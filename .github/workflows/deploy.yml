@@ -16,11 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Auth via Workload Identity Federation (set the two vars in repo settings).
+      # Auth with a service-account key JSON stored in the GCP_SA_KEY secret.
       - uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
