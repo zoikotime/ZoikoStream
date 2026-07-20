@@ -1,0 +1,40 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGION: us-central1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Auth via Workload Identity Federation (set the two vars in repo settings).
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # gcloud builds the Dockerfiles with Cloud Build — no docker build/push here.
+      - name: Deploy backend
+        id: api
+        run: |
+          gcloud run deploy zoikostream-api \
+            --source ./server --region "$REGION" --allow-unauthenticated \
+            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},SECRET_KEY=${{ secrets.SECRET_KEY }},SUPER_ADMIN_EMAIL=${{ vars.SUPER_ADMIN_EMAIL }},CORS_ORIGINS=${{ vars.WEB_URL }}"
+          echo "url=$(gcloud run services describe zoikostream-api --region "$REGION" --format='value(status.url)')" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy frontend
+        run: |
+          gcloud run deploy zoikostream-web \
+            --source ./client --region "$REGION" --allow-unauthenticated \
+            --build-env-vars "VITE_API_URL=${{ steps.api.outputs.url }}"
