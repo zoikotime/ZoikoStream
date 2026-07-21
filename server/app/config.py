@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single .env at the repo root (server/app/config.py -> repo root is two levels up).
 ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
-
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT_ENV, extra="ignore")
@@ -17,5 +17,14 @@ class Settings(BaseSettings):
     # 5173 is Vite's default; 5174 is its fallback when 5173 is taken. 4173 = vite preview.
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:5174,http://localhost:4173"
 
+    # LiveKit
+    LIVEKIT_URL: str
+    LIVEKIT_API_KEY: str
+    LIVEKIT_API_SECRET: str
+
+    model_config = SettingsConfigDict(
+    env_file=BASE_DIR / ".env",
+    extra="ignore"
+)
 
 settings = Settings()
