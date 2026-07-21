@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import get_db
-from .models import Organization, User
+from app.models import User, Organization
 from .schemas import (
     ForgotPasswordIn,
     LoginIn,

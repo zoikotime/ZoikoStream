@@ -1,26 +1,25 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import models  # noqa: F401 — registers tables on Base before create_all
-from .auth import router as auth_router
-from .config import settings
-from .db import Base, engine
-
-# ponytail: create_all on startup is enough for phase 1. Switch to alembic when the schema churns.
-Base.metadata.create_all(bind=engine)
+from app.auth import router as auth_router
+from app.routers.channels import router as channel_router
+from app.routers.streams import router as stream_router
 
 app = FastAPI(title="ZoikoStream API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.include_router(auth_router)
-
+app.include_router(channel_router)
+app.include_router(stream_router)
 
 @app.get("/health")
 def health():
