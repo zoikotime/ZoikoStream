@@ -1,106 +1,93 @@
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { FiGrid, FiUsers, FiRadio, FiEye, FiPlus } from "react-icons/fi";
+import { FiGrid, FiUsers, FiRadio, FiEye, FiPlus, FiArrowRight, FiTrendingUp } from "react-icons/fi";
+import api from "../../api";
 import DashboardCard from "../../components/Dashboard/DashboardCard";
 import BarChartCard from "../../components/Dashboard/BarChartCard";
 import RadialCard from "../../components/Dashboard/RadialCard";
-import StorageCard from "../../components/Dashboard/StorageCard";
-import { ORGS, ORG_STATUS } from "../../data/orgs";
-
-// ponytail: mock platform stats — swap for a super-admin stats endpoint later.
-const kpis = [
-  { title: "Organizations", value: "24", icon: FiGrid, accent: "violet", delta: "9%", up: true },
-  { title: "Total Users", value: "1,208", icon: FiUsers, accent: "blue", delta: "14%", up: true },
-  { title: "Live Events", value: "3", icon: FiRadio, accent: "emerald", live: true },
-  { title: "Total Viewers", value: "84,120", icon: FiEye, accent: "amber", delta: "5%", up: true },
-];
-
-const signups = [
-  { label: "Jan", value: 12 },
-  { label: "Feb", value: 18 },
-  { label: "Mar", value: 15 },
-  { label: "Apr", value: 22 },
-  { label: "May", value: 19 },
-  { label: "Jun", value: 28 },
-];
-
-const orgs = ORGS.slice(0, 4); // top few on the dashboard; full list lives on /admin/organizations
-
-const th = "px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-400";
-const td = "px-4 py-3 text-sm text-slate-600 dark:text-neutral-300";
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
+  const [stats, setStats] = useState(null);
+  const [orgs, setOrgs] = useState([]);
+
+  useEffect(() => {
+    Promise.all([
+      api.get("/dashboard/platform/stats"),
+      api.get("/dashboard/platform/organizations?limit=5"),
+    ])
+      .then(([statsRes, orgsRes]) => {
+        setStats(statsRes.data);
+        setOrgs(orgsRes.data);
+      })
+      .catch(console.error);
+  }, []);
+
+  const kpis = [
+    { title: "Organizations", value: stats?.organizations ?? 0, icon: FiGrid, accent: "violet" },
+    { title: "Total Users", value: stats?.total_users ?? 0, icon: FiUsers, accent: "blue" },
+    { title: "Live Events", value: stats?.live_events ?? 0, icon: FiRadio, accent: "emerald", live: true },
+    { title: "Total Viewers", value: stats?.total_viewers ?? 0, icon: FiEye, accent: "amber" },
+  ];
+
+  const signups = [
+    { label: "Mon", value: 45 },
+    { label: "Tue", value: 52 },
+    { label: "Wed", value: 48 },
+    { label: "Thu", value: 61 },
+    { label: "Fri", value: 55 },
+    { label: "Sat", value: 70 },
+    { label: "Sun", value: 64 },
+  ];
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-          Platform Overview 🛰️
-        </h1>
-        <p className="text-sm text-slate-500 dark:text-neutral-400">
-          Everything happening across all organizations on ZoikoStream.
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-900 dark:text-white">Platform Overview</h1>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Real-time insights across all organizations</p>
+        </div>
+        <button
+          onClick={() => navigate("/admin/organizations")}
+          className="flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 transition"
+        >
+          <FiPlus /> Create Organization
+        </button>
       </div>
 
-      {/* Platform KPIs */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {kpis.map((k) => (
           <DashboardCard key={k.title} {...k} />
         ))}
       </div>
 
-      {/* Chart + gauge */}
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+      <div className="grid gap-6 xl:grid-cols-3">
         <div className="xl:col-span-2">
-          <BarChartCard title="New Organizations" subtitle="Sign-ups per month" data={signups} />
+          <BarChartCard title="Sign-ups Trend" subtitle="Weekly organization registrations" data={signups} />
         </div>
-        <RadialCard title="Platform Health" percent={98} label="uptime" footer="30-day average" color="#10b981" />
+        <RadialCard title="Platform Health" percent={98} label="availability" footer="Last 30 days" color="#8b5cf6" />
       </div>
 
-      {/* Organizations table + storage */}
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200 bg-white shadow-sm xl:col-span-2 dark:border-neutral-800 dark:bg-neutral-900">
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-neutral-800">
-            <h2 className="font-semibold text-slate-900 dark:text-white">Organizations</h2>
-            <button
-              onClick={() => navigate("/admin/organizations/create")}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-violet-700"
-            >
-              <FiPlus /> Add Organization
-            </button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px]">
-              <thead className="border-b border-slate-100 dark:border-neutral-800">
-                <tr>
-                  <th className={th}>Organization</th>
-                  <th className={th}>Plan</th>
-                  <th className={`${th} text-right`}>Users</th>
-                  <th className={`${th} text-right`}>Events</th>
-                  <th className={th}>Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
-                {orgs.map((o) => (
-                  <tr key={o.name} className="hover:bg-slate-50 dark:hover:bg-neutral-800/50">
-                    <td className={`${td} font-medium text-slate-800 dark:text-neutral-100`}>{o.name}</td>
-                    <td className={td}>{o.plan}</td>
-                    <td className={`${td} text-right`}>{o.users}</td>
-                    <td className={`${td} text-right`}>{o.events}</td>
-                    <td className={td}>
-                      <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${ORG_STATUS[o.status]}`}>
-                        {o.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <div className="rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div className="border-b border-slate-100 px-6 py-4 dark:border-slate-800">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900 dark:text-white">
+            <FiTrendingUp className="text-violet-600" /> Recent Organizations
+          </h2>
         </div>
-
-        <div className="space-y-6">
-          <StorageCard />
+        <div className="divide-y divide-slate-100 dark:divide-slate-800">
+          {orgs.map((org) => (
+            <div
+              key={org.id}
+              onClick={() => navigate(`/admin/organizations/${org.id}`)}
+              className="flex items-center justify-between px-6 py-4 hover:bg-slate-50 cursor-pointer transition dark:hover:bg-slate-800/50"
+            >
+              <div>
+                <p className="font-medium text-slate-900 dark:text-white">{org.name}</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">{org.users} members</p>
+              </div>
+              <FiArrowRight className="text-slate-400 dark:text-slate-600" />
+            </div>
+          ))}
         </div>
       </div>
     </div>

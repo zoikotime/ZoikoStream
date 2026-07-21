@@ -32,7 +32,7 @@ export default function OrganizationLayout() {
   const orgName = user?.organization_name || "Zoiko Organization";
 
   return (
-    <div className="flex min-h-screen bg-slate-50 text-slate-800 dark:bg-neutral-950 dark:text-neutral-200">
+    <div className="flex min-h-screen bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
       <Sidebar nav={nav} open={open} onClose={() => setOpen(false)} />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar orgName={orgName} subtitle="Organization" onMenuClick={() => setOpen((v) => !v)} />

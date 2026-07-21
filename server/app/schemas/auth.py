@@ -6,7 +6,7 @@ class RegisterIn(BaseModel):
     full_name: str = Field(min_length=1, max_length=120)
     organization_name: str = Field(min_length=1, max_length=120)
     email: EmailStr
-    username: str = Field(min_length=3, max_length=60, pattern=r"^[a-zA-Z0-9_.-]+$")
+    username: str | None = Field(None, min_length=3, max_length=60, pattern=r"^[a-zA-Z0-9_.-]+$")
     password: str = Field(min_length=8, max_length=72)  # bcrypt caps at 72 bytes
 
 
@@ -20,8 +20,14 @@ class ForgotPasswordIn(BaseModel):
     email: EmailStr
 
 
+class VerifyOtpIn(BaseModel):
+    email: EmailStr
+    otp: str = Field(pattern=r"^\d{4}$")
+
+
 class ResetPasswordIn(BaseModel):
-    token: str
+    email: EmailStr
+    otp: str = Field(pattern=r"^\d{4}$")
     password: str = Field(min_length=8, max_length=72)
 
 
@@ -34,6 +40,7 @@ class UserOut(BaseModel):
     username: str
     role: str
     org_id: uuid.UUID
+    organization_name: str | None = None
 
 
 class TokenOut(BaseModel):

@@ -17,16 +17,16 @@ import {
   FiPlus,
   FiMenu,
   FiLogOut,
-  FiZap,
 } from "react-icons/fi";
 import { useAuth } from "../auth/AuthContext";
+import Logo from "../ui/Logo";
 
 // First letter(s) of a name for the avatar.
 const initials = (name = "") =>
   name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
 
 const nav = [
-  { to: "/", label: "Dashboard", icon: FiHome, end: true },
+  { to: "/dashboard", label: "Dashboard", icon: FiHome, end: true },
   { to: "/events", label: "Events", icon: FiCalendar },
   { to: "/speakers", label: "Speakers", icon: FiMic },
   { to: "/viewers", label: "Viewers", icon: FiUsers },
@@ -49,11 +49,8 @@ export default function MainLayout() {
           open ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <div className="h-16 flex items-center gap-2.5 px-6">
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 text-white">
-            <FiZap className="text-lg" />
-          </span>
-          <span className="text-lg font-bold tracking-tight text-slate-900">ZoikoStream</span>
+        <div className="h-16 flex items-center px-6">
+          <Logo textClass="text-lg text-slate-900" />
         </div>
 
         <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
