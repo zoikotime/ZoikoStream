@@ -2,3 +2,158 @@
 
 /* Class-based dark mode: `dark:` applies when <html class="dark"> is set. */
 @custom-variant dark (&:where(.dark, .dark *));
+
+/* ---- Brand palette ----
+   The app was built on emerald/teal. Rather than touch 300+ utility usages
+   across 56 files, remap those two scales to the ZoikoStream logo colors:
+   emerald -> violet (purple), teal -> pink (magenta). Every button, link,
+   gradient, focus ring and badge that used the old brand now renders on-brand.
+   ponytail: palette remap over per-file edits. If success/live badges must stay
+   green, give those specific spots their own `green-*` classes. */
+@theme {
+  --color-emerald-50:  #f5f3ff;
+  --color-emerald-100: #ede9fe;
+  --color-emerald-200: #ddd6fe;
+  --color-emerald-300: #c4b5fd;
+  --color-emerald-400: #a78bfa;
+  --color-emerald-500: #8b5cf6;
+  --color-emerald-600: #7c3aed;
+  --color-emerald-700: #6d28d9;
+  --color-emerald-800: #5b21b6;
+  --color-emerald-900: #4c1d95;
+  --color-emerald-950: #2e1065;
+
+  --color-teal-50:  #fdf2f8;
+  --color-teal-100: #fce7f3;
+  --color-teal-200: #fbcfe8;
+  --color-teal-300: #f9a8d4;
+  --color-teal-400: #f472b6;
+  --color-teal-500: #ec4899;
+  --color-teal-600: #db2777;
+  --color-teal-700: #be185d;
+  --color-teal-800: #9d174d;
+  --color-teal-900: #831843;
+  --color-teal-950: #500724;
+}
+
+/* ---- Base typography & rendering polish ---- */
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem; /* offset anchor jumps for the fixed header */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+}
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+/* Tighter optical tracking + balanced wrapping for display headings. */
+h1, h2, h3 { text-wrap: balance; }
+p { text-wrap: pretty; }
+/* Counters and metrics shouldn't jitter as digits change width. */
+.zk-tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+/* Timeline: one column on mobile, N columns (from --cols) on large screens. */
+.zk-timeline { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 1024px) {
+  .zk-timeline { grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); }
+}
+
+/* Brand text gradient (used sparingly on key words). */
+.zk-text-gradient {
+  background-image: linear-gradient(120deg, #8b5cf6 0%, #d946ef 50%, #ec4899 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Glass surfaces — one place, works on light and dark backdrops. */
+.zk-glass {
+  background-color: color-mix(in srgb, white 65%, transparent);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  backdrop-filter: blur(12px) saturate(160%);
+}
+.dark .zk-glass {
+  background-color: color-mix(in srgb, #0a0a0a 55%, transparent);
+}
+
+/* Consistent focus ring for interactive elements (a11y). */
+:where(a, button, input, [tabindex]):focus-visible {
+  outline: 2px solid #8b5cf6;
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}
+
+/* Text selection tint. */
+::selection { background: color-mix(in srgb, #8b5cf6 30%, transparent); }
+
+/* Skip link — hidden until focused. */
+.zk-skip {
+  position: fixed; top: 0; left: 50%; transform: translateX(-50%) translateY(-120%);
+  z-index: 100; transition: transform .2s ease;
+}
+.zk-skip:focus { transform: translateX(-50%) translateY(0.75rem); }
+
+/* ---- Animation keyframes (hero pipeline + ambient motion) ---- */
+@keyframes zk-flow {
+  0% { transform: translateX(0); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateX(var(--zk-flow-distance, 100%)); opacity: 0; }
+}
+@keyframes zk-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+@keyframes zk-pulse-ring {
+  0% { transform: scale(0.9); opacity: 0.6; }
+  70% { transform: scale(1.6); opacity: 0; }
+  100% { opacity: 0; }
+}
+@keyframes zk-shimmer {
+  100% { transform: translateX(100%); }
+}
+@keyframes zk-spin { to { transform: rotate(360deg); } }
+@keyframes zk-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.zk-fade-in { animation: zk-fade-in .4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes zk-slide-left { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes zk-slide-right { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes zk-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes zk-drift {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(20px, -18px); }
+}
+
+.zk-flow-dot { animation: zk-flow 2.4s linear infinite; }
+.zk-float { animation: zk-float 6s ease-in-out infinite; }
+.zk-pulse-ring { animation: zk-pulse-ring 2s ease-out infinite; }
+.zk-spin { animation: zk-spin .7s linear infinite; }
+.zk-drift { animation: zk-drift 14s ease-in-out infinite; }
+
+/* Brand panel flourishes: panning gradient + slow-rotating conic glow. */
+@keyframes zk-gradient { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+.zk-gradient-pan { background-size: 200% 200%; animation: zk-gradient 16s ease infinite; }
+@keyframes zk-spin-slow { to { transform: rotate(360deg); } }
+.zk-spin-slow { animation: zk-spin-slow 42s linear infinite; }
+
+/* Skeleton shimmer for loading states. */
+.zk-skeleton { position: relative; overflow: hidden; }
+.zk-skeleton::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, white 45%, transparent), transparent);
+  animation: zk-shimmer 1.6s infinite;
+}
+.dark .zk-skeleton::after {
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, white 8%, transparent), transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift,
+  .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow { animation: none; }
+}

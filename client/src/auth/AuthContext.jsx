@@ -1,38 +1,36 @@
 /* eslint-disable react-refresh/only-export-components -- context module exports a hook alongside the provider */
-import { createContext, useContext, useEffect, useState } from "react";
-import api from "../api";
+import { createContext, useContext, useState } from "react";
 
 const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
 
+// ponytail: dummy auth — the session lives entirely in localStorage, no backend. Hydration
+// is synchronous so `loading` is always false. Replace the localStorage read + setSession
+// with a real /auth/me fetch + /auth/login response when the API lands.
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  // Only "loading" if there's a token to resolve; otherwise we're done immediately.
-  const [loading, setLoading] = useState(() => !!localStorage.getItem("token"));
+  const [user, setUser] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("user")) || null;
+    } catch {
+      return null;
+    }
+  });
 
-  // On boot, if we have a token, confirm it's still valid by fetching the user.
-  useEffect(() => {
-    if (!localStorage.getItem("token")) return;
-    api
-      .get("/auth/me")
-      .then((r) => setUser(r.data))
-      .catch(() => localStorage.removeItem("token"))
-      .finally(() => setLoading(false));
-  }, []);
-
-  // Store token + user from a login/register response.
+  // Store token + user from a (fake) login/register response so a refresh keeps the session.
   const setSession = ({ access_token, user }) => {
     localStorage.setItem("token", access_token);
+    localStorage.setItem("user", JSON.stringify(user));
     setUser(user);
   };
 
   const logout = () => {
     localStorage.removeItem("token");
+    localStorage.removeItem("user");
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, setSession, logout }}>
+    <AuthContext.Provider value={{ user, loading: false, setSession, logout }}>
       {children}
     </AuthContext.Provider>
   );

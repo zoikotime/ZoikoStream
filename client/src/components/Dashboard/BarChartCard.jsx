@@ -1,19 +1,20 @@
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { useTheme } from "../../theme/ThemeContext";
+import Card from "../../ui/Card";
 
 // Reusable bar-chart card. `data` = [{ label, value }]. Tallest bar is highlighted.
 export default function BarChartCard({ title, subtitle, data, color = "#7c3aed" }) {
   const { theme } = useTheme();
   const dark = theme === "dark";
-  const grid = dark ? "#262626" : "#f1f5f9";
-  const axis = dark ? "#737373" : "#94a3b8";
+  const grid = dark ? "#1e293b" : "#f1f5f9"; // slate-800 / slate-100
+  const axis = dark ? "#64748b" : "#94a3b8"; // slate-500 / slate-400
   const max = Math.max(...data.map((d) => d.value));
 
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
+    <Card padding="md">
       <div className="mb-4">
         <h2 className="font-semibold text-slate-900 dark:text-white">{title}</h2>
-        {subtitle && <p className="text-sm text-slate-500 dark:text-neutral-400">{subtitle}</p>}
+        {subtitle && <p className="text-sm text-slate-500 dark:text-slate-400">{subtitle}</p>}
       </div>
       <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
@@ -27,8 +28,8 @@ export default function BarChartCard({ title, subtitle, data, color = "#7c3aed" 
                 borderRadius: 8,
                 border: `1px solid ${grid}`,
                 fontSize: 12,
-                background: dark ? "#171717" : "#fff",
-                color: dark ? "#e5e5e5" : "#0f172a",
+                background: dark ? "#0f172a" : "#fff",
+                color: dark ? "#e2e8f0" : "#0f172a",
               }}
             />
             <Bar dataKey="value" radius={[6, 6, 0, 0]} maxBarSize={26}>
@@ -39,6 +40,6 @@ export default function BarChartCard({ title, subtitle, data, color = "#7c3aed" 
           </BarChart>
         </ResponsiveContainer>
       </div>
-    </div>
+    </Card>
   );
 }

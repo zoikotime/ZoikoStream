@@ -14,21 +14,21 @@ const STATUS = {
 };
 
 const th = "px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-400";
-const td = "px-4 py-3 text-sm text-slate-600 dark:text-neutral-300";
+const td = "px-4 py-3 text-sm text-slate-600 dark:text-slate-300";
 
 export default function RecentEvents() {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
-      <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-neutral-800">
+    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
         <h2 className="font-semibold text-slate-900 dark:text-white">Recent Events</h2>
-        <button className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800">
+        <button className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
           View all
         </button>
       </div>
 
       <div className="overflow-x-auto">
         <table className="w-full min-w-[560px]">
-          <thead className="border-b border-slate-100 dark:border-neutral-800">
+          <thead className="border-b border-slate-100 dark:border-slate-800">
             <tr>
               <th className={th}>Event Name</th>
               <th className={th}>Status</th>
@@ -36,17 +36,17 @@ export default function RecentEvents() {
               <th className={`${th} text-right`}>Viewers</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100 dark:divide-neutral-800">
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {events.map((e) => (
-              <tr key={e.name} className="hover:bg-slate-50 dark:hover:bg-neutral-800/50">
-                <td className={`${td} font-medium text-slate-800 dark:text-neutral-100`}>{e.name}</td>
+              <tr key={e.name} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                <td className={`${td} font-medium text-slate-800 dark:text-slate-100`}>{e.name}</td>
                 <td className={td}>
                   <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${STATUS[e.status]}`}>
                     {e.status}
                   </span>
                 </td>
                 <td className={td}>{e.date}</td>
-                <td className={`${td} text-right font-medium text-slate-800 dark:text-neutral-100`}>
+                <td className={`${td} text-right font-medium text-slate-800 dark:text-slate-100`}>
                   {e.viewers}
                 </td>
               </tr>
