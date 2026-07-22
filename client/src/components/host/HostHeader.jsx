@@ -26,11 +26,8 @@ export default function HostHeader({ event, live }) {
     <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 bg-white px-4 py-3 sm:px-6 dark:border-slate-800 dark:bg-slate-900">
       {/* Brand */}
       <Link to="/organization/dashboard">
-        <Logo>
-          <span className="leading-tight">
-            <span className="block text-sm font-bold tracking-tight text-slate-900 dark:text-white">ZoikoStream</span>
-            <span className="block text-xs text-slate-500 dark:text-slate-400">Host Studio</span>
-          </span>
+        <Logo height="h-7">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Host Studio</span>
         </Logo>
       </Link>
 

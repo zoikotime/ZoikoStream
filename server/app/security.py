@@ -50,3 +50,51 @@ def get_current_user(
     if user is None or not user.is_active:
         raise unauthorized
     return user
+
+
+def require_super_admin(user: User = Depends(get_current_user)) -> User:
+    """Gate an endpoint to the platform super admin. Any other role -> 403."""
+    if user.role != "super_admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
+    return user
+
+
+# Role privilege ladder, lowest to highest. super_admin sits on top: it clears every
+# require_* gate and bypasses org isolation. Keep in sync with models.user.ROLES.
+_ROLE_RANK = {
+    "viewer": 0,
+    "speaker": 1,
+    "moderator": 2,
+    "host": 3,
+    "org_admin": 4,
+    "super_admin": 5,
+}
+
+
+def require_min_role(minimum: str):
+    """Build a reusable dependency that allows `minimum` and every role above it.
+    super_admin always passes. Usage in any module: Depends(require_min_role("host"))."""
+    threshold = _ROLE_RANK[minimum]
+
+    def _dep(user: User = Depends(get_current_user)) -> User:
+        if _ROLE_RANK.get(user.role, -1) < threshold:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"{minimum} access required")
+        return user
+
+    return _dep
+
+
+# Named gates for the common cases; each also admits everything above it in the ladder.
+require_org_admin = require_min_role("org_admin")
+require_host = require_min_role("host")
+require_moderator = require_min_role("moderator")
+
+
+def org_scoped(stmt, model, user: User):
+    """Constrain a select() to the caller's organization. super_admin sees every org.
+    The single place org isolation lives — modules call this instead of hand-writing
+    `.where(model.org_id == user.org_id)`, so the super_admin bypass stays consistent.
+    `model` must expose an `org_id` column."""
+    if user.role == "super_admin":
+        return stmt
+    return stmt.where(model.org_id == user.org_id)

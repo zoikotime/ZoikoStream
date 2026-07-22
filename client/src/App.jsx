@@ -19,6 +19,7 @@ import EventDetails from "./pages/organization/EventDetails";
 import InviteMembers from "./pages/organization/InviteMembers";
 import AdminDashboard from "./pages/admin/Dashboard";
 import Organizations from "./pages/admin/Organizations";
+import LiveEvents from "./pages/admin/LiveEvents";
 import AuthLayout from "./layouts/AuthLayout";
 import Login from "./pages/auth/Login";
 import CreateOrganization from "./pages/auth/CreateOrganization";
@@ -65,8 +66,23 @@ function LandingOrDashboard() {
   );
 }
 
-// Menu items that don't have a page yet — kept in-layout so the sidebar doesn't bounce the user out.
-const adminStubs = ["users", "events", "analytics", "billing", "settings"];
+// Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
+// so the control-center nav never 404s. Dashboard + Organizations are real pages below.
+const adminStubs = [
+  ["infrastructure", "Media Infrastructure"],
+  ["developers", "Developers"],
+  ["users", "Users"],
+  ["roles", "Roles & Permissions"],
+  ["subscriptions", "Subscriptions"],
+  ["analytics", "Analytics"],
+  ["security", "Security"],
+  ["audit", "Audit Logs"],
+  ["support", "Support"],
+  ["settings", "Platform Settings"],
+  ["status", "System Status"],
+  ["feature-flags", "Feature Flags"],
+  ["releases", "Release Center"],
+];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
 const legacyStubs = [
@@ -74,8 +90,6 @@ const legacyStubs = [
   ["recordings", "Recordings"], ["analytics", "Analytics"], ["users", "Users"],
   ["invitations", "Invitations"], ["billing", "Billing"], ["settings", "Settings"],
 ];
-
-const cap = (s) => s[0].toUpperCase() + s.slice(1);
 
 export default function App() {
   return (
@@ -114,8 +128,9 @@ export default function App() {
               <Route element={<AdminLayout />}>
                 <Route path="/admin/dashboard" element={<AdminDashboard />} />
                 <Route path="/admin/organizations" element={<Organizations />} />
-                {adminStubs.map((p) => (
-                  <Route key={p} path={`/admin/${p}`} element={<Placeholder title={cap(p)} />} />
+                <Route path="/admin/live-events" element={<LiveEvents />} />
+                {adminStubs.map(([path, title]) => (
+                  <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
                 ))}
               </Route>
             </Route>

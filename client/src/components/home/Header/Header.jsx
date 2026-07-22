@@ -27,11 +27,8 @@ export default function Header() {
         {/* Brand */}
         <Link to="/" className="group flex items-center" aria-label="ZoikoStream home">
           <Logo
-            icon="/zoiko-mark.png"
-            size="h-9 w-9 transition-transform duration-300 group-hover:scale-105"
-            textClass={`text-lg transition-colors ${
-              solid ? "text-slate-900 dark:text-white" : "text-white"
-            }`}
+            height="h-8"
+            className="transition-transform duration-300 group-hover:scale-105"
           />
         </Link>
 

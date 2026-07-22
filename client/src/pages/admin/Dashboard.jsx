@@ -1,95 +1,64 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { FiGrid, FiUsers, FiRadio, FiEye, FiPlus, FiArrowRight, FiTrendingUp } from "react-icons/fi";
-import api from "../../api";
-import DashboardCard from "../../components/Dashboard/DashboardCard";
-import BarChartCard from "../../components/Dashboard/BarChartCard";
-import RadialCard from "../../components/Dashboard/RadialCard";
+import { Reveal } from "../../ui/motion";
+import Skeleton from "../../ui/Skeleton";
+import PlatformStatus from "../../components/admin/sections/PlatformStatus";
+import CriticalAlerts from "../../components/admin/sections/CriticalAlerts";
+import LivePlatform from "../../components/admin/sections/LivePlatform";
+import OrgsAttention from "../../components/admin/sections/OrgsAttention";
+import RevenueGrowth from "../../components/admin/sections/RevenueGrowth";
+import LiveEventActivity from "../../components/admin/sections/LiveEventActivity";
+import PlatformActivity from "../../components/admin/sections/PlatformActivity";
+import Infrastructure from "../../components/admin/sections/Infrastructure";
+import AuditTimeline from "../../components/admin/sections/AuditTimeline";
+import QuickActions from "../../components/admin/sections/QuickActions";
 
+// Boot skeleton — mirrors the real layout (header + stat strip + stacked panels).
+// TODO(backend): key `loading` off the platform-stats fetch instead of a timer.
+function DashboardSkeleton() {
+  return (
+    <div className="mx-auto max-w-[1440px] space-y-8">
+      <div className="space-y-3">
+        <Skeleton variant="title" className="w-64" />
+        <Skeleton variant="line" className="w-96" />
+      </div>
+      <Skeleton variant="block" className="h-24" />
+      <Skeleton variant="block" className="h-64" />
+      <Skeleton variant="block" className="h-56" />
+    </div>
+  );
+}
+
+// Platform Operations Center. Sections follow a top-down attention hierarchy:
+// status → alerts → live now → orgs at risk → revenue → live events → what just
+// happened → infrastructure → quick actions. Each reads from data/platform.js.
 export default function AdminDashboard() {
-  const navigate = useNavigate();
-  const [stats, setStats] = useState(null);
-  const [orgs, setOrgs] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([
-      api.get("/dashboard/platform/stats"),
-      api.get("/dashboard/platform/organizations?limit=5"),
-    ])
-      .then(([statsRes, orgsRes]) => {
-        setStats(statsRes.data);
-        setOrgs(orgsRes.data);
-      })
-      .catch(console.error);
+    const t = setTimeout(() => setLoading(false), 500);
+    return () => clearTimeout(t);
   }, []);
 
-  const kpis = [
-    { title: "Organizations", value: stats?.organizations ?? 0, icon: FiGrid, accent: "violet" },
-    { title: "Total Users", value: stats?.total_users ?? 0, icon: FiUsers, accent: "blue" },
-    { title: "Live Events", value: stats?.live_events ?? 0, icon: FiRadio, accent: "emerald", live: true },
-    { title: "Total Viewers", value: stats?.total_viewers ?? 0, icon: FiEye, accent: "amber" },
-  ];
-
-  const signups = [
-    { label: "Mon", value: 45 },
-    { label: "Tue", value: 52 },
-    { label: "Wed", value: 48 },
-    { label: "Thu", value: 61 },
-    { label: "Fri", value: 55 },
-    { label: "Sat", value: 70 },
-    { label: "Sun", value: 64 },
-  ];
+  if (loading) return <DashboardSkeleton />;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900 dark:text-white">Platform Overview</h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Real-time insights across all organizations</p>
-        </div>
-        <button
-          onClick={() => navigate("/admin/organizations")}
-          className="flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 transition"
-        >
-          <FiPlus /> Create Organization
-        </button>
+    <div className="mx-auto max-w-[1440px] space-y-8">
+      <PlatformStatus />
+      <CriticalAlerts />
+
+      <Reveal><LivePlatform /></Reveal>
+      <Reveal><OrgsAttention /></Reveal>
+      <Reveal><RevenueGrowth /></Reveal>
+      <Reveal><LiveEventActivity /></Reveal>
+
+      {/* "What just happened" band — operational feed + audit history side by side. */}
+      <div className="grid gap-6 xl:grid-cols-2">
+        <Reveal><PlatformActivity /></Reveal>
+        <Reveal><AuditTimeline /></Reveal>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {kpis.map((k) => (
-          <DashboardCard key={k.title} {...k} />
-        ))}
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-3">
-        <div className="xl:col-span-2">
-          <BarChartCard title="Sign-ups Trend" subtitle="Weekly organization registrations" data={signups} />
-        </div>
-        <RadialCard title="Platform Health" percent={98} label="availability" footer="Last 30 days" color="#8b5cf6" />
-      </div>
-
-      <div className="rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <div className="border-b border-slate-100 px-6 py-4 dark:border-slate-800">
-          <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900 dark:text-white">
-            <FiTrendingUp className="text-violet-600" /> Recent Organizations
-          </h2>
-        </div>
-        <div className="divide-y divide-slate-100 dark:divide-slate-800">
-          {orgs.map((org) => (
-            <div
-              key={org.id}
-              onClick={() => navigate(`/admin/organizations/${org.id}`)}
-              className="flex items-center justify-between px-6 py-4 hover:bg-slate-50 cursor-pointer transition dark:hover:bg-slate-800/50"
-            >
-              <div>
-                <p className="font-medium text-slate-900 dark:text-white">{org.name}</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">{org.users} members</p>
-              </div>
-              <FiArrowRight className="text-slate-400 dark:text-slate-600" />
-            </div>
-          ))}
-        </div>
-      </div>
+      <Reveal><Infrastructure /></Reveal>
+      <Reveal><QuickActions /></Reveal>
     </div>
   );
 }

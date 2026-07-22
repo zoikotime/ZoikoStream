@@ -50,7 +50,7 @@ export default function MainLayout() {
         }`}
       >
         <div className="h-16 flex items-center px-6">
-          <Logo textClass="text-lg text-slate-900" />
+          <Logo />
         </div>
 
         <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">

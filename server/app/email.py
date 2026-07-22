@@ -93,8 +93,31 @@ def _otp_html(name: str, otp: str) -> str:
     </div>""")
 
 
+def _invite_html(org_name: str, inviter: str, invite_url: str) -> str:
+    safe_org = html.escape(org_name or "an organization")
+    safe_inviter = html.escape(inviter or "An admin")
+    return _shell(f"""
+    {_header("You're invited")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>{safe_inviter} has invited you to join <strong>{safe_org}</strong> on ZoikoStream.</p>
+      <p>Click below to accept the invitation and set up your account. This link expires soon.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{invite_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Accept invitation
+        </a>
+      </p>
+      <p style="color:#888;font-size:13px;">If you weren't expecting this, you can ignore this email.</p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
+
+
+def send_invitation_email(to: str, org_name: str, inviter: str, invite_url: str) -> None:
+    _send(to, f"You're invited to join {org_name} on ZoikoStream", _invite_html(org_name, inviter, invite_url))
 
 
 def send_reset_otp_email(to: str, name: str, otp: str) -> None:
@@ -113,4 +136,7 @@ if __name__ == "__main__":
     assert "Alice" in _otp_html("Alice", "0421")
     assert "zoiko-logo.png" in _welcome_html("Alice"), "logo missing from welcome email"
     assert "zoiko-logo.png" in _otp_html("Alice", "0421"), "logo missing from otp email"
+    invite = _invite_html("<b>Acme</b>", "<i>Bob</i>", "https://x/accept-invite?token=abc")
+    assert "&lt;b&gt;Acme&lt;/b&gt;" in invite and "&lt;i&gt;Bob&lt;/i&gt;" in invite, "invite not escaped"
+    assert "accept-invite?token=abc" in invite, "invite link missing"
     print("ok")
