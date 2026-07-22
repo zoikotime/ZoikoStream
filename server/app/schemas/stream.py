@@ -36,3 +36,9 @@ class StreamResponse(BaseModel):
     ended_at: datetime | None
 
     created_at: datetime
+
+class StreamListResponse(BaseModel):
+    page: int
+    limit: int
+    total: int
+    items: list[StreamResponse]
