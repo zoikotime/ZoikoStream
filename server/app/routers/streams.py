@@ -1,9 +1,9 @@
 import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException , Query
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select , func
 from datetime import datetime, timezone
 
 from app.db import get_db
@@ -13,12 +13,14 @@ from app.models import User
 from app.models.stream import Stream
 from app.models.channel import Channel
 
+
 from app.security import get_current_user
 
 from app.schemas.stream import (
     StreamCreate,
     StreamUpdate,
-    StreamResponse
+    StreamResponse,
+    StreamListResponse,
 )
 
 from app.services.livekit import create_stream_token
@@ -77,17 +79,35 @@ def create_stream(
 # GET ALL STREAMS
 @router.get(
     "/",
-    response_model=list[StreamResponse]
+    response_model=StreamListResponse
 )
 def get_streams(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    search: str | None = None,
     db: Session = Depends(get_db)
 ):
+    query = select(Stream).order_by(Stream.created_at.desc())
+
+    if search:
+        query = query.where(
+            Stream.title.ilike(f"%{search}%")
+        )
+
+    total = db.scalar(
+        select(func.count()).select_from(query.subquery())
+    )
 
     streams = db.scalars(
-        select(Stream)
+        query.offset((page - 1) * limit).limit(limit)
     ).all()
 
-    return streams
+    return {
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "items": streams
+    }
 
 
 
