@@ -2,8 +2,9 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
+import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
-import { fakeSession } from "../../auth/dummy";
+import { roleHome } from "../../auth/roleHome";
 import { Field, PasswordField, SubmitButton } from "./fields";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
@@ -29,7 +30,7 @@ export default function CreateOrganization() {
   const [errors, setErrors] = useState({});
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     const next = {};
     if (!form.name.trim()) next.name = "Organization name is required.";
@@ -42,17 +43,21 @@ export default function CreateOrganization() {
     if (Object.keys(next).length) return;
 
     setLoading(true);
-    // ponytail: dummy — the creator is always the org_admin. Swap for POST /auth/register.
-    setTimeout(() => {
-      const session = fakeSession(form.email.trim(), {
-        role: "org_admin",
+    try {
+      const { data } = await api.post("/auth/register", {
         full_name: form.adminName.trim(),
         organization_name: form.name.trim(),
+        email: form.email.trim(),
+        password: form.password,
       });
-      setSession(session);
+      setSession(data);
       notify.success("Organization created! Welcome to ZoikoStream.");
-      navigate("/organization/dashboard", { replace: true });
-    }, 700);
+      navigate(roleHome(data.user.role) || "/", { replace: true });
+    } catch (error) {
+      notify.error(errMsg(error, "Could not create your organization."));
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (

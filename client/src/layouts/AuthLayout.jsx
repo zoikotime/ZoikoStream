@@ -83,7 +83,7 @@ export default function AuthLayout() {
         />
 
         <Link to="/" className="zk-fade-in relative inline-block" aria-label="ZoikoStream home">
-          <Logo size="h-10 w-10" textClass="text-xl text-white drop-shadow" />
+          <Logo height="h-10" />
         </Link>
 
         <div className="relative">

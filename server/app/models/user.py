@@ -12,7 +12,10 @@ if TYPE_CHECKING:
     from .organization import Organization
     from .channel import Channel
 
-ROLES = ("super_admin", "org_admin", "speaker", "viewer")
+# Phase 1 role set. "org_admin" is the existing slug for the organization admin
+# (kept as-is — renaming to organization_admin would ripple through auth, dashboard,
+# the frontend, and seeded rows). "host"/"moderator" added for the streaming modules.
+ROLES = ("super_admin", "org_admin", "host", "moderator", "speaker", "viewer")
 
 
 class User(Base):
@@ -71,6 +74,11 @@ class User(Base):
     reset_token_expires: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+
+    # Soft delete: set on DELETE /organization/users/{id}. Distinct from is_active (which
+    # PATCH-status toggles) — a soft-deleted member is excluded from listings and can't be
+    # reactivated via a status change. Also flipped is_active=False so their tokens die.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     organization: Mapped["Organization"] = relationship(
         back_populates="users"

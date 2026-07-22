@@ -1,51 +1,74 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { FiArrowLeft, FiMail, FiCheckCircle, FiAlertCircle } from "react-icons/fi";
+import { FiArrowLeft, FiMail, FiCheckCircle, FiLock } from "react-icons/fi";
 import Card from "../../ui/Card";
-import { Field, SubmitButton } from "./fields";
+import { notify } from "../../ui/Toast";
+import api, { errMsg } from "../../api";
+import { Field, PasswordField, SubmitButton } from "./fields";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
-// States: idle (form) | loading | success | error. All dummy — no email is actually sent.
+// Steps: email (request code) -> reset (enter code + new password) -> done.
+// The backend emails a 4-digit OTP; /auth/reset-password re-validates it, so there's
+// no separate verify call here.
 export default function ForgotPassword() {
+  const [step, setStep] = useState("email"); // email | reset | done
+  const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState("");
-  const [status, setStatus] = useState("idle"); // idle | loading | success | error
-  const [emailError, setEmailError] = useState("");
+  const [otp, setOtp] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [errors, setErrors] = useState({});
 
-  const submit = (e) => {
+  const sendCode = async (e) => {
     e.preventDefault();
     if (!isEmail(email)) {
-      setEmailError("Enter a valid work email.");
+      setErrors({ email: "Enter a valid work email." });
       return;
     }
-    setEmailError("");
-    setStatus("loading");
-    // ponytail: dummy send. `fail@…` forces the error state so it's demoable without a backend.
-    setTimeout(() => {
-      setStatus(email.trim().toLowerCase().startsWith("fail@") ? "error" : "success");
-    }, 800);
+    setErrors({});
+    setLoading(true);
+    try {
+      await api.post("/auth/forgot-password", { email: email.trim() });
+      setStep("reset");
+    } catch (error) {
+      notify.error(errMsg(error, "We couldn't send the reset code right now."));
+    } finally {
+      setLoading(false);
+    }
   };
 
-  if (status === "success") {
+  const resetPassword = async (e) => {
+    e.preventDefault();
+    const errs = {};
+    if (!/^\d{4}$/.test(otp)) errs.otp = "Enter the 4-digit code from your email.";
+    if (password.length < 8) errs.password = "Use at least 8 characters.";
+    if (confirm !== password) errs.confirm = "Passwords don't match.";
+    if (Object.keys(errs).length) {
+      setErrors(errs);
+      return;
+    }
+    setErrors({});
+    setLoading(true);
+    try {
+      await api.post("/auth/reset-password", { email: email.trim(), otp, password });
+      setStep("done");
+    } catch (error) {
+      notify.error(errMsg(error, "That code is invalid or expired. Request a new one."));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (step === "done") {
     return (
       <Card padding="xl">
         <span className="grid h-12 w-12 place-items-center rounded-2xl bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400">
           <FiCheckCircle className="text-2xl" />
         </span>
-        <h1 className="mt-5 text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Check your email</h1>
+        <h1 className="mt-5 text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Password updated</h1>
         <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-          Password reset instructions have been sent to your email.
-        </p>
-        <p className="mt-4 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600 dark:bg-slate-900 dark:text-slate-300">
-          Sent to <span className="font-semibold text-slate-800 dark:text-slate-100">{email.trim()}</span>. Didn't get it?
-          Check spam or{" "}
-          <button
-            type="button"
-            onClick={() => setStatus("idle")}
-            className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
-          >
-            try another email
-          </button>.
+          Your password has been changed. You can now log in with your new password.
         </p>
         <Link
           to="/login"
@@ -57,21 +80,66 @@ export default function ForgotPassword() {
     );
   }
 
+  if (step === "reset") {
+    return (
+      <Card padding="xl">
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Enter reset code</h1>
+        <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
+          We sent a 4-digit code to <span className="font-semibold text-slate-800 dark:text-slate-100">{email.trim()}</span>.
+          Enter it below with your new password. The code expires in 10 minutes.
+        </p>
+
+        <form onSubmit={resetPassword} noValidate className="mt-8 space-y-5">
+          <Field
+            label="4-digit code"
+            inputMode="numeric"
+            maxLength={4}
+            autoComplete="one-time-code"
+            placeholder="0000"
+            value={otp}
+            onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            error={errors.otp}
+          />
+          <PasswordField
+            label="New password"
+            autoComplete="new-password"
+            placeholder="At least 8 characters"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            error={errors.password}
+          />
+          <PasswordField
+            label="Confirm new password"
+            autoComplete="new-password"
+            placeholder="Re-enter your new password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            error={errors.confirm}
+          />
+          <SubmitButton loading={loading}>
+            <FiLock className="text-base" /> Reset Password
+          </SubmitButton>
+        </form>
+
+        <button
+          type="button"
+          onClick={() => { setStep("email"); setOtp(""); setPassword(""); setConfirm(""); setErrors({}); }}
+          className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
+        >
+          <FiArrowLeft /> Use a different email
+        </button>
+      </Card>
+    );
+  }
+
   return (
     <Card padding="xl">
       <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Reset Password</h1>
       <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-        Enter your work email and we'll send you a secure password reset link.
+        Enter your work email and we'll send you a 4-digit code to reset your password.
       </p>
 
-      {status === "error" && (
-        <div className="mt-6 flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-400">
-          <FiAlertCircle className="mt-0.5 shrink-0" />
-          <span>We couldn't send the reset link. Please try again in a moment.</span>
-        </div>
-      )}
-
-      <form onSubmit={submit} noValidate className="mt-8 space-y-5">
+      <form onSubmit={sendCode} noValidate className="mt-8 space-y-5">
         <Field
           label="Work Email"
           type="email"
@@ -79,10 +147,10 @@ export default function ForgotPassword() {
           placeholder="you@company.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          error={emailError}
+          error={errors.email}
         />
-        <SubmitButton loading={status === "loading"}>
-          <FiMail className="text-base" /> Send Reset Link
+        <SubmitButton loading={loading}>
+          <FiMail className="text-base" /> Send Reset Code
         </SubmitButton>
       </form>
 

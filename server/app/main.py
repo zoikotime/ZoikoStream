@@ -7,6 +7,9 @@ from .auth import router as auth_router
 from .api.dashboard import router as dashboard_router
 from .routers.channels import router as channel_router
 from .routers.streams import router as stream_router
+from .routers.admin import router as admin_router
+from .routers.organization import router as organization_router
+from .routers.events import router as events_router
 from .config import settings
 
 # ponytail: tables are created by `python create_tables.py` (or alembic) now, not on startup —
@@ -28,6 +31,9 @@ app.include_router(auth_router)
 app.include_router(dashboard_router)
 app.include_router(channel_router)
 app.include_router(stream_router)
+app.include_router(admin_router)
+app.include_router(organization_router)
+app.include_router(events_router)
 
 
 # A DB outage (e.g. Supabase paused, DNS blip) raises OperationalError. Without this,

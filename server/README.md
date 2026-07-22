@@ -88,6 +88,11 @@ LIVEKIT_URL=https://YOUR_PROJECT.livekit.cloud
 LIVEKIT_API_KEY=xxxxxxxx
 
 LIVEKIT_API_SECRET=xxxxxxxx
+
+RESEND_API_KEY=re_your_resend_api_key
+
+# Use a verified sender in Resend, not the onboarding default, for production email.
+MAIL_FROM=ZoikoStream <noreply@zoikostream.com>
 ```
 
 ---

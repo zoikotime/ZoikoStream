@@ -20,7 +20,7 @@ export default function Footer() {
           {/* Brand */}
           <div className="col-span-2 sm:col-span-3 lg:col-span-2">
             <Link to="/">
-              <Logo textClass="text-lg text-white" />
+              <Logo />
             </Link>
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-white/50">
               Secure video infrastructure for products, broadcasts, and live events.

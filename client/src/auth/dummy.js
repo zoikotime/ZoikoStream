@@ -5,10 +5,16 @@
 const titleCase = (s) =>
   s.replace(/[._-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).trim();
 
+// The platform super-admin account (mirrors backend SUPER_ADMIN_EMAIL). This exact
+// address opens /admin/dashboard; every other user goes to their org dashboard.
+export const SUPER_ADMIN_EMAIL = "info@zoikostream.com";
+
 // Keyword in the email local-part -> role. First match wins; default org_admin.
 // Anchored to start-or-separator so "ghost@" / "supervisor@" don't false-match.
 export function roleFromEmail(email) {
-  const local = String(email).split("@")[0].toLowerCase();
+  const addr = String(email).trim().toLowerCase();
+  if (addr === SUPER_ADMIN_EMAIL) return "super_admin";
+  const local = addr.split("@")[0];
   if (/(^|[._-])(superadmin|platform)/.test(local)) return "super_admin";
   if (/(^|[._-])host/.test(local)) return "host";
   if (/(^|[._-])(moderator|mod)/.test(local)) return "moderator";
@@ -38,6 +44,7 @@ if (import.meta.env?.DEV) {
   console.assert(roleFromEmail("mod@acme.com") === "moderator", "roleFromEmail moderator");
   console.assert(roleFromEmail("viewer@acme.com") === "viewer", "roleFromEmail viewer");
   console.assert(roleFromEmail("superadmin@zoiko.com") === "super_admin", "roleFromEmail super");
+  console.assert(roleFromEmail("info@zoikostream.com") === "super_admin", "roleFromEmail platform admin email");
   console.assert(roleFromEmail("ghost@acme.com") === "org_admin", "roleFromEmail no false-match");
   console.assert(roleFromEmail("jane@acme.com") === "org_admin", "roleFromEmail default");
 }
