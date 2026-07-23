@@ -93,12 +93,72 @@ def _otp_html(name: str, otp: str) -> str:
     </div>""")
 
 
+def _member_invite_html(to: str, name: str, role: str, org_name: str, temp_password: str) -> str:
+    safe_name = html.escape(name or "there")
+    safe_role = html.escape(role.capitalize())
+    safe_org = html.escape(org_name or "your organization")
+    safe_email = html.escape(to)
+    safe_password = html.escape(temp_password)
+    login_url = f"{_base_url()}/login"
+    return _shell(f"""
+    {_header("You're invited!")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>You've been added to <strong>{safe_org}</strong> on ZoikoStream as a
+         <strong>{safe_role}</strong>. Use these credentials to sign in:</p>
+      <div style="margin:24px 0;padding:16px 20px;background:#f2f2f4;border-radius:8px;">
+        <p style="margin:0 0 6px;"><strong>Email:</strong> {safe_email}</p>
+        <p style="margin:0;"><strong>Temporary password:</strong> {safe_password}</p>
+      </div>
+      <p>We'd recommend changing this password after you sign in.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{login_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Sign In
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
 
 
 def send_reset_otp_email(to: str, name: str, otp: str) -> None:
     _send(to, "Your ZoikoStream password reset code", _otp_html(name, otp))
+
+
+def send_member_invite_email(to: str, name: str, role: str, org_name: str, temp_password: str) -> None:
+    # Logged regardless of delivery success -- the invite email already puts this password
+    # in plaintext by design, and Resend's default sender can't deliver to anyone but the
+    # account owner until a domain is verified, so this is the only way to recover it in dev.
+    log.info("Invite credentials for %s (%s): %s", to, role, temp_password)
+    _send(to, f"You've been added to {org_name} on ZoikoStream", _member_invite_html(to, name, role, org_name, temp_password))
+
+
+def _registration_html(name: str, event_title: str, watch_url: str) -> str:
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title)
+    return _shell(f"""
+    {_header("You're registered!")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>You're registered for <strong>{safe_title}</strong> on ZoikoStream. Use the link
+         below when it's time to join.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{watch_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Go to Event
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
+def send_registration_confirmation_email(to: str, name: str, event_title: str, stream_id) -> None:
+    watch_url = f"{_base_url()}/events/{stream_id}/watch"
+    _send(to, f"You're registered for {event_title}", _registration_html(name, event_title, watch_url))
 
 
 if __name__ == "__main__":

@@ -1,11 +1,15 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import String, Text, DateTime, ForeignKey, func, Boolean
+from sqlalchemy import String, Text, DateTime, Date, ForeignKey, func, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+
+# draft -> scheduled -> live -> completed (or draft/scheduled -> canceled)
+STREAM_STATUSES = ("draft", "scheduled", "live", "completed", "canceled")
+STREAM_VISIBILITIES = ("public", "private", "unlisted")
 
 
 class Stream(Base):
@@ -24,6 +28,17 @@ class Stream(Base):
         ForeignKey("channels.id"),
         nullable=False
     )
+
+    # Denormalized for cheap org-scoped listing/authorization without joining through
+    # channels -> users every time (events are managed by any org_admin/host in the org,
+    # not just the channel's specific owner).
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id"),
+        nullable=False,
+    )
+
+    host_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    moderator_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
     title: Mapped[str] = mapped_column(
@@ -67,6 +82,15 @@ class Stream(Base):
         default=False,
         nullable=False
     )
+
+    status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    visibility: Mapped[str] = mapped_column(String(20), default="public", nullable=False)
+    registration_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    scheduled_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    start_time: Mapped[str | None] = mapped_column(String(5), nullable=True)  # "HH:MM", local to `timezone`
+    end_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC", nullable=False)
 
 
     started_at: Mapped[datetime | None] = mapped_column(

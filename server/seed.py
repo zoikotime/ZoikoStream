@@ -7,6 +7,7 @@ Usage:
   python seed.py
 """
 
+import secrets
 import sys
 from sqlalchemy import func, select
 from app.models import Organization, User
@@ -61,23 +62,29 @@ def seed_database():
             username = f"{original_username}{counter}"
             counter += 1
         
+        # Random each run -- never hardcode a real password into source control.
+        # Rotate it immediately after seeding (see rotate_password.py) if this is more
+        # than a throwaway local database.
+        temp_password = secrets.token_urlsafe(12)
+
         admin_user = User(
             org_id=platform_org.id,
             full_name="ZoikoStream Admin",
             email=super_admin_email,
             username=username,
-            password_hash=hash_password("NoxxMC26070%!LGM"),  # Use provided password
+            password_hash=hash_password(temp_password),
             role="super_admin",
             is_active=True,
         )
-        
+
         db.add(admin_user)
         db.commit()
-        
+
         print(f"✓ Super admin created successfully!")
         print(f"  Email: {super_admin_email}")
         print(f"  Username: {username}")
-        print(f"  Password: NoxxMC26070%!LGM")
+        print(f"  Password: {temp_password}")
+        print(f"  (save this now -- it is not stored anywhere else in plaintext)")
         print(f"\n✓ Database seeding completed successfully!")
         return True
         

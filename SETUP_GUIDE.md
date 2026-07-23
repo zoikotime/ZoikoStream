@@ -58,11 +58,8 @@
 
 ## Super Admin Credentials
 
-```
-Email:    info@zoikostream.com
-Password: NoxxMC26070%!LGM
-Role:     super_admin
-```
+The email in `SUPER_ADMIN_EMAIL` (`.env`) auto-registers as `super_admin` on signup.
+Credentials themselves are never committed here — see your password manager / `.env`.
 
 ## Testing the Setup
 

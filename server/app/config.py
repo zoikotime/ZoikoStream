@@ -28,5 +28,12 @@ class Settings(BaseSettings):
     # zoikostream.com in Resend and switch this to noreply@zoikostream.com before launch.
     MAIL_FROM: str = "ZoikoStream <onboarding@resend.dev>"
 
+    # Recording (LiveKit Egress -> GCS). Blank = /streams/{id}/recordings/start fails with
+    # a clear error instead of silently doing nothing. GCS_CREDENTIALS_FILE is a path to a
+    # service account JSON key -- kept as a file (not inlined in .env) so the key's own
+    # newlines/quoting never fight with .env parsing. Never commit that key file.
+    GCS_BUCKET: str = ""
+    GCS_CREDENTIALS_FILE: str = ""
+
 
 settings = Settings()

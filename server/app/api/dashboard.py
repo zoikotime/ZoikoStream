@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Organization, User
+from ..models.stream import Stream
 from ..security import get_current_user
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -53,14 +54,22 @@ def get_org_stats(
     org_users = db.scalar(
         select(func.count(User.id)).where(User.org_id == user.org_id)
     )
-    
+
+    event_counts = dict(
+        db.execute(
+            select(Stream.status, func.count(Stream.id))
+            .where(Stream.org_id == user.org_id)
+            .group_by(Stream.status)
+        ).all()
+    )
+
     return {
         "organization_id": str(user.org_id),
         "organization_name": org.name,
-        "upcoming_events": 5,  # ponytail: fetch from events table when it exists
-        "live_events": 1,
-        "completed_events": 28,
-        "total_viewers": 12530,
+        "upcoming_events": event_counts.get("scheduled", 0),
+        "live_events": event_counts.get("live", 0),
+        "completed_events": event_counts.get("completed", 0),
+        "total_viewers": 0,  # ponytail: no view-tracking yet — needs a stream_views table
         "total_users": org_users or 0,
     }
 

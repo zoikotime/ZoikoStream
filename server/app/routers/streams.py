@@ -1,17 +1,22 @@
+import re
 import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
 
 from app.db import get_db
 from app.config import settings
 
-from app.models import User
+from app.models import Organization, User
 from app.models.stream import Stream
 from app.models.channel import Channel
+from app.models.registration import Registration
+from app.models.chat import ChatMessage
+from app.models.recording import Recording
 
 from app.security import get_current_user
 
@@ -29,10 +34,61 @@ router = APIRouter(
     tags=["Streams"]
 )
 
+# Who may create/manage events for an org. Viewers/moderators can watch/moderate but not
+# schedule or edit events.
+MANAGER_ROLES = ("org_admin", "host")
+
+
+def _require_manager(user: User) -> None:
+    if user.role not in MANAGER_ROLES:
+        raise HTTPException(403, "Only organization admins and hosts can manage events")
+
+
+def _get_or_create_default_channel(db: Session, user: User) -> Channel:
+    """Events need a channel to hang off, but the Events UI has no channel picker —
+    reuse (or lazily create) one default channel per organization."""
+    channel = db.scalar(
+        select(Channel).join(User, Channel.owner_id == User.id).where(User.org_id == user.org_id)
+    )
+    if channel:
+        return channel
+
+    org = db.get(Organization, user.org_id)
+    base_slug = re.sub(r"[^a-z0-9]+", "-", (org.name if org else "channel").lower()).strip("-") or "channel"
+    slug = base_slug
+    counter = 1
+    while db.scalar(select(Channel).where(Channel.slug == slug)):
+        slug = f"{base_slug}-{counter}"
+        counter += 1
+
+    channel = Channel(owner_id=user.id, name=org.name if org else "My Channel", slug=slug)
+    db.add(channel)
+    db.flush()  # assign channel.id without committing yet
+    return channel
+
+
+def _get_org_stream(db: Session, user: User, stream_id: str) -> Stream:
+    stream = db.scalar(select(Stream).where(Stream.id == stream_id, Stream.org_id == user.org_id))
+    if not stream:
+        raise HTTPException(404, "Stream not found")
+    return stream
+
+
+def _validate_assignee(db: Session, user: User, member_id, role: str, field: str) -> None:
+    """host_id/moderator_id must be a real user, in the caller's org, with the matching
+    role -- otherwise this fails as an unhandled 500 (FK violation) instead of a clean 400."""
+    if member_id is None:
+        return
+    member = db.scalar(select(User).where(User.id == member_id, User.org_id == user.org_id))
+    if not member:
+        raise HTTPException(400, f"{field} must be a member of your organization")
+    if member.role != role:
+        raise HTTPException(400, f"{field} must reference a user with the '{role}' role")
+
 
 # CREATE STREAM
 @router.post(
-    "/",
+    "",
     response_model=StreamResponse,
     status_code=201
 )
@@ -41,50 +97,68 @@ def create_stream(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
+    _require_manager(user)
 
-    channel = db.scalar(
-        select(Channel)
-        .where(
-            Channel.id == data.channel_id,
-            Channel.owner_id == user.id
+    if data.channel_id:
+        channel = db.scalar(
+            select(Channel)
+            .join(User, Channel.owner_id == User.id)
+            .where(Channel.id == data.channel_id, User.org_id == user.org_id)
         )
-    )
+        if not channel:
+            raise HTTPException(403, "Channel not found in your organization")
+    else:
+        channel = _get_or_create_default_channel(db, user)
 
-    if not channel:
-        raise HTTPException(
-            403,
-            "You don't own this channel"
-        )
-
+    _validate_assignee(db, user, data.host_id, "host", "host_id")
+    _validate_assignee(db, user, data.moderator_id, "moderator", "moderator_id")
 
     stream = Stream(
-        channel_id=data.channel_id,
+        channel_id=channel.id,
+        org_id=user.org_id,
+        host_id=data.host_id,
+        moderator_id=data.moderator_id,
         title=data.title,
         description=data.description,
         category=data.category,
-        stream_key=secrets.token_urlsafe(32)
+        thumbnail_url=data.thumbnail_url,
+        visibility=data.visibility,
+        registration_required=data.registration_required,
+        scheduled_date=data.scheduled_date,
+        start_time=data.start_time,
+        end_time=data.end_time,
+        timezone=data.timezone,
+        status=data.status,
+        stream_key=secrets.token_urlsafe(32),
     )
 
 
     db.add(stream)
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(400, "Could not create event — check host_id/moderator_id/channel_id are valid")
+
     db.refresh(stream)
 
     return stream
 
 
 
-# GET ALL STREAMS
+# GET ALL STREAMS (scoped to the caller's organization)
 @router.get(
-    "/",
+    "",
     response_model=list[StreamResponse]
 )
 def get_streams(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
 
     streams = db.scalars(
-        select(Stream)
+        select(Stream).where(Stream.org_id == user.org_id).order_by(Stream.created_at.desc())
     ).all()
 
     return streams
@@ -92,6 +166,10 @@ def get_streams(
 
 
 # GET SINGLE STREAM
+# ponytail: intentionally unauthenticated — shareable event links (/e/:id) and the
+# watch page need this with no login. Doesn't yet check `visibility`/`status`, so a
+# guessed id for a private/draft event is still readable; add optional-auth + a
+# visibility check here before private events matter for real.
 @router.get(
     "/{stream_id}",
     response_model=StreamResponse
@@ -128,38 +206,24 @@ def update_stream(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
+    _require_manager(user)
+    stream = _get_org_stream(db, user, stream_id)
 
-    stream = db.scalar(
-        select(Stream)
-        .join(Channel)
-        .where(
-            Stream.id == stream_id,
-            Channel.owner_id == user.id
-        )
-    )
+    updates = data.model_dump(exclude_unset=True)
+    if "host_id" in updates:
+        _validate_assignee(db, user, updates["host_id"], "host", "host_id")
+    if "moderator_id" in updates:
+        _validate_assignee(db, user, updates["moderator_id"], "moderator", "moderator_id")
 
+    for field, value in updates.items():
+        setattr(stream, field, value)
 
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found or not owner"
-        )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(400, "Could not update event — check the fields you're changing are valid")
 
-
-    if data.title is not None:
-        stream.title = data.title
-
-    if data.description is not None:
-        stream.description = data.description
-
-    if data.category is not None:
-        stream.category = data.category
-
-    if data.thumbnail_url is not None:
-        stream.thumbnail_url = data.thumbnail_url
-
-
-    db.commit()
     db.refresh(stream)
 
     return stream
@@ -176,23 +240,12 @@ def delete_stream(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
+    _require_manager(user)
+    stream = _get_org_stream(db, user, stream_id)
 
-    stream = db.scalar(
-        select(Stream)
-        .join(Channel)
-        .where(
-            Stream.id == stream_id,
-            Channel.owner_id == user.id
-        )
-    )
-
-
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found or not owner"
-        )
-
+    db.query(Registration).filter(Registration.stream_id == stream.id).delete()
+    db.query(ChatMessage).filter(ChatMessage.stream_id == stream.id).delete()
+    db.query(Recording).filter(Recording.stream_id == stream.id).delete()
 
     db.delete(stream)
     db.commit()
@@ -209,22 +262,8 @@ def start_stream(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
-
-    stream = db.scalar(
-        select(Stream)
-        .join(Channel)
-        .where(
-            Stream.id == stream_id,
-            Channel.owner_id == user.id
-        )
-    )
-
-
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found"
-        )
+    _require_manager(user)
+    stream = _get_org_stream(db, user, stream_id)
 
 
     if stream.is_live:
@@ -235,6 +274,7 @@ def start_stream(
 
 
     stream.is_live = True
+    stream.status = "live"
 
     stream.started_at = datetime.now(timezone.utc)
 
@@ -267,7 +307,7 @@ def get_viewer_token(
     stream_id: str,
     db: Session = Depends(get_db)
 ):
-    
+
     if stream_id.startswith("stream_"):
         stream_id = stream_id.replace("stream_", "")
 
@@ -302,7 +342,8 @@ def get_viewer_token(
 
     return {
         "room": stream.livekit_room,
-        "token": token
+        "token": token,
+        "livekit_url": settings.LIVEKIT_URL
     }
 
 # STOP STREAM
@@ -315,22 +356,8 @@ def stop_stream(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
-
-    stream = db.scalar(
-        select(Stream)
-        .join(Channel)
-        .where(
-            Stream.id == stream_id,
-            Channel.owner_id == user.id
-        )
-    )
-
-
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found or not owner"
-        )
+    _require_manager(user)
+    stream = _get_org_stream(db, user, stream_id)
 
 
     if not stream.is_live:
@@ -341,6 +368,7 @@ def stop_stream(
 
 
     stream.is_live = False
+    stream.status = "completed"
     stream.ended_at = datetime.now(timezone.utc)
 
 

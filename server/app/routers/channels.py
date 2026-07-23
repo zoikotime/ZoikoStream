@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.db import get_db
 from app.models import Channel, User
@@ -26,8 +27,10 @@ def create_channel(
     user: User = Depends(get_current_user),
 ):
 
+    slug = data.slug.strip().lower()
+
     existing = db.scalar(
-        select(Channel).where(Channel.slug == data.slug)
+        select(Channel).where(Channel.slug == slug)
     )
 
     if existing:
@@ -39,13 +42,22 @@ def create_channel(
     channel = Channel(
         owner_id=user.id,
         name=data.name,
-        slug=data.slug.lower(),
+        slug=slug,
         description=data.description,
         category=data.category,
     )
 
     db.add(channel)
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError:
+        # Precheck above is racy under concurrent requests -- the unique constraint is
+        # the real guard. Without this, a collision here is an uncaught 500 instead of
+        # the same clean 409 as the precheck.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Channel slug already exists")
+
     db.refresh(channel)
 
     return channel
@@ -128,12 +140,16 @@ def update_channel(
 
 
     channel.name = data.name
-    channel.slug = data.slug.lower()
+    channel.slug = data.slug.strip().lower()
     channel.description = data.description
     channel.category = data.category
 
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Channel slug already exists")
 
-    db.commit()
     db.refresh(channel)
 
     return channel

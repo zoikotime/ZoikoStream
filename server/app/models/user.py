@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from .organization import Organization
     from .channel import Channel
 
-ROLES = ("super_admin", "org_admin", "speaker", "viewer")
+ROLES = ("super_admin", "org_admin", "host", "moderator", "speaker", "viewer")
 
 
 class User(Base):
