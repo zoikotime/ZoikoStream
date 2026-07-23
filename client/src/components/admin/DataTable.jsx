@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { FiChevronDown, FiChevronLeft, FiChevronRight, FiChevronUp } from "react-icons/fi";
-import { cx, focusRing } from "./tokens";
+import { cx, focusRing } from "../../ui/tokens";
 
 // Reusable data grid for every admin table (Organizations, Users, Subscriptions, …).
 // Features: client-side sortable columns with clear indicators, optional pagination

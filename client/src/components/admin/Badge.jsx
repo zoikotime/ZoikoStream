@@ -1,4 +1,4 @@
-import { cx, TONE } from "./tokens";
+import { cx, TONE } from "../../ui/tokens";
 
 // Semantic pill: tone color + optional leading dot or icon. Never bare text for status.
 // tone: success | warning | danger | info | brand | neutral

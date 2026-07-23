@@ -1,71 +1,57 @@
 import { useState } from "react";
-import {
-  FiImage,
-  FiUploadCloud,
-  FiGlobe,
-  FiLock,
-  FiKey,
-  FiCheck,
-} from "react-icons/fi";
+import { FiGlobe, FiLock, FiEyeOff } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import Modal from "../../ui/Modal";
-import Button from "../../ui/Button";
+import Button from "../../components/admin/Button";
 import { notify } from "../../ui/Toast";
+import api, { errMsg } from "../../api";
 
-// ponytail: dummy option data — swap for org config / team endpoints later.
 const CATEGORIES = ["Webinar", "Conference", "Product Launch", "Workshop", "Q&A Session", "Internal"];
 const TIMEZONES = ["UTC", "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Kolkata", "Asia/Singapore"];
-const TEAM = ["Ava Chen", "Marcus Reed", "Priya Nair", "Leo Fischer", "Sofia Alvarez", "Noah Kim"];
 
+// Matches the backend Visibility enum (public | private | unlisted).
 const VISIBILITY = [
-  { value: "Public", label: "Public", desc: "Anyone with the link can watch", icon: FiGlobe },
-  { value: "Private", label: "Private", desc: "Only invited people can watch", icon: FiLock },
-  { value: "Password", label: "Password Protected", desc: "Requires a password to join", icon: FiKey },
+  { value: "public", label: "Public", desc: "Anyone with the link can watch", icon: FiGlobe },
+  { value: "unlisted", label: "Unlisted", desc: "Only people with the link", icon: FiEyeOff },
+  { value: "private", label: "Private", desc: "Only invited people can watch", icon: FiLock },
 ];
 
 const FEATURES = [
-  { key: "chat", label: "Enable Chat" },
-  { key: "polls", label: "Enable Polls" },
-  { key: "qa", label: "Enable Q&A" },
-  { key: "recording", label: "Enable Recording" },
+  { key: "chat_enabled", label: "Enable Chat" },
+  { key: "polls_enabled", label: "Enable Polls" },
+  { key: "qa_enabled", label: "Enable Q&A" },
+  { key: "recording_enabled", label: "Enable Recording" },
 ];
 
 const EMPTY = {
   title: "",
   description: "",
   category: CATEGORIES[0],
-  thumbnail: "",
-  banner: "",
   date: "",
   start: "",
   end: "",
   timezone: "UTC",
-  visibility: "Public",
-  password: "",
-  registration: false,
-  chat: true,
-  polls: false,
-  qa: true,
-  recording: true,
-  host: TEAM[0],
-  moderator: "",
-  speakers: [],
+  visibility: "public",
+  registration_required: false,
+  chat_enabled: true,
+  polls_enabled: false,
+  qa_enabled: true,
+  recording_enabled: true,
 };
 
 const input =
-  "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
+  "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
 const label = "mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300";
 
 function Section({ title, children }) {
   return (
     <section className="border-b border-slate-100 py-5 first:pt-0 last:border-0 dark:border-slate-800">
-      <h3 className="mb-4 text-sm font-semibold uppercase tracking-wide text-slate-400">{title}</h3>
+      <h3 className="mb-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{title}</h3>
       {children}
     </section>
   );
 }
 
-// Accessible on/off switch.
 function Toggle({ checked, onChange, label: text }) {
   return (
     <button
@@ -73,68 +59,96 @@ function Toggle({ checked, onChange, label: text }) {
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+      className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
     >
       {text}
-      <span className={cx("relative h-5 w-9 shrink-0 rounded-full transition", checked ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600")}>
+      <span className={cx("relative h-5 w-9 shrink-0 rounded-full transition", checked ? "bg-violet-500" : "bg-slate-300 dark:bg-slate-600")}>
         <span className={cx("absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition", checked ? "left-[18px]" : "left-0.5")} />
       </span>
     </button>
   );
 }
 
-// File "upload" dropzone — no backend, just records the chosen file name.
-function Upload({ icon: Icon, title, value, onFile }) {
-  return (
-    <label className="flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center transition hover:border-emerald-400 hover:bg-emerald-50/40 dark:border-slate-700 dark:bg-slate-800/50 dark:hover:border-emerald-500/50">
-      <Icon className="text-xl text-slate-400" />
-      <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{value || title}</span>
-      <span className="text-xs text-slate-400">PNG or JPG, up to 5MB</span>
-      <input
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => onFile(e.target.files?.[0]?.name || "")}
-      />
-    </label>
-  );
-}
+// Combine a <input type=date> + <input type=time> into an ISO datetime (or null).
+const toISO = (date, time) => {
+  if (!date) return null;
+  const d = new Date(`${date}T${time || "00:00"}`);
+  return isNaN(d) ? null : d.toISOString();
+};
 
-export default function CreateEventModal({ open, onClose }) {
+export default function CreateEventModal({ open, onClose, onCreated }) {
   const [form, setForm] = useState(EMPTY);
+  const [saving, setSaving] = useState(null); // "draft" | "published" | null
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
-
-  const toggleSpeaker = (name) =>
-    set("speakers", form.speakers.includes(name) ? form.speakers.filter((s) => s !== name) : [...form.speakers, name]);
 
   const canPublish = form.title.trim().length > 0;
 
-  const submit = (mode) => {
-    // ponytail: no backend — log the payload and toast. Wire to POST /organization/events later.
-    console.log(`${mode} event`, form);
-    notify.success(mode === "draft" ? "Draft saved" : `"${form.title}" published`);
+  const close = () => {
     setForm(EMPTY);
     onClose();
+  };
+
+  const submit = async (status) => {
+    const start_time = toISO(form.date, form.start);
+    const end_time = toISO(form.date, form.end);
+    if (start_time && end_time && new Date(end_time) <= new Date(start_time)) {
+      return notify.error("End time must be after start time");
+    }
+    setSaving(status);
+    try {
+      const { data } = await api.post("/events", {
+        title: form.title.trim(),
+        description: form.description || null,
+        category: form.category || null,
+        timezone: form.timezone || null,
+        start_time,
+        end_time,
+        visibility: form.visibility,
+        registration_required: form.registration_required,
+        chat_enabled: form.chat_enabled,
+        polls_enabled: form.polls_enabled,
+        qa_enabled: form.qa_enabled,
+        recording_enabled: form.recording_enabled,
+        status,
+      });
+      notify.success(status === "draft" ? "Draft saved" : `"${data.title}" published`);
+      onCreated?.();
+      close();
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setSaving(null);
+    }
   };
 
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={close}
       title="Create Event"
-      className="max-w-3xl"
+      className="max-w-2xl"
       footer={
         <>
-          <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
-          <Button variant="secondary" size="sm" onClick={() => submit("draft")}>Save Draft</Button>
-          <Button size="sm" onClick={() => submit("publish")} disabled={!canPublish} title={canPublish ? undefined : "Add a title first"}>
+          <Button variant="secondary" size="sm" onClick={close} disabled={!!saving}>Cancel</Button>
+          <Button variant="secondary" size="sm" onClick={() => submit("draft")} loading={saving === "draft"} disabled={!!saving}>
+            Save Draft
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => submit("published")}
+            loading={saving === "published"}
+            disabled={!canPublish || !!saving}
+            title={canPublish ? undefined : "Add a title first"}
+          >
             Publish Event
           </Button>
         </>
       }
     >
+      {/* ponytail: media upload (no storage endpoint) and host/speaker assignment
+          (needs a member picker of real user ids) are set from the event page after
+          creation — see /events/{id}/hosts etc. */}
       <div className="max-h-[65vh] overflow-y-auto pr-1">
-        {/* Basic Information */}
         <Section title="Basic Information">
           <div className="space-y-4">
             <div>
@@ -154,15 +168,6 @@ export default function CreateEventModal({ open, onClose }) {
           </div>
         </Section>
 
-        {/* Media */}
-        <Section title="Media">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Upload icon={FiImage} title="Upload thumbnail" value={form.thumbnail} onFile={(n) => set("thumbnail", n)} />
-            <Upload icon={FiUploadCloud} title="Upload banner" value={form.banner} onFile={(n) => set("banner", n)} />
-          </div>
-        </Section>
-
-        {/* Schedule */}
         <Section title="Schedule">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
@@ -186,7 +191,6 @@ export default function CreateEventModal({ open, onClose }) {
           </div>
         </Section>
 
-        {/* Visibility */}
         <Section title="Visibility">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {VISIBILITY.map(({ value, label: l, desc, icon: Icon }) => (
@@ -195,82 +199,29 @@ export default function CreateEventModal({ open, onClose }) {
                 type="button"
                 onClick={() => set("visibility", value)}
                 className={cx(
-                  "flex flex-col items-start gap-1 rounded-xl border p-3.5 text-left transition",
+                  "flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition",
                   form.visibility === value
-                    ? "border-emerald-500 bg-emerald-50/60 ring-1 ring-emerald-500/30 dark:bg-emerald-500/10"
+                    ? "border-violet-500 bg-violet-50/60 ring-1 ring-violet-500/30 dark:bg-violet-500/10"
                     : "border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600"
                 )}
               >
-                <Icon className={cx("text-lg", form.visibility === value ? "text-emerald-600 dark:text-emerald-400" : "text-slate-400")} />
+                <Icon className={cx("text-lg", form.visibility === value ? "text-violet-600 dark:text-violet-400" : "text-slate-400")} />
                 <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{l}</span>
                 <span className="text-xs text-slate-500 dark:text-slate-400">{desc}</span>
               </button>
             ))}
           </div>
-          {form.visibility === "Password" && (
-            <input
-              type="text"
-              className={cx(input, "mt-3")}
-              value={form.password}
-              onChange={(e) => set("password", e.target.value)}
-              placeholder="Set event password"
-            />
-          )}
         </Section>
 
-        {/* Registration */}
         <Section title="Registration">
-          <Toggle checked={form.registration} onChange={(v) => set("registration", v)} label="Registration Required" />
+          <Toggle checked={form.registration_required} onChange={(v) => set("registration_required", v)} label="Registration Required" />
         </Section>
 
-        {/* Features */}
         <Section title="Features">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {FEATURES.map(({ key, label: l }) => (
               <Toggle key={key} checked={form[key]} onChange={(v) => set(key, v)} label={l} />
             ))}
-          </div>
-        </Section>
-
-        {/* Assignments */}
-        <Section title="Assignments">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className={label}>Host</label>
-              <select className={input} value={form.host} onChange={(e) => set("host", e.target.value)}>
-                {TEAM.map((p) => <option key={p}>{p}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={label}>Moderator</label>
-              <select className={input} value={form.moderator} onChange={(e) => set("moderator", e.target.value)}>
-                <option value="">Select a moderator</option>
-                {TEAM.map((p) => <option key={p}>{p}</option>)}
-              </select>
-            </div>
-          </div>
-          <div className="mt-4">
-            <label className={label}>Speakers</label>
-            <div className="flex flex-wrap gap-2">
-              {TEAM.map((p) => {
-                const on = form.speakers.includes(p);
-                return (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => toggleSpeaker(p)}
-                    className={cx(
-                      "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition",
-                      on
-                        ? "border-emerald-500 bg-emerald-500 text-white"
-                        : "border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-300"
-                    )}
-                  >
-                    {on && <FiCheck className="text-xs" />} {p}
-                  </button>
-                );
-              })}
-            </div>
           </div>
         </Section>
       </div>

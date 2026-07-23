@@ -1,6 +1,6 @@
 // Super Admin design system — single import surface.
 //   import { Panel, DataTable, StatCard, Button, Badge, type, cx } from "../../components/admin";
-export * from "./tokens";
+export * from "../../ui/tokens";
 export * from "./format";
 
 export { default as Button } from "./Button";
