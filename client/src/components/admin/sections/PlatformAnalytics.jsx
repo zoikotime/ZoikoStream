@@ -1,5 +1,4 @@
-import AreaChartCard from "../../../components/Dashboard/AreaChartCard";
-import DonutChartCard from "../../../components/Dashboard/DonutChartCard";
+import { AreaChart, PieChart } from "../../../ui/charts";
 import SectionHeading from "../SectionHeading";
 import SectionCard from "../SectionCard";
 import { analytics, CHART, CATEGORICAL } from "../../../data/platform";
@@ -50,7 +49,7 @@ export default function PlatformAnalytics() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="xl:col-span-2">
-          <AreaChartCard
+          <AreaChart
             title="Traffic"
             subtitle="Playback vs live-stream views"
             data={analytics.traffic}
@@ -60,12 +59,12 @@ export default function PlatformAnalytics() {
             ]}
           />
         </div>
-        <DonutChartCard title="Traffic Mix" subtitle="Share by workload" data={analytics.mix} colors={CATEGORICAL} />
+        <PieChart title="Traffic Mix" subtitle="Share by workload" data={analytics.mix} colors={CATEGORICAL} />
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="xl:col-span-2">
-          <AreaChartCard
+          <AreaChart
             title="API Requests"
             subtitle="Total requests served per day"
             data={analytics.apiBandwidth}
@@ -73,7 +72,7 @@ export default function PlatformAnalytics() {
             type="line"
           />
         </div>
-        <AreaChartCard
+        <AreaChart
           title="Bandwidth"
           subtitle="Egress per day (GB)"
           data={analytics.apiBandwidth}

@@ -1,6 +1,6 @@
 import { FiArrowDownRight, FiArrowUpRight } from "react-icons/fi";
 import Counter from "../../ui/Counter";
-import Sparkline from "./Sparkline";
+import { Sparkline } from "../../ui/charts";
 import { SERIES, cx, panelSurface, t150, type } from "../../ui/tokens";
 
 // Metric tile: label + count-up value + trend delta (color + icon) + optional sparkline.

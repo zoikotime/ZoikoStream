@@ -4,8 +4,7 @@ import useApi from "../../hooks/useApi";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import StatCard from "../../components/admin/StatCard";
-import BarChartCard from "../../components/Dashboard/BarChartCard";
-import RadialCard from "../../components/Dashboard/RadialCard";
+import { BarChart, RadialChart } from "../../ui/charts";
 import RecentEvents from "../../components/Dashboard/RecentEvents";
 import StorageCard from "../../components/Dashboard/StorageCard";
 import QuickActions from "../../components/Dashboard/QuickActions";
@@ -59,9 +58,9 @@ export default function OrganizationDashboard() {
       {/* Chart + gauge */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="xl:col-span-2">
-          <BarChartCard title="Viewership Growth" subtitle="Daily viewers this week" data={viewership} />
+          <BarChart title="Viewership Growth" subtitle="Daily viewers this week" data={viewership} />
         </div>
-        <RadialCard title="Engagement" percent={75} label="avg. watch rate" footer="+6.3% vs last week" />
+        <RadialChart title="Engagement" percent={75} label="avg. watch rate" footer="+6.3% vs last week" />
       </div>
 
       {/* Recent events + side column */}

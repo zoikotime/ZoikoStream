@@ -9,9 +9,7 @@ import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import StatsCard from "../../ui/StatsCard";
 import { notify } from "../../ui/Toast";
-import BarChartCard from "../../components/Dashboard/BarChartCard";
-import AreaChartCard from "../../components/Dashboard/AreaChartCard";
-import DonutChartCard from "../../components/Dashboard/DonutChartCard";
+import { AreaChart, BarChart, PieChart } from "../../ui/charts";
 import DataTable from "../../components/admin/DataTable";
 import { fmtDate } from "../../data/events";
 import {
@@ -137,14 +135,14 @@ export default function OrganizationAnalytics() {
 
       {/* Charts */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <AreaChartCard
+        <AreaChart
           title="Viewership Growth"
           subtitle={`Viewers · ${label}`}
           data={t.viewership}
           keys={[{ key: "value", name: "Viewers", color: CHART.violet }]}
           type="area"
         />
-        <AreaChartCard
+        <AreaChart
           title="Attendance Trend"
           subtitle="Registered vs. attended"
           data={t.attendance}
@@ -154,8 +152,8 @@ export default function OrganizationAnalytics() {
           ]}
           type="line"
         />
-        <BarChartCard title="Watch Time" subtitle={`Hours watched · ${label}`} data={t.watchTime} color={CHART.violet} />
-        <AreaChartCard
+        <BarChart title="Watch Time" subtitle={`Hours watched · ${label}`} data={t.watchTime} color={CHART.violet} />
+        <AreaChart
           title="Audience Retention"
           subtitle="% of audience still watching"
           data={retention}
@@ -169,8 +167,8 @@ export default function OrganizationAnalytics() {
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <RankedBars title="Top Performing Events" subtitle="By total viewers" items={topEvents} color={CHART.violet} format={(v) => v.toLocaleString()} />
         <RankedBars title="Viewer Locations" subtitle="Share of total viewers" items={locations} color={CHART.blue} format={(v) => `${v}%`} />
-        <DonutChartCard title="Devices Used" subtitle="How viewers tuned in" data={devices} colors={CATEGORICAL} />
-        <DonutChartCard title="Traffic Sources" subtitle="Where viewers came from" data={trafficSources} colors={CATEGORICAL} />
+        <PieChart title="Devices Used" subtitle="How viewers tuned in" data={devices} colors={CATEGORICAL} />
+        <PieChart title="Traffic Sources" subtitle="Where viewers came from" data={trafficSources} colors={CATEGORICAL} />
       </div>
 
       {/* Recent reports */}
