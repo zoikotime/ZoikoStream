@@ -1,5 +1,5 @@
 import { FiAlertTriangle, FiRefreshCw } from "react-icons/fi";
-import Button from "../admin/Button";
+import { ConsoleButton as Button } from "../../ui/Button";
 import { errMsg } from "../../api";
 import { cx, panelSurface } from "../../ui/tokens";
 

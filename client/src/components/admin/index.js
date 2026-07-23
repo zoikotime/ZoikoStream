@@ -3,8 +3,8 @@
 export * from "../../ui/tokens";
 export * from "./format";
 
-export { default as Button } from "./Button";
-export { default as Badge } from "./Badge";
+export { ConsoleButton as Button } from "../../ui/Button";
+export { default as Badge } from "../../ui/Badge";
 export { default as StatCard } from "./StatCard";
 export { default as DataTable } from "./DataTable";
 export { default as Panel } from "./Panel";

@@ -12,8 +12,8 @@ import OrganizationErrorState from "../../components/organization/OrganizationEr
 import OrganizationEmptyState from "../../components/organization/OrganizationEmptyState";
 import SectionCard from "../../components/admin/SectionCard";
 import StatCard from "../../components/admin/StatCard";
-import Button from "../../components/admin/Button";
-import Badge from "../../components/admin/Badge";
+import { ConsoleButton as Button } from "../../ui/Button";
+import Badge from "../../ui/Badge";
 import { cx, focusRing } from "../../ui/tokens";
 import { statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 

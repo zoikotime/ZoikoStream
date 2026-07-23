@@ -2,7 +2,7 @@ import { useState } from "react";
 import { FiGlobe, FiLock, FiEyeOff } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import Modal from "../../ui/Modal";
-import Button from "../../components/admin/Button";
+import { ConsoleButton as Button } from "../../ui/Button";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 
