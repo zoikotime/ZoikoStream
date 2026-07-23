@@ -59,10 +59,10 @@ async def join(sid, data):
 
     with SessionLocal() as db:
         stream = db.get(Stream, stream_id)
-        if not stream:
+        user = _identify_user(data.get("token"), db)
+        if not stream or not stream.visible_to(user):
             return {"error": "Event not found"}
 
-        user = _identify_user(data.get("token"), db)
         if user:
             identity = {"user_id": str(user.id), "display_name": user.full_name}
         else:

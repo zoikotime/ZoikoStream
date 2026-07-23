@@ -7,7 +7,7 @@ from app.models import User
 from app.models.chat import ChatMessage
 from app.models.stream import Stream
 from app.schemas.chat import ChatMessageOut
-from app.security import get_current_user
+from app.security import get_current_user, get_optional_user
 from app.sockets import room_for, serialize_message, sio
 
 router = APIRouter(prefix="/streams/{stream_id}/messages", tags=["Chat"])
@@ -35,12 +35,18 @@ def _get_message(db: Session, stream_id: str, message_id: str) -> ChatMessage:
 
 
 # GET MESSAGE HISTORY
-# ponytail: public, same as GET /streams/{id} -- no visibility check yet either (see
-# that endpoint's note). A socket "join" also returns history; this is the REST/polling
-# fallback for clients that aren't using the socket layer.
+# Public, same as GET /streams/{id} -- gated by Stream.visible_to() the same way. A
+# socket "join" also returns history; this is the REST/polling fallback for clients
+# that aren't using the socket layer.
 @router.get("", response_model=list[ChatMessageOut])
-def get_messages(stream_id: str, limit: int = 50, db: Session = Depends(get_db)):
-    if not db.get(Stream, stream_id):
+def get_messages(
+    stream_id: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    stream = db.get(Stream, stream_id)
+    if not stream or not stream.visible_to(user):
         raise HTTPException(404, "Event not found")
 
     messages = db.scalars(

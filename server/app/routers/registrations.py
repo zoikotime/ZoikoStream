@@ -8,7 +8,7 @@ from app.models import User
 from app.models.registration import Registration
 from app.models.stream import Stream
 from app.schemas.registration import BulkRegisterIn, BulkRegisterResult, RegisterIn, RegistrationOut
-from app.security import get_current_user
+from app.security import get_current_user, get_optional_user
 
 router = APIRouter(prefix="/streams/{stream_id}/registrations", tags=["Registrations"])
 
@@ -20,9 +20,9 @@ def _require_manager(user: User) -> None:
         raise HTTPException(403, "Only organization admins and hosts can manage registrations")
 
 
-def _get_stream(db: Session, stream_id: str) -> Stream:
+def _get_stream(db: Session, stream_id: str, user: User | None = None) -> Stream:
     stream = db.get(Stream, stream_id)
-    if not stream:
+    if not stream or not stream.visible_to(user):
         raise HTTPException(404, "Event not found")
     return stream
 
@@ -35,12 +35,19 @@ def _get_org_stream(db: Session, user: User, stream_id: str) -> Stream:
 
 
 # SELF-SERVICE REGISTER
-# ponytail: public, same visibility caveat as GET /streams/{id} -- no check yet that the
-# event is actually open for registration (registration_required is informational only
-# right now; anyone with the stream_id can register regardless of that flag).
+# Public, gated by Stream.visible_to() like GET /streams/{id}.
+# ponytail: doesn't yet check that the event is actually open for registration --
+# registration_required is informational only right now; anyone who can see the event
+# can register regardless of that flag.
 @router.post("", response_model=RegistrationOut, status_code=201)
-def register(stream_id: str, data: RegisterIn, background: BackgroundTasks, db: Session = Depends(get_db)):
-    stream = _get_stream(db, stream_id)
+def register(
+    stream_id: str,
+    data: RegisterIn,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    stream = _get_stream(db, stream_id, user)
     email = data.email.lower()
 
     if db.scalar(select(Registration).where(Registration.stream_id == stream_id, Registration.email == email)):

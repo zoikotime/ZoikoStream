@@ -12,6 +12,7 @@ from .models import User
 
 ALGORITHM = "HS256"
 _bearer = HTTPBearer(auto_error=True)
+_bearer_optional = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -50,3 +51,21 @@ def get_current_user(
     if user is None or not user.is_active:
         raise unauthorized
     return user
+
+
+def get_optional_user(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Like get_current_user, but returns None instead of raising for guests/anonymous
+    requests -- for endpoints that serve both (e.g. a public event page that also
+    needs to know if the caller happens to be logged in, for a visibility check)."""
+    if creds is None:
+        return None
+    try:
+        payload = jwt.decode(creds.credentials, settings.SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload["sub"]
+    except (JWTError, KeyError):
+        return None
+    user = db.get(User, user_id)
+    return user if user and user.is_active else None

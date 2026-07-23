@@ -7,7 +7,7 @@ from app.models import User
 from app.models.recording import Recording
 from app.models.stream import Stream
 from app.schemas.recording import RecordingOut
-from app.security import get_current_user
+from app.security import get_current_user, get_optional_user
 from app.services.recording import apply_egress_update, get_egress_status, start_recording, status_from_egress, stop_recording
 
 router = APIRouter(prefix="/streams/{stream_id}/recordings", tags=["Recordings"])
@@ -34,10 +34,15 @@ def _get_recording(db: Session, stream_id: str, recording_id: str) -> Recording:
     return recording
 
 
-# LIST -- public, same as GET /streams/{id} (see that endpoint's visibility note).
+# LIST -- public, gated by Stream.visible_to() like GET /streams/{id}.
 @router.get("", response_model=list[RecordingOut])
-def list_recordings(stream_id: str, db: Session = Depends(get_db)):
-    if not db.get(Stream, stream_id):
+def list_recordings(
+    stream_id: str,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    stream = db.get(Stream, stream_id)
+    if not stream or not stream.visible_to(user):
         raise HTTPException(404, "Event not found")
     return db.scalars(
         select(Recording).where(Recording.stream_id == stream_id).order_by(Recording.created_at.desc())

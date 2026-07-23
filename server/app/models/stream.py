@@ -1,11 +1,15 @@
 import uuid
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import String, Text, DateTime, Date, ForeignKey, func, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+
+if TYPE_CHECKING:
+    from .user import User
 
 # draft -> scheduled -> live -> completed (or draft/scheduled -> canceled)
 STREAM_STATUSES = ("draft", "scheduled", "live", "completed", "canceled")
@@ -112,3 +116,14 @@ class Stream(Base):
 
 
     channel = relationship("Channel")
+
+    def visible_to(self, user: "User | None") -> bool:
+        """Whether `user` (None = anonymous/guest) may read this event.
+
+        Draft events and private events are org-only; everything else (public/unlisted,
+        any non-draft status) is readable by anyone, including guests -- that's what
+        shareable event links and the public watch page rely on.
+        """
+        if self.status == "draft" or self.visibility == "private":
+            return user is not None and user.org_id == self.org_id
+        return True

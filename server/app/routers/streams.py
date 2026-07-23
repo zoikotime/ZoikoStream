@@ -18,7 +18,7 @@ from app.models.registration import Registration
 from app.models.chat import ChatMessage
 from app.models.recording import Recording
 
-from app.security import get_current_user
+from app.security import get_current_user, get_optional_user
 
 from app.schemas.stream import (
     StreamCreate,
@@ -166,17 +166,18 @@ def get_streams(
 
 
 # GET SINGLE STREAM
-# ponytail: intentionally unauthenticated — shareable event links (/e/:id) and the
-# watch page need this with no login. Doesn't yet check `visibility`/`status`, so a
-# guessed id for a private/draft event is still readable; add optional-auth + a
-# visibility check here before private events matter for real.
+# Unauthenticated requests are allowed through -- shareable event links (/e/:id) and the
+# watch page need this with no login -- but Stream.visible_to() still gates draft/private
+# events to org members, using get_optional_user so a logged-in caller's org membership
+# is taken into account without *requiring* a login.
 @router.get(
     "/{stream_id}",
     response_model=StreamResponse
 )
 def get_stream(
     stream_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
 ):
 
     stream = db.scalar(
@@ -185,7 +186,7 @@ def get_stream(
     )
 
 
-    if not stream:
+    if not stream or not stream.visible_to(user):
         raise HTTPException(
             404,
             "Stream not found"
@@ -305,7 +306,8 @@ def start_stream(
 )
 def get_viewer_token(
     stream_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
 ):
 
     if stream_id.startswith("stream_"):
@@ -319,7 +321,7 @@ def get_viewer_token(
     )
 
 
-    if not stream:
+    if not stream or not stream.visible_to(user):
         raise HTTPException(
             404,
             "Stream not found"
