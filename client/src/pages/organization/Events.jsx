@@ -10,9 +10,7 @@ import {
   FiPlus,
   FiMoreVertical,
   FiEye,
-  FiEdit2,
   FiCopy,
-  FiUploadCloud,
   FiTrash2,
   FiVideo,
   FiChevronDown,
@@ -22,17 +20,16 @@ import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import StatsCard from "../../ui/StatsCard";
 import CreateEventModal from "./CreateEventModal";
-import { EVENTS, STATUS_PILL, VIS_PILL, fmtDate } from "../../data/events";
+import { notify } from "../../ui/Toast";
+import api, { errMsg } from "../../api";
+import { STATUS_LABEL, STATUS_PILL, VISIBILITY_LABEL, VIS_PILL, fmtDate } from "../../data/events";
 
 const ACTIONS = [
   { label: "View", icon: FiEye },
-  { label: "Edit", icon: FiEdit2 },
-  { label: "Duplicate", icon: FiCopy },
-  { label: "Publish", icon: FiUploadCloud },
+  { label: "Copy Link", icon: FiCopy },
   { label: "Delete", icon: FiTrash2, danger: true },
 ];
 
-// Row actions dropdown. Closes on outside click / Escape.
 function ActionsMenu({ event, onAction }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -55,7 +52,7 @@ function ActionsMenu({ event, onAction }) {
     <div ref={ref} className="relative flex justify-end">
       <button
         onClick={() => setOpen((v) => !v)}
-        aria-label={`Actions for ${event.name}`}
+        aria-label={`Actions for ${event.title}`}
         aria-haspopup="menu"
         aria-expanded={open}
         className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
@@ -98,41 +95,71 @@ const control =
 
 export default function OrganizationEvents() {
   const navigate = useNavigate();
+  const [events, setEvents] = useState([]);
+  const [members, setMembers] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [sort, setSort] = useState("date-desc");
   const [createOpen, setCreateOpen] = useState(false);
 
+  const load = () => {
+    Promise.all([api.get("/streams"), api.get("/organization/members")])
+      .then(([eventsRes, membersRes]) => {
+        setEvents(eventsRes.data);
+        setMembers(membersRes.data);
+      })
+      .catch((err) => notify.error(errMsg(err, "Failed to load events")))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(load, []);
+
+  const hostName = (id) => members.find((m) => m.id === id)?.full_name || "Unassigned";
+
   const stats = useMemo(
     () => [
-      { title: "Upcoming Events", value: EVENTS.filter((e) => e.status === "Upcoming").length, icon: FiCalendar, accent: "blue" },
-      { title: "Live Events", value: EVENTS.filter((e) => e.status === "Live").length, icon: FiRadio, accent: "emerald", live: true },
-      { title: "Draft Events", value: EVENTS.filter((e) => e.status === "Draft").length, icon: FiEdit, accent: "amber" },
-      { title: "Completed Events", value: EVENTS.filter((e) => e.status === "Completed").length, icon: FiCheckSquare, accent: "violet" },
+      { title: "Upcoming Events", value: events.filter((e) => e.status === "scheduled").length, icon: FiCalendar, accent: "blue" },
+      { title: "Live Events", value: events.filter((e) => e.status === "live").length, icon: FiRadio, accent: "emerald", live: events.some((e) => e.status === "live") },
+      { title: "Draft Events", value: events.filter((e) => e.status === "draft").length, icon: FiEdit, accent: "amber" },
+      { title: "Completed Events", value: events.filter((e) => e.status === "completed").length, icon: FiCheckSquare, accent: "violet" },
     ],
-    []
+    [events]
   );
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let out = EVENTS.filter(
+    const statusKey = { All: null, Upcoming: "scheduled", Live: "live", Draft: "draft", Completed: "completed" }[statusFilter];
+    let out = events.filter(
       (e) =>
-        (statusFilter === "All" || e.status === statusFilter) &&
-        (!q || e.name.toLowerCase().includes(q) || e.host.toLowerCase().includes(q))
+        (!statusKey || e.status === statusKey) &&
+        (!q || e.title.toLowerCase().includes(q) || hostName(e.host_id).toLowerCase().includes(q))
     );
     const sorters = {
-      "date-desc": (a, b) => b.date.localeCompare(a.date),
-      "date-asc": (a, b) => a.date.localeCompare(b.date),
-      "name-asc": (a, b) => a.name.localeCompare(b.name),
-      "viewers-desc": (a, b) => (b.viewers || 0) - (a.viewers || 0),
+      "date-desc": (a, b) => (b.scheduled_date || "").localeCompare(a.scheduled_date || ""),
+      "date-asc": (a, b) => (a.scheduled_date || "").localeCompare(b.scheduled_date || ""),
+      "name-asc": (a, b) => a.title.localeCompare(b.title),
     };
-    return [...out].sort(sorters[sort]);
-  }, [query, statusFilter, sort]);
+    return [...out].sort(sorters[sort] || sorters["date-desc"]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hostName is derived from `members`, already a dep
+  }, [events, members, query, statusFilter, sort]);
 
-  // ponytail: no backend — View opens the details page; the rest just log intent.
-  const handleAction = (action, event) => {
+  const handleAction = async (action, event) => {
     if (action === "View") return navigate(`/organization/events/${event.id}`);
-    console.log(`${action}: ${event.name}`);
+    if (action === "Copy Link") {
+      navigator.clipboard?.writeText(`${window.location.origin}/e/${event.id}`);
+      return notify.success("Event link copied");
+    }
+    if (action === "Delete") {
+      if (!window.confirm(`Delete "${event.title}"? This can't be undone.`)) return;
+      try {
+        await api.delete(`/streams/${event.id}`);
+        setEvents((list) => list.filter((e) => e.id !== event.id));
+        notify.success(`"${event.title}" deleted`);
+      } catch (err) {
+        notify.error(errMsg(err, "Failed to delete event"));
+      }
+    }
   };
 
   return (
@@ -158,7 +185,6 @@ export default function OrganizationEvents() {
             />
           </div>
 
-          {/* Filter (native select — no dependency needed) */}
           <div className="relative">
             <FiFilter className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <select
@@ -174,7 +200,6 @@ export default function OrganizationEvents() {
             <FiChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
           </div>
 
-          {/* Sort */}
           <div className="relative">
             <select
               value={sort}
@@ -185,7 +210,6 @@ export default function OrganizationEvents() {
               <option value="date-desc">Newest first</option>
               <option value="date-asc">Oldest first</option>
               <option value="name-asc">Name (A–Z)</option>
-              <option value="viewers-desc">Most viewers</option>
             </select>
             <FiChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
           </div>
@@ -215,14 +239,12 @@ export default function OrganizationEvents() {
                 <th className={th}>Host</th>
                 <th className={th}>Visibility</th>
                 <th className={th}>Registration</th>
-                <th className={`${th} text-right`}>Viewers</th>
                 <th className={`${th} text-right`}>Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {rows.map((e) => (
                 <tr key={e.id} className="transition hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                  {/* Thumbnail + name */}
                   <td className={td}>
                     <div className="flex items-center gap-3">
                       <span className="grid h-10 w-16 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-slate-800 to-slate-600 text-white dark:from-slate-700 dark:to-slate-900">
@@ -232,35 +254,37 @@ export default function OrganizationEvents() {
                         onClick={() => navigate(`/organization/events/${e.id}`)}
                         className="text-left font-medium text-slate-800 hover:text-emerald-600 dark:text-slate-100 dark:hover:text-emerald-400"
                       >
-                        {e.name}
+                        {e.title}
                       </button>
                     </div>
                   </td>
                   <td className={td}>
                     <span className={cx("inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold", STATUS_PILL[e.status])}>
-                      {e.status === "Live" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />}
-                      {e.status}
+                      {e.status === "live" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />}
+                      {STATUS_LABEL[e.status] || e.status}
                     </span>
                   </td>
-                  <td className={td}>{fmtDate(e.date)}</td>
-                  <td className={td}>{e.host}</td>
+                  <td className={td}>{fmtDate(e.scheduled_date)}</td>
+                  <td className={td}>{hostName(e.host_id)}</td>
                   <td className={td}>
-                    <span className={cx("font-medium", VIS_PILL[e.visibility])}>{e.visibility}</span>
+                    <span className={cx("font-medium", VIS_PILL[e.visibility])}>{VISIBILITY_LABEL[e.visibility] || e.visibility}</span>
                   </td>
-                  <td className={td}>{e.registration}</td>
-                  <td className={cx(td, "text-right font-medium text-slate-800 dark:text-slate-100")}>
-                    {e.viewers != null ? e.viewers.toLocaleString() : "—"}
-                  </td>
+                  <td className={td}>{e.registration_required ? "Required" : "Open"}</td>
                   <td className={cx(td, "text-right")}>
                     <ActionsMenu event={e} onAction={handleAction} />
                   </td>
                 </tr>
               ))}
-              {rows.length === 0 && (
+              {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-sm text-slate-400">
-                    No events match your filters.
+                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-slate-400">
+                    {events.length === 0 ? "No events yet — create your first one." : "No events match your filters."}
                   </td>
+                </tr>
+              )}
+              {loading && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-slate-400">Loading…</td>
                 </tr>
               )}
             </tbody>
@@ -268,7 +292,7 @@ export default function OrganizationEvents() {
         </div>
       </Card>
 
-      <CreateEventModal open={createOpen} onClose={() => setCreateOpen(false)} />
+      <CreateEventModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={(event) => setEvents((list) => [event, ...list])} />
     </div>
   );
 }

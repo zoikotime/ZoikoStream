@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   FiCalendar,
@@ -9,7 +9,9 @@ import {
 } from "react-icons/fi";
 import { cx } from "../ui/tokens";
 import Button from "../ui/Button";
-import { getEvent, fmtDate } from "../data/events";
+import api, { errMsg } from "../api";
+import { notify } from "../ui/Toast";
+import { fmtDate, toLegacyEventShape } from "../data/events";
 
 // Literal gradient per accent — Tailwind JIT can't compile interpolated class names.
 const BANNER = {
@@ -39,6 +41,7 @@ const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 function RegistrationForm({ event }) {
   const [form, setForm] = useState({ name: "", email: "", phone: "", company: "" });
   const [done, setDone] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const valid = form.name.trim() && isEmail(form.email);
 
@@ -53,16 +56,26 @@ function RegistrationForm({ event }) {
       </div>
     );
 
+  const submit = async (e) => {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await api.post(`/streams/${event.id}/registrations`, {
+        full_name: form.name.trim(),
+        email: form.email.trim(),
+        phone: form.phone || null,
+        company: form.company || null,
+      });
+      setDone(true);
+    } catch (err) {
+      notify.error(errMsg(err, "Failed to register for this event"));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        // ponytail: no backend — show the confirmation state. Wire to POST /register later.
-        console.log("register", { eventId: event.id, ...form });
-        setDone(true);
-      }}
-      className="space-y-4"
-    >
+    <form onSubmit={submit} className="space-y-4">
       <div>
         <label className={labelCls}>Full Name</label>
         <input className={field} value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="Jane Doe" required />
@@ -79,7 +92,7 @@ function RegistrationForm({ event }) {
         <label className={labelCls}>Company</label>
         <input className={field} value={form.company} onChange={(e) => set("company", e.target.value)} placeholder="Acme Inc." />
       </div>
-      <Button type="submit" className="w-full" disabled={!valid}>Register</Button>
+      <Button type="submit" className="w-full" disabled={!valid || submitting}>{submitting ? "Registering…" : "Register"}</Button>
       <p className="text-center text-xs text-slate-400">Free to attend · No credit card required</p>
     </form>
   );
@@ -87,7 +100,23 @@ function RegistrationForm({ event }) {
 
 export default function EventRegistration() {
   const { id } = useParams();
-  const event = getEvent(id);
+  const [event, setEvent] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api
+      .get(`/streams/${id}`)
+      .then((res) => setEvent(toLegacyEventShape(res.data)))
+      .catch(() => setEvent(null))
+      .finally(() => setLoading(false));
+  }, [id]);
+
+  if (loading)
+    return (
+      <div className="grid min-h-screen place-items-center bg-slate-50 dark:bg-slate-950">
+        <p className="text-sm text-slate-500 dark:text-slate-400">Loading…</p>
+      </div>
+    );
 
   if (!event)
     return (
@@ -96,7 +125,7 @@ export default function EventRegistration() {
       </div>
     );
 
-  const tz = event.timezone.split("/").pop().replace("_", " ");
+  const tz = (event.timezone || "UTC").split("/").pop().replace("_", " ");
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200">

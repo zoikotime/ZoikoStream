@@ -1,14 +1,16 @@
 // client/src/components/host/HostPanel.jsx
 // Right sidebar for the Host Dashboard — tabbed: Participants, Chat, Live
 // Notifications. Tab state is lifted to the page so the control bar can switch it.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   FiSend, FiMic, FiMicOff, FiVideoOff, FiMoreVertical, FiUserPlus,
   FiVideo, FiRadio, FiBarChart2, FiHelpCircle, FiBell,
 } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
-import { participants, chatMessages, notifications, initials } from "../../data/host";
+import { notify } from "../../ui/Toast";
+import { connectEventChat, sendChatMessage } from "../../lib/chatSocket";
+import { participants, notifications, initials } from "../../data/host";
 
 const TABS = [
   { key: "participants", label: "People" },
@@ -59,16 +61,39 @@ function Participants() {
   );
 }
 
-function Chat() {
-  const [msgs, setMsgs] = useState(chatMessages);
+function Chat({ streamId }) {
+  const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState("");
+  const socketRef = useRef(null);
 
-  const send = (e) => {
+  useEffect(() => {
+    if (!streamId) return;
+    const token = localStorage.getItem("token");
+    const socket = connectEventChat(
+      streamId,
+      { token },
+      {
+        onHistory: setMsgs,
+        onNew: (msg) => setMsgs((m) => [...m, msg]),
+        onUpdated: (msg) => setMsgs((m) => m.map((x) => (x.id === msg.id ? msg : x))),
+        onDeleted: (id) => setMsgs((m) => m.filter((x) => x.id !== id)),
+        onError: (err) => notify.error(err),
+      }
+    );
+    socketRef.current = socket;
+    return () => socket.disconnect();
+  }, [streamId]);
+
+  const send = async (e) => {
     e.preventDefault();
     const t = text.trim();
-    if (!t) return;
-    setMsgs((m) => [...m, { id: `local-${m.length}`, name: "You", role: "Host", text: t, time: "now" }]);
-    setText("");
+    if (!t || !socketRef.current) return;
+    try {
+      await sendChatMessage(socketRef.current, t);
+      setText("");
+    } catch {
+      notify.error("Failed to send message");
+    }
   };
 
   return (
@@ -77,12 +102,15 @@ function Chat() {
         {msgs.map((m) => (
           <div key={m.id}>
             <div className="flex items-baseline gap-2">
-              <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">{m.name}</span>
-              <span className="text-[11px] text-slate-400">{m.time}</span>
+              <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">{m.display_name}</span>
+              <span className="text-[11px] text-slate-400">
+                {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </span>
             </div>
             <p className="text-sm text-slate-600 dark:text-slate-300">{m.text}</p>
           </div>
         ))}
+        {msgs.length === 0 && <p className="text-center text-sm text-slate-400">No messages yet.</p>}
       </div>
       <form onSubmit={send} className="mt-3 flex items-center gap-2">
         <input
@@ -120,7 +148,7 @@ function Notifications() {
   );
 }
 
-export default function HostPanel({ tab, setTab, className = "" }) {
+export default function HostPanel({ tab, setTab, streamId, className = "" }) {
   return (
     <aside className={cx("flex flex-col bg-white dark:bg-slate-900", className)}>
       <div className="flex shrink-0 border-b border-slate-200 dark:border-slate-800">
@@ -141,7 +169,7 @@ export default function HostPanel({ tab, setTab, className = "" }) {
       </div>
       <div className="flex min-h-0 flex-1 flex-col p-3">
         {tab === "participants" && <Participants />}
-        {tab === "chat" && <Chat />}
+        {tab === "chat" && <Chat streamId={streamId} />}
         {tab === "notifications" && <Notifications />}
       </div>
     </aside>

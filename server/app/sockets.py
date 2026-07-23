@@ -1,8 +1,11 @@
 """Real-time layer for live chat. Mounted alongside the FastAPI app in main.py.
 
 Socket.IO events (client -> server):
-  "join"      {stream_id, token?, display_name?} -> {history: [...]} | {error}
+  "join"      {stream_id, token?, display_name?, email?} -> {history: [...]} | {error}
               token identifies a logged-in user; guests pass display_name instead.
+              email is only needed for registration_required events -- a guest who
+              registered proves it this way; a logged-in caller is checked against
+              their own account email instead (see services/registration.py).
   "chat:send" {text} -> {ok: true} | {error}
               uses the identity established by "join" (stored in the socket session).
 
@@ -22,6 +25,7 @@ from .models.chat import ChatMessage
 from .models.stream import Stream
 from .schemas.chat import ChatMessageOut
 from .security import ALGORITHM
+from .services.registration import is_registered
 
 sio = socketio.AsyncServer(
     async_mode="asgi",
@@ -62,6 +66,9 @@ async def join(sid, data):
         user = _identify_user(data.get("token"), db)
         if not stream or not stream.visible_to(user):
             return {"error": "Event not found"}
+
+        if not is_registered(db, stream, user, data.get("email")):
+            return {"error": "This event requires registration before you can join"}
 
         if user:
             identity = {"user_id": str(user.id), "display_name": user.full_name}

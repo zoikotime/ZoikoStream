@@ -3,12 +3,10 @@ import { Link, useNavigate } from "react-router-dom";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
 import { useAuth } from "../../auth/AuthContext";
-import { fakeSession } from "../../auth/dummy";
+import api, { errMsg } from "../../api";
 import { Field, PasswordField, SubmitButton } from "./fields";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
-const slugify = (s) =>
-  s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 // New organizations only. The creator automatically becomes the Organization Admin —
 // no role/username field. Hosts/Moderators/Viewers never land here (they're invited).
@@ -18,7 +16,6 @@ export default function CreateOrganization() {
 
   const [form, setForm] = useState({
     name: "",
-    slug: "",
     adminName: "",
     email: "",
     password: "",
@@ -29,7 +26,7 @@ export default function CreateOrganization() {
   const [errors, setErrors] = useState({});
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     const next = {};
     if (!form.name.trim()) next.name = "Organization name is required.";
@@ -42,17 +39,21 @@ export default function CreateOrganization() {
     if (Object.keys(next).length) return;
 
     setLoading(true);
-    // ponytail: dummy — the creator is always the org_admin. Swap for POST /auth/register.
-    setTimeout(() => {
-      const session = fakeSession(form.email.trim(), {
-        role: "org_admin",
+    try {
+      const res = await api.post("/auth/register", {
         full_name: form.adminName.trim(),
         organization_name: form.name.trim(),
+        email: form.email.trim(),
+        password: form.password,
       });
-      setSession(session);
+      setSession(res.data);
       notify.success("Organization created! Welcome to ZoikoStream.");
       navigate("/organization/dashboard", { replace: true });
-    }, 700);
+    } catch (err) {
+      notify.error(errMsg(err, "Failed to create your organization"));
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -71,13 +72,6 @@ export default function CreateOrganization() {
           value={form.name}
           onChange={set("name")}
           error={errors.name}
-        />
-        <Field
-          label="Organization Slug (optional)"
-          placeholder={slugify(form.name) || "acme-inc"}
-          value={form.slug}
-          onChange={set("slug")}
-          hint="Used in your event links — leave blank to auto-generate."
         />
         <Field
           label="Organization Admin Name"

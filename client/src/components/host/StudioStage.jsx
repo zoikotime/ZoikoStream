@@ -12,7 +12,7 @@ const fmtElapsed = (s) => `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60)
 // Everyone on stage (i.e. not a plain attendee) shows in the filmstrip.
 const stagePeople = participants.filter((p) => p.role !== "Attendee");
 
-export default function StudioStage({ live, camera, screenShare, recording, event }) {
+export default function StudioStage({ live, camera, screenShare, recording, event, videoRef }) {
   const [secs, setSecs] = useState(0);
 
   // While live, tick the elapsed counter off the start time. setSecs is only
@@ -57,28 +57,38 @@ export default function StudioStage({ live, camera, screenShare, recording, even
           </div>
         </div>
 
-        {/* Center content — screen share > camera > camera-off */}
+        {/* Center content. The <video> element is always mounted so its ref is stable —
+            LiveKit can attach a track to it the instant one publishes, regardless of
+            whether that happens before or after `live`/`camera` state re-renders. An
+            opaque placeholder layers on top until there's actually a feed to show. */}
         <div className="absolute inset-0 grid place-items-center">
+          <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
           {screenShare ? (
-            <div className="flex flex-col items-center gap-3 text-slate-300">
-              <FiMonitor className="text-5xl text-emerald-400" />
-              <p className="text-sm font-medium">You're sharing your screen</p>
+            <div className="absolute inset-0 grid place-items-center bg-slate-900">
+              <div className="flex flex-col items-center gap-3 text-slate-300">
+                <FiMonitor className="text-5xl text-emerald-400" />
+                <p className="text-sm font-medium">You're sharing your screen</p>
+              </div>
             </div>
-          ) : camera ? (
-            <div className="flex flex-col items-center gap-3">
-              <span className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-3xl font-bold text-white shadow-lg">
-                {initials(stagePeople[0]?.name)}
-              </span>
-              <p className="text-sm font-medium text-slate-200">
-                {stagePeople[0]?.name} · {stagePeople[0]?.role}
-              </p>
+          ) : !(live && camera) && camera ? (
+            <div className="absolute inset-0 grid place-items-center bg-slate-900">
+              <div className="flex flex-col items-center gap-3">
+                <span className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-3xl font-bold text-white shadow-lg">
+                  {initials(stagePeople[0]?.name)}
+                </span>
+                <p className="text-sm font-medium text-slate-200">
+                  {live ? "Connecting camera…" : "Ready — click Go Live to start"}
+                </p>
+              </div>
             </div>
-          ) : (
-            <div className="flex flex-col items-center gap-3 text-slate-400">
-              <FiVideoOff className="text-5xl" />
-              <p className="text-sm font-medium">Your camera is off</p>
+          ) : !camera ? (
+            <div className="absolute inset-0 grid place-items-center bg-slate-900">
+              <div className="flex flex-col items-center gap-3 text-slate-400">
+                <FiVideoOff className="text-5xl" />
+                <p className="text-sm font-medium">Your camera is off</p>
+              </div>
             </div>
-          )}
+          ) : null}
         </div>
 
         {/* Bottom overlay: event name + elapsed */}

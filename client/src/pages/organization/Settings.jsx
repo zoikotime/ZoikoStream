@@ -144,7 +144,6 @@ export default function OrganizationSettings() {
     });
 
   const save = () => { savedRef.current = settings; setDirty(false); notify.success("Settings saved"); };
-  const discard = () => { setSettings(savedRef.current); setDirty(false); };
   const verifyDomain = () => { patch((s) => ({ ...s, domainStatus: "Verified" })); notify.success("Domain verified"); };
 
   const toggleIntegration = (key) => {

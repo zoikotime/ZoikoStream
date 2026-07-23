@@ -2,6 +2,7 @@
 // Large "broadcast" player surface (dummy — no real stream). Live indicator,
 // play/pause, volume control, a scrubber for replays, and real fullscreen.
 import { useEffect, useRef, useState } from "react";
+import { Room, RoomEvent, Track } from "livekit-client";
 import {
   FiPlay, FiPause, FiVolume2, FiVolume1, FiVolumeX,
   FiMaximize, FiMinimize, FiSettings, FiRotateCcw,
@@ -23,22 +24,61 @@ function VolumeIcon({ muted, volume }) {
   return volume < 50 ? <FiVolume1 /> : <FiVolume2 />;
 }
 
-export default function VideoPlayer({ event, viewers }) {
+export default function VideoPlayer({ event, viewers, liveToken }) {
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
 
   const wrapRef = useRef(null);
+  const videoElRef = useRef(null);
   const [playing, setPlaying] = useState(isLive);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(80);
   const [progress, setProgress] = useState(32); // replay scrubber (%)
   const [fs, setFs] = useState(false);
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
     const onFs = () => setFs(Boolean(document.fullscreenElement));
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
+
+  // Subscribe to the LiveKit room and attach the host's video/audio to this element.
+  useEffect(() => {
+    if (!isLive || !liveToken) return;
+    const room = new Room();
+
+    const attach = (track) => {
+      if ((track.kind === Track.Kind.Video || track.kind === Track.Kind.Audio) && videoElRef.current) {
+        track.attach(videoElRef.current);
+      }
+    };
+
+    room.on(RoomEvent.TrackSubscribed, attach);
+    room.on(RoomEvent.Connected, () => setConnected(true));
+
+    room
+      .connect(liveToken.livekit_url, liveToken.token)
+      .catch(() => setConnected(false));
+
+    return () => {
+      room.disconnect();
+      setConnected(false);
+    };
+  }, [isLive, liveToken]);
+
+  // Volume/mute/play-pause apply to the real element once connected.
+  useEffect(() => {
+    if (!videoElRef.current) return;
+    videoElRef.current.muted = muted;
+    videoElRef.current.volume = volume / 100;
+  }, [muted, volume, connected]);
+
+  useEffect(() => {
+    if (!videoElRef.current) return;
+    if (playing) videoElRef.current.play().catch(() => {});
+    else videoElRef.current.pause();
+  }, [playing, connected]);
 
   const toggleFs = () => {
     if (document.fullscreenElement) document.exitFullscreen?.();
@@ -75,29 +115,33 @@ export default function VideoPlayer({ event, viewers }) {
         )}
       </div>
 
-      {/* Stage content */}
+      {/* Stage content. The <video> element is always mounted so its ref is stable —
+          LiveKit can attach the host's track to it the instant it subscribes, regardless
+          of whether that happens before or after `connected` state re-renders. */}
       <div className="absolute inset-0 grid place-items-center px-4 text-center">
-        {isEnded && !playing ? (
-          <div className="flex flex-col items-center gap-3">
-            <p className="text-lg font-semibold text-white">This event has ended</p>
-            <button
-              onClick={() => setPlaying(true)}
-              className="inline-flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/25"
-            >
-              <FiRotateCcw /> Watch the replay
-            </button>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-3">
-            <span className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-white/25 to-white/5 text-3xl font-bold text-white shadow-lg backdrop-blur">
-              {initials(event.host)}
-            </span>
-            <div>
-              <p className="text-sm font-semibold text-white">{event.host}</p>
-              <p className="text-xs text-white/70">{isLive ? "On air now" : "Host"}</p>
+        <video ref={videoElRef} autoPlay playsInline className="absolute inset-0 h-full w-full object-cover" />
+        {!(isLive && connected) &&
+          (isEnded && !playing ? (
+            <div className="flex flex-col items-center gap-3">
+              <p className="text-lg font-semibold text-white">This event has ended</p>
+              <button
+                onClick={() => setPlaying(true)}
+                className="inline-flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/25"
+              >
+                <FiRotateCcw /> Watch the replay
+              </button>
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="flex flex-col items-center gap-3">
+              <span className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-white/25 to-white/5 text-3xl font-bold text-white shadow-lg backdrop-blur">
+                {initials(event.host)}
+              </span>
+              <div>
+                <p className="text-sm font-semibold text-white">{event.host}</p>
+                <p className="text-xs text-white/70">{isLive ? "Connecting…" : "Host"}</p>
+              </div>
+            </div>
+          ))}
       </div>
 
       {/* Center play/pause overlay */}

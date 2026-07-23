@@ -38,7 +38,7 @@ function ControlButton({ icon: Icon, label, tone = "neutral", active = false, di
 const Divider = () => <span className="mx-1 hidden h-10 w-px shrink-0 bg-slate-200 sm:block dark:bg-slate-800" />;
 
 export default function ControlBar({
-  live, camera, mic, screenShare, recording,
+  live, camera, mic, screenShare, recording, connecting = false,
   onGoLive, onEnd, onToggleCamera, onToggleMic, onToggleScreen, onToggleRecording,
   onChat, onParticipants, onInvite, onPolls, onQA,
 }) {
@@ -60,22 +60,31 @@ export default function ControlBar({
 
       <Divider />
 
-      {/* Recording status */}
-      <ControlButton icon={FiCircle} label={recording ? "Recording" : "Record"} tone="rose" active={recording} onClick={onToggleRecording} />
+      {/* Recording status — can't start until the event is actually live */}
+      <ControlButton
+        icon={FiCircle}
+        label={recording ? "Recording" : "Record"}
+        tone="rose"
+        active={recording}
+        disabled={!live}
+        onClick={onToggleRecording}
+      />
 
       {/* Broadcast — pushed to the right */}
       <div className="ml-auto flex items-center gap-2">
         <button
           onClick={onGoLive}
-          disabled={live}
+          disabled={live || connecting}
           className={cx(
-            "inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition",
+            "inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed",
             live
               ? "cursor-default bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400"
-              : "bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-500"
+              : connecting
+                ? "bg-emerald-600/60 text-white"
+                : "bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-500"
           )}
         >
-          <FiRadio /> {live ? "You're Live" : "Go Live"}
+          <FiRadio /> {live ? "You're Live" : connecting ? "Connecting…" : "Go Live"}
         </button>
         <button
           onClick={onEnd}

@@ -13,6 +13,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "axios": "^1.18.1",
     "dayjs": "^1.11.21",
+    "livekit-client": "^2.20.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-hook-form": "^7.82.0",

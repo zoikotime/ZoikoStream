@@ -1,10 +1,13 @@
 // client/src/components/watch/WatchPanel.jsx
 // Viewer Portal right column — tabbed Chat / Q&A / Polls. Fully interactive on
 // local state (send a message, upvote/ask a question, vote in a poll).
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FiSend, FiChevronUp, FiCheckCircle } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
-import { chatSeed, qaSeed, pollsSeed, initials } from "../../data/watch";
+import { notify } from "../../ui/Toast";
+import { useAuth } from "../../auth/AuthContext";
+import { connectEventChat, sendChatMessage } from "../../lib/chatSocket";
+import { qaSeed, pollsSeed, initials } from "../../data/watch";
 
 const TABS = [
   { key: "chat", label: "Chat" },
@@ -12,17 +15,82 @@ const TABS = [
   { key: "polls", label: "Polls" },
 ];
 
-function Chat() {
-  const [msgs, setMsgs] = useState(chatSeed);
-  const [text, setText] = useState("");
+// Viewers usually aren't logged in — ask for a display name once and remember it
+// for next time, rather than gating chat behind an account.
+function useGuestName() {
+  const [name, setName] = useState(() => localStorage.getItem("chat_guest_name") || "");
+  const save = (n) => {
+    localStorage.setItem("chat_guest_name", n);
+    setName(n);
+  };
+  return [name, save];
+}
 
-  const send = (e) => {
+function JoinChatPrompt({ onJoin }) {
+  const [value, setValue] = useState("");
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (value.trim()) onJoin(value.trim());
+      }}
+      className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center"
+    >
+      <p className="text-sm text-slate-500 dark:text-slate-400">Enter your name to join the chat</p>
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="Your name"
+        className="w-full max-w-[220px] rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-center text-sm text-slate-700 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+      />
+      <button type="submit" className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500" disabled={!value.trim()}>
+        Join Chat
+      </button>
+    </form>
+  );
+}
+
+function Chat({ streamId, viewerEmail }) {
+  const { user } = useAuth();
+  const [guestName, setGuestName] = useGuestName();
+  const displayName = user?.full_name || guestName;
+
+  const [msgs, setMsgs] = useState([]);
+  const [text, setText] = useState("");
+  const socketRef = useRef(null);
+
+  useEffect(() => {
+    if (!streamId || !displayName) return;
+    const token = localStorage.getItem("token");
+    const socket = connectEventChat(
+      streamId,
+      user ? { token } : { displayName, email: viewerEmail },
+      {
+        onHistory: setMsgs,
+        onNew: (msg) => setMsgs((m) => [...m, msg]),
+        onUpdated: (msg) => setMsgs((m) => m.map((x) => (x.id === msg.id ? msg : x))),
+        onDeleted: (id) => setMsgs((m) => m.filter((x) => x.id !== id)),
+        onError: (err) => notify.error(err),
+      }
+    );
+    socketRef.current = socket;
+    return () => socket.disconnect();
+  }, [streamId, displayName, user, viewerEmail]);
+
+  const send = async (e) => {
     e.preventDefault();
     const t = text.trim();
-    if (!t) return;
-    setMsgs((m) => [...m, { id: `local-${m.length}`, name: "You", text: t, time: "now" }]);
-    setText("");
+    if (!t || !socketRef.current) return;
+    try {
+      await sendChatMessage(socketRef.current, t);
+      setText("");
+    } catch {
+      notify.error("Failed to send message");
+    }
   };
+
+  if (!displayName) return <JoinChatPrompt onJoin={setGuestName} />;
 
   return (
     <div className="flex h-full flex-col">
@@ -30,16 +98,24 @@ function Chat() {
         {msgs.map((m) => (
           <div key={m.id} className={cx(m.pinned && "rounded-lg bg-emerald-50 p-2 dark:bg-emerald-500/10")}>
             <div className="flex items-center gap-2">
-              <span className={cx("grid h-6 w-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold", m.name === "You" ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-200")}>
-                {initials(m.name)}
+              <span
+                className={cx(
+                  "grid h-6 w-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold",
+                  m.display_name === displayName ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-200"
+                )}
+              >
+                {initials(m.display_name)}
               </span>
-              <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">{m.name}</span>
+              <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">{m.display_name}</span>
               {m.pinned && <span className="rounded bg-emerald-600/10 px-1.5 text-[10px] font-semibold uppercase text-emerald-600 dark:text-emerald-400">Pinned</span>}
-              <span className="ml-auto text-[11px] text-slate-400">{m.time}</span>
+              <span className="ml-auto text-[11px] text-slate-400">
+                {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </span>
             </div>
             <p className="ml-8 text-sm text-slate-600 dark:text-slate-300">{m.text}</p>
           </div>
         ))}
+        {msgs.length === 0 && <p className="text-center text-sm text-slate-400">No messages yet — say hello!</p>}
       </div>
       <form onSubmit={send} className="mt-3 flex items-center gap-2">
         <input
@@ -176,7 +252,7 @@ function Polls() {
   );
 }
 
-export default function WatchPanel({ className = "" }) {
+export default function WatchPanel({ streamId, viewerEmail, className = "" }) {
   const [tab, setTab] = useState("chat");
 
   return (
@@ -198,7 +274,7 @@ export default function WatchPanel({ className = "" }) {
         ))}
       </div>
       <div className="flex min-h-0 flex-1 flex-col p-3">
-        {tab === "chat" && <Chat />}
+        {tab === "chat" && <Chat streamId={streamId} viewerEmail={viewerEmail} />}
         {tab === "qa" && <QA />}
         {tab === "polls" && <Polls />}
       </div>

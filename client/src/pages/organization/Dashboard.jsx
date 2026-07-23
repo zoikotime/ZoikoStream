@@ -33,10 +33,10 @@ export default function OrganizationDashboard() {
   }, []);
 
   const kpis = [
-    { title: "Upcoming Events", value: String(stats?.upcoming_events || "5"), icon: FiCalendar, accent: "violet", delta: "12%", up: true },
-    { title: "Live Events", value: String(stats?.live_events || "1"), icon: FiRadio, accent: "emerald", live: true },
-    { title: "Completed Events", value: String(stats?.completed_events || "28"), icon: FiCheckSquare, accent: "indigo", delta: "8%", up: true },
-    { title: "Total Viewers", value: String(stats?.total_viewers || "12,530"), icon: FiUsers, accent: "amber", delta: "3%", up: false },
+    { title: "Upcoming Events", value: String(stats?.upcoming_events ?? "—"), icon: FiCalendar, accent: "violet" },
+    { title: "Live Events", value: String(stats?.live_events ?? "—"), icon: FiRadio, accent: "emerald", live: (stats?.live_events || 0) > 0 },
+    { title: "Completed Events", value: String(stats?.completed_events ?? "—"), icon: FiCheckSquare, accent: "indigo" },
+    { title: "Total Viewers", value: (stats?.total_viewers ?? 0).toLocaleString(), icon: FiUsers, accent: "amber" },
   ];
 
   return (

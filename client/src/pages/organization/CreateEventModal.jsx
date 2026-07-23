@@ -1,55 +1,32 @@
-import { useState } from "react";
-import {
-  FiImage,
-  FiUploadCloud,
-  FiGlobe,
-  FiLock,
-  FiKey,
-  FiCheck,
-} from "react-icons/fi";
+import { useEffect, useState } from "react";
+import { FiGlobe, FiLock, FiEyeOff } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import Modal from "../../ui/Modal";
 import Button from "../../ui/Button";
 import { notify } from "../../ui/Toast";
+import api, { errMsg } from "../../api";
 
-// ponytail: dummy option data — swap for org config / team endpoints later.
 const CATEGORIES = ["Webinar", "Conference", "Product Launch", "Workshop", "Q&A Session", "Internal"];
 const TIMEZONES = ["UTC", "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Kolkata", "Asia/Singapore"];
-const TEAM = ["Ava Chen", "Marcus Reed", "Priya Nair", "Leo Fischer", "Sofia Alvarez", "Noah Kim"];
 
 const VISIBILITY = [
-  { value: "Public", label: "Public", desc: "Anyone with the link can watch", icon: FiGlobe },
-  { value: "Private", label: "Private", desc: "Only invited people can watch", icon: FiLock },
-  { value: "Password", label: "Password Protected", desc: "Requires a password to join", icon: FiKey },
-];
-
-const FEATURES = [
-  { key: "chat", label: "Enable Chat" },
-  { key: "polls", label: "Enable Polls" },
-  { key: "qa", label: "Enable Q&A" },
-  { key: "recording", label: "Enable Recording" },
+  { value: "public", label: "Public", desc: "Anyone with the link can watch", icon: FiGlobe },
+  { value: "private", label: "Private", desc: "Only invited people can watch", icon: FiLock },
+  { value: "unlisted", label: "Unlisted", desc: "Not listed publicly, link still works", icon: FiEyeOff },
 ];
 
 const EMPTY = {
   title: "",
   description: "",
   category: CATEGORIES[0],
-  thumbnail: "",
-  banner: "",
-  date: "",
-  start: "",
-  end: "",
+  scheduled_date: "",
+  start_time: "",
+  end_time: "",
   timezone: "UTC",
-  visibility: "Public",
-  password: "",
-  registration: false,
-  chat: true,
-  polls: false,
-  qa: true,
-  recording: true,
-  host: TEAM[0],
-  moderator: "",
-  speakers: [],
+  visibility: "public",
+  registration_required: false,
+  host_id: "",
+  moderator_id: "",
 };
 
 const input =
@@ -65,7 +42,6 @@ function Section({ title, children }) {
   );
 }
 
-// Accessible on/off switch.
 function Toggle({ checked, onChange, label: text }) {
   return (
     <button
@@ -83,38 +59,52 @@ function Toggle({ checked, onChange, label: text }) {
   );
 }
 
-// File "upload" dropzone — no backend, just records the chosen file name.
-function Upload({ icon: Icon, title, value, onFile }) {
-  return (
-    <label className="flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center transition hover:border-emerald-400 hover:bg-emerald-50/40 dark:border-slate-700 dark:bg-slate-800/50 dark:hover:border-emerald-500/50">
-      <Icon className="text-xl text-slate-400" />
-      <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{value || title}</span>
-      <span className="text-xs text-slate-400">PNG or JPG, up to 5MB</span>
-      <input
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => onFile(e.target.files?.[0]?.name || "")}
-      />
-    </label>
-  );
-}
-
-export default function CreateEventModal({ open, onClose }) {
+// Events created here start as "draft" or "scheduled" — going live happens from the
+// host studio, not this form.
+export default function CreateEventModal({ open, onClose, onCreated }) {
   const [form, setForm] = useState(EMPTY);
+  const [members, setMembers] = useState([]);
+  const [saving, setSaving] = useState(false);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
 
-  const toggleSpeaker = (name) =>
-    set("speakers", form.speakers.includes(name) ? form.speakers.filter((s) => s !== name) : [...form.speakers, name]);
+  useEffect(() => {
+    if (!open) return;
+    api
+      .get("/organization/members")
+      .then((res) => setMembers(res.data))
+      .catch(() => setMembers([]));
+  }, [open]);
 
+  const hosts = members.filter((m) => m.role === "host" && m.is_active);
+  const moderators = members.filter((m) => m.role === "moderator" && m.is_active);
   const canPublish = form.title.trim().length > 0;
 
-  const submit = (mode) => {
-    // ponytail: no backend — log the payload and toast. Wire to POST /organization/events later.
-    console.log(`${mode} event`, form);
-    notify.success(mode === "draft" ? "Draft saved" : `"${form.title}" published`);
-    setForm(EMPTY);
-    onClose();
+  const submit = async (mode) => {
+    setSaving(true);
+    try {
+      const res = await api.post("/streams", {
+        title: form.title,
+        description: form.description || null,
+        category: form.category,
+        scheduled_date: form.scheduled_date || null,
+        start_time: form.start_time || null,
+        end_time: form.end_time || null,
+        timezone: form.timezone,
+        visibility: form.visibility,
+        registration_required: form.registration_required,
+        host_id: form.host_id || null,
+        moderator_id: form.moderator_id || null,
+        status: mode === "draft" ? "draft" : "scheduled",
+      });
+      notify.success(mode === "draft" ? "Draft saved" : `"${form.title}" published`);
+      setForm(EMPTY);
+      onCreated?.(res.data);
+      onClose();
+    } catch (err) {
+      notify.error(errMsg(err, "Failed to create event"));
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -125,16 +115,15 @@ export default function CreateEventModal({ open, onClose }) {
       className="max-w-3xl"
       footer={
         <>
-          <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
-          <Button variant="secondary" size="sm" onClick={() => submit("draft")}>Save Draft</Button>
-          <Button size="sm" onClick={() => submit("publish")} disabled={!canPublish} title={canPublish ? undefined : "Add a title first"}>
+          <Button variant="secondary" size="sm" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button variant="secondary" size="sm" onClick={() => submit("draft")} disabled={!canPublish || saving}>Save Draft</Button>
+          <Button size="sm" onClick={() => submit("publish")} disabled={!canPublish || saving} title={canPublish ? undefined : "Add a title first"}>
             Publish Event
           </Button>
         </>
       }
     >
       <div className="max-h-[65vh] overflow-y-auto pr-1">
-        {/* Basic Information */}
         <Section title="Basic Information">
           <div className="space-y-4">
             <div>
@@ -154,20 +143,11 @@ export default function CreateEventModal({ open, onClose }) {
           </div>
         </Section>
 
-        {/* Media */}
-        <Section title="Media">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Upload icon={FiImage} title="Upload thumbnail" value={form.thumbnail} onFile={(n) => set("thumbnail", n)} />
-            <Upload icon={FiUploadCloud} title="Upload banner" value={form.banner} onFile={(n) => set("banner", n)} />
-          </div>
-        </Section>
-
-        {/* Schedule */}
         <Section title="Schedule">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label className={label}>Date</label>
-              <input type="date" className={input} value={form.date} onChange={(e) => set("date", e.target.value)} />
+              <input type="date" className={input} value={form.scheduled_date} onChange={(e) => set("scheduled_date", e.target.value)} />
             </div>
             <div>
               <label className={label}>Timezone</label>
@@ -177,16 +157,15 @@ export default function CreateEventModal({ open, onClose }) {
             </div>
             <div>
               <label className={label}>Start Time</label>
-              <input type="time" className={input} value={form.start} onChange={(e) => set("start", e.target.value)} />
+              <input type="time" className={input} value={form.start_time} onChange={(e) => set("start_time", e.target.value)} />
             </div>
             <div>
               <label className={label}>End Time</label>
-              <input type="time" className={input} value={form.end} onChange={(e) => set("end", e.target.value)} />
+              <input type="time" className={input} value={form.end_time} onChange={(e) => set("end_time", e.target.value)} />
             </div>
           </div>
         </Section>
 
-        {/* Visibility */}
         <Section title="Visibility">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {VISIBILITY.map(({ value, label: l, desc, icon: Icon }) => (
@@ -207,69 +186,33 @@ export default function CreateEventModal({ open, onClose }) {
               </button>
             ))}
           </div>
-          {form.visibility === "Password" && (
-            <input
-              type="text"
-              className={cx(input, "mt-3")}
-              value={form.password}
-              onChange={(e) => set("password", e.target.value)}
-              placeholder="Set event password"
-            />
-          )}
         </Section>
 
-        {/* Registration */}
         <Section title="Registration">
-          <Toggle checked={form.registration} onChange={(v) => set("registration", v)} label="Registration Required" />
+          <Toggle checked={form.registration_required} onChange={(v) => set("registration_required", v)} label="Registration Required" />
         </Section>
 
-        {/* Features */}
-        <Section title="Features">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {FEATURES.map(({ key, label: l }) => (
-              <Toggle key={key} checked={form[key]} onChange={(v) => set(key, v)} label={l} />
-            ))}
-          </div>
-        </Section>
-
-        {/* Assignments */}
         <Section title="Assignments">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label className={label}>Host</label>
-              <select className={input} value={form.host} onChange={(e) => set("host", e.target.value)}>
-                {TEAM.map((p) => <option key={p}>{p}</option>)}
+              <select className={input} value={form.host_id} onChange={(e) => set("host_id", e.target.value)}>
+                <option value="">Unassigned</option>
+                {hosts.map((h) => <option key={h.id} value={h.id}>{h.full_name}</option>)}
               </select>
+              {hosts.length === 0 && (
+                <p className="mt-1 text-xs text-slate-400">No hosts yet — invite one from Members.</p>
+              )}
             </div>
             <div>
               <label className={label}>Moderator</label>
-              <select className={input} value={form.moderator} onChange={(e) => set("moderator", e.target.value)}>
-                <option value="">Select a moderator</option>
-                {TEAM.map((p) => <option key={p}>{p}</option>)}
+              <select className={input} value={form.moderator_id} onChange={(e) => set("moderator_id", e.target.value)}>
+                <option value="">Unassigned</option>
+                {moderators.map((m) => <option key={m.id} value={m.id}>{m.full_name}</option>)}
               </select>
-            </div>
-          </div>
-          <div className="mt-4">
-            <label className={label}>Speakers</label>
-            <div className="flex flex-wrap gap-2">
-              {TEAM.map((p) => {
-                const on = form.speakers.includes(p);
-                return (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => toggleSpeaker(p)}
-                    className={cx(
-                      "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition",
-                      on
-                        ? "border-emerald-500 bg-emerald-500 text-white"
-                        : "border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:text-slate-300"
-                    )}
-                  >
-                    {on && <FiCheck className="text-xs" />} {p}
-                  </button>
-                );
-              })}
+              {moderators.length === 0 && (
+                <p className="mt-1 text-xs text-slate-400">No moderators yet — invite one from Members.</p>
+              )}
             </div>
           </div>
         </Section>

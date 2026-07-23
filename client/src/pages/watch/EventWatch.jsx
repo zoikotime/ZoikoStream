@@ -6,24 +6,69 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
-import { getEvent } from "../../data/events";
+import api, { errMsg } from "../../api";
+import { notify } from "../../ui/Toast";
+import { toLegacyEventShape } from "../../data/events";
 import { startingViewers } from "../../data/watch";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
 import EventInfo from "../../components/watch/EventInfo";
 import RelatedRecordings from "../../components/watch/RelatedRecordings";
+import RegistrationGate from "../../components/watch/RegistrationGate";
+
+// Registered viewers prove it with the email they registered with (see
+// services/registration.py on the backend) -- remembered per event so they aren't
+// asked again on a reload.
+const emailStorageKey = (eventId) => `zk_viewer_email_${eventId}`;
 
 export default function EventWatch() {
   const { eventId } = useParams();
   const { theme, toggle } = useTheme();
-  const event = getEvent(eventId);
+  const [event, setEvent] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [liveToken, setLiveToken] = useState(null);
+  const [viewerEmail, setViewerEmail] = useState(() => localStorage.getItem(emailStorageKey(eventId)) || "");
+
+  useEffect(() => {
+    api
+      .get(`/streams/${eventId}`)
+      .then((res) => setEvent(toLegacyEventShape(res.data)))
+      .catch(() => setEvent(null))
+      .finally(() => setLoading(false));
+  }, [eventId]);
 
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
+  const awaitingRegistration = !!event?.registration_required && !viewerEmail;
+
+  const confirmViewerEmail = (email) => {
+    localStorage.setItem(emailStorageKey(eventId), email);
+    setViewerEmail(email);
+  };
+
+  // Viewer LiveKit token — only fetchable once the event is actually live. Backend
+  // rejects with 403 if the event requires registration and this email (or, for a
+  // logged-in org member, their account) doesn't have one on file.
+  useEffect(() => {
+    if (!live || awaitingRegistration) return;
+    api
+      .get(`/streams/${eventId}/token`, { params: viewerEmail ? { email: viewerEmail } : {} })
+      .then((res) => setLiveToken(res.data))
+      .catch((err) => {
+        setLiveToken(null);
+        if (err?.response?.status === 403) {
+          notify.error(errMsg(err, "This event requires registration before you can join"));
+          localStorage.removeItem(emailStorageKey(eventId));
+          setViewerEmail("");
+        }
+      });
+  }, [live, eventId, viewerEmail, awaitingRegistration]);
 
   // Live viewer count that gently drifts (setState only in the interval callback).
-  const [viewers, setViewers] = useState(event?.viewers ?? startingViewers);
+  // ponytail: no real view-tracking yet, toLegacyEventShape always gives viewers: null,
+  // so this always starts from the simulated baseline.
+  const [viewers, setViewers] = useState(startingViewers);
   useEffect(() => {
     if (!live) return;
     const t = setInterval(
@@ -32,6 +77,13 @@ export default function EventWatch() {
     );
     return () => clearInterval(t);
   }, [live]);
+
+  if (loading)
+    return (
+      <div className="grid min-h-screen place-items-center bg-slate-50 dark:bg-slate-950">
+        <p className="text-sm text-slate-500 dark:text-slate-400">Loading…</p>
+      </div>
+    );
 
   if (!event)
     return (
@@ -76,19 +128,29 @@ export default function EventWatch() {
 
       {/* Main layout: player + info (70%) / chat panel (30%) */}
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="space-y-6">
-            <VideoPlayer event={event} viewers={viewers} />
-            <EventInfo event={event} />
-          </div>
+        {awaitingRegistration ? (
+          <RegistrationGate eventTitle={event.name} onSubmit={confirmViewerEmail} />
+        ) : (
+          <>
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+              <div className="space-y-6">
+                <VideoPlayer event={event} viewers={viewers} liveToken={liveToken} />
+                <EventInfo event={event} />
+              </div>
 
-          <WatchPanel className="h-[70vh] self-start lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]" />
-        </div>
+              <WatchPanel
+                streamId={eventId}
+                viewerEmail={viewerEmail}
+                className="h-[70vh] self-start lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]"
+              />
+            </div>
 
-        {/* Bottom section */}
-        <div className="mt-10">
-          <RelatedRecordings ended={ended} />
-        </div>
+            {/* Bottom section */}
+            <div className="mt-10">
+              <RelatedRecordings ended={ended} />
+            </div>
+          </>
+        )}
       </main>
 
       <footer className="border-t border-slate-200 py-6 text-center text-xs text-slate-400 dark:border-slate-800">

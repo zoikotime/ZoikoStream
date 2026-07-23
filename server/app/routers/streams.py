@@ -27,6 +27,7 @@ from app.schemas.stream import (
 )
 
 from app.services.livekit import create_stream_token
+from app.services.registration import is_registered
 
 
 router = APIRouter(
@@ -306,6 +307,7 @@ def start_stream(
 )
 def get_viewer_token(
     stream_id: str,
+    email: str | None = None,
     db: Session = Depends(get_db),
     user: User | None = Depends(get_optional_user),
 ):
@@ -325,6 +327,14 @@ def get_viewer_token(
         raise HTTPException(
             404,
             "Stream not found"
+        )
+
+    # `email` lets a guest who registered prove it via query param; a logged-in caller
+    # is checked against their own account email instead (see is_registered).
+    if not is_registered(db, stream, user, email):
+        raise HTTPException(
+            403,
+            "This event requires registration before you can join"
         )
 
 

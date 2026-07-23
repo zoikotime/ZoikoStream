@@ -4,13 +4,12 @@ import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
 import { useAuth } from "../../auth/AuthContext";
 import { roleHome } from "../../auth/roleHome";
-import { fakeSession } from "../../auth/dummy";
+import api, { errMsg } from "../../api";
 import { Field, PasswordField, SubmitButton } from "./fields";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
-// One login page for every role. After login the (later) backend decides the role; for now
-// fakeSession() infers it from the email so every dashboard is reachable from here.
+// One login page for every role — the backend decides the role from the account itself.
 export default function Login() {
   const { setSession } = useAuth();
   const navigate = useNavigate();
@@ -21,7 +20,7 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     const next = {};
     if (!isEmail(email)) next.email = "Enter a valid work email.";
@@ -30,15 +29,18 @@ export default function Login() {
     if (Object.keys(next).length) return;
 
     setLoading(true);
-    // ponytail: dummy auth — no API. Swap this timeout for POST /auth/login later.
-    setTimeout(() => {
-      const session = fakeSession(email.trim(), { remember });
-      setSession(session);
-      notify.success(`Welcome back, ${session.user.full_name}!`);
+    try {
+      const res = await api.post("/auth/login", { identifier: email.trim(), password, remember });
+      setSession(res.data);
+      notify.success(`Welcome back, ${res.data.user.full_name}!`);
       // Viewers have no app dashboard -> land on the public site (they normally arrive via
       // an event link, not the login page).
-      navigate(roleHome(session.user.role) || "/", { replace: true });
-    }, 500);
+      navigate(roleHome(res.data.user.role) || "/", { replace: true });
+    } catch (err) {
+      notify.error(errMsg(err, "Invalid email or password"));
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (

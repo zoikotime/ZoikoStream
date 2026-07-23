@@ -23,7 +23,6 @@ import AuthLayout from "./layouts/AuthLayout";
 import Login from "./pages/auth/Login";
 import CreateOrganization from "./pages/auth/CreateOrganization";
 import ForgotPassword from "./pages/auth/ForgotPassword";
-import AcceptInvitation from "./pages/auth/AcceptInvitation";
 import EventRegistration from "./pages/EventRegistration";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
@@ -87,12 +86,13 @@ export default function App() {
             <Route path="/" element={<LandingOrDashboard />} />
 
             {/* Authentication — one login for every role; brand panel shared via AuthLayout.
-                All dummy: no API calls. After login, roleHome() picks the dashboard. */}
+                Login/CreateOrganization call the real API; ForgotPassword is still a
+                dummy flow pending an OTP-entry rework. After login, roleHome() picks the
+                dashboard. */}
             <Route element={<AuthLayout />}>
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<CreateOrganization />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
-              <Route path="/accept-invitation" element={<AcceptInvitation />} />
             </Route>
 
             {/* Public event registration landing (shareable link) */}
@@ -101,13 +101,15 @@ export default function App() {
             {/* Viewer Portal — attendee watch page from an invite link (public) */}
             <Route path="/events/:eventId/watch" element={<EventWatch />} />
 
-            {/* Host broadcasting studio — standalone full-screen page (own header/sidebar).
-                ponytail: open route for the demo; gate to a "host" role once auth supports it. */}
-            <Route path="/host/dashboard" element={<HostDashboard />} />
+            {/* Host broadcasting studio — standalone full-screen page (own header/sidebar). */}
+            <Route element={<RoleRoute allow={["host"]} />}>
+              <Route path="/host/dashboard" element={<HostDashboard />} />
+            </Route>
 
-            {/* Moderator console — standalone real-time audience-management page.
-                ponytail: open route for the demo; gate to a "moderator" role once auth supports it. */}
-            <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
+            {/* Moderator console — standalone real-time audience-management page. */}
+            <Route element={<RoleRoute allow={["moderator"]} />}>
+              <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
+            </Route>
 
             {/* Super admin (platform) area */}
             <Route element={<RoleRoute allow={["super_admin"]} />}>
