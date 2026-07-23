@@ -12,6 +12,7 @@ import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import Badge from "../../ui/Badge";
 import Modal from "../../ui/Modal";
+import DataTable from "../../components/admin/DataTable";
 import { notify } from "../../ui/Toast";
 import { fmtDate } from "../../data/events";
 import {
@@ -107,6 +108,22 @@ export default function OrganizationBilling() {
     URL.revokeObjectURL(url);
     notify.success(`Downloaded ${inv.id}`);
   };
+
+  const invoiceColumns = [
+    { key: "id", header: "Invoice", className: "whitespace-nowrap", render: (inv) => <span className="font-medium text-slate-800 dark:text-slate-100">{inv.id}</span> },
+    { key: "date", header: "Date", className: "whitespace-nowrap", render: (inv) => fmtDate(inv.date) },
+    { key: "description", header: "Description", className: "whitespace-nowrap" },
+    { key: "amount", header: "Amount", align: "right", className: "whitespace-nowrap", render: (inv) => <span className="font-medium tabular-nums text-slate-800 dark:text-slate-100">${inv.amount.toFixed(2)}</span> },
+    { key: "status", header: "Status", className: "whitespace-nowrap", render: (inv) => <Badge status={INVOICE_TONE[inv.status]}>{inv.status}</Badge> },
+    { key: "download", header: "", align: "right", className: "whitespace-nowrap", render: (inv) => (
+      <button
+        onClick={() => downloadInvoice(inv)}
+        className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+      >
+        <FiDownload /> Invoice
+      </button>
+    ) },
+  ];
 
   return (
     <div className="space-y-6">
@@ -219,38 +236,7 @@ export default function OrganizationBilling() {
           <h2 className="font-semibold text-slate-900 dark:text-white">Billing History</h2>
           <p className="text-sm text-slate-500 dark:text-slate-400">Download invoices for your records</p>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[680px]">
-            <thead className="border-b border-slate-100 dark:border-slate-800">
-              <tr>
-                {["Invoice", "Date", "Description", "Amount", "Status", ""].map((h, i) => (
-                  <th key={i} className={cx("px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-400 whitespace-nowrap", (h === "Amount" || h === "") && "text-right")}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {invoices.map((inv) => (
-                <tr key={inv.id} className="text-sm transition hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                  <td className="whitespace-nowrap px-4 py-3 font-medium text-slate-800 dark:text-slate-100">{inv.id}</td>
-                  <td className="whitespace-nowrap px-4 py-3 text-slate-600 dark:text-slate-300">{fmtDate(inv.date)}</td>
-                  <td className="whitespace-nowrap px-4 py-3 text-slate-600 dark:text-slate-300">{inv.description}</td>
-                  <td className="whitespace-nowrap px-4 py-3 text-right font-medium tabular-nums text-slate-800 dark:text-slate-100">${inv.amount.toFixed(2)}</td>
-                  <td className="whitespace-nowrap px-4 py-3"><Badge status={INVOICE_TONE[inv.status]}>{inv.status}</Badge></td>
-                  <td className="whitespace-nowrap px-4 py-3 text-right">
-                    <button
-                      onClick={() => downloadInvoice(inv)}
-                      className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
-                    >
-                      <FiDownload /> Invoice
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable columns={invoiceColumns} rows={invoices} rowKey={(inv) => inv.id} minWidth={680} />
       </Card>
 
       {/* Upgrade / change plan modal */}
