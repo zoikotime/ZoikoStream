@@ -5,7 +5,7 @@ import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import { roleHome } from "../../auth/roleHome";
-import { Field, PasswordField, SubmitButton } from "./fields";
+import { Field, PasswordField, SubmitButton, Checkbox } from "../../ui/forms";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 const slugify = (s) =>
@@ -120,11 +120,10 @@ export default function CreateOrganization() {
 
         <div>
           <label className="flex items-start gap-2.5 text-sm text-slate-600 dark:text-slate-300">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={agree}
               onChange={(e) => setAgree(e.target.checked)}
-              className="mt-0.5 h-4 w-4 rounded accent-emerald-600"
+              className="mt-0.5 rounded accent-emerald-600"
             />
             <span>I agree to the Terms and Privacy Policy.</span>
           </label>

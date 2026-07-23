@@ -4,7 +4,7 @@ import { FiArrowLeft, FiMail, FiCheckCircle, FiLock } from "react-icons/fi";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
-import { Field, PasswordField, SubmitButton } from "./fields";
+import { Field, PasswordField, SubmitButton } from "../../ui/forms";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 

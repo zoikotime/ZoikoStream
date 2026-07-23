@@ -13,6 +13,7 @@ import Badge from "../../ui/Badge";
 import DataTable from "../../components/admin/DataTable";
 import SectionCard from "../../components/admin/SectionCard";
 import { cx, focusRing } from "../../ui/tokens";
+import { Label } from "../../ui/forms";
 import { fmtDate } from "../../data/events";
 
 const ROLES = ["org_admin", "host", "moderator", "speaker", "viewer"];
@@ -67,7 +68,7 @@ function InviteModal({ open, onClose, onInvited }) {
     >
       <div className="space-y-4">
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">Email address</label>
+          <Label>Email address</Label>
           <div className="relative">
             <FiMail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
@@ -80,7 +81,7 @@ function InviteModal({ open, onClose, onInvited }) {
           </div>
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">Role</label>
+          <Label>Role</Label>
           <select value={role} onChange={(e) => setRole(e.target.value)} className={cx(control, "h-10 w-full")}>
             {ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
           </select>

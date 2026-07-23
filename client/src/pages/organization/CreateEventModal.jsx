@@ -3,6 +3,7 @@ import { FiGlobe, FiLock, FiEyeOff } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
+import { Input, Textarea, Select, Label, Switch } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 
@@ -39,33 +40,12 @@ const EMPTY = {
   recording_enabled: true,
 };
 
-const input =
-  "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
-const label = "mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300";
-
 function Section({ title, children }) {
   return (
     <section className="border-b border-slate-100 py-5 first:pt-0 last:border-0 dark:border-slate-800">
       <h3 className="mb-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{title}</h3>
       {children}
     </section>
-  );
-}
-
-function Toggle({ checked, onChange, label: text }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-    >
-      {text}
-      <span className={cx("relative h-5 w-9 shrink-0 rounded-full transition", checked ? "bg-violet-500" : "bg-slate-300 dark:bg-slate-600")}>
-        <span className={cx("absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition", checked ? "left-[18px]" : "left-0.5")} />
-      </span>
-    </button>
   );
 }
 
@@ -152,18 +132,18 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         <Section title="Basic Information">
           <div className="space-y-4">
             <div>
-              <label className={label}>Event Title</label>
-              <input className={input} value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Q3 Product Launch" />
+              <Label>Event Title</Label>
+              <Input variant="console" value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Q3 Product Launch" />
             </div>
             <div>
-              <label className={label}>Description</label>
-              <textarea rows={3} className={input} value={form.description} onChange={(e) => set("description", e.target.value)} placeholder="What is this event about?" />
+              <Label>Description</Label>
+              <Textarea variant="console" rows={3} value={form.description} onChange={(e) => set("description", e.target.value)} placeholder="What is this event about?" />
             </div>
             <div>
-              <label className={label}>Category</label>
-              <select className={input} value={form.category} onChange={(e) => set("category", e.target.value)}>
+              <Label>Category</Label>
+              <Select variant="console" value={form.category} onChange={(e) => set("category", e.target.value)}>
                 {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-              </select>
+              </Select>
             </div>
           </div>
         </Section>
@@ -171,22 +151,22 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         <Section title="Schedule">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <label className={label}>Date</label>
-              <input type="date" className={input} value={form.date} onChange={(e) => set("date", e.target.value)} />
+              <Label>Date</Label>
+              <Input variant="console" type="date" value={form.date} onChange={(e) => set("date", e.target.value)} />
             </div>
             <div>
-              <label className={label}>Timezone</label>
-              <select className={input} value={form.timezone} onChange={(e) => set("timezone", e.target.value)}>
+              <Label>Timezone</Label>
+              <Select variant="console" value={form.timezone} onChange={(e) => set("timezone", e.target.value)}>
                 {TIMEZONES.map((t) => <option key={t}>{t}</option>)}
-              </select>
+              </Select>
             </div>
             <div>
-              <label className={label}>Start Time</label>
-              <input type="time" className={input} value={form.start} onChange={(e) => set("start", e.target.value)} />
+              <Label>Start Time</Label>
+              <Input variant="console" type="time" value={form.start} onChange={(e) => set("start", e.target.value)} />
             </div>
             <div>
-              <label className={label}>End Time</label>
-              <input type="time" className={input} value={form.end} onChange={(e) => set("end", e.target.value)} />
+              <Label>End Time</Label>
+              <Input variant="console" type="time" value={form.end} onChange={(e) => set("end", e.target.value)} />
             </div>
           </div>
         </Section>
@@ -214,13 +194,13 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         </Section>
 
         <Section title="Registration">
-          <Toggle checked={form.registration_required} onChange={(v) => set("registration_required", v)} label="Registration Required" />
+          <Switch accent="violet" checked={form.registration_required} onChange={(v) => set("registration_required", v)} label="Registration Required" />
         </Section>
 
         <Section title="Features">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {FEATURES.map(({ key, label: l }) => (
-              <Toggle key={key} checked={form[key]} onChange={(v) => set(key, v)} label={l} />
+              <Switch key={key} accent="violet" checked={form[key]} onChange={(v) => set(key, v)} label={l} />
             ))}
           </div>
         </Section>

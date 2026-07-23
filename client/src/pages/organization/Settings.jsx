@@ -13,6 +13,7 @@ import { cx, ACCENT } from "../../ui/tokens";
 import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import Badge from "../../ui/Badge";
+import { Input, Textarea, Select, Switch, Checkbox } from "../../ui/forms";
 import Modal from "../../ui/Modal";
 import { notify } from "../../ui/Toast";
 import { fmtDate } from "../../data/events";
@@ -32,9 +33,6 @@ const TABS = [
   { key: "danger", label: "Danger Zone", icon: FiAlertTriangle },
 ];
 const INT_ICON = { slack: FiHash, zoom: FiVideo, salesforce: FiCloud, zapier: FiZap, ga: FiBarChart2, webhooks: FiLink };
-
-const input =
-  "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
 
 const mask = (t) => `${t.slice(0, 8)}••••••••${t.slice(-4)}`;
 
@@ -60,19 +58,6 @@ function Field({ label, hint, className, children }) {
       {children}
       {hint && <p className="mt-1 text-xs text-slate-400">{hint}</p>}
     </div>
-  );
-}
-function Toggle({ checked, onChange }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={cx("relative h-5 w-9 shrink-0 rounded-full transition", checked ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600")}
-    >
-      <span className={cx("absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition", checked ? "left-[18px]" : "left-0.5")} />
-    </button>
   );
 }
 function SettingRow({ title, desc, children }) {
@@ -144,7 +129,6 @@ export default function OrganizationSettings() {
     });
 
   const save = () => { savedRef.current = settings; setDirty(false); notify.success("Settings saved"); };
-  const discard = () => { setSettings(savedRef.current); setDirty(false); };
   const verifyDomain = () => { patch((s) => ({ ...s, domainStatus: "Verified" })); notify.success("Domain verified"); };
 
   const toggleIntegration = (key) => {
@@ -226,29 +210,29 @@ export default function OrganizationSettings() {
               <Panel title="Organization Profile" desc="Basic information about your organization">
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Field label="Organization Name">
-                    <input className={input} value={settings.profile.name} onChange={(e) => setProfile("name", e.target.value)} />
+                    <Input variant="form" value={settings.profile.name} onChange={(e) => setProfile("name", e.target.value)} />
                   </Field>
                   <Field label="URL Slug" hint={`zoikostream.com/o/${settings.profile.slug || "…"}`}>
-                    <input className={input} value={settings.profile.slug} onChange={(e) => setProfile("slug", e.target.value)} />
+                    <Input variant="form" value={settings.profile.slug} onChange={(e) => setProfile("slug", e.target.value)} />
                   </Field>
                   <Field label="Website">
-                    <input className={input} value={settings.profile.website} onChange={(e) => setProfile("website", e.target.value)} />
+                    <Input variant="form" value={settings.profile.website} onChange={(e) => setProfile("website", e.target.value)} />
                   </Field>
                   <Field label="Support Email">
-                    <input type="email" className={input} value={settings.profile.supportEmail} onChange={(e) => setProfile("supportEmail", e.target.value)} />
+                    <Input variant="form" type="email" value={settings.profile.supportEmail} onChange={(e) => setProfile("supportEmail", e.target.value)} />
                   </Field>
                   <Field label="Industry">
-                    <select className={input} value={settings.profile.industry} onChange={(e) => setProfile("industry", e.target.value)}>
+                    <Select variant="form" value={settings.profile.industry} onChange={(e) => setProfile("industry", e.target.value)}>
                       {INDUSTRIES.map((i) => <option key={i}>{i}</option>)}
-                    </select>
+                    </Select>
                   </Field>
                   <Field label="Company Size">
-                    <select className={input} value={settings.profile.size} onChange={(e) => setProfile("size", e.target.value)}>
+                    <Select variant="form" value={settings.profile.size} onChange={(e) => setProfile("size", e.target.value)}>
                       {COMPANY_SIZES.map((s) => <option key={s}>{s}</option>)}
-                    </select>
+                    </Select>
                   </Field>
                   <Field label="Description" className="sm:col-span-2">
-                    <textarea rows={3} className={input} value={settings.profile.description} onChange={(e) => setProfile("description", e.target.value)} />
+                    <Textarea variant="form" rows={3} value={settings.profile.description} onChange={(e) => setProfile("description", e.target.value)} />
                   </Field>
                 </div>
               </Panel>
@@ -258,7 +242,7 @@ export default function OrganizationSettings() {
                   <Field label="Domain" className="flex-1">
                     <div className="relative">
                       <FiGlobe className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                      <input className={cx(input, "pl-9")} value={settings.customDomain} onChange={(e) => setDomain(e.target.value)} placeholder="events.yourcompany.com" />
+                      <Input variant="form" className="pl-9" value={settings.customDomain} onChange={(e) => setDomain(e.target.value)} placeholder="events.yourcompany.com" />
                     </div>
                   </Field>
                   <Button variant="secondary" onClick={verifyDomain}>Verify</Button>
@@ -318,24 +302,24 @@ export default function OrganizationSettings() {
             <>
               <Panel title="Security" desc="Authentication and access policies for your organization">
                 <SettingRow title="Require two-factor authentication" desc="Every member must enable 2FA to sign in">
-                  <Toggle checked={settings.security.require2fa} onChange={(v) => setSec("require2fa", v)} />
+                  <Switch checked={settings.security.require2fa} onChange={(v) => setSec("require2fa", v)} />
                 </SettingRow>
                 <SettingRow title="Enforce SSO (SAML)" desc="Restrict sign-in to your identity provider">
-                  <Toggle checked={settings.security.enforceSSO} onChange={(v) => setSec("enforceSSO", v)} />
+                  <Switch checked={settings.security.enforceSSO} onChange={(v) => setSec("enforceSSO", v)} />
                 </SettingRow>
                 <SettingRow title="Minimum password length">
-                  <select className={cx(input, "w-28")} value={settings.security.minPasswordLength} onChange={(e) => setSec("minPasswordLength", Number(e.target.value))}>
+                  <Select variant="form" className="w-28" value={settings.security.minPasswordLength} onChange={(e) => setSec("minPasswordLength", Number(e.target.value))}>
                     {PASSWORD_LENGTHS.map((n) => <option key={n} value={n}>{n} chars</option>)}
-                  </select>
+                  </Select>
                 </SettingRow>
                 <SettingRow title="Session timeout" desc="Automatically sign out inactive members">
-                  <select className={cx(input, "w-36")} value={settings.security.sessionTimeout} onChange={(e) => setSec("sessionTimeout", e.target.value)}>
+                  <Select variant="form" className="w-36" value={settings.security.sessionTimeout} onChange={(e) => setSec("sessionTimeout", e.target.value)}>
                     {SESSION_TIMEOUTS.map((t) => <option key={t}>{t}</option>)}
-                  </select>
+                  </Select>
                 </SettingRow>
                 <div className="pt-4">
                   <Field label="Allowed email domains" hint="Comma-separated. Only these domains can be invited.">
-                    <input className={input} value={settings.security.allowedDomains} onChange={(e) => setSec("allowedDomains", e.target.value)} placeholder="acme.com, acme.io" />
+                    <Input variant="form" value={settings.security.allowedDomains} onChange={(e) => setSec("allowedDomains", e.target.value)} placeholder="acme.com, acme.io" />
                   </Field>
                 </div>
               </Panel>
@@ -357,12 +341,11 @@ export default function OrganizationSettings() {
                           <td className="py-2.5 pr-3 text-slate-700 dark:text-slate-200">{p.label}</td>
                           {ROLES.map((r) => (
                             <td key={r} className="px-3 py-2.5 text-center">
-                              <input
-                                type="checkbox"
+                              <Checkbox
                                 checked={settings.permissions[r].includes(p.key)}
                                 onChange={() => togglePerm(r, p.key)}
                                 aria-label={`${r} — ${p.label}`}
-                                className="h-4 w-4 cursor-pointer accent-emerald-500"
+                                className="cursor-pointer accent-emerald-500"
                               />
                             </td>
                           ))}
@@ -383,7 +366,7 @@ export default function OrganizationSettings() {
                   <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">{g.title}</h3>
                   {g.items.map((it) => (
                     <SettingRow key={it.key} title={it.label} desc={it.desc}>
-                      <Toggle checked={settings.notifs[it.key]} onChange={() => toggleNotif(it.key)} />
+                      <Switch checked={settings.notifs[it.key]} onChange={() => toggleNotif(it.key)} />
                     </SettingRow>
                   ))}
                 </div>
@@ -487,7 +470,7 @@ export default function OrganizationSettings() {
       >
         <p className="mb-3">The new owner will get full control of <strong className="text-slate-800 dark:text-slate-100">{orgName}</strong>, including billing and deletion.</p>
         <Field label="New owner's email">
-          <input type="email" className={input} value={newOwner} onChange={(e) => setNewOwner(e.target.value)} placeholder="admin@yourcompany.com" />
+          <Input variant="form" type="email" value={newOwner} onChange={(e) => setNewOwner(e.target.value)} placeholder="admin@yourcompany.com" />
         </Field>
       </Modal>
 
@@ -505,7 +488,7 @@ export default function OrganizationSettings() {
       >
         <p className="mb-3">This permanently deletes <strong className="text-slate-800 dark:text-slate-100">{orgName}</strong>, its events, recordings, and analytics. This cannot be undone.</p>
         <Field label={`Type "${orgName}" to confirm`}>
-          <input className={input} value={confirmName} onChange={(e) => setConfirmName(e.target.value)} placeholder={orgName} />
+          <Input variant="form" value={confirmName} onChange={(e) => setConfirmName(e.target.value)} placeholder={orgName} />
         </Field>
       </Modal>
     </div>
