@@ -4,7 +4,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
-class RegisterIn(BaseModel):
+class RegistrantIn(BaseModel):
     full_name: str = Field(min_length=1, max_length=120)
     email: EmailStr
     phone: str | None = Field(None, max_length=30)
@@ -12,7 +12,7 @@ class RegisterIn(BaseModel):
 
 
 class BulkRegisterIn(BaseModel):
-    registrants: list[RegisterIn] = Field(min_length=1, max_length=1000)
+    registrants: list[RegistrantIn] = Field(min_length=1, max_length=1000)
 
 
 class RegistrationOut(BaseModel):

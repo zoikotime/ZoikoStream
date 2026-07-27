@@ -7,7 +7,7 @@ from app.email import send_registration_confirmation_email
 from app.models import User
 from app.models.registration import Registration
 from app.models.stream import Stream
-from app.schemas.registration import BulkRegisterIn, BulkRegisterResult, RegisterIn, RegistrationOut
+from app.schemas.registration import BulkRegisterIn, BulkRegisterResult, RegistrantIn, RegistrationOut
 from app.security import get_current_user, get_optional_user
 
 router = APIRouter(prefix="/streams/{stream_id}/registrations", tags=["Registrations"])
@@ -42,7 +42,7 @@ def _get_org_stream(db: Session, user: User, stream_id: str) -> Stream:
 @router.post("", response_model=RegistrationOut, status_code=201)
 def register(
     stream_id: str,
-    data: RegisterIn,
+    data: RegistrantIn,
     background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User | None = Depends(get_optional_user),
