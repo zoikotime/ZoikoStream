@@ -1,6 +1,7 @@
 // client/src/components/moderation/ModeratorHeader.jsx
 // Header: brand, event name, live status, and the current viewer count.
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import useInterval from "../../hooks/useInterval";
 import { Link } from "react-router-dom";
 import { FiUsers, FiClock, FiSun, FiMoon, FiLogOut } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
@@ -21,11 +22,7 @@ export default function ModeratorHeader({ event, viewers }) {
 
   // Tick the event timer forward once a second while the event is live.
   const [elapsed, setElapsed] = useState(event.startedAgo ?? 0);
-  useEffect(() => {
-    if (!live) return;
-    const t = setInterval(() => setElapsed((s) => s + 1), 1000);
-    return () => clearInterval(t);
-  }, [live]);
+  useInterval(() => setElapsed((s) => s + 1), 1000, live);
 
   return (
     <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 bg-white px-4 py-3 sm:px-6 dark:border-slate-800 dark:bg-slate-900">

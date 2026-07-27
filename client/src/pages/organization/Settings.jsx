@@ -3,12 +3,14 @@
 // developer (API keys + integrations), and danger zone. Route: /organization/settings.
 // Rendered inside OrganizationLayout. No backend: form edits gate behind Save (local
 // state + a dirty flag); immediate actions (integrations, keys, danger) toast on their own.
-import { useRef, useState } from "react";
+import { useState } from "react";
 import {
   FiUser, FiImage, FiShield, FiBell, FiCode, FiAlertTriangle,
   FiUploadCloud, FiGlobe, FiCheck, FiCopy, FiEye, FiEyeOff, FiTrash2, FiPlus, FiSave,
   FiHash, FiVideo, FiCloud, FiZap, FiBarChart2, FiLink,
 } from "react-icons/fi";
+import api, { errMsg } from "../../api";
+import useApi from "../../hooks/useApi";
 import { cx, ACCENT } from "../../ui/tokens";
 import Card from "../../ui/Card";
 import Button from "../../ui/Button";
@@ -16,12 +18,13 @@ import Badge from "../../ui/Badge";
 import { Input, Textarea, Select, Switch, Checkbox } from "../../ui/forms";
 import Modal from "../../ui/Modal";
 import { notify } from "../../ui/Toast";
+import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import { fmtDate } from "../../data/events";
 import {
-  orgProfile, INDUSTRIES, COMPANY_SIZES, domain, ACCENTS,
-  securityDefaults, SESSION_TIMEOUTS, PASSWORD_LENGTHS,
+  INDUSTRIES, COMPANY_SIZES, ACCENTS,
+  SESSION_TIMEOUTS, PASSWORD_LENGTHS,
   ROLES, PERMISSIONS, permissionDefaults,
-  notificationGroups, notificationDefaults, apiKeysSeed, integrationsSeed,
+  notificationGroups, apiKeysSeed, integrationsSeed,
 } from "../../data/orgSettings";
 
 const TABS = [
@@ -89,23 +92,84 @@ function IconButton({ icon: Icon, title, danger, onClick }) {
   );
 }
 
-const initialSettings = () => ({
-  profile: { ...orgProfile },
-  customDomain: domain.custom,
-  domainStatus: domain.status,
-  accent: "violet",
+// ── API ⇄ form-state mapping ──────────────────────────────────────────────────
+// The form keeps its camelCase shape; these translate at the network boundary so the
+// JSX below is untouched. Only profile / branding-color / security / notifications /
+// domain have a backend — permissions, API keys, integrations, domain-verify and the
+// danger zone stay local (no endpoint yet) and are marked at their call sites.
+const loadSettings = async () => {
+  const [profile, security, notifs, domainData, branding] = await Promise.all([
+    api.get("/organization/profile").then((r) => r.data),
+    api.get("/organization/security").then((r) => r.data),
+    api.get("/organization/notifications").then((r) => r.data),
+    api.get("/organization/domain").then((r) => r.data),
+    api.get("/organization/branding").then((r) => r.data),
+  ]);
+  return { profile, security, notifs, domain: domainData, branding };
+};
+
+const fromApi = ({ profile: p, security: s, notifs: n, domain: d, branding: b }) => ({
+  profile: {
+    name: p.name ?? "", slug: p.slug ?? "", website: p.website ?? "",
+    supportEmail: p.support_email ?? "", industry: p.industry ?? INDUSTRIES[0],
+    size: p.company_size ?? COMPANY_SIZES[0], description: p.description ?? "",
+  },
+  customDomain: d.domain ?? "",
+  domainStatus: d.domain_verified ? "Verified" : "Pending",
+  accent: b.primary_color || "violet",
   logoName: "",
-  security: { ...securityDefaults },
+  security: {
+    require2fa: s.require_2fa, enforceSSO: s.enforce_sso,
+    minPasswordLength: s.min_password_length, sessionTimeout: s.session_timeout,
+    allowedDomains: s.allowed_domains ?? "",
+  },
   permissions: Object.fromEntries(Object.entries(permissionDefaults).map(([r, a]) => [r, [...a]])),
-  notifs: { ...notificationDefaults },
+  notifs: {
+    eventScheduled: n.event_scheduled, eventStarting: n.event_starting,
+    recordingReady: n.recording_ready, weeklySummary: n.weekly_summary,
+    billing: n.billing, mentions: n.mentions, memberJoined: n.member_joined,
+    securityAlerts: n.security_alerts,
+  },
+});
+
+// Only sends fields with a backend. EmailStr rejects "" → send null for empty optionals.
+const toApi = (s) => ({
+  profile: {
+    name: s.profile.name, slug: s.profile.slug || null, website: s.profile.website || null,
+    description: s.profile.description || null, industry: s.profile.industry || null,
+    company_size: s.profile.size || null, support_email: s.profile.supportEmail || null,
+  },
+  security: {
+    require_2fa: s.security.require2fa, enforce_sso: s.security.enforceSSO,
+    min_password_length: Number(s.security.minPasswordLength),
+    session_timeout: s.security.sessionTimeout, allowed_domains: s.security.allowedDomains,
+  },
+  notifs: {
+    event_scheduled: s.notifs.eventScheduled, event_starting: s.notifs.eventStarting,
+    recording_ready: s.notifs.recordingReady, weekly_summary: s.notifs.weeklySummary,
+    billing: s.notifs.billing, mentions: s.notifs.mentions,
+    member_joined: s.notifs.memberJoined, security_alerts: s.notifs.securityAlerts,
+  },
+  domain: { domain: s.customDomain || null },
+  branding: { primary_color: s.accent },
 });
 
 export default function OrganizationSettings() {
+  const { data, loading, error, reload } = useApi(loadSettings);
   const [tab, setTab] = useState("general");
-  const [settings, setSettings] = useState(initialSettings);
+  const [settings, setSettings] = useState(null);
+  const [seededData, setSeededData] = useState(null);
   const [dirty, setDirty] = useState(false);
-  const savedRef = useRef(null);
-  if (savedRef.current === null) savedRef.current = settings;
+  const [saving, setSaving] = useState(false);
+
+  // Seed the editable form the first render fetched data arrives (and again after a
+  // retry, which yields a fresh object). React's "adjust state during render" pattern,
+  // guarded so it runs once per data object — no effect, no cascading render.
+  if (data && data !== seededData) {
+    setSeededData(data);
+    setSettings(fromApi(data));
+    setDirty(false);
+  }
 
   // Immediate (non-Save) state.
   const [integrations, setIntegrations] = useState(integrationsSeed);
@@ -115,6 +179,22 @@ export default function OrganizationSettings() {
   const [newOwner, setNewOwner] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
+
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <OrganizationErrorState error={error} onRetry={reload} title="Couldn't load settings" />
+      </div>
+    );
+  }
+  if (loading || !settings) {
+    return (
+      <div className="space-y-6">
+        <div className="zk-skeleton h-8 w-56 rounded-lg bg-slate-200 dark:bg-slate-800" />
+        <div className="zk-skeleton h-72 w-full rounded-2xl bg-slate-200 dark:bg-slate-800" />
+      </div>
+    );
+  }
 
   const patch = (updater) => { setSettings(updater); setDirty(true); };
   const setProfile = (k, v) => patch((s) => ({ ...s, profile: { ...s.profile, [k]: v } }));
@@ -128,7 +208,27 @@ export default function OrganizationSettings() {
       return { ...s, permissions: { ...s.permissions, [role]: next } };
     });
 
-  const save = () => { savedRef.current = settings; setDirty(false); notify.success("Settings saved"); };
+  const save = async () => {
+    const body = toApi(settings);
+    setSaving(true);
+    try {
+      await Promise.all([
+        api.patch("/organization/profile", body.profile),
+        api.patch("/organization/security", body.security),
+        api.patch("/organization/notifications", body.notifs),
+        api.patch("/organization/domain", body.domain),
+        api.patch("/organization/branding", body.branding),
+      ]);
+      setDirty(false);
+      notify.success("Settings saved");
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  // ponytail: optimistic only — no DNS-verify endpoint yet (backend resets verified on
+  // domain change; real verification is a later phase). Resets to Pending on reload.
   const verifyDomain = () => { patch((s) => ({ ...s, domainStatus: "Verified" })); notify.success("Domain verified"); };
 
   const toggleIntegration = (key) => {
@@ -171,8 +271,8 @@ export default function OrganizationSettings() {
         </div>
         <div className="flex items-center gap-3">
           {dirty && <span className="text-xs font-medium text-amber-600 dark:text-amber-400">Unsaved changes</span>}
-          <Button size="sm" onClick={save} disabled={!dirty}>
-            <FiSave className="text-base" /> Save Changes
+          <Button size="sm" onClick={save} disabled={!dirty || saving}>
+            <FiSave className="text-base" /> {saving ? "Saving…" : "Save Changes"}
           </Button>
         </div>
       </div>
