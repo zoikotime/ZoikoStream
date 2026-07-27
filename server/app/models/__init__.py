@@ -5,3 +5,4 @@ from .channel import Channel
 from .chat import ChatMessage
 from .registration import Registration
 from .recording import Recording
+from .view import StreamView

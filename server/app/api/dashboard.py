@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import Organization, User
 from ..models.stream import Stream
+from ..models.view import StreamView
 from ..security import get_current_user
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -63,13 +64,19 @@ def get_org_stats(
         ).all()
     )
 
+    total_viewers = db.scalar(
+        select(func.count(StreamView.id))
+        .join(Stream, Stream.id == StreamView.stream_id)
+        .where(Stream.org_id == user.org_id)
+    )
+
     return {
         "organization_id": str(user.org_id),
         "organization_name": org.name,
         "upcoming_events": event_counts.get("scheduled", 0),
         "live_events": event_counts.get("live", 0),
         "completed_events": event_counts.get("completed", 0),
-        "total_viewers": 0,  # ponytail: no view-tracking yet — needs a stream_views table
+        "total_viewers": total_viewers or 0,
         "total_users": org_users or 0,
     }
 
@@ -85,12 +92,14 @@ def get_platform_stats(
     
     total_orgs = db.scalar(select(func.count(Organization.id)).where(Organization.name != "ZoikoStream Platform"))
     total_users = db.scalar(select(func.count(User.id)))
-    
+    live_events = db.scalar(select(func.count(Stream.id)).where(Stream.status == "live"))
+    total_viewers = db.scalar(select(func.count(StreamView.id)))
+
     return {
         "organizations": total_orgs or 0,
         "total_users": total_users or 0,
-        "live_events": 3,
-        "total_viewers": 84120,
+        "live_events": live_events or 0,
+        "total_viewers": total_viewers or 0,
     }
 
 

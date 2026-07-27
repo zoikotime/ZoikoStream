@@ -28,6 +28,7 @@ from app.schemas.stream import (
 
 from app.services.livekit import create_stream_token
 from app.services.registration import is_registered
+from app.services.views import record_view
 
 
 router = APIRouter(
@@ -352,6 +353,7 @@ def get_viewer_token(
             "Stream is offline"
         )
 
+    record_view(db, stream.id, user, email)
 
     token = create_stream_token(
         identity=f"viewer-{uuid.uuid4()}",
