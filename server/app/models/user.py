@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -71,6 +71,10 @@ class User(Base):
     reset_token_expires: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    # Failed verify-otp/reset-password attempts against the current reset_token. Reset
+    # to 0 whenever a fresh OTP is issued; once it hits OTP_MAX_ATTEMPTS the code is
+    # dead even if the correct OTP is guessed afterward -- request a new one.
+    reset_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     organization: Mapped["Organization"] = relationship(
         back_populates="users"

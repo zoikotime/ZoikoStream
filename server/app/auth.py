@@ -25,6 +25,7 @@ from .security import create_access_token, get_current_user, hash_password, veri
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 OTP_TTL_MINUTES = 10
+OTP_MAX_ATTEMPTS = 5
 
 
 @router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
@@ -112,20 +113,35 @@ def forgot_password(data: ForgotPasswordIn, background: BackgroundTasks, db: Ses
     otp = f"{secrets.randbelow(10000):04d}"  # zero-padded 4-digit code
     user.reset_token = otp
     user.reset_token_expires = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
+    user.reset_attempts = 0  # fresh code, fresh attempt budget
     db.commit()
-    # ponytail: 4-digit OTP = 10k combos; the short TTL is the only brute-force guard.
-    # Add an attempt counter (lock after ~5 tries) before this is a production reset path.
     background.add_task(send_reset_otp_email, user.email, user.full_name, otp)
     return resp
 
 
 def _valid_otp_user(db: Session, email: str, otp: str) -> User:
-    """Look up the user by email and check the OTP is correct and unexpired.
-    Same generic error for wrong-email / wrong-otp / expired so nothing leaks."""
+    """Look up the user by email and check the OTP is correct, unexpired, and not
+    locked out from too many wrong guesses. Same generic error for wrong-email /
+    wrong-otp / expired / locked-out so nothing leaks about which case applies.
+
+    A wrong guess counts against the attempt budget even so; once OTP_MAX_ATTEMPTS is
+    hit the code is dead regardless of whether the *next* guess would've been correct --
+    request a new one via /forgot-password.
+    """
+    invalid = HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
     user = db.scalar(select(User).where(User.email == email.lower()))
     expires = user.reset_token_expires if user else None
-    if user is None or user.reset_token != otp or expires is None or expires < datetime.now(timezone.utc):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
+    if user is None or expires is None or expires < datetime.now(timezone.utc):
+        raise invalid
+
+    if user.reset_attempts >= OTP_MAX_ATTEMPTS:
+        raise invalid
+
+    if user.reset_token != otp:
+        user.reset_attempts += 1
+        db.commit()
+        raise invalid
+
     return user
 
 
@@ -141,6 +157,7 @@ def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
     user.password_hash = hash_password(data.password)
     user.reset_token = None  # single-use: consume the OTP
     user.reset_token_expires = None
+    user.reset_attempts = 0
     db.commit()
     return {"message": "Password updated. You can now log in."}
 
