@@ -2,18 +2,21 @@
 // Main broadcast monitor: live/preview state, overlays (LIVE, REC, viewers,
 // elapsed) and a speaker filmstrip. Owns its own elapsed-time counter.
 import { useEffect, useState } from "react";
-import { FiMonitor, FiVideoOff, FiUsers, FiMic, FiMicOff } from "react-icons/fi";
-import { cx, ACCENT } from "../../ui/tokens";
-import { participants, initials } from "../../data/host";
+import { FiMonitor, FiVideoOff, FiUsers, FiVideo } from "react-icons/fi";
+import { cx } from "../../ui/tokens";
+import { initials } from "../../data/host";
+import { useRoomParticipants } from "../../lib/useLiveKitRoom";
+import SpeakerTile from "../common/SpeakerTile";
 
 const pad = (n) => String(n).padStart(2, "0");
 const fmtElapsed = (s) => `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
 
-// Everyone on stage (i.e. not a plain attendee) shows in the filmstrip.
-const stagePeople = participants.filter((p) => p.role !== "Attendee");
-
-export default function StudioStage({ live, camera, screenShare, recording, event, videoRef }) {
+export default function StudioStage({ live, camera, screenShare, recording, event, videoRef, room }) {
   const [secs, setSecs] = useState(0);
+  const { participants } = useRoomParticipants(room);
+  // The host's own camera already shows in the main preview above -- the filmstrip is
+  // for everyone else currently promoted to speak.
+  const speakers = participants.filter((p) => !p.isLocal).slice(0, 6);
 
   // While live, tick the elapsed counter off the start time. setSecs is only
   // called inside timer callbacks (never synchronously in the effect body).
@@ -74,7 +77,7 @@ export default function StudioStage({ live, camera, screenShare, recording, even
             <div className="absolute inset-0 grid place-items-center bg-slate-900">
               <div className="flex flex-col items-center gap-3">
                 <span className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-3xl font-bold text-white shadow-lg">
-                  {initials(stagePeople[0]?.name)}
+                  <FiVideo />
                 </span>
                 <p className="text-sm font-medium text-slate-200">
                   {live ? "Connecting camera…" : "Ready — click Go Live to start"}
@@ -102,25 +105,14 @@ export default function StudioStage({ live, camera, screenShare, recording, even
         </div>
       </div>
 
-      {/* Speaker filmstrip */}
-      <div className="grid grid-cols-3 gap-3 sm:grid-cols-5">
-        {stagePeople.slice(0, 5).map((p) => (
-          <div
-            key={p.id}
-            className="relative aspect-video overflow-hidden rounded-xl bg-slate-800 ring-1 ring-slate-200 dark:ring-slate-800"
-          >
-            <div className="absolute inset-0 grid place-items-center">
-              <span className={cx("grid h-10 w-10 place-items-center rounded-full text-sm font-semibold", ACCENT[p.accent].chip)}>
-                {initials(p.name)}
-              </span>
-            </div>
-            <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
-              <span className="truncate text-[11px] font-medium text-white">{p.name.split(" ")[0]}</span>
-              {p.muted ? <FiMicOff className="shrink-0 text-rose-400" /> : <FiMic className="shrink-0 text-emerald-400" />}
-            </div>
-          </div>
-        ))}
-      </div>
+      {/* Speaker filmstrip -- promoted viewers currently on stage alongside the host */}
+      {speakers.length > 0 && (
+        <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+          {speakers.map((p) => (
+            <SpeakerTile key={p.identity} participant={p} initials={initials} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

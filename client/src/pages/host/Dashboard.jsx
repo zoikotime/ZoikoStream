@@ -85,6 +85,7 @@ export default function HostDashboard() {
   const [recordingId, setRecordingId] = useState(null);
   const [tab, setTab] = useState("participants");
   const [modal, setModal] = useState(null);
+  const [room, setRoom] = useState(null);
 
   const roomRef = useRef(null);
   const videoRef = useRef(null);
@@ -97,8 +98,8 @@ export default function HostDashboard() {
   // Never leave a LiveKit connection open if the host navigates away mid-broadcast.
   useEffect(() => () => roomRef.current?.disconnect(), []);
 
-  const attachCameraTrack = (room) => {
-    const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+  const attachCameraTrack = (r) => {
+    const pub = r.localParticipant.getTrackPublication(Track.Source.Camera);
     if (pub?.track && videoRef.current) pub.track.attach(videoRef.current);
   };
 
@@ -107,26 +108,28 @@ export default function HostDashboard() {
     setConnecting(true);
     try {
       const { data } = await api.post(`/streams/${selectedEvent.id}/start`);
-      const room = new Room();
+      const r = new Room();
 
-      room.localParticipant.on(ParticipantEvent.LocalTrackPublished, (pub) => {
+      r.localParticipant.on(ParticipantEvent.LocalTrackPublished, (pub) => {
         if (pub.source === Track.Source.Camera && videoRef.current) pub.track.attach(videoRef.current);
       });
-      room.localParticipant.on(ParticipantEvent.LocalTrackUnpublished, (pub) => {
+      r.localParticipant.on(ParticipantEvent.LocalTrackUnpublished, (pub) => {
         if (pub.source === Track.Source.Camera) pub.track?.detach();
       });
 
-      await room.connect(data.livekit_url, data.token);
-      await room.localParticipant.setMicrophoneEnabled(mic);
-      await room.localParticipant.setCameraEnabled(camera);
+      await r.connect(data.livekit_url, data.token);
+      await r.localParticipant.setMicrophoneEnabled(mic);
+      await r.localParticipant.setCameraEnabled(camera);
 
-      roomRef.current = room;
-      attachCameraTrack(room);
+      roomRef.current = r;
+      setRoom(r);
+      attachCameraTrack(r);
       setLive(true);
       notify.success("You're live!");
     } catch (err) {
       roomRef.current?.disconnect();
       roomRef.current = null;
+      setRoom(null);
       notify.error(errMsg(err, "Failed to go live — check camera/mic permissions and try again"));
     } finally {
       setConnecting(false);
@@ -150,6 +153,7 @@ export default function HostDashboard() {
       /* already gone */
     }
     roomRef.current = null;
+    setRoom(null);
 
     try {
       await api.post(`/streams/${selectedEvent.id}/stop`);
@@ -243,7 +247,7 @@ export default function HostDashboard() {
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex-1 space-y-6 p-4 sm:p-6 lg:overflow-auto">
             <SummaryCards />
-            <StudioStage live={live} camera={camera} screenShare={screenShare} recording={recording} event={eventForUI} videoRef={videoRef} />
+            <StudioStage live={live} camera={camera} screenShare={screenShare} recording={recording} event={eventForUI} videoRef={videoRef} room={room} />
           </div>
           <ControlBar
             live={live}

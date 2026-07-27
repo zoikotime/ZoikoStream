@@ -15,17 +15,6 @@ const TABS = [
   { key: "polls", label: "Polls" },
 ];
 
-// Viewers usually aren't logged in — ask for a display name once and remember it
-// for next time, rather than gating chat behind an account.
-function useGuestName() {
-  const [name, setName] = useState(() => localStorage.getItem("chat_guest_name") || "");
-  const save = (n) => {
-    localStorage.setItem("chat_guest_name", n);
-    setName(n);
-  };
-  return [name, save];
-}
-
 function JoinChatPrompt({ onJoin }) {
   const [value, setValue] = useState("");
   return (
@@ -51,9 +40,8 @@ function JoinChatPrompt({ onJoin }) {
   );
 }
 
-function Chat({ streamId, viewerEmail }) {
+function Chat({ streamId, viewerEmail, guestName, onGuestName }) {
   const { user } = useAuth();
-  const [guestName, setGuestName] = useGuestName();
   const displayName = user?.full_name || guestName;
 
   const [msgs, setMsgs] = useState([]);
@@ -90,7 +78,7 @@ function Chat({ streamId, viewerEmail }) {
     }
   };
 
-  if (!displayName) return <JoinChatPrompt onJoin={setGuestName} />;
+  if (!displayName) return <JoinChatPrompt onJoin={onGuestName} />;
 
   return (
     <div className="flex h-full flex-col">
@@ -252,7 +240,7 @@ function Polls() {
   );
 }
 
-export default function WatchPanel({ streamId, viewerEmail, className = "" }) {
+export default function WatchPanel({ streamId, viewerEmail, guestName, onGuestName, className = "" }) {
   const [tab, setTab] = useState("chat");
 
   return (
@@ -274,7 +262,9 @@ export default function WatchPanel({ streamId, viewerEmail, className = "" }) {
         ))}
       </div>
       <div className="flex min-h-0 flex-1 flex-col p-3">
-        {tab === "chat" && <Chat streamId={streamId} viewerEmail={viewerEmail} />}
+        {tab === "chat" && (
+          <Chat streamId={streamId} viewerEmail={viewerEmail} guestName={guestName} onGuestName={onGuestName} />
+        )}
         {tab === "qa" && <QA />}
         {tab === "polls" && <Polls />}
       </div>

@@ -16,6 +16,7 @@ from .routers.members import router as members_router
 from .routers.chat import router as chat_router
 from .routers.registrations import router as registrations_router
 from .routers.recordings import router as recordings_router
+from .routers.stage import router as stage_router
 from .routers.webhooks import router as webhooks_router
 from .services.scheduler import run_auto_close_loop
 from .sockets import sio
@@ -60,6 +61,7 @@ app.include_router(members_router)
 app.include_router(chat_router)
 app.include_router(registrations_router)
 app.include_router(recordings_router)
+app.include_router(stage_router)
 app.include_router(webhooks_router)
 
 

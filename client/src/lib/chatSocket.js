@@ -6,7 +6,11 @@ const SOCKET_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 // identity is either { token } (logged-in host/user) or { displayName, email } (guest
 // viewer -- email is only needed for registration_required events, see EventWatch.jsx).
-export function connectEventChat(streamId, identity, { onHistory, onNew, onUpdated, onDeleted, onError }) {
+export function connectEventChat(
+  streamId,
+  identity,
+  { onHistory, onNew, onUpdated, onDeleted, onError, onHandsQueue, onRoster }
+) {
   const socket = io(SOCKET_URL, { transports: ["websocket", "polling"] });
 
   socket.on("connect", () => {
@@ -15,7 +19,13 @@ export function connectEventChat(streamId, identity, { onHistory, onNew, onUpdat
       { stream_id: streamId, token: identity.token, display_name: identity.displayName, email: identity.email },
       (res) => {
         if (res?.error) onError?.(res.error);
-        else onHistory?.(res.history || []);
+        else {
+          onHistory?.(res.history || []);
+          if (res.stage) {
+            onHandsQueue?.(res.stage.hands || []);
+            onRoster?.(res.stage.roster || []);
+          }
+        }
       }
     );
   });
@@ -23,6 +33,8 @@ export function connectEventChat(streamId, identity, { onHistory, onNew, onUpdat
   socket.on("chat:new", (msg) => onNew?.(msg));
   socket.on("chat:updated", (msg) => onUpdated?.(msg));
   socket.on("chat:deleted", ({ id }) => onDeleted?.(id));
+  socket.on("stage:hands", (hands) => onHandsQueue?.(hands));
+  socket.on("stage:roster", (roster) => onRoster?.(roster));
 
   return socket;
 }
@@ -30,6 +42,24 @@ export function connectEventChat(streamId, identity, { onHistory, onNew, onUpdat
 export function sendChatMessage(socket, text) {
   return new Promise((resolve, reject) => {
     socket.emit("chat:send", { text }, (res) => {
+      if (res?.error) reject(new Error(res.error));
+      else resolve(res);
+    });
+  });
+}
+
+export function raiseHand(socket) {
+  return new Promise((resolve, reject) => {
+    socket.emit("stage:raise_hand", {}, (res) => {
+      if (res?.error) reject(new Error(res.error));
+      else resolve(res);
+    });
+  });
+}
+
+export function lowerHand(socket) {
+  return new Promise((resolve, reject) => {
+    socket.emit("stage:lower_hand", {}, (res) => {
       if (res?.error) reject(new Error(res.error));
       else resolve(res);
     });

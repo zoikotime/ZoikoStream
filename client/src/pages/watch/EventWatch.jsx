@@ -9,6 +9,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import api, { errMsg } from "../../api";
 import { notify } from "../../ui/Toast";
 import { toLegacyEventShape } from "../../data/events";
+import { useGuestName } from "../../lib/guestName";
 import { startingViewers } from "../../data/watch";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
@@ -29,6 +30,7 @@ export default function EventWatch() {
   const [loading, setLoading] = useState(true);
   const [liveToken, setLiveToken] = useState(null);
   const [viewerEmail, setViewerEmail] = useState(() => localStorage.getItem(emailStorageKey(eventId)) || "");
+  const [guestName, setGuestName] = useGuestName();
 
   useEffect(() => {
     api
@@ -134,13 +136,21 @@ export default function EventWatch() {
           <>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
               <div className="space-y-6">
-                <VideoPlayer event={event} viewers={viewers} liveToken={liveToken} />
+                <VideoPlayer
+                  event={event}
+                  viewers={viewers}
+                  liveToken={liveToken}
+                  viewerEmail={viewerEmail}
+                  guestName={guestName}
+                />
                 <EventInfo event={event} />
               </div>
 
               <WatchPanel
                 streamId={eventId}
                 viewerEmail={viewerEmail}
+                guestName={guestName}
+                onGuestName={setGuestName}
                 className="h-[70vh] self-start lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]"
               />
             </div>

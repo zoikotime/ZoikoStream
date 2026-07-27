@@ -1,6 +1,5 @@
 import re
 import secrets
-import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -28,6 +27,7 @@ from app.schemas.stream import (
 
 from app.services.livekit import create_stream_token
 from app.services.registration import is_registered
+from app.services.stage import ON_STAGE, resolve_identity
 from app.services.views import record_view
 
 
@@ -355,10 +355,24 @@ def get_viewer_token(
 
     record_view(db, stream.id, user, email)
 
+    identity = resolve_identity(user, email)
+
+    display_name = user.full_name if user else None
+    if not display_name and email:
+        registration = db.scalar(select(Registration).where(Registration.stream_id == stream.id, Registration.email == email.lower()))
+        display_name = registration.full_name if registration else None
+
+    # Promoted before they ever opened the watch page (host invited them straight from
+    # the Registrations list) -- give them publish rights from the very first token
+    # instead of waiting for a live permission upgrade that assumes they're already
+    # connected (see services/livekit.update_publish_permission).
+    can_publish = identity in ON_STAGE.get(str(stream.id), {})
+
     token = create_stream_token(
-        identity=f"viewer-{uuid.uuid4()}",
+        identity=identity,
         room_name=stream.livekit_room,
-        can_publish=False
+        can_publish=can_publish,
+        name=display_name or "Guest",
     )
 
 

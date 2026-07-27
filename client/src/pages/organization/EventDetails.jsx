@@ -82,10 +82,23 @@ function parseBulkInput(text) {
 const rTh = "px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-400 whitespace-nowrap";
 const rTd = "px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap";
 
-function RegistrationsPanel({ streamId, registrations, onImported }) {
+function RegistrationsPanel({ streamId, registrations, isLive, onImported }) {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [promoting, setPromoting] = useState(null);
+
+  const promote = async (r) => {
+    setPromoting(r.id);
+    try {
+      await api.post(`/streams/${streamId}/stage/promote`, { email: r.email, display_name: r.full_name });
+      notify.success(`${r.full_name} can now go on camera — send them back to the event link.`);
+    } catch (err) {
+      notify.error(errMsg(err, "Failed to promote"));
+    } finally {
+      setPromoting(null);
+    }
+  };
 
   const parsed = parseBulkInput(bulkText);
 
@@ -157,6 +170,7 @@ function RegistrationsPanel({ streamId, registrations, onImported }) {
                 <th className={rTh}>Company</th>
                 <th className={rTh}>Source</th>
                 <th className={rTh}>Registered</th>
+                {isLive && <th className={rTh}>Stage</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -167,10 +181,21 @@ function RegistrationsPanel({ streamId, registrations, onImported }) {
                   <td className={rTd}>{r.company || "—"}</td>
                   <td className={rTd}>{r.source === "bulk" ? "Bulk import" : "Self-registered"}</td>
                   <td className={rTd}>{new Date(r.created_at).toLocaleDateString()}</td>
+                  {isLive && (
+                    <td className={rTd}>
+                      <button
+                        onClick={() => promote(r)}
+                        disabled={promoting === r.id}
+                        className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                      >
+                        {promoting === r.id ? "Inviting…" : "Promote to speaker"}
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
               {registrations.length === 0 && (
-                <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-slate-400">No one has registered yet.</td></tr>
+                <tr><td colSpan={isLive ? 6 : 5} className="px-4 py-12 text-center text-sm text-slate-400">No one has registered yet.</td></tr>
               )}
             </tbody>
           </table>
@@ -419,6 +444,7 @@ export default function EventDetails() {
         <RegistrationsPanel
           streamId={id}
           registrations={registrations}
+          isLive={event.status === "live"}
           onImported={(created) => setRegistrations((list) => [...created, ...list])}
         />
       )}

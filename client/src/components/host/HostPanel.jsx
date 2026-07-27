@@ -3,14 +3,14 @@
 // Notifications. Tab state is lifted to the page so the control bar can switch it.
 import { useEffect, useRef, useState } from "react";
 import {
-  FiSend, FiMic, FiMicOff, FiVideoOff, FiMoreVertical, FiUserPlus,
+  FiSend, FiUserPlus,
   FiVideo, FiRadio, FiBarChart2, FiHelpCircle, FiBell,
 } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
-import Badge from "../../ui/Badge";
 import { notify } from "../../ui/Toast";
+import api, { errMsg } from "../../api";
 import { connectEventChat, sendChatMessage } from "../../lib/chatSocket";
-import { participants, notifications, initials } from "../../data/host";
+import { notifications, initials } from "../../data/host";
 
 const TABS = [
   { key: "participants", label: "People" },
@@ -18,7 +18,7 @@ const TABS = [
   { key: "notifications", label: "Alerts" },
 ];
 
-const ROLE_STATUS = { Host: "success", "Co-host": "info", Speaker: "info", Moderator: "warning", Attendee: "neutral" };
+const MAX_SPEAKERS = 6;
 
 const NOTE_ICON = {
   join: { icon: FiUserPlus, accent: "emerald" },
@@ -29,33 +29,102 @@ const NOTE_ICON = {
   system: { icon: FiVideo, accent: "indigo" },
 };
 
-function Participants() {
+function Participants({ streamId }) {
+  const [hands, setHands] = useState([]);
+  const [roster, setRoster] = useState([]);
+  const [busy, setBusy] = useState(null);
+
+  useEffect(() => {
+    if (!streamId) return;
+    const token = localStorage.getItem("token");
+    const socket = connectEventChat(
+      streamId,
+      { token },
+      { onHandsQueue: setHands, onRoster: setRoster, onError: (err) => notify.error(err) }
+    );
+    return () => socket.disconnect();
+  }, [streamId]);
+
+  const promote = async (entry) => {
+    setBusy(entry.identity);
+    try {
+      await api.post(`/streams/${streamId}/stage/promote`, {
+        identity: entry.identity,
+        display_name: entry.display_name,
+      });
+    } catch (err) {
+      notify.error(errMsg(err, "Failed to promote"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const demote = async (entry) => {
+    setBusy(entry.identity);
+    try {
+      await api.post(`/streams/${streamId}/stage/demote`, { identity: entry.identity });
+    } catch (err) {
+      notify.error(errMsg(err, "Failed to demote"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between px-1 pb-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">In this event · {participants.length}</p>
-        <button className="text-xs font-medium text-emerald-600 hover:underline dark:text-emerald-400">Mute all</button>
-      </div>
-      <div className="-mr-1 flex-1 space-y-1 overflow-y-auto pr-1">
-        {participants.map((p) => (
-          <div key={p.id} className="group flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/60">
-            <span className={cx("relative grid h-9 w-9 shrink-0 place-items-center rounded-full text-sm font-semibold", ACCENT[p.accent].chip)}>
-              {initials(p.name)}
-              {p.speaking && <span className="absolute inset-0 animate-pulse rounded-full ring-2 ring-emerald-500" />}
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{p.name}</p>
-              <Badge status={ROLE_STATUS[p.role]}>{p.role}</Badge>
-            </div>
-            <div className="flex items-center gap-2 text-slate-400">
-              {p.camOff && <FiVideoOff className="text-sm" />}
-              {p.muted ? <FiMicOff className="text-sm text-rose-400" /> : <FiMic className="text-sm text-emerald-500" />}
-              <button className="opacity-0 transition group-hover:opacity-100" aria-label={`Manage ${p.name}`}>
-                <FiMoreVertical />
-              </button>
-            </div>
+    <div className="flex h-full flex-col gap-5 overflow-y-auto pr-1">
+      <div>
+        <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
+          <FiBell className="mr-1 inline" /> Raised hands · {hands.length}
+        </p>
+        {hands.length === 0 ? (
+          <p className="px-1 text-sm text-slate-400">No one has raised their hand yet.</p>
+        ) : (
+          <div className="space-y-1">
+            {hands.map((h) => (
+              <div key={h.identity} className="flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/60">
+                <span className={cx("grid h-9 w-9 shrink-0 place-items-center rounded-full text-sm font-semibold", ACCENT.amber.chip)}>
+                  {initials(h.display_name)}
+                </span>
+                <p className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-slate-100">{h.display_name}</p>
+                <button
+                  onClick={() => promote(h)}
+                  disabled={busy === h.identity || roster.length >= MAX_SPEAKERS}
+                  className="shrink-0 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  Promote
+                </button>
+              </div>
+            ))}
           </div>
-        ))}
+        )}
+      </div>
+
+      <div>
+        <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
+          On stage · {roster.length}/{MAX_SPEAKERS}
+        </p>
+        {roster.length === 0 ? (
+          <p className="px-1 text-sm text-slate-400">No one else is on stage yet.</p>
+        ) : (
+          <div className="space-y-1">
+            {roster.map((r) => (
+              <div key={r.identity} className="flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/60">
+                <span className={cx("relative grid h-9 w-9 shrink-0 place-items-center rounded-full text-sm font-semibold", ACCENT.emerald.chip)}>
+                  {initials(r.display_name)}
+                  <span className="absolute inset-0 animate-pulse rounded-full ring-2 ring-emerald-500" />
+                </span>
+                <p className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-slate-100">{r.display_name}</p>
+                <button
+                  onClick={() => demote(r)}
+                  disabled={busy === r.identity}
+                  className="shrink-0 rounded-lg bg-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-300 disabled:opacity-50 dark:bg-slate-700 dark:text-slate-200"
+                >
+                  Demote
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -168,7 +237,7 @@ export default function HostPanel({ tab, setTab, streamId, className = "" }) {
         ))}
       </div>
       <div className="flex min-h-0 flex-1 flex-col p-3">
-        {tab === "participants" && <Participants />}
+        {tab === "participants" && <Participants streamId={streamId} />}
         {tab === "chat" && <Chat streamId={streamId} />}
         {tab === "notifications" && <Notifications />}
       </div>

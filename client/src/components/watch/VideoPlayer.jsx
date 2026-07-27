@@ -1,14 +1,19 @@
 // client/src/components/watch/VideoPlayer.jsx
-// Large "broadcast" player surface (dummy — no real stream). Live indicator,
-// play/pause, volume control, a scrubber for replays, and real fullscreen.
+// Live broadcast surface: a main tile (the host) plus up to 6 on-stage speaker tiles,
+// backed by a real LiveKit room. Also owns the "Raise Hand" self-service request and
+// reacts once a moderator promotes this viewer to speaker.
 import { useEffect, useRef, useState } from "react";
-import { Room, RoomEvent, Track } from "livekit-client";
 import {
   FiPlay, FiPause, FiVolume2, FiVolume1, FiVolumeX,
-  FiMaximize, FiMinimize, FiSettings, FiRotateCcw,
+  FiMaximize, FiMinimize, FiSettings, FiRotateCcw, FiBell, FiMic, FiMicOff, FiVideo, FiVideoOff,
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import { initials } from "../../data/watch";
+import { useAuth } from "../../auth/AuthContext";
+import { connectEventChat, raiseHand, lowerHand } from "../../lib/chatSocket";
+import { useLiveKitRoom, useRoomParticipants } from "../../lib/useLiveKitRoom";
+import { notify } from "../../ui/Toast";
+import SpeakerTile from "../common/SpeakerTile";
 
 const STAGE = {
   violet: "from-violet-900 via-slate-900 to-black",
@@ -24,18 +29,126 @@ function VolumeIcon({ muted, volume }) {
   return volume < 50 ? <FiVolume1 /> : <FiVolume2 />;
 }
 
-export default function VideoPlayer({ event, viewers, liveToken }) {
+// The viewer's own "Raise Hand" control + post-promotion camera/mic prompt. Uses a
+// small dedicated socket connection (join only needs stream_id/identity, not chat
+// history) so it works independent of whether the chat tab has been opened.
+function StageControls({ streamId, displayName, viewerEmail, localCanPublish, room }) {
+  const { user } = useAuth();
+  const [handRaised, setHandRaised] = useState(false);
+  const [camera, setCamera] = useState(false);
+  const [mic, setMic] = useState(false);
+  const socketRef = useRef(null);
+  const wasOnStage = useRef(localCanPublish);
+
+  useEffect(() => {
+    if (!displayName) return;
+    const token = localStorage.getItem("token");
+    const socket = connectEventChat(streamId, user ? { token } : { displayName, email: viewerEmail }, {});
+    socketRef.current = socket;
+    return () => socket.disconnect();
+  }, [streamId, displayName, user, viewerEmail]);
+
+  // The moment LiveKit grants publish rights (via useLiveKitRoom -> ParticipantPermissionsChanged),
+  // prompt the viewer to actually go on camera; on demotion, drop their local preview state.
+  useEffect(() => {
+    if (localCanPublish && !wasOnStage.current) {
+      setHandRaised(false);
+      notify.success("You've been invited to speak! Enable your camera/mic below.");
+    } else if (!localCanPublish && wasOnStage.current) {
+      setCamera(false);
+      setMic(false);
+    }
+    wasOnStage.current = localCanPublish;
+  }, [localCanPublish]);
+
+  const toggleHand = async () => {
+    if (!socketRef.current) return;
+    try {
+      if (handRaised) {
+        await lowerHand(socketRef.current);
+        setHandRaised(false);
+      } else {
+        await raiseHand(socketRef.current);
+        setHandRaised(true);
+        notify.success("Hand raised — the host has been notified.");
+      }
+    } catch {
+      notify.error("Couldn't reach the event — try again");
+    }
+  };
+
+  const toggleCamera = async () => {
+    if (!room) return;
+    const next = !camera;
+    try {
+      await room.localParticipant.setCameraEnabled(next);
+      setCamera(next);
+    } catch {
+      notify.error("Could not toggle camera");
+    }
+  };
+
+  const toggleMic = async () => {
+    if (!room) return;
+    const next = !mic;
+    try {
+      await room.localParticipant.setMicrophoneEnabled(next);
+      setMic(next);
+    } catch {
+      notify.error("Could not toggle microphone");
+    }
+  };
+
+  if (!displayName) return null;
+
+  if (localCanPublish) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-400">You're on stage</span>
+        <button onClick={toggleCamera} className={cx("grid h-8 w-8 place-items-center rounded-lg", camera ? "bg-white/15 text-white" : "bg-white/5 text-white/50")} aria-label="Toggle camera">
+          {camera ? <FiVideo /> : <FiVideoOff />}
+        </button>
+        <button onClick={toggleMic} className={cx("grid h-8 w-8 place-items-center rounded-lg", mic ? "bg-white/15 text-white" : "bg-white/5 text-white/50")} aria-label="Toggle microphone">
+          {mic ? <FiMic /> : <FiMicOff />}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={toggleHand}
+      className={cx(
+        "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold backdrop-blur transition",
+        handRaised ? "bg-amber-500/20 text-amber-300" : "bg-white/10 text-white hover:bg-white/20"
+      )}
+    >
+      <FiBell /> {handRaised ? "Hand raised" : "Raise Hand"}
+    </button>
+  );
+}
+
+export default function VideoPlayer({ event, viewers, liveToken, viewerEmail, guestName }) {
+  const { user } = useAuth();
+  const displayName = user?.full_name || guestName;
+
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
 
   const wrapRef = useRef(null);
-  const videoElRef = useRef(null);
+  const mainVideoRef = useRef(null);
   const [playing, setPlaying] = useState(isLive);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(80);
   const [progress, setProgress] = useState(32); // replay scrubber (%)
   const [fs, setFs] = useState(false);
-  const [connected, setConnected] = useState(false);
+
+  const { room, connected } = useLiveKitRoom(isLive ? liveToken : null);
+  const { participants, localCanPublish } = useRoomParticipants(room);
+
+  const hostIdentity = event.host_id ? String(event.host_id) : null;
+  const main = participants.find((p) => p.identity === hostIdentity) || participants.find((p) => !p.isLocal) || null;
+  const filmstrip = participants.filter((p) => p !== main).slice(0, 6);
 
   useEffect(() => {
     const onFs = () => setFs(Boolean(document.fullscreenElement));
@@ -43,41 +156,24 @@ export default function VideoPlayer({ event, viewers, liveToken }) {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Subscribe to the LiveKit room and attach the host's video/audio to this element.
   useEffect(() => {
-    if (!isLive || !liveToken) return;
-    const room = new Room();
-
-    const attach = (track) => {
-      if ((track.kind === Track.Kind.Video || track.kind === Track.Kind.Audio) && videoElRef.current) {
-        track.attach(videoElRef.current);
-      }
-    };
-
-    room.on(RoomEvent.TrackSubscribed, attach);
-    room.on(RoomEvent.Connected, () => setConnected(true));
-
-    room
-      .connect(liveToken.livekit_url, liveToken.token)
-      .catch(() => setConnected(false));
-
-    return () => {
-      room.disconnect();
-      setConnected(false);
-    };
-  }, [isLive, liveToken]);
+    const track = main?.videoTrack;
+    const el = mainVideoRef.current;
+    if (track && el) track.attach(el);
+    return () => track?.detach(el);
+  }, [main?.videoTrack]);
 
   // Volume/mute/play-pause apply to the real element once connected.
   useEffect(() => {
-    if (!videoElRef.current) return;
-    videoElRef.current.muted = muted;
-    videoElRef.current.volume = volume / 100;
+    if (!mainVideoRef.current) return;
+    mainVideoRef.current.muted = muted;
+    mainVideoRef.current.volume = volume / 100;
   }, [muted, volume, connected]);
 
   useEffect(() => {
-    if (!videoElRef.current) return;
-    if (playing) videoElRef.current.play().catch(() => {});
-    else videoElRef.current.pause();
+    if (!mainVideoRef.current) return;
+    if (playing) mainVideoRef.current.play().catch(() => {});
+    else mainVideoRef.current.pause();
   }, [playing, connected]);
 
   const toggleFs = () => {
@@ -119,8 +215,8 @@ export default function VideoPlayer({ event, viewers, liveToken }) {
           LiveKit can attach the host's track to it the instant it subscribes, regardless
           of whether that happens before or after `connected` state re-renders. */}
       <div className="absolute inset-0 grid place-items-center px-4 text-center">
-        <video ref={videoElRef} autoPlay playsInline className="absolute inset-0 h-full w-full object-cover" />
-        {!(isLive && connected) &&
+        <video ref={mainVideoRef} autoPlay playsInline className="absolute inset-0 h-full w-full object-cover" />
+        {!(isLive && connected && main?.videoTrack) &&
           (isEnded && !playing ? (
             <div className="flex flex-col items-center gap-3">
               <p className="text-lg font-semibold text-white">This event has ended</p>
@@ -134,10 +230,10 @@ export default function VideoPlayer({ event, viewers, liveToken }) {
           ) : (
             <div className="flex flex-col items-center gap-3">
               <span className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-white/25 to-white/5 text-3xl font-bold text-white shadow-lg backdrop-blur">
-                {initials(event.host)}
+                {initials(main?.name || event.host)}
               </span>
               <div>
-                <p className="text-sm font-semibold text-white">{event.host}</p>
+                <p className="text-sm font-semibold text-white">{main?.name || event.host}</p>
                 <p className="text-xs text-white/70">{isLive ? "Connecting…" : "Host"}</p>
               </div>
             </div>
@@ -155,6 +251,15 @@ export default function VideoPlayer({ event, viewers, liveToken }) {
             {playing ? <FiPause className="text-2xl" /> : <FiPlay className="ml-1 text-2xl" />}
           </span>
         </button>
+      )}
+
+      {/* Speaker filmstrip */}
+      {isLive && filmstrip.length > 0 && (
+        <div className="absolute bottom-16 left-3 right-3 z-10 grid grid-cols-3 gap-2 sm:grid-cols-6">
+          {filmstrip.map((p) => (
+            <SpeakerTile key={p.identity} participant={p} initials={initials} />
+          ))}
+        </div>
       )}
 
       {/* Control bar */}
@@ -201,6 +306,18 @@ export default function VideoPlayer({ event, viewers, liveToken }) {
             <span className="text-xs font-medium tabular-nums text-white/80">
               {Math.floor(progress * 0.72)}:12 / 01:12:40
             </span>
+          )}
+
+          {isLive && (
+            <div className="ml-2">
+              <StageControls
+                streamId={event.id}
+                displayName={displayName}
+                viewerEmail={viewerEmail}
+                localCanPublish={localCanPublish}
+                room={room}
+              />
+            </div>
           )}
 
           <div className="ml-auto flex items-center gap-3">
