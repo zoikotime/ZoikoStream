@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from app.db import get_db
 from app.config import settings
 
-from app.models import Organization, User
+from app.models import Membership, Organization, User
 from app.models.stream import Stream
 from app.models.channel import Channel
 from app.models.registration import Registration
@@ -76,14 +76,22 @@ def _get_org_stream(db: Session, user: User, stream_id: str) -> Stream:
 
 
 def _validate_assignee(db: Session, user: User, member_id, role: str, field: str) -> None:
-    """host_id/moderator_id must be a real user, in the caller's org, with the matching
-    role -- otherwise this fails as an unhandled 500 (FK violation) instead of a clean 400."""
+    """host_id/moderator_id must be a real user with an active membership (in that role)
+    in the caller's org -- checked against Membership rather than User.org_id/role so this
+    works regardless of which org that person currently has active elsewhere; otherwise
+    this fails as an unhandled 500 (FK violation) instead of a clean 400."""
     if member_id is None:
         return
-    member = db.scalar(select(User).where(User.id == member_id, User.org_id == user.org_id))
-    if not member:
+    membership = db.scalar(
+        select(Membership).where(
+            Membership.user_id == member_id,
+            Membership.org_id == user.org_id,
+            Membership.is_active.is_(True),
+        )
+    )
+    if not membership:
         raise HTTPException(400, f"{field} must be a member of your organization")
-    if member.role != role:
+    if membership.role != role:
         raise HTTPException(400, f"{field} must reference a user with the '{role}' role")
 
 

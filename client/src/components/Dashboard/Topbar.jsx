@@ -2,6 +2,7 @@ import { useState } from "react";
 import { FiMenu, FiBell, FiChevronDown, FiLogOut, FiUser, FiSun, FiMoon } from "react-icons/fi";
 import { useAuth } from "../../auth/AuthContext";
 import { useTheme } from "../../theme/ThemeContext";
+import OrgSwitcher from "../OrgSwitcher";
 
 const initials = (name = "") =>
   name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
@@ -77,6 +78,7 @@ export default function Topbar({ orgName, subtitle = "Organization", onMenuClick
                   </p>
                   <p className="truncate text-xs text-slate-500 dark:text-slate-400">{user?.email}</p>
                 </div>
+                <OrgSwitcher />
                 <button className="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-700">
                   <FiUser /> Profile
                 </button>

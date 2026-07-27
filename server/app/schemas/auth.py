@@ -49,6 +49,19 @@ class TokenOut(BaseModel):
     user: UserOut
 
 
+class MembershipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    org_id: uuid.UUID
+    organization_name: str
+    role: str
+    is_active: bool
+
+
+class SwitchOrgIn(BaseModel):
+    org_id: uuid.UUID
+
+
 class MemberInviteIn(BaseModel):
     full_name: str = Field(min_length=1, max_length=120)
     email: EmailStr

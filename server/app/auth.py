@@ -8,12 +8,14 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import get_db
 from .email import send_reset_otp_email, send_welcome_email
-from .models import Organization, User
+from .models import Membership, Organization, User
 from .schemas import (
     ForgotPasswordIn,
     LoginIn,
+    MembershipOut,
     RegisterIn,
     ResetPasswordIn,
+    SwitchOrgIn,
     TokenOut,
     UserOut,
     VerifyOtpIn,
@@ -28,7 +30,7 @@ OTP_TTL_MINUTES = 10
 @router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
 def register(data: RegisterIn, background: BackgroundTasks, db: Session = Depends(get_db)):
     email = data.email.lower()
-    
+
     # Auto-generate username from email if not provided (use part before @)
     if data.username:
         username = data.username.lower()
@@ -40,7 +42,7 @@ def register(data: RegisterIn, background: BackgroundTasks, db: Session = Depend
         while db.scalar(select(User).where(func.lower(User.username) == username)):
             username = f"{base_username}{counter}"
             counter += 1
-    
+
     # Check if email already exists
     exists = db.scalar(select(User).where(User.email == email))
     if exists:
@@ -62,6 +64,8 @@ def register(data: RegisterIn, background: BackgroundTasks, db: Session = Depend
         role=role,
     )
     db.add(user)
+    db.flush()  # assign user.id before the membership row references it
+    db.add(Membership(user_id=user.id, org_id=org.id, role=role, is_active=True))
     db.commit()
     db.refresh(user)
 
@@ -86,11 +90,11 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is disabled")
-    
+
     # Include organization name in response
     user_out = UserOut.model_validate(user)
     user_out.organization_name = user.organization.name if user.organization else None
-    
+
     return TokenOut(
         access_token=create_access_token(user, remember=data.remember),
         user=user_out,
@@ -143,6 +147,44 @@ def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)):
+    user_out = UserOut.model_validate(user)
+    user_out.organization_name = user.organization.name if user.organization else None
+    return user_out
+
+
+@router.get("/memberships", response_model=list[MembershipOut])
+def memberships(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(Membership).where(Membership.user_id == user.id).order_by(Membership.created_at)
+    ).all()
+    return [
+        MembershipOut(
+            org_id=m.org_id,
+            organization_name=m.organization.name if m.organization else "Organization",
+            role=m.role,
+            is_active=m.is_active,
+        )
+        for m in rows
+    ]
+
+
+@router.post("/switch-org", response_model=UserOut)
+def switch_org(data: SwitchOrgIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    membership = db.scalar(
+        select(Membership).where(
+            Membership.user_id == user.id,
+            Membership.org_id == data.org_id,
+            Membership.is_active.is_(True),
+        )
+    )
+    if not membership:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "You aren't a member of that organization")
+
+    user.org_id = membership.org_id
+    user.role = membership.role
+    db.commit()
+    db.refresh(user)
+
     user_out = UserOut.model_validate(user)
     user_out.organization_name = user.organization.name if user.organization else None
     return user_out

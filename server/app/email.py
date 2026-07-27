@@ -137,6 +137,35 @@ def send_member_invite_email(to: str, name: str, role: str, org_name: str, temp_
     _send(to, f"You've been added to {org_name} on ZoikoStream", _member_invite_html(to, name, role, org_name, temp_password))
 
 
+def _added_to_org_html(name: str, role: str, org_name: str) -> str:
+    safe_name = html.escape(name or "there")
+    safe_role = html.escape(role.capitalize())
+    safe_org = html.escape(org_name or "another organization")
+    login_url = f"{_base_url()}/login"
+    return _shell(f"""
+    {_header("You're in!")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>You've been added to <strong>{safe_org}</strong> on ZoikoStream as a
+         <strong>{safe_role}</strong>. Sign in with your existing ZoikoStream account and
+         switch into it from your account menu.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{login_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Sign In
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
+def send_added_to_org_email(to: str, name: str, role: str, org_name: str) -> None:
+    # Unlike send_member_invite_email, this is for someone who already has a ZoikoStream
+    # login (matched by email) and is simply gaining membership in one more org -- no new
+    # password to generate or send.
+    _send(to, f"You've been added to {org_name} on ZoikoStream", _added_to_org_html(name, role, org_name))
+
+
 def _registration_html(name: str, event_title: str, watch_url: str) -> str:
     safe_name = html.escape(name or "there")
     safe_title = html.escape(event_title)
