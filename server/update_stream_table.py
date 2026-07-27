@@ -1,7 +1,6 @@
 from sqlalchemy import text
 from app.db import engine
 
-
 def add_column():
 
     with engine.connect() as conn:

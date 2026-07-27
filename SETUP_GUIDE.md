@@ -149,6 +149,7 @@ GET    /dashboard/platform/stats  → Platform-wide stats (super_admin only)
 
 ## Files Modified
 
+
 ### Backend
 - `server/app/schemas.py` - Updated RegisterIn, UserOut
 - `server/app/auth.py` - Fixed registration, added org_name to responses

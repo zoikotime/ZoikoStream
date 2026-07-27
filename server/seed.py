@@ -1,12 +1,3 @@
-#!/usr/bin/env python
-"""
-Seed script to initialize the database with the super admin user and test database connection.
-Run this after setting up the database and before starting the server.
-
-Usage:
-  python seed.py
-"""
-
 import secrets
 import sys
 from sqlalchemy import func, select
