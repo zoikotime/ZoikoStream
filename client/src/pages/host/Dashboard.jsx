@@ -12,9 +12,12 @@ import FeatureModal from "../../components/host/FeatureModal";
 import { useAuth } from "../../auth/AuthContext";
 import api, { errMsg } from "../../api";
 import { notify } from "../../ui/Toast";
+import { cx } from "../../ui/tokens";
 import { fmtDate } from "../../data/events";
 
-// Events this host is actually assigned to broadcast (not every org event).
+// Events this host is actually assigned to broadcast (not every org event). Includes
+// canceled/completed ones too -- a host who expects to run an event should be able to
+// see it landed in that state (and why) rather than have it silently vanish.
 function useAssignedEvents(userId) {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -23,7 +26,7 @@ function useAssignedEvents(userId) {
     api
       .get("/streams")
       .then((res) => {
-        setEvents(res.data.filter((e) => e.host_id === userId && !["completed", "canceled"].includes(e.status)));
+        setEvents(res.data.filter((e) => e.host_id === userId));
       })
       .catch(() => setEvents([]))
       .finally(() => setLoading(false));
@@ -31,6 +34,14 @@ function useAssignedEvents(userId) {
 
   return { events, loading };
 }
+
+const DEAD_STATUSES = ["completed", "canceled"];
+
+const STATUS_BADGE = {
+  live: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400",
+  canceled: "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
+  completed: "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
+};
 
 function EventPicker({ events, loading, onSelect }) {
   return (
@@ -46,25 +57,34 @@ function EventPicker({ events, loading, onSelect }) {
               No events are assigned to you yet — ask your organization admin to set you as the host on an event.
             </p>
           )}
-          {events.map((e) => (
-            <button
-              key={e.id}
-              onClick={() => onSelect(e.id)}
-              className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-left transition hover:border-emerald-400 hover:bg-emerald-50/40 dark:border-slate-700 dark:hover:border-emerald-500/50 dark:hover:bg-emerald-500/10"
-            >
-              <div className="min-w-0">
-                <p className="truncate font-medium text-slate-800 dark:text-slate-100">{e.title}</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {e.status === "live" ? "Live now" : fmtDate(e.scheduled_date)}
-                </p>
-              </div>
-              {e.status === "live" && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700 dark:bg-rose-500/15 dark:text-rose-400">
-                  LIVE
-                </span>
-              )}
-            </button>
-          ))}
+          {events.map((e) => {
+            const dead = DEAD_STATUSES.includes(e.status);
+            return (
+              <button
+                key={e.id}
+                onClick={() => !dead && onSelect(e.id)}
+                disabled={dead}
+                className={cx(
+                  "flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition",
+                  dead
+                    ? "cursor-not-allowed border-slate-200 opacity-60 dark:border-slate-800"
+                    : "border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/40 dark:border-slate-700 dark:hover:border-emerald-500/50 dark:hover:bg-emerald-500/10"
+                )}
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-slate-800 dark:text-slate-100">{e.title}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {e.status === "live" ? "Live now" : fmtDate(e.scheduled_date)}
+                  </p>
+                </div>
+                {(e.status === "live" || dead) && (
+                  <span className={cx("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold capitalize", STATUS_BADGE[e.status])}>
+                    {e.status === "live" ? "Live" : e.status}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -90,9 +110,12 @@ export default function HostDashboard() {
   const roomRef = useRef(null);
   const videoRef = useRef(null);
 
-  // Auto-select if this host only has exactly one assignable event — derived, not
-  // stored, so there's no setState-in-effect render cascade.
-  const effectiveSelectedId = selectedId || (!loading && events.length === 1 ? events[0].id : null);
+  // Auto-select if this host only has exactly one *actionable* event — derived, not
+  // stored, so there's no setState-in-effect render cascade. A lone canceled/completed
+  // event should still land on the picker (so its status is visible), not skip straight
+  // past it.
+  const actionable = events.filter((e) => !DEAD_STATUSES.includes(e.status));
+  const effectiveSelectedId = selectedId || (!loading && actionable.length === 1 ? actionable[0].id : null);
   const selectedEvent = events.find((e) => e.id === effectiveSelectedId) || null;
 
   // Never leave a LiveKit connection open if the host navigates away mid-broadcast.
