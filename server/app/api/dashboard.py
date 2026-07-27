@@ -11,6 +11,7 @@ from ..models import Organization, User
 from ..models.stream import Stream
 from ..models.view import StreamView
 from ..security import get_current_user
+from ..services.analytics import RANGES, org_analytics
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -79,6 +80,23 @@ def get_org_stats(
         "total_viewers": total_viewers or 0,
         "total_users": org_users or 0,
     }
+
+
+@router.get("/org/analytics")
+def get_org_analytics(
+    range: str = "30d",
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Real analytics for the org Analytics page, derived from StreamView/Registration/
+    Stream. See services/analytics.py for exactly what is and isn't covered."""
+    if user.role not in ["org_admin", "super_admin"]:
+        return {"error": "Unauthorized", "message": "Only admins can access analytics"}
+
+    if range not in RANGES:
+        return {"error": "Invalid range", "message": f"range must be one of {list(RANGES)}"}
+
+    return org_analytics(db, user.org_id, range)
 
 
 @router.get("/platform/stats")
