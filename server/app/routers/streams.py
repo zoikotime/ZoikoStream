@@ -26,6 +26,7 @@ from app.schemas.stream import (
 )
 
 from app.services.livekit import create_stream_token
+from app.services.presence import viewer_count
 from app.services.registration import is_registered
 from app.services.stage import ON_STAGE, resolve_identity
 from app.services.views import record_view
@@ -381,6 +382,23 @@ def get_viewer_token(
         "token": token,
         "livekit_url": settings.LIVEKIT_URL
     }
+
+# LIVE VIEWER COUNT
+# Public, gated the same way as GET /streams/{id}. The socket layer (sockets.py) is the
+# source of truth and pushes "viewers:count" on every join/disconnect; this is only the
+# snapshot for a first render before that connection is up (e.g. the host dashboard,
+# which doesn't join the viewer presence room -- see sockets.py's is_manager check).
+@router.get("/{stream_id}/viewers/count")
+def get_viewer_count(
+    stream_id: str,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    stream = db.scalar(select(Stream).where(Stream.id == stream_id))
+    if not stream or not stream.visible_to(user):
+        raise HTTPException(404, "Stream not found")
+
+    return {"count": viewer_count(str(stream.id))}
 
 # STOP STREAM
 @router.post(

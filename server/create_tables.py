@@ -10,6 +10,8 @@ from app.models.chat import ChatMessage
 from app.models.registration import Registration
 from app.models.recording import Recording
 from app.models.view import StreamView
+from app.models.qa import QaQuestion, QaVote
+from app.models.poll import Poll, PollOption, PollVote
 
 
 print("Creating tables...")

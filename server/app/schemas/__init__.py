@@ -5,3 +5,5 @@ from .chat import *
 from .registration import *
 from .recording import *
 from .stage import *
+from .qa import *
+from .poll import *

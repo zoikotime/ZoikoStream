@@ -6,3 +6,5 @@ from .chat import ChatMessage
 from .registration import Registration
 from .recording import Recording
 from .view import StreamView
+from .qa import QaQuestion, QaVote
+from .poll import Poll, PollOption, PollVote
