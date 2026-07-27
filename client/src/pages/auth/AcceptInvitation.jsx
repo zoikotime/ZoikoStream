@@ -5,7 +5,7 @@ import { notify } from "../../ui/Toast";
 import { useAuth } from "../../auth/AuthContext";
 import { roleHome } from "../../auth/roleHome";
 import { fakeSession } from "../../auth/dummy";
-import { Field, PasswordField, SubmitButton } from "./fields";
+import { Field, PasswordField, SubmitButton } from "../../ui/forms";
 
 const ROLE_LABEL = {
   host: "Host",

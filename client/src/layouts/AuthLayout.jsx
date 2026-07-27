@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, Outlet } from "react-router-dom";
+import useInterval from "../hooks/useInterval";
 import { Logo } from "../ui";
 
 // Rotates in the brand panel to keep it feeling alive. (Kept from the original AuthPage.)
@@ -14,10 +15,7 @@ const TAGLINES = [
 // Invitation all share the exact same branding without duplicating it.
 export default function AuthLayout() {
   const [tagIdx, setTagIdx] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTagIdx((i) => (i + 1) % TAGLINES.length), 4000);
-    return () => clearInterval(id);
-  }, []);
+  useInterval(() => setTagIdx((i) => (i + 1) % TAGLINES.length), 4000);
 
   // Pointer-follow spotlight — writes CSS vars straight to the node, no re-render.
   const onMove = (e) => {

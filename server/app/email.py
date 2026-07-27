@@ -1,5 +1,8 @@
+import base64
 import html
 import logging
+from functools import lru_cache
+from pathlib import Path
 
 import httpx
 
@@ -9,6 +12,22 @@ log = logging.getLogger(__name__)
 
 RESEND_URL = "https://api.resend.com/emails"
 
+# Logo is embedded as an inline (cid) attachment, not hotlinked: recipient mail
+# clients can't reach a localhost / undeployed frontend, so the img travels with
+# the email instead. Bundled in the package so it's always available at runtime.
+LOGO_CID = "zoiko-logo"
+_LOGO_PATH = Path(__file__).parent / "assets" / "zoiko-logo.png"
+
+
+@lru_cache(maxsize=1)
+def _logo_attachment() -> dict | None:
+    try:
+        content = base64.b64encode(_LOGO_PATH.read_bytes()).decode()
+    except OSError as e:
+        log.error("Logo not found at %s: %s", _LOGO_PATH, e)
+        return None
+    return {"filename": "zoiko-logo.png", "content": content, "content_id": LOGO_CID}
+
 
 def _send(to: str, subject: str, html_body: str) -> None:
     """Post one email to Resend. Best-effort: logs and swallows failures so a mail
@@ -16,11 +35,15 @@ def _send(to: str, subject: str, html_body: str) -> None:
     if not settings.RESEND_API_KEY:
         log.warning("RESEND_API_KEY not set; skipping email to %s", to)
         return
+    payload = {"from": settings.MAIL_FROM, "to": [to], "subject": subject, "html": html_body}
+    logo = _logo_attachment()
+    if logo:
+        payload["attachments"] = [logo]
     try:
         resp = httpx.post(
             RESEND_URL,
             headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}"},
-            json={"from": settings.MAIL_FROM, "to": [to], "subject": subject, "html": html_body},
+            json=payload,
             timeout=10,
         )
         resp.raise_for_status()
@@ -45,10 +68,11 @@ def _base_url() -> str:
 
 
 def _header(title: str) -> str:
-    # White band so the navy wordmark reads. Logo is served from the frontend's /public.
+    # White band so the navy wordmark reads. Logo rides along as an inline cid
+    # attachment (see _logo_attachment) so it renders without a public image host.
     return f"""
     <div style="background:#fff;padding:36px 24px 8px;text-align:center;">
-      <img src="{_base_url()}/zoiko-logo.png" alt="ZoikoStream" height="40"
+      <img src="cid:{LOGO_CID}" alt="ZoikoStream" height="40"
            style="height:40px;width:auto;display:inline-block;" />
     </div>
     <div style="padding:20px 24px 0;text-align:center;">
@@ -134,8 +158,9 @@ if __name__ == "__main__":
     assert "&lt;script&gt;" in _welcome_html("<script>"), "name not HTML-escaped"
     assert "0421" in _otp_html("Alice", "0421"), "otp not rendered"
     assert "Alice" in _otp_html("Alice", "0421")
-    assert "zoiko-logo.png" in _welcome_html("Alice"), "logo missing from welcome email"
-    assert "zoiko-logo.png" in _otp_html("Alice", "0421"), "logo missing from otp email"
+    assert f"cid:{LOGO_CID}" in _welcome_html("Alice"), "logo cid missing from welcome email"
+    assert f"cid:{LOGO_CID}" in _otp_html("Alice", "0421"), "logo cid missing from otp email"
+    assert _logo_attachment() and _logo_attachment()["content_id"] == LOGO_CID, "logo attachment missing"
     invite = _invite_html("<b>Acme</b>", "<i>Bob</i>", "https://x/accept-invite?token=abc")
     assert "&lt;b&gt;Acme&lt;/b&gt;" in invite and "&lt;i&gt;Bob&lt;/i&gt;" in invite, "invite not escaped"
     assert "accept-invite?token=abc" in invite, "invite link missing"

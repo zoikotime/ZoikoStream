@@ -1,7 +1,7 @@
 import { FiArrowDownRight, FiArrowUpRight } from "react-icons/fi";
 import Counter from "../../ui/Counter";
-import Sparkline from "./Sparkline";
-import { SERIES, cx, surface, t150, type } from "./tokens";
+import { Sparkline } from "../../ui/charts";
+import { SERIES, cx, panelSurface, t150, type } from "../../ui/tokens";
 
 // Metric tile: label + count-up value + trend delta (color + icon) + optional sparkline.
 // The delta + sparkline are what make the dashboard feel "alive". Renders a
@@ -21,7 +21,7 @@ export default function StatCard({
 }) {
   if (loading) {
     return (
-      <div className={cx(surface, "p-4", className)} aria-hidden="true">
+      <div className={cx(panelSurface, "p-4", className)} aria-hidden="true">
         <div className="zk-skeleton h-3 w-20 rounded bg-slate-200 dark:bg-slate-800" />
         <div className="zk-skeleton mt-2 h-7 w-28 rounded bg-slate-200 dark:bg-slate-800" />
         {trend !== undefined && <div className="zk-skeleton mt-3 h-9 w-full rounded bg-slate-200 dark:bg-slate-800" />}
@@ -30,7 +30,7 @@ export default function StatCard({
   }
 
   return (
-    <div className={cx(surface, t150, "group p-4 hover:border-slate-300 dark:hover:border-slate-700", className)}>
+    <div className={cx(panelSurface, t150, "group p-4 hover:border-slate-300 dark:hover:border-slate-700", className)}>
       <p className={cx(type.label, "font-medium text-slate-500 dark:text-slate-400")}>{label}</p>
       <div className="mt-1 flex items-end justify-between gap-3">
         <p className={cx(type.stat, "text-slate-900 dark:text-white")}>

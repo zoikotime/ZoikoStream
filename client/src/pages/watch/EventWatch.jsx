@@ -2,7 +2,8 @@
 // Viewer Portal — what attendees see from an event invite link.
 // Route: /events/:eventId/watch. Standalone public page (NOT the Org Dashboard).
 // No backend: video is a dummy surface, all interactions run on local state.
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import useInterval from "../../hooks/useInterval";
 import { Link, useParams } from "react-router-dom";
 import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
@@ -24,14 +25,7 @@ export default function EventWatch() {
 
   // Live viewer count that gently drifts (setState only in the interval callback).
   const [viewers, setViewers] = useState(event?.viewers ?? startingViewers);
-  useEffect(() => {
-    if (!live) return;
-    const t = setInterval(
-      () => setViewers((v) => Math.max(0, v + Math.floor(Math.random() * 15) - 6)),
-      3000
-    );
-    return () => clearInterval(t);
-  }, [live]);
+  useInterval(() => setViewers((v) => Math.max(0, v + Math.floor(Math.random() * 15) - 6)), 3000, live);
 
   if (!event)
     return (

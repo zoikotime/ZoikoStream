@@ -1,7 +1,7 @@
 import { FiArrowUpRight, FiArrowDownRight } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import Counter from "../../ui/Counter";
-import Sparkline from "./Sparkline";
+import { Sparkline } from "../../ui/charts";
 
 // KPI value + delta + sparkline, laid out for the revenue / analytics strips.
 // Distinct from StatsCard (which is icon-led, no sparkline). Reuses Counter + Sparkline.

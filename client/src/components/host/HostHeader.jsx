@@ -1,6 +1,7 @@
 // client/src/components/host/HostHeader.jsx
 // Studio top bar: brand, welcome, current event + status, and a live clock.
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import useInterval from "../../hooks/useInterval";
 import { Link } from "react-router-dom";
 import { FiSun, FiMoon, FiBell, FiLogOut } from "react-icons/fi";
 import { useAuth } from "../../auth/AuthContext";
@@ -13,10 +14,7 @@ export default function HostHeader({ event, live }) {
   const { theme, toggle } = useTheme();
   const [now, setNow] = useState(() => new Date());
 
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
+  useInterval(() => setNow(new Date()), 1000);
 
   const hostName = user?.full_name || "Host";
   const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });

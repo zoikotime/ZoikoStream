@@ -9,9 +9,8 @@ import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import StatsCard from "../../ui/StatsCard";
 import { notify } from "../../ui/Toast";
-import BarChartCard from "../../components/Dashboard/BarChartCard";
-import AreaChartCard from "../../components/Dashboard/AreaChartCard";
-import DonutChartCard from "../../components/Dashboard/DonutChartCard";
+import { AreaChart, BarChart, PieChart } from "../../ui/charts";
+import DataTable from "../../components/admin/DataTable";
 import { fmtDate } from "../../data/events";
 import {
   CHART, CATEGORICAL, RANGES, rangeLabel, summary, trends,
@@ -21,11 +20,25 @@ import {
 const control =
   "rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-700 shadow-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200";
 
-const th = "px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-400 whitespace-nowrap";
-const td = "px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap";
-
 const engTone = (v) =>
   v >= 70 ? CHART.emerald : v >= 55 ? CHART.amber : CHART.rose;
+
+// Recent-reports table columns for the shared DataTable (render preserves the
+// original cell styling exactly: bold event, right-aligned metrics, engagement bar).
+const reportColumns = [
+  { key: "event", header: "Event", className: "whitespace-nowrap", render: (r) => <span className="font-medium text-slate-800 dark:text-slate-100">{r.event}</span> },
+  { key: "date", header: "Date", className: "whitespace-nowrap", render: (r) => fmtDate(r.date) },
+  { key: "viewers", header: "Total Viewers", align: "right", className: "whitespace-nowrap", render: (r) => r.viewers.toLocaleString() },
+  { key: "watchHours", header: "Watch Time", align: "right", className: "whitespace-nowrap", render: (r) => `${r.watchHours.toLocaleString()} hrs` },
+  { key: "engagement", header: "Engagement", className: "whitespace-nowrap", render: (r) => (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+        <div className="h-full rounded-full" style={{ width: `${r.engagement}%`, background: engTone(r.engagement) }} />
+      </div>
+      <span className="tabular-nums font-medium text-slate-700 dark:text-slate-200">{r.engagement}%</span>
+    </div>
+  ) },
+];
 
 // Horizontal ranked bars — reused for Top Events and Viewer Locations.
 function RankedBars({ title, subtitle, items, color, format }) {
@@ -122,14 +135,14 @@ export default function OrganizationAnalytics() {
 
       {/* Charts */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <AreaChartCard
+        <AreaChart
           title="Viewership Growth"
           subtitle={`Viewers · ${label}`}
           data={t.viewership}
           keys={[{ key: "value", name: "Viewers", color: CHART.violet }]}
           type="area"
         />
-        <AreaChartCard
+        <AreaChart
           title="Attendance Trend"
           subtitle="Registered vs. attended"
           data={t.attendance}
@@ -139,8 +152,8 @@ export default function OrganizationAnalytics() {
           ]}
           type="line"
         />
-        <BarChartCard title="Watch Time" subtitle={`Hours watched · ${label}`} data={t.watchTime} color={CHART.violet} />
-        <AreaChartCard
+        <BarChart title="Watch Time" subtitle={`Hours watched · ${label}`} data={t.watchTime} color={CHART.violet} />
+        <AreaChart
           title="Audience Retention"
           subtitle="% of audience still watching"
           data={retention}
@@ -154,8 +167,8 @@ export default function OrganizationAnalytics() {
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <RankedBars title="Top Performing Events" subtitle="By total viewers" items={topEvents} color={CHART.violet} format={(v) => v.toLocaleString()} />
         <RankedBars title="Viewer Locations" subtitle="Share of total viewers" items={locations} color={CHART.blue} format={(v) => `${v}%`} />
-        <DonutChartCard title="Devices Used" subtitle="How viewers tuned in" data={devices} colors={CATEGORICAL} />
-        <DonutChartCard title="Traffic Sources" subtitle="Where viewers came from" data={trafficSources} colors={CATEGORICAL} />
+        <PieChart title="Devices Used" subtitle="How viewers tuned in" data={devices} colors={CATEGORICAL} />
+        <PieChart title="Traffic Sources" subtitle="Where viewers came from" data={trafficSources} colors={CATEGORICAL} />
       </div>
 
       {/* Recent reports */}
@@ -172,37 +185,7 @@ export default function OrganizationAnalytics() {
             <FiDownload /> Export CSV
           </button>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px]">
-            <thead className="border-b border-slate-100 dark:border-slate-800">
-              <tr>
-                <th className={th}>Event</th>
-                <th className={th}>Date</th>
-                <th className={`${th} text-right`}>Total Viewers</th>
-                <th className={`${th} text-right`}>Watch Time</th>
-                <th className={th}>Engagement</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {reports.map((r) => (
-                <tr key={r.id} className="transition hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                  <td className={cx(td, "font-medium text-slate-800 dark:text-slate-100")}>{r.event}</td>
-                  <td className={td}>{fmtDate(r.date)}</td>
-                  <td className={cx(td, "text-right tabular-nums")}>{r.viewers.toLocaleString()}</td>
-                  <td className={cx(td, "text-right tabular-nums")}>{r.watchHours.toLocaleString()} hrs</td>
-                  <td className={td}>
-                    <div className="flex items-center gap-2">
-                      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-                        <div className="h-full rounded-full" style={{ width: `${r.engagement}%`, background: engTone(r.engagement) }} />
-                      </div>
-                      <span className="tabular-nums font-medium text-slate-700 dark:text-slate-200">{r.engagement}%</span>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable columns={reportColumns} rows={reports} rowKey={(r) => r.id} minWidth={720} />
       </Card>
     </div>
   );

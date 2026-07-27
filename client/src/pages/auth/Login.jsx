@@ -5,7 +5,7 @@ import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import { roleHome } from "../../auth/roleHome";
-import { Field, PasswordField, SubmitButton } from "./fields";
+import { Field, PasswordField, SubmitButton, Checkbox } from "../../ui/forms";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
@@ -73,11 +73,10 @@ export default function Login() {
           />
           <div className="mt-3 flex items-center justify-between">
             <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={remember}
                 onChange={(e) => setRemember(e.target.checked)}
-                className="h-4 w-4 rounded accent-emerald-600"
+                className="rounded accent-emerald-600"
               />
               Remember Me
             </label>

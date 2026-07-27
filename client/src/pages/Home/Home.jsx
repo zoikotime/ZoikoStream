@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import Header from "../../components/home/Header/Header";
+import MarketingLayout from "../../layouts/MarketingLayout";
 import Hero from "../../components/home/Hero/Hero";
 import { SectionFallback } from "../../ui";
 
@@ -19,29 +19,22 @@ const Footer = lazy(() => import("../../components/home/Footer/Footer"));
 
 export default function Home() {
   return (
-    <div className="min-h-screen overflow-x-clip bg-white dark:bg-slate-950">
-      {/* Keyboard/screen-reader skip link */}
-      <a href="#main" className="zk-skip rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-lg">
-        Skip to content
-      </a>
-      <Header />
-      <main id="main">
-        <Hero />
-        <Suspense fallback={<SectionFallback />}>
-          <PlatformDefinition />
-          <AudiencePathways />
-          <MediaLifecycle />
-          <DeveloperPlatform />
-          <EnterpriseOperations />
-          <LiveEvents />
-          <Trust />
-          <Proof />
-          <CTA />
-          <Resources />
-          <FAQ />
-          <Footer />
-        </Suspense>
-      </main>
-    </div>
+    <MarketingLayout>
+      <Hero />
+      <Suspense fallback={<SectionFallback />}>
+        <PlatformDefinition />
+        <AudiencePathways />
+        <MediaLifecycle />
+        <DeveloperPlatform />
+        <EnterpriseOperations />
+        <LiveEvents />
+        <Trust />
+        <Proof />
+        <CTA />
+        <Resources />
+        <FAQ />
+        <Footer />
+      </Suspense>
+    </MarketingLayout>
   );
 }

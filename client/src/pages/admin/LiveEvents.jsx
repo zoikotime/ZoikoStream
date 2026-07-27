@@ -6,6 +6,7 @@ import { cx } from "../../ui/tokens";
 import Card from "../../ui/Card";
 import StatsCard from "../../ui/StatsCard";
 import HealthDot from "../../components/admin/HealthDot";
+import DataTable from "../../components/admin/DataTable";
 import { liveEvents, counts, summary } from "../../data/liveEvents";
 
 // Tabs in the requested order; default to Live (the monitoring focus).
@@ -41,8 +42,6 @@ const REPLAY = {
 const initials = (name = "") =>
   name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 
-const th = "px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-400 whitespace-nowrap";
-const td = "px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap";
 const dash = <span className="text-slate-300 dark:text-slate-600">—</span>;
 
 // Badge cell from a state map (recording/replay); em-dash when absent.
@@ -73,6 +72,31 @@ export default function LiveEvents() {
   ];
 
   const latencyColor = (ms) => (ms >= 100 ? "text-rose-600 dark:text-rose-400" : ms >= 70 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300");
+
+  // Columns for the shared DataTable — each render preserves the original cell exactly.
+  const eventColumns = [
+    { key: "org", header: "Organization", className: "whitespace-nowrap", render: (e) => (
+      <div className="flex items-center gap-2.5">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 text-[10px] font-semibold text-white">
+          {initials(e.org)}
+        </span>
+        <span className="font-medium text-slate-800 dark:text-slate-100">{e.org}</span>
+      </div>
+    ) },
+    { key: "title", header: "Event", className: "whitespace-nowrap", render: (e) => (
+      <>
+        <p className="font-medium text-slate-800 dark:text-slate-100">{e.title}</p>
+        <p className={cx("text-xs", e.reason ? "text-rose-500 dark:text-rose-400" : "text-slate-400")}>{e.reason || e.time}</p>
+      </>
+    ) },
+    { key: "status", header: "Status", className: "whitespace-nowrap", render: (e) => <HealthDot badge {...STATUS[e.status]} /> },
+    { key: "bitrate", header: "Bitrate", align: "right", className: "whitespace-nowrap", render: (e) => (e.bitrate ? `${e.bitrate.toFixed(1)} Mbps` : dash) },
+    { key: "viewers", header: "Viewers", align: "right", className: "whitespace-nowrap", render: (e) => (e.viewers != null ? e.viewers.toLocaleString() : dash) },
+    { key: "latency", header: "Latency", align: "right", className: "whitespace-nowrap", render: (e) => (e.latency != null ? <span className={cx("font-medium", latencyColor(e.latency))}>{e.latency} ms</span> : dash) },
+    { key: "health", header: "Health", className: "whitespace-nowrap", render: (e) => (e.health ? <HealthDot status={e.health} /> : dash) },
+    { key: "recording", header: "Recording", className: "whitespace-nowrap", render: (e) => jobCell(REC, e.recording) },
+    { key: "replay", header: "Replay", className: "whitespace-nowrap", render: (e) => jobCell(REPLAY, e.replay) },
+  ];
 
   return (
     <div className="space-y-6">
@@ -132,61 +156,13 @@ export default function LiveEvents() {
         </div>
 
         {/* Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[1040px]">
-            <thead className="border-b border-slate-100 dark:border-slate-800">
-              <tr>
-                <th className={th}>Organization</th>
-                <th className={th}>Event</th>
-                <th className={th}>Status</th>
-                <th className={`${th} text-right`}>Bitrate</th>
-                <th className={`${th} text-right`}>Viewers</th>
-                <th className={`${th} text-right`}>Latency</th>
-                <th className={th}>Health</th>
-                <th className={th}>Recording</th>
-                <th className={th}>Replay</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {rows.map((e) => (
-                <tr key={e.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                  <td className={td}>
-                    <div className="flex items-center gap-2.5">
-                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 text-[10px] font-semibold text-white">
-                        {initials(e.org)}
-                      </span>
-                      <span className="font-medium text-slate-800 dark:text-slate-100">{e.org}</span>
-                    </div>
-                  </td>
-                  <td className={td}>
-                    <p className="font-medium text-slate-800 dark:text-slate-100">{e.title}</p>
-                    <p className={cx("text-xs", e.reason ? "text-rose-500 dark:text-rose-400" : "text-slate-400")}>
-                      {e.reason || e.time}
-                    </p>
-                  </td>
-                  <td className={td}>
-                    <HealthDot badge {...STATUS[e.status]} />
-                  </td>
-                  <td className={`${td} text-right tabular-nums`}>{e.bitrate ? `${e.bitrate.toFixed(1)} Mbps` : dash}</td>
-                  <td className={`${td} text-right tabular-nums`}>{e.viewers != null ? e.viewers.toLocaleString() : dash}</td>
-                  <td className={`${td} text-right tabular-nums`}>
-                    {e.latency != null ? <span className={cx("font-medium", latencyColor(e.latency))}>{e.latency} ms</span> : dash}
-                  </td>
-                  <td className={td}>{e.health ? <HealthDot status={e.health} /> : dash}</td>
-                  <td className={td}>{jobCell(REC, e.recording)}</td>
-                  <td className={td}>{jobCell(REPLAY, e.replay)}</td>
-                </tr>
-              ))}
-              {rows.length === 0 && (
-                <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center text-sm text-slate-400">
-                    No {tab} events{q ? " match your search" : ""}.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          columns={eventColumns}
+          rows={rows}
+          rowKey={(e) => e.id}
+          minWidth={1040}
+          empty={{ title: `No ${tab} events${q ? " match your search" : ""}.` }}
+        />
       </Card>
     </div>
   );

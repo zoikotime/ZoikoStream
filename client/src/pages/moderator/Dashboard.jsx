@@ -2,7 +2,8 @@
 // Moderator Dashboard — real-time audience management during a live event.
 // Route: /moderator/dashboard. Standalone console (NOT the Org Dashboard).
 // No backend: all moderation actions mutate local state and log to the activity feed.
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import useInterval from "../../hooks/useInterval";
 import ModeratorHeader from "../../components/moderation/ModeratorHeader";
 import SummaryCards from "../../components/moderation/SummaryCards";
 import ParticipantsPanel from "../../components/moderation/ParticipantsPanel";
@@ -32,11 +33,7 @@ export default function ModeratorDashboard() {
   };
 
   // Live viewer count drift (setState only inside the interval callback).
-  useEffect(() => {
-    if (currentEvent.status !== "Live") return;
-    const t = setInterval(() => setViewers((v) => Math.max(0, v + Math.floor(Math.random() * 13) - 6)), 3000);
-    return () => clearInterval(t);
-  }, []);
+  useInterval(() => setViewers((v) => Math.max(0, v + Math.floor(Math.random() * 13) - 6)), 3000, currentEvent.status === "Live");
 
   // Participants
   const muteParticipant = (id) => {

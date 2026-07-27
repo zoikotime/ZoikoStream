@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import useInterval from "../../../hooks/useInterval";
 import { FiUploadCloud, FiCpu, FiLock, FiGlobe, FiPlayCircle } from "react-icons/fi";
 
 // Heavyweight interactive #1: the media pipeline. Auto-advances through stages,
@@ -24,11 +25,7 @@ export default function MediaPipeline() {
 
   // Auto-advance until the user engages (works on touch, where hover never fires),
   // paused on hover, and off under reduced-motion.
-  useEffect(() => {
-    if (paused || engaged || prefersReducedMotion()) return;
-    const id = setInterval(() => setIndex((i) => (i + 1) % STAGES.length), 3200);
-    return () => clearInterval(id);
-  }, [paused, engaged]);
+  useInterval(() => setIndex((i) => (i + 1) % STAGES.length), 3200, !paused && !engaged && !prefersReducedMotion());
 
   const select = (i) => { setIndex(i); setEngaged(true); };
 

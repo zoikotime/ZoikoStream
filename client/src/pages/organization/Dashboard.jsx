@@ -1,14 +1,16 @@
-import { useEffect, useState } from "react";
-import { FiCalendar, FiRadio, FiCheckSquare, FiUsers } from "react-icons/fi";
 import { useAuth } from "../../auth/AuthContext";
 import api from "../../api";
-import DashboardCard from "../../components/Dashboard/DashboardCard";
-import BarChartCard from "../../components/Dashboard/BarChartCard";
-import RadialCard from "../../components/Dashboard/RadialCard";
+import useApi from "../../hooks/useApi";
+import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
+import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
+import StatCard from "../../components/admin/StatCard";
+import { BarChart, RadialChart } from "../../ui/charts";
 import RecentEvents from "../../components/Dashboard/RecentEvents";
 import StorageCard from "../../components/Dashboard/StorageCard";
 import QuickActions from "../../components/Dashboard/QuickActions";
 
+// ponytail: viewership/engagement/storage have no backend endpoint yet — kept as
+// static previews and marked. When GET /dashboard/org/analytics lands, feed these.
 const viewership = [
   { label: "Mon", value: 90 },
   { label: "Tue", value: 120 },
@@ -21,52 +23,44 @@ const viewership = [
 
 export default function OrganizationDashboard() {
   const { user } = useAuth();
-  const [stats, setStats] = useState(null);
-  const orgName = user?.organization_name || "Zoiko Organization";
+  const { data: stats, loading, error, reload } = useApi(() =>
+    api.get("/dashboard/org/stats").then((r) => r.data)
+  );
 
-  useEffect(() => {
-    // Fetch organization-specific stats
-    api
-      .get("/dashboard/org/stats")
-      .then((res) => setStats(res.data))
-      .catch((err) => console.error("Failed to fetch org stats:", err));
-  }, []);
+  const orgName =
+    stats?.organization_name || user?.organization_name || "Zoiko Organization";
 
   const kpis = [
-    { title: "Upcoming Events", value: String(stats?.upcoming_events || "5"), icon: FiCalendar, accent: "violet", delta: "12%", up: true },
-    { title: "Live Events", value: String(stats?.live_events || "1"), icon: FiRadio, accent: "emerald", live: true },
-    { title: "Completed Events", value: String(stats?.completed_events || "28"), icon: FiCheckSquare, accent: "indigo", delta: "8%", up: true },
-    { title: "Total Viewers", value: String(stats?.total_viewers || "12,530"), icon: FiUsers, accent: "amber", delta: "3%", up: false },
+    { label: "Upcoming Events", value: stats?.upcoming_events ?? 0 },
+    { label: "Live Events", value: stats?.live_events ?? 0 },
+    { label: "Completed Events", value: stats?.completed_events ?? 0 },
+    { label: "Total Viewers", value: stats?.total_viewers ?? 0 },
   ];
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-          Welcome, {orgName} 👋
-        </h1>
-        <p className="text-sm text-slate-500 dark:text-slate-400">
-          Here's what's happening across your organization today.
-        </p>
-      </div>
+      <OrganizationPageHeader
+        title={`Welcome, ${orgName}`}
+        subtitle="Here's what's happening across your organization today."
+      />
 
-      {/* KPI cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {kpis.map((k) => (
-          <DashboardCard key={k.title} {...k} />
-        ))}
-      </div>
+      {/* KPI cards — real loading skeletons, honest error state (no hidden fallback numbers) */}
+      {error ? (
+        <OrganizationErrorState error={error} onRetry={reload} title="Couldn't load dashboard stats" />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {kpis.map((k) => (
+            <StatCard key={k.label} label={k.label} value={k.value} loading={loading} />
+          ))}
+        </div>
+      )}
 
       {/* Chart + gauge */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="xl:col-span-2">
-          <BarChartCard
-            title="Viewership Growth"
-            subtitle="Daily viewers this week"
-            data={viewership}
-          />
+          <BarChart title="Viewership Growth" subtitle="Daily viewers this week" data={viewership} />
         </div>
-        <RadialCard title="Engagement" percent={75} label="avg. watch rate" footer="+6.3% vs last week" />
+        <RadialChart title="Engagement" percent={75} label="avg. watch rate" footer="+6.3% vs last week" />
       </div>
 
       {/* Recent events + side column */}

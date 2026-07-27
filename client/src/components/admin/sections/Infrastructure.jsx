@@ -1,6 +1,6 @@
 import Panel from "../Panel";
 import HealthDot, { healthColor } from "../HealthDot";
-import Sparkline from "../Sparkline";
+import { Sparkline } from "../../../ui/charts";
 import { cx } from "../../../ui/tokens";
 import { healthServices, regions } from "../../../data/platform";
 

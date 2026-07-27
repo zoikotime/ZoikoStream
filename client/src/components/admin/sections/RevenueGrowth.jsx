@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import Panel from "../Panel";
-import AreaTrend from "../AreaTrend";
+import { AreaTrend } from "../../../ui/charts";
 import { CHART, revenue } from "../../../data/platform";
 import { money } from "../format";
 
