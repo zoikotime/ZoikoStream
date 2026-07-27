@@ -1,5 +1,11 @@
 import { useNavigate } from "react-router-dom";
 import { FiPlus, FiUpload, FiUserPlus } from "react-icons/fi";
+<<<<<<< Updated upstream
+=======
+import Card from "../../ui/Card";
+import { ConsoleButton as Button } from "../../ui/Button";
+import { useNavigate } from "react-router-dom";
+>>>>>>> Stashed changes
 
 export default function QuickActions() {
   const navigate = useNavigate();
@@ -8,12 +14,18 @@ export default function QuickActions() {
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-neutral-800 dark:bg-neutral-900">
       <h2 className="mb-4 font-semibold text-slate-900 dark:text-white">Quick Actions</h2>
 
+<<<<<<< Updated upstream
       <button
         onClick={() => navigate("/organization/events/create")}
         className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-violet-700"
       >
         <FiPlus className="text-lg" /> Create Event
       </button>
+=======
+      <Button size="lg" leftIcon={FiPlus} onClick={() => navigate("/organization/events/create")} className="w-full">
+        Create Event
+      </Button>
+>>>>>>> Stashed changes
 
       {/* Secondary actions — routes land later. */}
       <div className="mt-3 grid grid-cols-2 gap-3">

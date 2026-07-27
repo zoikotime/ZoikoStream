@@ -11,7 +11,24 @@ import Dashboard from "./pages/Dashboard";
 import OrganizationDashboard from "./pages/organization/Dashboard";
 import AdminDashboard from "./pages/admin/Dashboard";
 import Organizations from "./pages/admin/Organizations";
+<<<<<<< Updated upstream
 import AuthPage from "./pages/AuthPage";
+=======
+import LiveEvents from "./pages/admin/LiveEvents";
+import AuthLayout from "./layouts/AuthLayout";
+import Login from "./pages/auth/Login";
+import CreateOrganization from "./pages/auth/CreateOrganization";
+import ForgotPassword from "./pages/auth/ForgotPassword";
+import AcceptInvitation from "./pages/auth/AcceptInvitation";
+import EventRegistration from "./pages/EventRegistration";
+import HostDashboard from "./pages/host/Dashboard";
+import EventWatch from "./pages/watch/EventWatch";
+import ModeratorDashboard from "./pages/moderator/Dashboard";
+import OrganizationProfile from "./pages/organization/Profile";
+
+// Public marketing homepage — code-split from the app bundle.
+const Home = lazy(() => import("./pages/Home/Home"));
+>>>>>>> Stashed changes
 
 // ponytail: one placeholder for routes not built yet — replace each with a real page as it lands
 function Placeholder({ title }) {
@@ -66,9 +83,20 @@ export default function App() {
             <Route element={<RoleRoute allow={["org_admin"]} />}>
               <Route element={<OrganizationLayout />}>
                 <Route path="/organization/dashboard" element={<OrganizationDashboard />} />
+<<<<<<< Updated upstream
                 {orgStubs.map((p) => (
                   <Route key={p} path={`/organization/${p}`} element={<Placeholder title={cap(p)} />} />
                 ))}
+=======
+                <Route path="/organization/events" element={<OrganizationEvents />} />
+                <Route path="/organization/recordings" element={<OrganizationRecordings />} />
+                <Route path="/organization/analytics" element={<OrganizationAnalytics />} />
+                <Route path="/organization/billing" element={<OrganizationBilling />} />
+                <Route path="/organization/settings" element={<OrganizationSettings />} />
+                <Route path="/organization/events/:id" element={<EventDetails />} />
+                <Route path="/organization/users" element={<InviteMembers />} />
+                <Route path="/organization/profile" element={<OrganizationProfile />} />
+>>>>>>> Stashed changes
               </Route>
             </Route>
 
