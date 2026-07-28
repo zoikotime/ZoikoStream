@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000",
+  baseURL: import.meta.env.VITE_API_URL || "http://localhost:8001",
 });
 
 // Attach the stored token to every request.
@@ -13,6 +13,12 @@ api.interceptors.request.use((config) => {
 
 export default api;
 
-// Turn an axios error into a readable message for toasts.
-export const errMsg = (e, fallback = "Something went wrong") =>
-  e?.response?.data?.detail || e?.message || fallback;
+// Turn an axios error into a readable string for toasts. Must always return a
+// string: FastAPI 422s send `detail` as an array of {loc,msg,...} objects, and
+// passing a non-string to toast.error() crashes React (blank screen).
+export const errMsg = (e, fallback = "Something went wrong") => {
+  const d = e?.response?.data?.detail;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) return d.map((x) => x?.msg).filter(Boolean).join(", ") || fallback;
+  return e?.message || fallback;
+};

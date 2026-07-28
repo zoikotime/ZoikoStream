@@ -7,7 +7,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+<<<<<<< HEAD
 from ..models import Organization, User , Event
+=======
+from ..models import Organization, User
+>>>>>>> origin/main
 from ..security import get_current_user
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -54,6 +58,7 @@ def get_org_stats(
         select(func.count(User.id)).where(User.org_id == user.org_id)
     )
     
+<<<<<<< HEAD
     upcoming_events = db.scalar(
         select(func.count(Event.id)).where(
            Event.org_id == user.org_id,
@@ -86,6 +91,16 @@ def get_org_stats(
         "completed_events": completed_events or 5,
         "total_viewers": 12530,   # Replace later when viewer tracking exists
         "total_users": org_users or 50,
+=======
+    return {
+        "organization_id": str(user.org_id),
+        "organization_name": org.name,
+        "upcoming_events": 5,  # ponytail: fetch from events table when it exists
+        "live_events": 1,
+        "completed_events": 28,
+        "total_viewers": 12530,
+        "total_users": org_users or 0,
+>>>>>>> origin/main
     }
 
 

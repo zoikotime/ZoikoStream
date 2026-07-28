@@ -1,13 +1,14 @@
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import get_db
-from app.models import User, Organization
+from .email import send_reset_otp_email, send_welcome_email
+from .models import Organization, User
 from .schemas import (
     ForgotPasswordIn,
     LoginIn,
@@ -15,21 +16,35 @@ from .schemas import (
     ResetPasswordIn,
     TokenOut,
     UserOut,
+    VerifyOtpIn,
 )
 from .security import create_access_token, get_current_user, hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+OTP_TTL_MINUTES = 10
+
 
 @router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
-def register(data: RegisterIn, db: Session = Depends(get_db)):
+def register(data: RegisterIn, background: BackgroundTasks, db: Session = Depends(get_db)):
     email = data.email.lower()
-    username = data.username.lower()
-    exists = db.scalar(
-        select(User).where(or_(User.email == email, func.lower(User.username) == username))
-    )
+    
+    # Auto-generate username from email if not provided (use part before @)
+    if data.username:
+        username = data.username.lower()
+    else:
+        # Use email prefix as username; make it unique by appending a number if needed
+        base_username = email.split("@")[0].lower()
+        username = base_username
+        counter = 1
+        while db.scalar(select(User).where(func.lower(User.username) == username)):
+            username = f"{base_username}{counter}"
+            counter += 1
+    
+    # Check if email already exists
+    exists = db.scalar(select(User).where(User.email == email))
     if exists:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email or username already taken")
+        raise HTTPException(status.HTTP_409_CONFLICT, "Email already taken")
 
     org = Organization(name=data.organization_name)
     db.add(org)
@@ -42,14 +57,23 @@ def register(data: RegisterIn, db: Session = Depends(get_db)):
         org_id=org.id,
         full_name=data.full_name,
         email=email,
-        username=data.username,
+        username=username,
         password_hash=hash_password(data.password),
         role=role,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    return TokenOut(access_token=create_access_token(user, remember=False), user=UserOut.model_validate(user))
+
+    # Fire the welcome email after the response is sent — mail latency/outage never
+    # delays or breaks signup (send_welcome_email is best-effort and logs its own errors).
+    background.add_task(send_welcome_email, user.email, user.full_name)
+
+    # Include organization name in response
+    user_out = UserOut.model_validate(user)
+    user_out.organization_name = user.organization.name if user.organization else None
+
+    return TokenOut(access_token=create_access_token(user, remember=False), user=user_out)
 
 
 @router.post("/login", response_model=TokenOut)
@@ -62,38 +86,56 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is disabled")
+    
+    # Include organization name in response
+    user_out = UserOut.model_validate(user)
+    user_out.organization_name = user.organization.name if user.organization else None
+    
     return TokenOut(
         access_token=create_access_token(user, remember=data.remember),
-        user=UserOut.model_validate(user),
+        user=user_out,
     )
 
 
 @router.post("/forgot-password")
-def forgot_password(data: ForgotPasswordIn, db: Session = Depends(get_db)):
+def forgot_password(data: ForgotPasswordIn, background: BackgroundTasks, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == data.email.lower()))
     # Always return 200 so the endpoint can't be used to probe which emails exist.
-    resp = {"message": "If that email exists, a reset link has been sent."}
+    resp = {"message": "If that email exists, a 4-digit code has been sent."}
     if user is None:
         return resp
 
-    user.reset_token = secrets.token_urlsafe(32)
-    user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    otp = f"{secrets.randbelow(10000):04d}"  # zero-padded 4-digit code
+    user.reset_token = otp
+    user.reset_token_expires = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
     db.commit()
-    # ponytail: no email service yet — return the token so dev can complete the flow.
-    # Wire this to real email (Resend/SES) before launch and drop reset_token from the response.
-    resp["dev_reset_token"] = user.reset_token
+    # ponytail: 4-digit OTP = 10k combos; the short TTL is the only brute-force guard.
+    # Add an attempt counter (lock after ~5 tries) before this is a production reset path.
+    background.add_task(send_reset_otp_email, user.email, user.full_name, otp)
     return resp
+
+
+def _valid_otp_user(db: Session, email: str, otp: str) -> User:
+    """Look up the user by email and check the OTP is correct and unexpired.
+    Same generic error for wrong-email / wrong-otp / expired so nothing leaks."""
+    user = db.scalar(select(User).where(User.email == email.lower()))
+    expires = user.reset_token_expires if user else None
+    if user is None or user.reset_token != otp or expires is None or expires < datetime.now(timezone.utc):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
+    return user
+
+
+@router.post("/verify-otp")
+def verify_otp(data: VerifyOtpIn, db: Session = Depends(get_db)):
+    _valid_otp_user(db, data.email, data.otp)  # raises 400 if bad — code stays valid for the reset step
+    return {"message": "Code verified."}
 
 
 @router.post("/reset-password")
 def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.reset_token == data.token))
-    expires = user.reset_token_expires if user else None
-    if user is None or expires is None or expires < datetime.now(timezone.utc):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired reset token")
-
+    user = _valid_otp_user(db, data.email, data.otp)
     user.password_hash = hash_password(data.password)
-    user.reset_token = None
+    user.reset_token = None  # single-use: consume the OTP
     user.reset_token_expires = None
     db.commit()
     return {"message": "Password updated. You can now log in."}
@@ -101,4 +143,6 @@ def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)):
-    return UserOut.model_validate(user)
+    user_out = UserOut.model_validate(user)
+    user_out.organization_name = user.organization.name if user.organization else None
+    return user_out
