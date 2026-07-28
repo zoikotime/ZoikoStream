@@ -12,12 +12,23 @@ from ..crud import admin as crud
 from ..db import get_db
 from ..models import Organization, PlatformSetting, Subscription, User
 from ..schemas.admin import (
+    ApiKeyCreate,
+    ApiKeyCreated,
+    ApiKeyOut,
+    FeatureFlagCreate,
+    FeatureFlagOut,
+    FeatureFlagUpdate,
     OrgCreate,
     OrgOut,
     OrgUpdate,
     Page,
+    ReleaseCreate,
+    ReleaseOut,
     SettingsUpdate,
     SubscriptionUpdate,
+    SupportTicketCreate,
+    SupportTicketOut,
+    SupportTicketUpdate,
     UserUpdate,
 )
 from ..security import require_super_admin
@@ -188,8 +199,8 @@ def analytics(db: Session = Depends(get_db)):
 
 
 @router.get("/live-events")
-def live_events(db: Session = Depends(get_db)):
-    return svc.live_events(db)
+def live_events(state: str = Query("live", pattern="^(live|recent)$"), db: Session = Depends(get_db)):
+    return svc.live_events(db, state=state)
 
 
 @router.get("/platform-health")
@@ -235,3 +246,169 @@ def update_settings(data: SettingsUpdate, request: Request,
            meta={"keys": list(data.values.keys())})
     rows = db.scalars(select(PlatformSetting)).all()
     return {r.key: {"value": r.value, "category": r.category, "updated_at": r.updated_at} for r in rows}
+
+
+# ── Roles & permissions (read-only reference) ────────────────────────────────
+
+@router.get("/roles")
+def roles(db: Session = Depends(get_db)):
+    return svc.roles()
+
+
+# ── Feature flags ────────────────────────────────────────────────────────────
+
+@router.get("/feature-flags", response_model=list[FeatureFlagOut])
+def list_feature_flags(db: Session = Depends(get_db)):
+    return crud.list_feature_flags(db)
+
+
+@router.post("/feature-flags", response_model=FeatureFlagOut, status_code=status.HTTP_201_CREATED)
+def create_feature_flag(data: FeatureFlagCreate, request: Request,
+                        db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    if crud.get_feature_flag_by_key(db, data.key):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Flag '{data.key}' already exists")
+    flag = crud.create_feature_flag(db, data, updated_by=admin.email)
+    _audit(db, admin, request, "feature_flag.create", target_type="feature_flag",
+           target_id=flag.id, meta={"key": flag.key, "enabled": flag.enabled})
+    return flag
+
+
+@router.patch("/feature-flags/{flag_id}", response_model=FeatureFlagOut)
+def update_feature_flag(flag_id: uuid.UUID, data: FeatureFlagUpdate, request: Request,
+                        db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    flag = crud.get_feature_flag(db, flag_id)
+    if not flag:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Feature flag not found")
+    flag = crud.update_feature_flag(db, flag, data, updated_by=admin.email)
+    _audit(db, admin, request, "feature_flag.update", target_type="feature_flag",
+           target_id=flag.id, meta=data.model_dump(exclude_none=True))
+    return flag
+
+
+@router.delete("/feature-flags/{flag_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_feature_flag(flag_id: uuid.UUID, request: Request,
+                        db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    flag = crud.get_feature_flag(db, flag_id)
+    if not flag:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Feature flag not found")
+    key = flag.key
+    crud.delete_feature_flag(db, flag)
+    _audit(db, admin, request, "feature_flag.delete", target_type="feature_flag",
+           target_id=flag_id, meta={"key": key})
+
+
+# ── Release center ───────────────────────────────────────────────────────────
+
+@router.get("/releases", response_model=Page)
+def list_releases(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    items, total = crud.list_releases(db, page=page, page_size=page_size)
+    return Page(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.post("/releases", response_model=ReleaseOut, status_code=status.HTTP_201_CREATED)
+def create_release(data: ReleaseCreate, request: Request,
+                   db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    release = crud.create_release(db, data, released_by=admin.email)
+    _audit(db, admin, request, "release.create", target_type="release",
+           target_id=release.id, meta={"version": release.version, "title": release.title})
+    return release
+
+
+@router.delete("/releases/{release_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_release(release_id: uuid.UUID, request: Request,
+                   db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    release = crud.get_release(db, release_id)
+    if not release:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Release not found")
+    version = release.version
+    crud.delete_release(db, release)
+    _audit(db, admin, request, "release.delete", target_type="release",
+           target_id=release_id, meta={"version": version})
+
+
+# ── Support tickets ──────────────────────────────────────────────────────────
+
+@router.get("/support-tickets", response_model=Page)
+def list_support_tickets(
+    status_: str | None = Query(None, alias="status"),
+    org_id: uuid.UUID | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    items, total = crud.list_support_tickets(db, status=status_, org_id=org_id, page=page, page_size=page_size)
+    return Page(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.post("/support-tickets", response_model=SupportTicketOut, status_code=status.HTTP_201_CREATED)
+def create_support_ticket(data: SupportTicketCreate, request: Request,
+                          db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    org = db.get(Organization, data.org_id)
+    if not org:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    ticket = crud.create_support_ticket(db, data)
+    _audit(db, admin, request, "support_ticket.create", target_type="support_ticket",
+           target_id=ticket.id, org_id=data.org_id, meta={"subject": data.subject})
+    return ticket
+
+
+@router.patch("/support-tickets/{ticket_id}", response_model=SupportTicketOut)
+def update_support_ticket(ticket_id: uuid.UUID, data: SupportTicketUpdate, request: Request,
+                          db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    org_id = ticket.org_id
+    out = crud.update_support_ticket(db, ticket, data)
+    _audit(db, admin, request, "support_ticket.update", target_type="support_ticket",
+           target_id=ticket_id, org_id=org_id, meta=data.model_dump(exclude_none=True))
+    return out
+
+
+@router.delete("/support-tickets/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_support_ticket(ticket_id: uuid.UUID, request: Request,
+                          db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    org_id = ticket.org_id
+    crud.delete_support_ticket(db, ticket)
+    _audit(db, admin, request, "support_ticket.delete", target_type="support_ticket",
+           target_id=ticket_id, org_id=org_id)
+
+
+# ── Developer / API keys ─────────────────────────────────────────────────────
+
+@router.get("/organizations/{org_id}/api-keys", response_model=list[ApiKeyOut])
+def list_api_keys(org_id: uuid.UUID, db: Session = Depends(get_db)):
+    org = db.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    return crud.list_api_keys(db, org)
+
+
+@router.post("/organizations/{org_id}/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
+def create_api_key(org_id: uuid.UUID, data: ApiKeyCreate, request: Request,
+                   db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    org = db.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    created = crud.create_api_key(db, org, data.label)
+    _audit(db, admin, request, "api_key.create", target_type="api_key",
+           target_id=created.id, org_id=org_id, meta={"label": data.label, "prefix": created.prefix})
+    return created
+
+
+@router.delete("/organizations/{org_id}/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_api_key(org_id: uuid.UUID, key_id: str, request: Request,
+                   db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    org = db.get(Organization, org_id)
+    if not org:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    if not crud.revoke_api_key(db, org, key_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "API key not found")
+    _audit(db, admin, request, "api_key.revoke", target_type="api_key", target_id=key_id, org_id=org_id)

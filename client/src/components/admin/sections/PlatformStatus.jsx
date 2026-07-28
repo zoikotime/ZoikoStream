@@ -1,36 +1,43 @@
 import dayjs from "dayjs";
 import HealthDot from "../HealthDot";
 import StatStrip from "../StatStrip";
-import { alerts, kpis, liveActivity, platformHealth, regions, revenue, services } from "../../../data/platform";
-import { compact, money } from "../format";
+import { compact, money, seriesDelta } from "../format";
 
-// One overall verdict, derived from real status signals (regions + services + alerts).
-function overall() {
-  const down =
-    regions.some((r) => r.status === "down") ||
-    services.some((s) => s.status === "down") ||
-    alerts.some((a) => a.severity === "critical");
-  if (down) return { status: "down", label: "Service disruption" };
-  const warn =
-    regions.some((r) => r.status === "warn") ||
-    services.some((s) => s.status === "warn") ||
-    alerts.some((a) => a.severity === "warning");
-  if (warn) return { status: "warn", label: "Minor degradation" };
-  return { status: "ok", label: "All systems operational" };
-}
+const VERDICT = {
+  ok: { status: "ok", label: "All systems operational" },
+  warn: { status: "warn", label: "Minor degradation" },
+  down: { status: "down", label: "Service disruption" },
+};
 
 // Section 1 — Platform Status. The page's single opening verdict plus a compact
-// stat strip. Replaces the old eight-KPI-card wall.
-export default function PlatformStatus() {
-  const o = overall();
-  const kpi = Object.fromEntries(kpis.map((k) => [k.key, k]));
+// stat strip. `summary` is /admin/dashboard's summary block; growth deltas come
+// from the last two points of the monthly growth series (null when there isn't
+// enough history yet, rendered as no delta rather than a fabricated one).
+export default function PlatformStatus({ summary, organizationGrowth, userGrowth }) {
+  const verdict = VERDICT[summary.platform_health] || VERDICT.ok;
+  const orgDelta = seriesDelta(organizationGrowth);
+  const userDelta = seriesDelta(userGrowth);
+
   const items = [
-    { label: "Organizations", value: compact(kpi.orgs.value), delta: kpi.orgs.delta, up: kpi.orgs.up },
-    { label: "Total Users", value: compact(kpi.users.value), delta: kpi.users.delta, up: kpi.users.up },
-    { label: "Live Now", value: liveActivity.liveEvents.toLocaleString(), live: true },
-    { label: "Concurrent Viewers", value: compact(liveActivity.currentViewers), live: true },
-    { label: "MRR", value: money(revenue.mrr), delta: `${revenue.growthPct}%`, up: true },
-    { label: "Uptime (30d)", value: `${platformHealth.percent}%` },
+    {
+      label: "Organizations",
+      value: compact(summary.total_organizations),
+      delta: orgDelta ? `${orgDelta.pct}%` : undefined,
+      up: orgDelta?.up,
+    },
+    {
+      label: "Total Users",
+      value: compact(summary.total_users),
+      delta: userDelta ? `${userDelta.pct}%` : undefined,
+      up: userDelta?.up,
+    },
+    { label: "Live Now", value: summary.live_events.toLocaleString(), live: summary.live_events > 0 },
+    {
+      label: "Concurrent Viewers",
+      value: summary.concurrent_viewers != null ? compact(summary.concurrent_viewers) : "—",
+    },
+    { label: "MRR", value: money(summary.monthly_revenue) },
+    { label: "Storage Used", value: `${summary.storage_used_gb.toLocaleString()} GB` },
   ];
 
   return (
@@ -43,11 +50,11 @@ export default function PlatformStatus() {
           Platform Control Center
         </h1>
         <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm text-slate-500 dark:text-slate-400">
-          <HealthDot status={o.status} pulse badge>{o.label}</HealthDot>
+          <HealthDot status={verdict.status} pulse badge>{verdict.label}</HealthDot>
           <span className="text-slate-300 dark:text-slate-600">·</span>
           <span>{dayjs().format("dddd, MMMM D, YYYY")}</span>
           <span className="text-slate-300 dark:text-slate-600">·</span>
-          <span>monitoring {compact(kpi.orgs.value)} organizations</span>
+          <span>monitoring {compact(summary.total_organizations)} organizations</span>
         </div>
       </div>
       <StatStrip items={items} />

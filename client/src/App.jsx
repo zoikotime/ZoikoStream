@@ -20,6 +20,17 @@ import InviteMembers from "./pages/organization/InviteMembers";
 import AdminDashboard from "./pages/admin/Dashboard";
 import Organizations from "./pages/admin/Organizations";
 import LiveEvents from "./pages/admin/LiveEvents";
+import AdminUsers from "./pages/admin/Users";
+import Subscriptions from "./pages/admin/Subscriptions";
+import Analytics from "./pages/admin/Analytics";
+import AuditLogs from "./pages/admin/AuditLogs";
+import PlatformSettings from "./pages/admin/Settings";
+import SystemStatus from "./pages/admin/SystemStatus";
+import FeatureFlags from "./pages/admin/FeatureFlags";
+import ReleaseCenter from "./pages/admin/ReleaseCenter";
+import Support from "./pages/admin/Support";
+import Roles from "./pages/admin/Roles";
+import Developers from "./pages/admin/Developers";
 import AuthLayout from "./layouts/AuthLayout";
 import Login from "./pages/auth/Login";
 import CreateOrganization from "./pages/auth/CreateOrganization";
@@ -70,18 +81,7 @@ function LandingOrDashboard() {
 // so the control-center nav never 404s. Dashboard + Organizations are real pages below.
 const adminStubs = [
   ["infrastructure", "Media Infrastructure"],
-  ["developers", "Developers"],
-  ["users", "Users"],
-  ["roles", "Roles & Permissions"],
-  ["subscriptions", "Subscriptions"],
-  ["analytics", "Analytics"],
   ["security", "Security"],
-  ["audit", "Audit Logs"],
-  ["support", "Support"],
-  ["settings", "Platform Settings"],
-  ["status", "System Status"],
-  ["feature-flags", "Feature Flags"],
-  ["releases", "Release Center"],
 ];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
@@ -129,6 +129,17 @@ export default function App() {
                 <Route path="/admin/dashboard" element={<AdminDashboard />} />
                 <Route path="/admin/organizations" element={<Organizations />} />
                 <Route path="/admin/live-events" element={<LiveEvents />} />
+                <Route path="/admin/users" element={<AdminUsers />} />
+                <Route path="/admin/subscriptions" element={<Subscriptions />} />
+                <Route path="/admin/analytics" element={<Analytics />} />
+                <Route path="/admin/audit" element={<AuditLogs />} />
+                <Route path="/admin/settings" element={<PlatformSettings />} />
+                <Route path="/admin/status" element={<SystemStatus />} />
+                <Route path="/admin/feature-flags" element={<FeatureFlags />} />
+                <Route path="/admin/releases" element={<ReleaseCenter />} />
+                <Route path="/admin/support" element={<Support />} />
+                <Route path="/admin/roles" element={<Roles />} />
+                <Route path="/admin/developers" element={<Developers />} />
                 {adminStubs.map(([path, title]) => (
                   <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
                 ))}

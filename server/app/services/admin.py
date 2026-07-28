@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import Organization, Plan, Stream, Subscription, User
+from ..security import _ROLE_RANK
 
 # Excluded from customer-facing counts — it only holds the super admin (matches dashboard.py).
 PLATFORM_ORG_NAME = "ZoikoStream Platform"

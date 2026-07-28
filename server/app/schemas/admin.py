@@ -141,3 +141,101 @@ class AuditLogOut(BaseModel):
 class SettingsUpdate(BaseModel):
     """Partial patch of platform settings, keyed by setting name -> arbitrary JSON blob."""
     values: dict[str, Any]
+
+
+# ── Feature flags ────────────────────────────────────────────────────────────
+
+class FeatureFlagOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    key: str
+    name: str
+    description: str | None = None
+    enabled: bool
+    updated_at: datetime | None = None
+    updated_by: str | None = None
+
+
+class FeatureFlagCreate(BaseModel):
+    key: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_.-]+$")
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = None
+    enabled: bool = False
+
+
+class FeatureFlagUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=120)
+    description: str | None = None
+    enabled: bool | None = None
+
+
+# ── Release center ───────────────────────────────────────────────────────────
+
+class ReleaseOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    version: str
+    title: str
+    notes: str | None = None
+    channel: str
+    released_by: str | None = None
+    released_at: datetime | None = None
+
+
+class ReleaseCreate(BaseModel):
+    version: str = Field(min_length=1, max_length=40)
+    title: str = Field(min_length=1, max_length=200)
+    notes: str | None = None
+    channel: str = "production"
+
+
+# ── Support tickets ──────────────────────────────────────────────────────────
+
+class SupportTicketOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    org_id: uuid.UUID
+    organization_name: str | None = None
+    subject: str
+    message: str
+    status: str
+    priority: str
+    requester_email: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class SupportTicketCreate(BaseModel):
+    org_id: uuid.UUID
+    subject: str = Field(min_length=1, max_length=200)
+    message: str = Field(min_length=1)
+    priority: str = "normal"
+    requester_email: EmailStr | None = None
+
+
+class SupportTicketUpdate(BaseModel):
+    status: str | None = None
+    priority: str | None = None
+
+
+# ── Developer / API keys ─────────────────────────────────────────────────────
+
+class ApiKeyOut(BaseModel):
+    id: str
+    label: str
+    prefix: str
+    created_at: datetime
+    revoked: bool = False
+
+
+class ApiKeyCreated(ApiKeyOut):
+    """Returned once, at creation time — the only moment the raw key is visible."""
+    key: str
+
+
+class ApiKeyCreate(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
