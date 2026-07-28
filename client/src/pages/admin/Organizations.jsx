@@ -1,65 +1,72 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import {
-  FiCheckCircle, FiDownload, FiEye, FiGrid, FiPlus, FiSearch, FiSlash, FiTrash2,
+  FiCheckCircle, FiDownload, FiEdit2, FiGrid, FiPlus, FiSearch, FiSlash, FiTrash2,
 } from "react-icons/fi";
 import {
-  Badge, Button, DataTable, HealthDot, Panel, StatCard, initials,
+  Badge, Button, DataTable, Panel, StatCard, initials,
 } from "../../components/admin";
-import { ORGS } from "../../data/orgs";
+import api, { errMsg } from "../../api";
+import useApi from "../../hooks/useApi";
+import OrgModal from "./OrgModal";
 
 const PLAN_TONE = { Enterprise: "brand", Pro: "info", Starter: "neutral" };
-const STATUS_TONE = { Active: "success", Trial: "warning", Suspended: "danger" };
-
-// Parse "12.3 TB" / "480 GB" -> GB, so Bandwidth/Storage sort numerically.
-const toGb = (s) => {
-  const [n, unit] = String(s).split(" ");
-  return parseFloat(n) * (unit === "TB" ? 1000 : 1);
-};
+const STATUS_TONE = { active: "success", trial: "warning", suspended: "danger" };
+const SUB_TONE = { active: "success", trial: "warning", past_due: "danger", cancelled: "neutral" };
 
 const inputCls =
   "h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-800 placeholder:text-slate-400 focus-visible:border-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100";
 const selectCls =
   "h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 focus-visible:border-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200";
 
-// Reference implementation of the admin design system: page header + StatCard KPIs +
-// filter toolbar + DataTable (sortable, hover row actions, pagination, empty state).
+const gb = (n) => `${Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`;
+
+function useOrgsData() {
+  return useApi(() =>
+    Promise.all([
+      api.get("/admin/organizations", { params: { page_size: 100 } }).then((r) => r.data.items),
+      api.get("/admin/plans").then((r) => r.data),
+    ]).then(([organizations, plans]) => ({ organizations, plans }))
+  );
+}
+
+// Real Super Admin Organizations console: GET/POST/PATCH/DELETE against /admin/organizations,
+// create/edit through OrgModal, suspend/activate + delete wired straight to the API.
 export default function Organizations() {
-  const [loading, setLoading] = useState(true);
+  const { data, loading, error, reload } = useOrgsData();
   const [q, setQ] = useState("");
   const [plan, setPlan] = useState("all");
   const [status, setStatus] = useState("all");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingOrg, setEditingOrg] = useState(null);
 
-  useEffect(() => {
-    // ponytail: demo boot delay to exercise the skeletons. Replace with GET /admin/organizations.
-    const t = setTimeout(() => setLoading(false), 450);
-    return () => clearTimeout(t);
-  }, []);
+  const organizations = data?.organizations || [];
+  const plans = data?.plans || [];
 
   const kpis = useMemo(
     () => ({
-      total: ORGS.length,
-      active: ORGS.filter((o) => o.status === "Active").length,
-      trial: ORGS.filter((o) => o.status === "Trial").length,
-      suspended: ORGS.filter((o) => o.status === "Suspended").length,
-      enterprise: ORGS.filter((o) => o.plan === "Enterprise").length,
+      total: organizations.length,
+      active: organizations.filter((o) => o.status === "active").length,
+      trial: organizations.filter((o) => o.status === "trial").length,
+      suspended: organizations.filter((o) => o.status === "suspended").length,
+      enterprise: organizations.filter((o) => o.plan === "Enterprise").length,
     }),
-    []
+    [organizations]
   );
 
   const filtered = useMemo(() => {
     const query = q.trim().toLowerCase();
-    return ORGS.filter(
+    return organizations.filter(
       (o) =>
-        (!query || o.name.toLowerCase().includes(query) || o.domain.includes(query)) &&
+        (!query || o.name.toLowerCase().includes(query) || (o.domain || "").toLowerCase().includes(query)) &&
         (plan === "all" || o.plan === plan) &&
         (status === "all" || o.status === status)
     );
-  }, [q, plan, status]);
+  }, [organizations, q, plan, status]);
 
   const exportCsv = () => {
-    const head = ["Organization", "Domain", "Plan", "Status", "Users", "Events", "Bandwidth", "Storage", "Region"];
-    const lines = [head, ...filtered.map((o) => [o.name, o.domain, o.plan, o.status, o.users, o.events, o.bandwidth, o.storage, o.region])];
+    const head = ["Organization", "Domain", "Plan", "Status", "Users", "Events", "Bandwidth GB", "Storage GB", "Region"];
+    const lines = [head, ...filtered.map((o) => [o.name, o.domain || "", o.plan || "", o.status, o.users_count, o.events_count, o.bandwidth_gb, o.storage_used_gb, o.region || ""])];
     const csv = lines.map((r) => r.map((f) => `"${String(f).replace(/"/g, '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a");
@@ -68,6 +75,31 @@ export default function Organizations() {
     a.click();
     URL.revokeObjectURL(url);
     toast.success(`Exported ${filtered.length} organizations`);
+  };
+
+  const openCreate = () => { setEditingOrg(null); setModalOpen(true); };
+  const openEdit = (o) => { setEditingOrg(o); setModalOpen(true); };
+
+  const toggleSuspend = async (o) => {
+    const next = o.status === "suspended" ? "active" : "suspended";
+    try {
+      await api.patch(`/admin/organizations/${o.id}`, { status: next });
+      toast.success(`${o.name} ${next === "suspended" ? "suspended" : "activated"}`);
+      reload();
+    } catch (e) {
+      toast.error(errMsg(e));
+    }
+  };
+
+  const remove = async (o) => {
+    if (!window.confirm(`Delete ${o.name}? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/admin/organizations/${o.id}`);
+      toast.success(`${o.name} deleted`);
+      reload();
+    } catch (e) {
+      toast.error(errMsg(e));
+    }
   };
 
   const columns = [
@@ -85,34 +117,46 @@ export default function Organizations() {
               <span className="font-medium text-slate-800 dark:text-slate-100">{o.name}</span>
               <Badge tone={STATUS_TONE[o.status]} dot>{o.status}</Badge>
             </div>
-            <span className="text-xs text-slate-400">{o.domain}</span>
+            <span className="text-xs text-slate-400">{o.domain || "—"}</span>
           </div>
         </div>
       ),
     },
-    { key: "plan", header: "Plan", sortable: true, render: (o) => <Badge tone={PLAN_TONE[o.plan]}>{o.plan}</Badge> },
-    { key: "users", header: "Users", align: "right", sortable: true },
-    { key: "events", header: "Events", align: "right", sortable: true },
-    { key: "bandwidth", header: "Bandwidth", align: "right", mono: true, sortable: true, sortValue: (o) => toGb(o.bandwidth) },
-    { key: "storage", header: "Storage", align: "right", mono: true, sortable: true, sortValue: (o) => toGb(o.storage) },
-    { key: "region", header: "Region", sortable: true },
-    { key: "health", header: "Health", render: (o) => <HealthDot status={o.health} /> },
+    { key: "plan", header: "Plan", sortable: true, render: (o) => (o.plan ? <Badge tone={PLAN_TONE[o.plan] || "neutral"}>{o.plan}</Badge> : <span className="text-slate-300 dark:text-slate-600">—</span>) },
+    {
+      key: "subscription_status",
+      header: "Subscription",
+      render: (o) => (o.subscription_status ? <Badge tone={SUB_TONE[o.subscription_status] || "neutral"}>{o.subscription_status}</Badge> : <span className="text-slate-300 dark:text-slate-600">—</span>),
+    },
+    { key: "users_count", header: "Users", align: "right", sortable: true },
+    { key: "events_count", header: "Events", align: "right", sortable: true },
+    { key: "bandwidth_gb", header: "Bandwidth", align: "right", mono: true, sortable: true, render: (o) => gb(o.bandwidth_gb) },
+    { key: "storage_used_gb", header: "Storage", align: "right", mono: true, sortable: true, render: (o) => gb(o.storage_used_gb) },
+    { key: "region", header: "Region", sortable: true, render: (o) => o.region || "—" },
   ];
 
   const rowActions = (o) => (
     <>
-      <Button variant="ghost" size="sm" iconOnly title={`View ${o.name}`} leftIcon={FiEye} onClick={() => toast(`Open ${o.name}`, { icon: "🔎" })} />
+      <Button variant="ghost" size="sm" iconOnly title={`Edit ${o.name}`} leftIcon={FiEdit2} onClick={() => openEdit(o)} />
       <Button
         variant="ghost"
         size="sm"
         iconOnly
-        title={o.status === "Suspended" ? "Activate" : "Suspend"}
-        leftIcon={o.status === "Suspended" ? FiCheckCircle : FiSlash}
-        onClick={() => toast.success(`${o.status === "Suspended" ? "Activated" : "Suspended"} ${o.name}`)}
+        title={o.status === "suspended" ? "Activate" : "Suspend"}
+        leftIcon={o.status === "suspended" ? FiCheckCircle : FiSlash}
+        onClick={() => toggleSuspend(o)}
       />
-      <Button variant="ghost" size="sm" iconOnly title={`Delete ${o.name}`} leftIcon={FiTrash2} className="hover:text-rose-600 dark:hover:text-rose-400" onClick={() => toast(`Deleted ${o.name}`, { icon: "🗑️" })} />
+      <Button variant="ghost" size="sm" iconOnly title={`Delete ${o.name}`} leftIcon={FiTrash2} className="hover:text-rose-600 dark:hover:text-rose-400" onClick={() => remove(o)} />
     </>
   );
+
+  if (error) {
+    return (
+      <div className="mx-auto max-w-[1440px] rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
+        Couldn't load organizations. Try refreshing the page.
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-[1440px] space-y-6">
@@ -126,7 +170,7 @@ export default function Organizations() {
           <Button variant="secondary" leftIcon={FiDownload} onClick={exportCsv} disabled={loading || filtered.length === 0}>
             Export
           </Button>
-          <Button variant="primary" leftIcon={FiPlus} onClick={() => toast("Create organization — coming soon", { icon: "🏢" })}>
+          <Button variant="primary" leftIcon={FiPlus} onClick={openCreate}>
             Add Organization
           </Button>
         </div>
@@ -150,15 +194,13 @@ export default function Organizations() {
           </div>
           <select value={plan} onChange={(e) => setPlan(e.target.value)} className={selectCls} aria-label="Filter by plan">
             <option value="all">All plans</option>
-            <option value="Enterprise">Enterprise</option>
-            <option value="Pro">Pro</option>
-            <option value="Starter">Starter</option>
+            {plans.map((p) => <option key={p.slug} value={p.name}>{p.name}</option>)}
           </select>
           <select value={status} onChange={(e) => setStatus(e.target.value)} className={selectCls} aria-label="Filter by status">
             <option value="all">All statuses</option>
-            <option value="Active">Active</option>
-            <option value="Trial">Trial</option>
-            <option value="Suspended">Suspended</option>
+            <option value="active">Active</option>
+            <option value="trial">Trial</option>
+            <option value="suspended">Suspended</option>
           </select>
         </div>
         <div className="border-t border-slate-100 dark:border-slate-800/70" />
@@ -168,9 +210,9 @@ export default function Organizations() {
           rowKey={(o) => o.id}
           loading={loading}
           rowActions={rowActions}
-          initialSort={{ key: "users", dir: "desc" }}
+          initialSort={{ key: "users_count", dir: "desc" }}
           pageSize={8}
-          minWidth={920}
+          minWidth={980}
           empty={{
             icon: FiGrid,
             title: "No organizations match your filters",
@@ -183,6 +225,14 @@ export default function Organizations() {
           }}
         />
       </Panel>
+
+      <OrgModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        org={editingOrg}
+        plans={plans}
+        onSaved={reload}
+      />
     </div>
   );
 }

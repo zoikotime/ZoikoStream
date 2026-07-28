@@ -1,101 +1,93 @@
 import { useMemo, useState } from "react";
-import {
-  FiSearch, FiRadio, FiUsers, FiTrendingUp, FiVideo, FiFilm,
-} from "react-icons/fi";
+import { FiSearch, FiRadio, FiGrid, FiClock } from "react-icons/fi";
+import api from "../../api";
+import useApi from "../../hooks/useApi";
 import { cx } from "../../ui/tokens";
 import Card from "../../ui/Card";
 import StatsCard from "../../ui/StatsCard";
 import HealthDot from "../../components/admin/HealthDot";
 import DataTable from "../../components/admin/DataTable";
-import { liveEvents, counts, summary } from "../../data/liveEvents";
+import { initials, timeAgo } from "../../components/admin/format";
 
-// Tabs in the requested order; default to Live (the monitoring focus).
 const TABS = [
-  { key: "upcoming", label: "Upcoming" },
   { key: "live", label: "Live" },
-  { key: "finished", label: "Finished" },
-  { key: "failed", label: "Failed" },
+  { key: "recent", label: "Recently Ended" },
 ];
-
-// Event status pill.
-const STATUS = {
-  live: { status: "success", label: "Live", pulse: true },
-  upcoming: { status: "info", label: "Upcoming" },
-  finished: { status: "neutral", label: "Finished" },
-  failed: { status: "error", label: "Failed" },
-};
-// Recording / replay job state → HealthDot badge (reuses the shared status colors).
-const REC = {
-  recording: { status: "error", label: "REC", pulse: true },
-  processing: { status: "warning", label: "Processing" },
-  saved: { status: "success", label: "Saved" },
-  scheduled: { status: "neutral", label: "Scheduled" },
-  failed: { status: "error", label: "Failed" },
-};
-const REPLAY = {
-  ready: { status: "success", label: "Ready" },
-  processing: { status: "warning", label: "Processing" },
-  queued: { status: "pending", label: "Queued" },
-  failed: { status: "error", label: "Failed" },
-};
-
-const initials = (name = "") =>
-  name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 
 const dash = <span className="text-slate-300 dark:text-slate-600">—</span>;
 
-// Badge cell from a state map (recording/replay); em-dash when absent.
-const jobCell = (map, key) => {
-  const j = key && map[key];
-  return j ? <HealthDot badge status={j.status} label={j.label} pulse={j.pulse} /> : dash;
-};
+// Real broadcast duration from start/end timestamps (live = up to now).
+function duration(startedAt, endedAt) {
+  if (!startedAt) return dash;
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  const mins = Math.max(0, Math.round((end - start) / 60000));
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
 
-// Platform-wide Live Events monitor: KPI cards + status tabs + real-time table.
-// ponytail: all mock (data/liveEvents.js); poll a GET or subscribe to a socket later.
+function useLiveEventsData() {
+  return useApi(() =>
+    Promise.all([
+      api.get("/admin/live-events", { params: { state: "live" } }).then((r) => r.data),
+      api.get("/admin/live-events", { params: { state: "recent" } }).then((r) => r.data),
+    ]).then(([live, recent]) => ({ live, recent }))
+  );
+}
+
+// Platform-wide Live Events monitor. Every row comes from GET /admin/live-events, which is
+// derived straight from the streams table — no fabricated viewers/bitrate/recording state;
+// fields the platform doesn't measure yet (LiveKit room stats) render as "—", not a number.
 export default function LiveEvents() {
+  const { data, loading, error } = useLiveEventsData();
   const [tab, setTab] = useState("live");
   const [q, setQ] = useState("");
 
+  const live = data?.live || [];
+  const recent = data?.recent || [];
+  const rowsForTab = tab === "live" ? live : recent;
+
   const rows = useMemo(() => {
     const query = q.trim().toLowerCase();
-    return liveEvents.filter(
-      (e) => e.status === tab && (!query || e.title.toLowerCase().includes(query) || e.org.toLowerCase().includes(query))
+    if (!query) return rowsForTab;
+    return rowsForTab.filter(
+      (e) => (e.title || "").toLowerCase().includes(query) || (e.organization || "").toLowerCase().includes(query)
     );
-  }, [tab, q]);
+  }, [rowsForTab, q]);
+
+  const orgCount = useMemo(() => new Set(live.map((e) => e.organization).filter(Boolean)).size, [live]);
 
   const kpis = [
-    { title: "Events", value: summary.events, icon: FiRadio, accent: "violet", delta: "6.4%", up: true },
-    { title: "Viewers", value: summary.viewers, icon: FiUsers, accent: "blue", live: true },
-    { title: "Peak Concurrency", value: summary.peak, icon: FiTrendingUp, accent: "indigo", delta: "11%", up: true },
-    { title: "Recordings", value: summary.recordings, icon: FiVideo, accent: "emerald", delta: "3.2%", up: true },
-    { title: "Replay Jobs", value: summary.replayJobs, icon: FiFilm, accent: "amber" },
+    { title: "Live Now", value: live.length, icon: FiRadio, accent: "violet", live: live.length > 0 },
+    { title: "Organizations Streaming", value: orgCount, icon: FiGrid, accent: "blue" },
+    { title: "Recently Ended", value: recent.length, icon: FiClock, accent: "amber" },
   ];
 
-  const latencyColor = (ms) => (ms >= 100 ? "text-rose-600 dark:text-rose-400" : ms >= 70 ? "text-amber-600 dark:text-amber-400" : "text-slate-600 dark:text-slate-300");
-
-  // Columns for the shared DataTable — each render preserves the original cell exactly.
-  const eventColumns = [
-    { key: "org", header: "Organization", className: "whitespace-nowrap", render: (e) => (
+  const columns = [
+    { key: "organization", header: "Organization", className: "whitespace-nowrap", render: (e) => (
       <div className="flex items-center gap-2.5">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 text-[10px] font-semibold text-white">
-          {initials(e.org)}
+          {initials(e.organization || "?")}
         </span>
-        <span className="font-medium text-slate-800 dark:text-slate-100">{e.org}</span>
+        <span className="font-medium text-slate-800 dark:text-slate-100">{e.organization || "—"}</span>
       </div>
     ) },
     { key: "title", header: "Event", className: "whitespace-nowrap", render: (e) => (
       <>
         <p className="font-medium text-slate-800 dark:text-slate-100">{e.title}</p>
-        <p className={cx("text-xs", e.reason ? "text-rose-500 dark:text-rose-400" : "text-slate-400")}>{e.reason || e.time}</p>
+        <p className="text-xs text-slate-400">{e.channel || "—"}</p>
       </>
     ) },
-    { key: "status", header: "Status", className: "whitespace-nowrap", render: (e) => <HealthDot badge {...STATUS[e.status]} /> },
-    { key: "bitrate", header: "Bitrate", align: "right", className: "whitespace-nowrap", render: (e) => (e.bitrate ? `${e.bitrate.toFixed(1)} Mbps` : dash) },
+    { key: "region", header: "Region", className: "whitespace-nowrap", render: (e) => e.region || dash },
+    { key: "started_at", header: tab === "live" ? "Started" : "Started", align: "right", className: "whitespace-nowrap", render: (e) => (e.started_at ? timeAgo(e.started_at) : dash) },
+    ...(tab === "recent"
+      ? [{ key: "ended_at", header: "Ended", align: "right", className: "whitespace-nowrap", render: (e) => (e.ended_at ? timeAgo(e.ended_at) : dash) }]
+      : []),
+    { key: "duration", header: "Duration", align: "right", className: "whitespace-nowrap", render: (e) => duration(e.started_at, e.ended_at) },
     { key: "viewers", header: "Viewers", align: "right", className: "whitespace-nowrap", render: (e) => (e.viewers != null ? e.viewers.toLocaleString() : dash) },
-    { key: "latency", header: "Latency", align: "right", className: "whitespace-nowrap", render: (e) => (e.latency != null ? <span className={cx("font-medium", latencyColor(e.latency))}>{e.latency} ms</span> : dash) },
-    { key: "health", header: "Health", className: "whitespace-nowrap", render: (e) => (e.health ? <HealthDot status={e.health} /> : dash) },
-    { key: "recording", header: "Recording", className: "whitespace-nowrap", render: (e) => jobCell(REC, e.recording) },
-    { key: "replay", header: "Replay", className: "whitespace-nowrap", render: (e) => jobCell(REPLAY, e.replay) },
+    ...(tab === "live"
+      ? [{ key: "health", header: "Health", className: "whitespace-nowrap", render: (e) => (e.health ? <HealthDot status={e.health} /> : dash) }]
+      : []),
   ];
 
   return (
@@ -107,63 +99,73 @@ export default function LiveEvents() {
           <p className="text-sm text-slate-500 dark:text-slate-400">Real-time streaming monitor across every organization</p>
         </div>
         <span className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" /> Live · auto-refreshing
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" /> Live · from the streams table
         </span>
       </div>
 
-      {/* KPI cards */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-5">
-        {kpis.map((k) => <StatsCard key={k.title} {...k} />)}
-      </div>
-
-      {/* Monitor */}
-      <Card padding="none" className="overflow-hidden">
-        {/* Tabs + search */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4 dark:border-slate-800">
-          <div className="inline-flex rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
-            {TABS.map((t) => {
-              const active = tab === t.key;
-              return (
-                <button
-                  key={t.key}
-                  onClick={() => setTab(t.key)}
-                  className={cx(
-                    "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition",
-                    active
-                      ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white"
-                      : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
-                  )}
-                >
-                  {t.key === "live" && (counts.live || 0) > 0 && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />}
-                  {t.label}
-                  <span className={cx("rounded-full px-1.5 text-xs tabular-nums", active ? "bg-slate-100 text-slate-600 dark:bg-slate-600 dark:text-slate-200" : "bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-400")}>
-                    {counts[t.key] || 0}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="relative min-w-0 flex-1 sm:max-w-xs">
-            <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Search event or organization…"
-              className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-10 pr-4 text-sm text-slate-800 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:ring-violet-500/20"
-            />
-          </div>
+      {error ? (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
+          Couldn't load live events. Try refreshing the page.
         </div>
+      ) : (
+        <>
+          {/* KPI cards */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {kpis.map((k) => <StatsCard key={k.title} {...k} />)}
+          </div>
 
-        {/* Table */}
-        <DataTable
-          columns={eventColumns}
-          rows={rows}
-          rowKey={(e) => e.id}
-          minWidth={1040}
-          empty={{ title: `No ${tab} events${q ? " match your search" : ""}.` }}
-        />
-      </Card>
+          {/* Monitor */}
+          <Card padding="none" className="overflow-hidden">
+            {/* Tabs + search */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4 dark:border-slate-800">
+              <div className="inline-flex rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
+                {TABS.map((t) => {
+                  const active = tab === t.key;
+                  const count = t.key === "live" ? live.length : recent.length;
+                  return (
+                    <button
+                      key={t.key}
+                      onClick={() => setTab(t.key)}
+                      className={cx(
+                        "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium transition",
+                        active
+                          ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white"
+                          : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+                      )}
+                    >
+                      {t.key === "live" && count > 0 && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" />}
+                      {t.label}
+                      <span className={cx("rounded-full px-1.5 text-xs tabular-nums", active ? "bg-slate-100 text-slate-600 dark:bg-slate-600 dark:text-slate-200" : "bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-400")}>
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="relative min-w-0 flex-1 sm:max-w-xs">
+                <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Search event or organization…"
+                  className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-10 pr-4 text-sm text-slate-800 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:ring-violet-500/20"
+                />
+              </div>
+            </div>
+
+            {/* Table */}
+            <DataTable
+              columns={columns}
+              rows={rows}
+              rowKey={(e) => e.id}
+              loading={loading}
+              minWidth={900}
+              empty={{ title: `No ${tab === "live" ? "live" : "recently ended"} events${q ? " match your search" : ""}.` }}
+            />
+          </Card>
+        </>
+      )}
     </div>
   );
 }

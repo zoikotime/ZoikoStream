@@ -1,26 +1,37 @@
 """Database access for the Super Admin API. Pure DB queries — no HTTP, no derived
 business logic (that lives in services/admin.py). List helpers return (items, total)."""
 
+import hashlib
+import secrets
 import uuid
+from datetime import datetime, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..models import (
     AuditLog,
     Channel,
+    FeatureFlag,
     Organization,
     Plan,
+    Release,
     Stream,
     Subscription,
+    SupportTicket,
     User,
 )
 from ..schemas.admin import (
     AdminUserOut,
+    ApiKeyCreated,
+    ApiKeyOut,
     AuditLogOut,
+    FeatureFlagOut,
     OrgOut,
     PlanOut,
+    ReleaseOut,
     SubscriptionOut,
+    SupportTicketOut,
 )
 
 # Non-cancelled statuses rank above cancelled when picking an org's "current" subscription.
@@ -150,6 +161,9 @@ def update_organization(db, org: Organization, data) -> Organization:
 
 def delete_organization(db, org: Organization) -> None:
     db.query(Subscription).filter(Subscription.org_id == org.id).delete()
+    # `memberships` predates the current org_id-on-User model and isn't SQLAlchemy-mapped,
+    # but it still FK-references organizations — clean it up raw or the delete 500s.
+    db.execute(text("DELETE FROM memberships WHERE org_id = :oid"), {"oid": org.id})
     db.delete(org)
     db.commit()
 
@@ -194,6 +208,9 @@ def update_user(db, user: User, data) -> AdminUserOut:
 
 
 def delete_user(db, user: User) -> None:
+    # `memberships` predates the current org_id-on-User model and isn't SQLAlchemy-mapped,
+    # but it still FK-references users — clean it up raw or the delete 500s.
+    db.execute(text("DELETE FROM memberships WHERE user_id = :uid"), {"uid": user.id})
     db.delete(user)
     db.commit()
 
@@ -276,3 +293,168 @@ def list_audit_logs(db, action=None, target_type=None, page=1, page_size=50):
         stmt.order_by(AuditLog.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     ).all()
     return [AuditLogOut.model_validate(x) for x in logs], total
+
+
+# ── Feature flags ────────────────────────────────────────────────────────────
+
+def list_feature_flags(db) -> list[FeatureFlagOut]:
+    flags = db.scalars(select(FeatureFlag).order_by(FeatureFlag.key)).all()
+    return [FeatureFlagOut.model_validate(f) for f in flags]
+
+
+def get_feature_flag(db, flag_id) -> FeatureFlag | None:
+    return db.get(FeatureFlag, flag_id)
+
+
+def get_feature_flag_by_key(db, key) -> FeatureFlag | None:
+    return db.scalar(select(FeatureFlag).where(FeatureFlag.key == key))
+
+
+def create_feature_flag(db, data, updated_by: str) -> FeatureFlag:
+    flag = FeatureFlag(key=data.key, name=data.name, description=data.description,
+                       enabled=data.enabled, updated_by=updated_by)
+    db.add(flag)
+    db.commit()
+    db.refresh(flag)
+    return flag
+
+
+def update_feature_flag(db, flag: FeatureFlag, data, updated_by: str) -> FeatureFlag:
+    for field in ("name", "description", "enabled"):
+        val = getattr(data, field, None)
+        if val is not None:
+            setattr(flag, field, val)
+    flag.updated_by = updated_by
+    db.commit()
+    db.refresh(flag)
+    return flag
+
+
+def delete_feature_flag(db, flag: FeatureFlag) -> None:
+    db.delete(flag)
+    db.commit()
+
+
+# ── Release center ───────────────────────────────────────────────────────────
+
+def list_releases(db, page=1, page_size=50):
+    stmt = select(Release)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    releases = db.scalars(
+        stmt.order_by(Release.released_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return [ReleaseOut.model_validate(r) for r in releases], total
+
+
+def get_release(db, release_id) -> Release | None:
+    return db.get(Release, release_id)
+
+
+def create_release(db, data, released_by: str) -> Release:
+    release = Release(version=data.version, title=data.title, notes=data.notes,
+                      channel=data.channel or "production", released_by=released_by)
+    db.add(release)
+    db.commit()
+    db.refresh(release)
+    return release
+
+
+def delete_release(db, release: Release) -> None:
+    db.delete(release)
+    db.commit()
+
+
+# ── Support tickets ──────────────────────────────────────────────────────────
+
+def _ticket_out(t: SupportTicket) -> SupportTicketOut:
+    out = SupportTicketOut.model_validate(t)
+    out.organization_name = t.organization.name if t.organization else None
+    return out
+
+
+def list_support_tickets(db, status=None, org_id=None, page=1, page_size=50):
+    stmt = select(SupportTicket)
+    if status:
+        stmt = stmt.where(SupportTicket.status == status)
+    if org_id:
+        stmt = stmt.where(SupportTicket.org_id == org_id)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    tickets = db.scalars(
+        stmt.order_by(SupportTicket.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return [_ticket_out(t) for t in tickets], total
+
+
+def get_support_ticket(db, ticket_id) -> SupportTicket | None:
+    return db.get(SupportTicket, ticket_id)
+
+
+def create_support_ticket(db, data) -> SupportTicket:
+    ticket = SupportTicket(
+        org_id=data.org_id, subject=data.subject, message=data.message,
+        priority=data.priority or "normal", requester_email=data.requester_email,
+    )
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+    return _ticket_out(ticket)
+
+
+def update_support_ticket(db, ticket: SupportTicket, data) -> SupportTicket:
+    if data.status is not None:
+        ticket.status = data.status
+        if data.status in ("resolved", "closed") and ticket.resolved_at is None:
+            ticket.resolved_at = datetime.now(timezone.utc)
+        elif data.status in ("open", "in_progress"):
+            ticket.resolved_at = None
+    if data.priority is not None:
+        ticket.priority = data.priority
+    db.commit()
+    db.refresh(ticket)
+    return _ticket_out(ticket)
+
+
+def delete_support_ticket(db, ticket: SupportTicket) -> None:
+    db.delete(ticket)
+    db.commit()
+
+
+# ── Developer / API keys (stored on Organization.api_keys JSON) ─────────────
+
+def list_api_keys(db, org: Organization) -> list[ApiKeyOut]:
+    records = org.api_keys or []
+    return [ApiKeyOut(id=r["id"], label=r["label"], prefix=r["prefix"],
+                      created_at=r["created_at"], revoked=r.get("revoked", False))
+            for r in records]
+
+
+def create_api_key(db, org: Organization, label: str) -> ApiKeyCreated:
+    raw = f"zk_live_{secrets.token_urlsafe(32)}"
+    record = {
+        "id": str(uuid.uuid4()),
+        "label": label,
+        "prefix": raw[:12],
+        "key_hash": hashlib.sha256(raw.encode()).hexdigest(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "revoked": False,
+    }
+    org.api_keys = [*(org.api_keys or []), record]
+    db.commit()
+    return ApiKeyCreated(id=record["id"], label=label, prefix=record["prefix"],
+                         created_at=record["created_at"], revoked=False, key=raw)
+
+
+def revoke_api_key(db, org: Organization, key_id: str) -> bool:
+    records = org.api_keys or []
+    found = False
+    updated = []
+    for r in records:
+        if r["id"] == key_id:
+            found = True
+            r = {**r, "revoked": True}
+        updated.append(r)
+    if not found:
+        return False
+    org.api_keys = updated
+    db.commit()
+    return True

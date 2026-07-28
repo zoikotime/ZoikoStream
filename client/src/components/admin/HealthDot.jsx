@@ -14,10 +14,11 @@ const TONE = {
   info: { dot: "bg-blue-500", text: "text-blue-600 dark:text-blue-400", bg: "bg-blue-100 dark:bg-blue-500/15", label: "Info" },
   pending: { dot: "bg-blue-500", text: "text-blue-600 dark:text-blue-400", bg: "bg-blue-100 dark:bg-blue-500/15", label: "Pending" },
   neutral: { dot: "bg-slate-400", text: "text-slate-500 dark:text-slate-400", bg: "bg-slate-100 dark:bg-slate-800", label: "Unknown" },
+  not_configured: { dot: "bg-slate-400", text: "text-slate-500 dark:text-slate-400", bg: "bg-slate-100 dark:bg-slate-800", label: "Not configured" },
 };
 
 // Hex per status — for recharts (sparklines/trends) which need a color value, not a class.
-const HEX = { ok: "#22c55e", success: "#22c55e", warn: "#f59e0b", warning: "#f59e0b", down: "#f43f5e", error: "#f43f5e", critical: "#f43f5e", info: "#3b82f6", pending: "#3b82f6", neutral: "#94a3b8" };
+const HEX = { ok: "#22c55e", success: "#22c55e", warn: "#f59e0b", warning: "#f59e0b", down: "#f43f5e", error: "#f43f5e", critical: "#f43f5e", info: "#3b82f6", pending: "#3b82f6", neutral: "#94a3b8", not_configured: "#94a3b8" };
 export const healthColor = (status) => HEX[status] || HEX.neutral;
 
 // `status` keys into TONE. `label` overrides the default text; omit `children` for dot-only.
