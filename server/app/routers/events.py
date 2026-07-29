@@ -8,7 +8,7 @@ Permissions:
   edit (PATCH)                                     -> org admin, or a host who owns/hosts it
   read (list / get / view assignees)               -> any org member
 """
-
+from app.services.event_email import send_event_created_email
 import uuid
 from datetime import datetime
 
@@ -84,7 +84,17 @@ def create_event(data: EventCreate, admin: User = Depends(require_org_admin), db
         slug = crud.unique_event_slug(db, admin.org_id, data.title)
     else:
         slug = None
-    return crud.create_event(db, admin.org_id, admin.id, data, slug)
+    event = crud.create_event(db, admin.org_id, admin.id, data, slug)
+
+    send_event_created_email(
+        to=admin.email,
+        organizer_name=admin.full_name,
+        event_title=event.title,
+        start_time=event.start_time,
+        status=event.status,
+    )
+
+    return event
 
 
 @router.get("/{event_id}", response_model=EventOut)
