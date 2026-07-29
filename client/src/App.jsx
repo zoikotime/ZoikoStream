@@ -19,6 +19,12 @@ import EventDetails from "./pages/organization/EventDetails";
 import InviteMembers from "./pages/organization/InviteMembers";
 import AdminDashboard from "./pages/admin/Dashboard";
 import Organizations from "./pages/admin/Organizations";
+<<<<<<< HEAD
+<<<<<<< Updated upstream
+import AuthPage from "./pages/AuthPage";
+=======
+=======
+>>>>>>> origin/main
 import LiveEvents from "./pages/admin/LiveEvents";
 import AdminUsers from "./pages/admin/Users";
 import Subscriptions from "./pages/admin/Subscriptions";
@@ -40,9 +46,17 @@ import EventRegistration from "./pages/EventRegistration";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import ModeratorDashboard from "./pages/moderator/Dashboard";
+<<<<<<< HEAD
+import OrganizationProfile from "./pages/organization/Profile";
 
 // Public marketing homepage — code-split from the app bundle.
 const Home = lazy(() => import("./pages/Home/Home"));
+>>>>>>> Stashed changes
+=======
+
+// Public marketing homepage — code-split from the app bundle.
+const Home = lazy(() => import("./pages/Home/Home"));
+>>>>>>> origin/main
 
 // ponytail: one placeholder for routes not built yet — replace each with a real page as it lands
 function Placeholder({ title }) {
@@ -150,6 +164,14 @@ export default function App() {
             <Route element={<RoleRoute allow={["org_admin"]} />}>
               <Route element={<OrganizationLayout />}>
                 <Route path="/organization/dashboard" element={<OrganizationDashboard />} />
+<<<<<<< HEAD
+<<<<<<< Updated upstream
+                {orgStubs.map((p) => (
+                  <Route key={p} path={`/organization/${p}`} element={<Placeholder title={cap(p)} />} />
+                ))}
+=======
+=======
+>>>>>>> origin/main
                 <Route path="/organization/events" element={<OrganizationEvents />} />
                 <Route path="/organization/recordings" element={<OrganizationRecordings />} />
                 <Route path="/organization/analytics" element={<OrganizationAnalytics />} />
@@ -157,6 +179,11 @@ export default function App() {
                 <Route path="/organization/settings" element={<OrganizationSettings />} />
                 <Route path="/organization/events/:id" element={<EventDetails />} />
                 <Route path="/organization/users" element={<InviteMembers />} />
+<<<<<<< HEAD
+                <Route path="/organization/profile" element={<OrganizationProfile />} />
+>>>>>>> Stashed changes
+=======
+>>>>>>> origin/main
               </Route>
             </Route>
 

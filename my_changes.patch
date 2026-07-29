@@ -1,0 +1,118 @@
+diff --git a/server/app/api/dashboard.py b/server/app/api/dashboard.py
+index 98d7b82..40a4a70 100644
+--- a/server/app/api/dashboard.py
++++ b/server/app/api/dashboard.py
+@@ -7,7 +7,7 @@ from sqlalchemy import func, select
+ from sqlalchemy.orm import Session
+ 
+ from ..db import get_db
+-from ..models import Organization, User
++from ..models import Organization, User, Event
+ from ..security import get_current_user
+ 
+ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+@@ -34,37 +34,54 @@ def get_org_stats(
+     user: User = Depends(get_current_user),
+     db: Session = Depends(get_db),
+ ):
+-    """
+-    Get organization-specific statistics for org_admin dashboard.
+-    Only return stats for the user's own organization.
+-    """
+     if user.role not in ["org_admin", "super_admin"]:
+         return {
+             "error": "Unauthorized",
+             "message": "Only admins can access dashboard stats"
+         }
+-    
+-    # Get user's organization
++
+     org = db.get(Organization, user.org_id)
+     if not org:
+         return {"error": "Organization not found"}
+-    
+-    # Count organization stats
++
+     org_users = db.scalar(
+         select(func.count(User.id)).where(User.org_id == user.org_id)
+     )
+-    
++
++    upcoming_events = db.scalar(
++        select(func.count(Event.id)).where(
++            Event.org_id == user.org_id,
++            Event.status == "scheduled",
++            Event.deleted_at.is_(None),
++        )
++    ) or 0
++
++    live_events = db.scalar(
++        select(func.count(Event.id)).where(
++            Event.org_id == user.org_id,
++            Event.status == "live",
++            Event.deleted_at.is_(None),
++        )
++    ) or 0
++
++    completed_events = db.scalar(
++        select(func.count(Event.id)).where(
++            Event.org_id == user.org_id,
++            Event.status.in_(["ended", "archived"]),
++            Event.deleted_at.is_(None),
++        )
++    ) or 0
++
+     return {
+         "organization_id": str(user.org_id),
+         "organization_name": org.name,
+-        "upcoming_events": 5,  # ponytail: fetch from events table when it exists
+-        "live_events": 1,
+-        "completed_events": 28,
++        "upcoming_events": upcoming_events,
++        "live_events": live_events,
++        "completed_events": completed_events,
+         "total_viewers": 12530,
+         "total_users": org_users or 0,
+     }
+ 
+-
+ @router.get("/platform/stats")
+ def get_platform_stats(
+     user: User = Depends(get_current_user),
+diff --git a/server/app/models/event.py b/server/app/models/event.py
+index 3666028..55b6450 100644
+--- a/server/app/models/event.py
++++ b/server/app/models/event.py
+@@ -29,7 +29,11 @@ class Event(Base):
+     __tablename__ = "events"
+ 
+     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+-    org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
++    organization_id: Mapped[uuid.UUID] = mapped_column(
++    ForeignKey("organizations.id"),
++    nullable=False,
++    index=True,
++    )
+     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+ 
+     # Content
+@@ -37,7 +41,7 @@ class Event(Base):
+     slug: Mapped[str | None] = mapped_column(String(220), index=True)  # unique within org (crud-enforced)
+     description: Mapped[str | None] = mapped_column(Text)
+     short_description: Mapped[str | None] = mapped_column(String(300))
+-    banner_image: Mapped[str | None] = mapped_column(String(500))
++    banner_url: Mapped[str | None] = mapped_column(String(500))
+     thumbnail: Mapped[str | None] = mapped_column(String(500))
+     category: Mapped[str | None] = mapped_column(String(100))
+     tags: Mapped[list | None] = mapped_column(JSON, default=list)
+@@ -45,8 +49,8 @@ class Event(Base):
+     timezone: Mapped[str | None] = mapped_column(String(60))
+ 
+     # Schedule
+-    start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+-    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
++    scheduled_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
++    scheduled_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+ 
+     # Access / registration
+     visibility: Mapped[str] = mapped_column(String(20), default="public", nullable=False)
