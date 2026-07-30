@@ -3,6 +3,7 @@ Thin controllers: DB access -> crud.admin, aggregation -> services.admin, and ev
 mutation writes an audit log."""
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
@@ -10,11 +11,12 @@ from sqlalchemy.orm import Session
 
 from ..crud import admin as crud
 from ..db import get_db
-from ..models import Organization, PlatformSetting, Subscription, User
+from ..models import ElevationSession, Organization, PlatformSetting, Subscription, User
 from ..schemas.admin import (
     ApiKeyCreate,
     ApiKeyCreated,
     ApiKeyOut,
+    ElevationRequest,
     FeatureFlagCreate,
     FeatureFlagOut,
     FeatureFlagUpdate,
@@ -33,6 +35,7 @@ from ..schemas.admin import (
 )
 from ..security import require_super_admin
 from ..services import admin as svc
+from ..services import ops as ops_svc
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_super_admin)])
 
@@ -50,6 +53,96 @@ def _audit(db, admin, request, action, **kw):
 @router.get("/dashboard")
 def dashboard(db: Session = Depends(get_db)):
     return svc.dashboard_summary(db)
+
+
+# ── Command Center ───────────────────────────────────────────────────────────
+
+@router.get("/command-center")
+def command_center(
+    range_: str = Query("live", alias="range", pattern="^(live|1h|24h|7d|custom)$"),
+    from_: datetime | None = Query(None, alias="from"),
+    to: datetime | None = Query(None),
+    region: str | None = Query(None, pattern="^(na|eu|apac|sa)$"),
+    scope: str = Query("core_live", pattern="^(core_live|core|live)$"),
+    include_test: bool = Query(False),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    """Whole-page payload for /admin/dashboard. One call because every region reports on the
+    same window and the same instant.
+
+    range=custom requires `from`; `to` defaults to now. Validated here rather than in the
+    service so a bad window is a 400 the console can explain, not a silently empty page."""
+    if range_ == "custom":
+        if from_ is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "range=custom requires a 'from' timestamp")
+        until = to or datetime.now(timezone.utc)
+        if from_.tzinfo is None:
+            from_ = from_.replace(tzinfo=timezone.utc)
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        if from_ >= until:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "'from' must be before 'to'")
+        return ops_svc.command_center(db, admin, range_=range_, since=from_, until=until,
+                                      region=region, scope=scope, include_test=include_test)
+    return ops_svc.command_center(db, admin, range_=range_, region=region,
+                                  scope=scope, include_test=include_test)
+
+
+@router.get("/console-state")
+def console_state(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    """Small payload the admin shell polls: overall health, sidebar badge counts, and the
+    caller's elevation session."""
+    return ops_svc.console_state(db, admin)
+
+
+@router.get("/search")
+def search(
+    q: str = Query(..., min_length=1, max_length=120),
+    db: Session = Depends(get_db),
+):
+    """Global entity search for the console command bar."""
+    return ops_svc.search(db, q)
+
+
+# ── Elevation (step-up privilege) ────────────────────────────────────────────
+
+@router.post("/elevation", status_code=status.HTTP_201_CREATED)
+def start_elevation(data: ElevationRequest, request: Request,
+                    db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    """Open a scoped, expiring elevation. An existing active one is returned unchanged so a
+    double-click can't extend a grant."""
+    existing = ops_svc.current_elevation(db, admin)
+    if existing:
+        return existing
+    row = ElevationSession(
+        user_id=admin.id, scope=data.scope, scopes=data.scopes, reason=data.reason,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=data.minutes),
+    )
+    db.add(row)
+    db.commit()
+    _audit(db, admin, request, "elevation.start", target_type="elevation", target_id=row.id,
+           meta={"scope": data.scope, "minutes": data.minutes, "reason": data.reason})
+    return ops_svc.current_elevation(db, admin)
+
+
+@router.delete("/elevation", status_code=status.HTTP_204_NO_CONTENT)
+def end_elevation(request: Request, db: Session = Depends(get_db),
+                  admin: User = Depends(require_super_admin)):
+    """End the caller's elevation early ("End now" in the console footer)."""
+    row = db.scalar(
+        select(ElevationSession).where(
+            ElevationSession.user_id == admin.id,
+            ElevationSession.ended_at.is_(None),
+        ).order_by(ElevationSession.granted_at.desc())
+    )
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No active elevation")
+    row.ended_at = datetime.now(timezone.utc)
+    db.commit()
+    _audit(db, admin, request, "elevation.end", target_type="elevation", target_id=row.id,
+           meta={"scope": row.scope})
 
 
 # ── Organizations ────────────────────────────────────────────────────────────
@@ -397,9 +490,11 @@ def create_api_key(org_id: uuid.UUID, data: ApiKeyCreate, request: Request,
     org = db.get(Organization, org_id)
     if not org:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
-    created = crud.create_api_key(db, org, data.label)
+    created = crud.create_api_key(db, org, data.label, expires_in_days=data.expires_in_days)
     _audit(db, admin, request, "api_key.create", target_type="api_key",
-           target_id=created.id, org_id=org_id, meta={"label": data.label, "prefix": created.prefix})
+           target_id=created.id, org_id=org_id,
+           meta={"label": data.label, "prefix": created.prefix,
+                 "expires_in_days": data.expires_in_days})
     return created
 
 

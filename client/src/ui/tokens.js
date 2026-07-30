@@ -115,8 +115,13 @@ export const tap = "transition duration-150 ease-out active:scale-[0.98] motion-
 
 // Console surfaces — flat + bordered (shadow reserved for true overlays).
 // `panelSurface` was admin's `surface` string; `overlay` for menus/modals.
-export const panelSurface = "rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50";
-export const overlay = "rounded-lg border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900";
+// The dark fill is a TRANSLUCENT wash rather than a fixed grey, so the same token reads
+// correctly on the console's true-black page and on the org area's slate page — one
+// surface definition, no per-area fork.
+export const panelSurface =
+  "rounded-lg border border-slate-200 bg-white dark:border-white/10 dark:bg-white/[0.02]";
+export const overlay =
+  "rounded-lg border border-slate-200 bg-white shadow-lg dark:border-white/10 dark:bg-neutral-950";
 
 // Semantic tones for the admin console (pill bg + text; dot uses bg-current).
 // Literal green for success (NOT the remapped emerald), so it reads as green.
@@ -127,6 +132,97 @@ export const TONE = {
   info: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400",
   brand: "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300",
   neutral: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Command Center surfaces (/admin). The console runs a TRUE BLACK dark theme —
+// #000 page, panels lifted with a translucent white wash rather than a grey fill, so
+// there is exactly one black and every layer above it is derived from it. Light theme
+// is the mirror image (slate-50 page, white panels). Every value is a `dark:` pair, so
+// nothing here can break theme switching.
+//
+// Scoped to the console on purpose: the org dashboard, marketing site and watch pages
+// keep the slate palette they were designed against.
+// ─────────────────────────────────────────────────────────────────────────────
+export const CONSOLE = {
+  // Shell
+  page: "bg-slate-50 dark:bg-black",
+  rail: "border-slate-200 bg-white dark:border-white/10 dark:bg-black",
+  bar: "border-slate-200 bg-white/85 dark:border-white/10 dark:bg-black/85",
+  // Panels — flat, bordered, no shadow (console surface, not a marketing card).
+  panel: "rounded-xl border border-slate-200 bg-white dark:border-white/10 dark:bg-white/[0.02]",
+  panelHover: "hover:border-slate-300 dark:hover:border-white/20",
+  inset: "rounded-lg border border-slate-200 bg-slate-50/80 dark:border-white/10 dark:bg-white/[0.03]",
+  divider: "border-slate-200 dark:border-white/10",
+  divideY: "divide-slate-100 dark:divide-white/[0.07]",
+  // Text ladder
+  heading: "text-slate-900 dark:text-white",
+  body: "text-slate-600 dark:text-neutral-300",
+  muted: "text-slate-500 dark:text-neutral-400",
+  faint: "text-slate-400 dark:text-neutral-500",
+  // Controls
+  control:
+    "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.03] dark:text-neutral-200 dark:hover:bg-white/[0.07]",
+  segment: "bg-slate-100 dark:bg-white/[0.05]",
+  segmentOn: "bg-violet-600 text-white shadow-sm",
+  segmentOff: "text-slate-600 hover:text-slate-900 dark:text-neutral-400 dark:hover:text-white",
+  link: "text-violet-600 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300",
+
+  // Sidebar navigation states. Three levels have to stay tellable apart at a glance:
+  //   rest  — quiet, recedes
+  //   hover — clearly reactive (the old values were ~4% washes, effectively invisible)
+  //   on    — violet-tinted in BOTH themes, matching the active-item treatment in the design
+  // Hover is a neutral lift rather than a violet tint so it never reads as "selected".
+  navOn: "bg-violet-50 text-violet-700 dark:bg-violet-500/[0.14] dark:text-white",
+  navOff: [
+    "text-slate-600 dark:text-neutral-400",
+    "hover:bg-slate-100 hover:text-slate-900",
+    "dark:hover:bg-white/[0.08] dark:hover:text-white",
+  ].join(" "),
+  // Icons carry the state too — a violet icon on the active row, muted at rest, and
+  // brightened on hover so the whole row responds as one target.
+  navIconOn: "text-violet-600 dark:text-violet-400",
+  navIconOff: "text-slate-400 group-hover:text-slate-600 dark:text-neutral-500 dark:group-hover:text-neutral-200",
+};
+
+// Heat cells for the stage × region availability matrix. Thresholds are availability %,
+// highest first — the first match wins.
+export const HEAT = [
+  { min: 99.9, cls: "bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-400" },
+  { min: 99.0, cls: "bg-green-50/70 text-green-600 dark:bg-green-500/[0.07] dark:text-green-500" },
+  { min: 98.0, cls: "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400" },
+  { min: 0, cls: "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-400" },
+];
+export const heatClass = (pct) =>
+  pct == null
+    ? "bg-slate-50 text-slate-400 dark:bg-white/[0.02] dark:text-neutral-600"
+    : (HEAT.find((h) => pct >= h.min) || HEAT[HEAT.length - 1]).cls;
+
+// Severity/verdict pills used across the console's tables and cards.
+export const SEVERITY = {
+  critical: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400",
+  sev1: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400",
+  sev2: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400",
+  high: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400",
+  sev3: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400",
+  monitoring: "bg-slate-100 text-slate-600 dark:bg-white/[0.07] dark:text-neutral-300",
+  sev4: "bg-slate-100 text-slate-600 dark:bg-white/[0.07] dark:text-neutral-300",
+  blocked: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400",
+  conditional: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400",
+  passed: "bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-400",
+};
+
+// Lifecycle stage accent — one hue per stage, in rail order. Hex because the rail dots
+// and the connecting gradient are inline SVG/CSS, not utility classes.
+export const STAGE_COLOR = {
+  contribute: "#22d3ee",
+  ingest: "#3b82f6",
+  produce: "#f59e0b",
+  secure: "#8b5cf6",
+  deliver: "#f43f5e",
+  understand: "#f59e0b",
+  preserve: "#10b981",
+  platform: "#e5e7eb",
 };
 
 // Chart series colors — consistent mapping between charts and their labels/legends.

@@ -36,6 +36,7 @@ from ..schemas.organization import (
     OrgSecurity,
 )
 from ..security import create_access_token, get_current_user, hash_password, require_org_admin
+from ..services import org as org_svc
 
 # Roles an org admin may assign/invite. Excludes super_admin (platform-only, never via this API).
 ORG_ASSIGNABLE_ROLES = ("org_admin", "host", "moderator", "speaker", "viewer")
@@ -59,6 +60,40 @@ def get_my_org_admin(
     """get_my_org gated to org admin (and above) for mutations/sensitive reads. Reuses the
     same lookup — require_org_admin just adds the 403 gate (super admin passes)."""
     return org
+
+
+# ── Overview (dashboard) ──────────────────────────────────────────────────────
+
+@router.get("/overview")
+def overview(
+    range_: str = Query("24h", alias="range", pattern="^(1h|24h|7d|30d)$"),
+    workspace: str | None = Query(None, description="workspace slug; only 'production' exists"),
+    include_test: bool = Query(True),
+    org: Organization = Depends(get_my_org),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Whole-page payload for /organization/dashboard, scoped to the caller's own org.
+
+    Readable by any member: it reports on the organization the caller already belongs to and
+    carries no cross-tenant or platform-wide figures. `workspace` is accepted so the console's
+    switcher round-trips, but this platform has one implicit workspace per org — an unknown
+    slug is a 404 rather than silently returning the default.
+    """
+    if workspace and workspace not in {w["slug"] for w in org_svc.workspaces(org)}:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown workspace '{workspace}'")
+    return org_svc.overview(db, org, user, range_=range_, include_test=include_test)
+
+
+@router.get("/console-state")
+def console_state(
+    org: Organization = Depends(get_my_org),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Small payload the org shell polls on every page: identity, workspace, nav badges and
+    the service-health verdict for the services this org actually uses."""
+    return org_svc.console_state(db, org, user)
 
 
 # ── Identity / Profile ────────────────────────────────────────────────────────

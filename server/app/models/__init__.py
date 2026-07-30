@@ -34,3 +34,19 @@ from .live import (
 from .feature_flag import FeatureFlag
 from .release import Release, RELEASE_CHANNELS
 from .support_ticket import SupportTicket, TICKET_STATUSES, TICKET_PRIORITIES
+from .platform_ops import (
+    ElevationSession,
+    GovernanceRecord,
+    Incident,
+    PlatformMetric,
+    SessionAlert,
+    ALERT_SEVERITIES,
+    EVENT_IMPACTS,
+    GOVERNANCE_KINDS,
+    GOVERNANCE_STATUSES,
+    INCIDENT_KINDS,
+    INCIDENT_SEVERITIES,
+    INCIDENT_STATUSES,
+    LIFECYCLE_STAGES,
+    REGIONS,
+)

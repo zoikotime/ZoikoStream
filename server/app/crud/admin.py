@@ -4,7 +4,7 @@ business logic (that lives in services/admin.py). List helpers return (items, to
 import hashlib
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
@@ -428,20 +428,26 @@ def list_api_keys(db, org: Organization) -> list[ApiKeyOut]:
             for r in records]
 
 
-def create_api_key(db, org: Organization, label: str) -> ApiKeyCreated:
+def create_api_key(db, org: Organization, label: str, expires_in_days: int | None = None) -> ApiKeyCreated:
+    now = datetime.now(timezone.utc)
     raw = f"zk_live_{secrets.token_urlsafe(32)}"
     record = {
         "id": str(uuid.uuid4()),
         "label": label,
         "prefix": raw[:12],
         "key_hash": hashlib.sha256(raw.encode()).hexdigest(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": now.isoformat(),
+        # An expiry makes credential rotation a real, surfaceable obligation (the org
+        # console's "expires in N days" item reads this). None = non-expiring, which is
+        # what every key created before this field existed remains.
+        "expires_at": (now + timedelta(days=expires_in_days)).isoformat() if expires_in_days else None,
         "revoked": False,
     }
     org.api_keys = [*(org.api_keys or []), record]
     db.commit()
     return ApiKeyCreated(id=record["id"], label=label, prefix=record["prefix"],
-                         created_at=record["created_at"], revoked=False, key=raw)
+                         created_at=record["created_at"], revoked=False, key=raw,
+                         expires_at=record["expires_at"])
 
 
 def revoke_api_key(db, org: Organization, key_id: str) -> bool:

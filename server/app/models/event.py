@@ -65,6 +65,10 @@ class Event(Base):
     auto_end_event: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    # Blast-radius class: standard | high | unrepeatable. Decides which readiness gates are
+    # mandatory (see services.ops.event_readiness) and what reaches the Command Center's
+    # high-impact list. "unrepeatable" = cannot be re-run (memorial, results broadcast).
+    impact: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
