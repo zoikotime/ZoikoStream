@@ -135,6 +135,27 @@ export default function HostDashboard() {
 
       r.localParticipant.on(ParticipantEvent.LocalTrackPublished, (pub) => {
         if (pub.source === Track.Source.Camera && videoRef.current) pub.track.attach(videoRef.current);
+
+        // The browser's native MediaStreamTrack "ended" event -- fired directly by the
+        // OS/device layer (permission revoked, camera unplugged, another app grabs it),
+        // independent of livekit-client's own event wiring -- NOT fired when the host
+        // deliberately toggles Camera/Mic off (that stops the track itself, it doesn't
+        // wait for it to end). Without this, the stream silently goes dark: the button
+        // still reads "on", the host sees nothing wrong, and the viewer is left staring
+        // at "Connecting..." forever.
+        pub.track?.mediaStreamTrack?.addEventListener(
+          "ended",
+          () => {
+            if (pub.source === Track.Source.Camera) {
+              setCamera(false);
+              notify.error("Your camera stopped unexpectedly — click Camera to reconnect it");
+            } else if (pub.source === Track.Source.Microphone) {
+              setMic(false);
+              notify.error("Your microphone stopped unexpectedly — click Mic to reconnect it");
+            }
+          },
+          { once: true }
+        );
       });
       r.localParticipant.on(ParticipantEvent.LocalTrackUnpublished, (pub) => {
         if (pub.source === Track.Source.Camera) pub.track?.detach();
@@ -301,7 +322,7 @@ export default function HostDashboard() {
         />
       </div>
 
-      <FeatureModal modal={modal} onClose={() => setModal(null)} />
+      <FeatureModal modal={modal} streamId={selectedEvent.id} onClose={() => setModal(null)} />
     </div>
   );
 }

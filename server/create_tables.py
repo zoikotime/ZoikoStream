@@ -12,6 +12,15 @@ from app.models.recording import Recording
 from app.models.view import StreamView
 from app.models.qa import QaQuestion, QaVote
 from app.models.poll import Poll, PollOption, PollVote
+from app.models.plan import Plan
+from app.models.subscription import Subscription
+from app.models.api_key import ApiKey
+from app.models.feature_flag import FeatureFlag
+from app.models.audit_log import AuditLog
+from app.models.release import Release
+from app.models.platform_setting import PlatformSetting
+from app.models.support_ticket import SupportTicket
+from app.models.invitation import Invitation
 
 
 print("Creating tables...")

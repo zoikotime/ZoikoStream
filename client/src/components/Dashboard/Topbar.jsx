@@ -2,7 +2,7 @@ import { useState } from "react";
 import { FiMenu, FiBell, FiChevronDown, FiLogOut, FiUser, FiSun, FiMoon } from "react-icons/fi";
 import { useAuth } from "../../auth/AuthContext";
 import { useTheme } from "../../theme/ThemeContext";
-import OrgSwitcher from "../OrgSwitcher";
+import AccountModal from "../AccountModal";
 
 const initials = (name = "") =>
   name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
@@ -11,6 +11,7 @@ export default function Topbar({ orgName, subtitle = "Organization", onMenuClick
   const { user, logout } = useAuth();
   const { theme, toggle } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
 
   return (
     <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-4 border-b border-slate-200 bg-white px-4 sm:px-6 dark:border-slate-800 dark:bg-slate-900">
@@ -78,8 +79,10 @@ export default function Topbar({ orgName, subtitle = "Organization", onMenuClick
                   </p>
                   <p className="truncate text-xs text-slate-500 dark:text-slate-400">{user?.email}</p>
                 </div>
-                <OrgSwitcher />
-                <button className="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-700">
+                <button
+                  onClick={() => { setMenuOpen(false); setAccountOpen(true); }}
+                  className="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-700"
+                >
                   <FiUser /> Profile
                 </button>
                 <button
@@ -93,6 +96,7 @@ export default function Topbar({ orgName, subtitle = "Organization", onMenuClick
           )}
         </div>
       </div>
+      <AccountModal open={accountOpen} onClose={() => setAccountOpen(false)} />
     </header>
   );
 }

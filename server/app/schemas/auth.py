@@ -62,20 +62,55 @@ class SwitchOrgIn(BaseModel):
     org_id: uuid.UUID
 
 
-class MemberInviteIn(BaseModel):
+class UpdateProfileIn(BaseModel):
     full_name: str = Field(min_length=1, max_length=120)
-    email: EmailStr
-    role: str = Field(pattern=r"^(host|moderator|speaker|viewer)$")
 
 
-class MemberOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=72)
 
+
+_MEMBER_ROLES = r"^(org_admin|host|moderator|speaker|viewer)$"
+
+
+class OrgUserOut(BaseModel):
     id: uuid.UUID
     full_name: str
     email: EmailStr
     role: str
     is_active: bool
+    created_at: datetime
+
+
+class OrgUserUpdateIn(BaseModel):
+    role: str = Field(pattern=_MEMBER_ROLES)
+
+
+class InvitationCreateIn(BaseModel):
+    email: EmailStr
+    role: str = Field(pattern=_MEMBER_ROLES)
+
+
+class InvitationActionIn(BaseModel):
+    action: str = Field(pattern=r"^resend$")
+
+
+class InvitationOut(BaseModel):
+    id: uuid.UUID
+    email: EmailStr
+    role: str
+    status: str
+    invited_by: str | None = None
+    expires_at: datetime
+    created_at: datetime
+
+
+class AcceptInvitationIn(BaseModel):
+    token: str
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=8, max_length=72)
 
 class ChannelCreate(BaseModel):
     name: str = Field(..., min_length=3, max_length=120)

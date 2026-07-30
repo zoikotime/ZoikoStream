@@ -40,7 +40,7 @@ from .config import settings
 from .db import SessionLocal
 from .models import User
 from .models.chat import ChatMessage
-from .models.poll import Poll, PollOption, PollVote
+from .models.poll import Poll, PollVote
 from .models.qa import QaQuestion, QaVote
 from .models.stream import Stream
 from .schemas.chat import ChatMessageOut
@@ -51,9 +51,26 @@ from .services import presence
 from .services.registration import is_registered
 from .services.stage import HAND_QUEUE, MANAGER_ROLES, resolve_identity, stage_room_for, stage_snapshot
 
+# python-socketio's cors_allowed_origins does exact string matching (no regex support,
+# unlike main.py's CORSMiddleware allow_origin_regex) -- so "localhost" and "127.0.0.1"
+# have to both be listed explicitly per port, or a browser using one while CORS_ORIGINS
+# only lists the other gets every WebSocket handshake rejected with 403.
+def _socket_cors_origins() -> list[str]:
+    origins = set()
+    for origin in (o.strip() for o in settings.CORS_ORIGINS.split(",")):
+        if not origin:
+            continue
+        origins.add(origin)
+        if "://localhost" in origin:
+            origins.add(origin.replace("://localhost", "://127.0.0.1"))
+        elif "://127.0.0.1" in origin:
+            origins.add(origin.replace("://127.0.0.1", "://localhost"))
+    return list(origins)
+
+
 sio = socketio.AsyncServer(
     async_mode="asgi",
-    cors_allowed_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+    cors_allowed_origins=_socket_cors_origins(),
 )
 
 HISTORY_LIMIT = 50

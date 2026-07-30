@@ -34,7 +34,6 @@ export { default as Counter } from "./Counter";
 export { default as Skeleton, SectionFallback } from "./Skeleton";
 export { default as Spinner, PageSpinner } from "./Spinner";
 export { default as Modal } from "./Modal";
-export { default as Drawer } from "./Drawer";
 export { toast, notify, Toaster, toasterProps } from "./Toast";
 
 // Theme

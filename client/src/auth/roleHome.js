@@ -1,7 +1,8 @@
 // In-app landing per role. "/" is the public marketing homepage.
 //
-// Viewers intentionally have NO app dashboard (value is null) — they watch via a
-// public event link (/e/:id) or a direct watch link, no account needed at all.
+// Viewers intentionally have NO app dashboard (value is null):
+//   • invited viewers watch via their event link (AcceptInvitation -> /events/:id/watch);
+//   • public viewers join a public event link (/e/:id) with no account at all.
 // Callers treat null as "no app home" and fall back to the public site.
 const HOMES = {
   super_admin: "/admin/dashboard",

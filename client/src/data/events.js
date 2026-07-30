@@ -1,7 +1,37 @@
-// Display helpers shared by the Events list and Event Details pages. Event data itself
-// comes from GET /streams — this file only maps the backend's lowercase enum values to
-// display labels/styles.
+// Presentation helpers for events. Event data itself comes from GET /streams (see
+// pages/organization/Events.jsx); this file is formatters + display maps only.
 
+const DTF_DATE = { month: "short", day: "numeric", year: "numeric" };
+const DTF_TIME = { hour: "numeric", minute: "2-digit" };
+
+// Accepts an ISO date ("2024-05-20") or a full datetime; returns "May 20, 2024".
+export const fmtDate = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(String(iso).length <= 10 ? `${iso}T00:00:00` : iso);
+  return isNaN(d) ? "—" : d.toLocaleDateString("en-US", DTF_DATE);
+};
+
+// "May 20, 2024 · 10:00 AM"
+export const fmtDateTime = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d) ? "—" : `${d.toLocaleDateString("en-US", DTF_DATE)} · ${d.toLocaleTimeString("en-US", DTF_TIME)}`;
+};
+
+export const fmtTime = (iso) => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d) ? "—" : d.toLocaleTimeString("en-US", DTF_TIME);
+};
+
+export const fmtDuration = (mins) => {
+  if (mins == null) return "—";
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h ? `${h}h${m ? ` ${m}m` : ""}` : `${m}m`;
+};
+
+// Backend Stream.status -> display label + pill classes (org Events list/detail).
 export const STATUS_LABEL = {
   draft: "Draft",
   scheduled: "Upcoming",
@@ -18,22 +48,13 @@ export const STATUS_PILL = {
   canceled: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400",
 };
 
-export const VISIBILITY_LABEL = {
-  public: "Public",
-  private: "Private",
-  unlisted: "Unlisted",
-};
+export const VISIBILITY_LABEL = { public: "Public", private: "Private", unlisted: "Unlisted" };
 
 export const VIS_PILL = {
   public: "text-emerald-600 dark:text-emerald-400",
   private: "text-slate-500 dark:text-slate-400",
   unlisted: "text-amber-600 dark:text-amber-400",
 };
-
-export const fmtDate = (isoDate) =>
-  isoDate
-    ? new Date(isoDate + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
-    : "—";
 
 // Deterministic banner color per event — the backend has no "accent" concept, this is
 // purely a stable visual pick so the same event doesn't change color on reload.

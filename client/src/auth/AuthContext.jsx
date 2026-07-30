@@ -29,18 +29,19 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
-  // Patches the stored user (e.g. after switching the active org) without a full
-  // re-login — the access token stays valid, only which org/role it resolves to changes.
+  // Merge partial fields (e.g. a new full_name from PATCH /auth/me) into the stored
+  // user without touching the token -- unlike setSession, this isn't a fresh login.
   const updateUser = (patch) => {
-    setUser((prev) => {
-      const next = { ...prev, ...patch };
+    setUser((u) => {
+      if (!u) return u;
+      const next = { ...u, ...patch };
       localStorage.setItem("user", JSON.stringify(next));
       return next;
     });
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading: false, setSession, logout, updateUser }}>
+    <AuthContext.Provider value={{ user, loading: false, setSession, updateUser, logout }}>
       {children}
     </AuthContext.Provider>
   );

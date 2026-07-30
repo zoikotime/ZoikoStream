@@ -8,8 +8,10 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import get_db
 from .email import send_reset_otp_email, send_welcome_email
-from .models import Membership, Organization, User
+from .models import Invitation, Membership, Organization, User
 from .schemas import (
+    AcceptInvitationIn,
+    ChangePasswordIn,
     ForgotPasswordIn,
     LoginIn,
     MembershipOut,
@@ -17,6 +19,7 @@ from .schemas import (
     ResetPasswordIn,
     SwitchOrgIn,
     TokenOut,
+    UpdateProfileIn,
     UserOut,
     VerifyOtpIn,
 )
@@ -91,6 +94,10 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is disabled")
+    # Suspended orgs lock out everyone except the platform's own super_admin account,
+    # whose org_id points at "ZoikoStream Platform", not the org being suspended.
+    if user.role != "super_admin" and user.organization and not user.organization.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This organization has been suspended")
 
     # Include organization name in response
     user_out = UserOut.model_validate(user)
@@ -169,6 +176,26 @@ def me(user: User = Depends(get_current_user)):
     return user_out
 
 
+@router.patch("/me", response_model=UserOut)
+def update_me(data: UpdateProfileIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    user.full_name = data.full_name
+    db.commit()
+    db.refresh(user)
+
+    user_out = UserOut.model_validate(user)
+    user_out.organization_name = user.organization.name if user.organization else None
+    return user_out
+
+
+@router.post("/change-password")
+def change_password(data: ChangePasswordIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not verify_password(data.current_password, user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect")
+    user.password_hash = hash_password(data.new_password)
+    db.commit()
+    return {"message": "Password updated."}
+
+
 @router.get("/memberships", response_model=list[MembershipOut])
 def memberships(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.scalars(
@@ -205,3 +232,61 @@ def switch_org(data: SwitchOrgIn, user: User = Depends(get_current_user), db: Se
     user_out = UserOut.model_validate(user)
     user_out.organization_name = user.organization.name if user.organization else None
     return user_out
+
+
+@router.post("/accept-invitation", response_model=TokenOut)
+def accept_invitation(data: AcceptInvitationIn, db: Session = Depends(get_db)):
+    """Public (no auth) -- the invite token mailed by POST /organization/invitations
+    IS the credential here. Matches an email against every still-pending invitation
+    for it (there can be more than one, from different orgs) and bcrypt-checks the
+    token against each until one verifies, same shape as an OTP check."""
+    invalid = HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired invitation")
+    email = data.email.lower()
+    candidates = db.scalars(select(Invitation).where(Invitation.email == email, Invitation.status == "pending")).all()
+    invitation = next((i for i in candidates if verify_password(data.token, i.token_hash)), None)
+    if invitation is None:
+        raise invalid
+    if invitation.expires_at < datetime.now(timezone.utc):
+        invitation.status = "expired"
+        db.commit()
+        raise invalid
+
+    user = db.scalar(select(User).where(User.email == email))
+    if user is None:
+        username = email.split("@")[0]
+        counter = 1
+        while db.scalar(select(User).where(func.lower(User.username) == username)):
+            username = f"{email.split('@')[0]}{counter}"
+            counter += 1
+        user = User(
+            org_id=invitation.org_id,
+            full_name=data.full_name,
+            email=email,
+            username=username,
+            password_hash=hash_password(data.password),
+            role=invitation.role,
+        )
+        db.add(user)
+        db.flush()
+        db.add(Membership(user_id=user.id, org_id=invitation.org_id, role=invitation.role, is_active=True))
+    else:
+        # Already has a login (being invited into an additional org) -- the token proves
+        # they own this invite, so activate membership and switch them into it without
+        # touching their existing password.
+        membership = db.scalar(select(Membership).where(Membership.user_id == user.id, Membership.org_id == invitation.org_id))
+        if membership:
+            membership.is_active = True
+            membership.role = invitation.role
+        else:
+            db.add(Membership(user_id=user.id, org_id=invitation.org_id, role=invitation.role, is_active=True))
+        user.org_id = invitation.org_id
+        user.role = invitation.role
+
+    invitation.status = "accepted"
+    invitation.accepted_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(user)
+
+    user_out = UserOut.model_validate(user)
+    user_out.organization_name = user.organization.name if user.organization else None
+    return TokenOut(access_token=create_access_token(user, remember=False), user=user_out)

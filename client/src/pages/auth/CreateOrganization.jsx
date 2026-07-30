@@ -2,11 +2,14 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
-import { useAuth } from "../../auth/AuthContext";
 import api, { errMsg } from "../../api";
-import { Field, PasswordField, SubmitButton } from "./fields";
+import { useAuth } from "../../auth/AuthContext";
+import { roleHome } from "../../auth/roleHome";
+import { Field, PasswordField, SubmitButton, Checkbox } from "../../ui/forms";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
+const slugify = (s) =>
+  s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 // New organizations only. The creator automatically becomes the Organization Admin —
 // no role/username field. Hosts/Moderators/Viewers never land here (they're invited).
@@ -16,6 +19,7 @@ export default function CreateOrganization() {
 
   const [form, setForm] = useState({
     name: "",
+    slug: "",
     adminName: "",
     email: "",
     password: "",
@@ -40,17 +44,17 @@ export default function CreateOrganization() {
 
     setLoading(true);
     try {
-      const res = await api.post("/auth/register", {
+      const { data } = await api.post("/auth/register", {
         full_name: form.adminName.trim(),
         organization_name: form.name.trim(),
         email: form.email.trim(),
         password: form.password,
       });
-      setSession(res.data);
+      setSession(data);
       notify.success("Organization created! Welcome to ZoikoStream.");
-      navigate("/organization/dashboard", { replace: true });
-    } catch (err) {
-      notify.error(errMsg(err, "Failed to create your organization"));
+      navigate(roleHome(data.user.role) || "/", { replace: true });
+    } catch (error) {
+      notify.error(errMsg(error, "Could not create your organization."));
     } finally {
       setLoading(false);
     }
@@ -72,6 +76,13 @@ export default function CreateOrganization() {
           value={form.name}
           onChange={set("name")}
           error={errors.name}
+        />
+        <Field
+          label="Organization Slug (optional)"
+          placeholder={slugify(form.name) || "acme-inc"}
+          value={form.slug}
+          onChange={set("slug")}
+          hint="Used in your event links — leave blank to auto-generate."
         />
         <Field
           label="Organization Admin Name"
@@ -109,11 +120,10 @@ export default function CreateOrganization() {
 
         <div>
           <label className="flex items-start gap-2.5 text-sm text-slate-600 dark:text-slate-300">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={agree}
               onChange={(e) => setAgree(e.target.checked)}
-              className="mt-0.5 h-4 w-4 rounded accent-emerald-600"
+              className="mt-0.5 rounded accent-emerald-600"
             />
             <span>I agree to the Terms and Privacy Policy.</span>
           </label>

@@ -16,19 +16,32 @@ export function useLiveKitRoom(liveToken) {
 
   useEffect(() => {
     if (!liveToken) return;
+    // React StrictMode double-invokes effects in dev: mount -> cleanup -> mount again.
+    // Without this `cancelled` guard, the FIRST run's r.connect() can still resolve
+    // after its own cleanup already disconnected it -- overwriting `room` with a dead
+    // connection the SECOND (real) run never gets to correct, leaving the viewer stuck
+    // on "Connecting..." forever even though a room genuinely connected underneath.
+    let cancelled = false;
     const r = new Room();
-    roomRef.current = r;
 
-    r.on(RoomEvent.Connected, () => setConnected(true));
-    r.on(RoomEvent.Disconnected, () => setConnected(false));
+    r.on(RoomEvent.Connected, () => { if (!cancelled) setConnected(true); });
+    r.on(RoomEvent.Disconnected, () => { if (!cancelled) setConnected(false); });
 
     r.connect(liveToken.livekit_url, liveToken.token)
-      .then(() => setRoom(r))
-      .catch(() => setConnected(false));
+      .then(() => {
+        if (cancelled) {
+          r.disconnect();
+          return;
+        }
+        roomRef.current = r;
+        setRoom(r);
+      })
+      .catch(() => { if (!cancelled) setConnected(false); });
 
     return () => {
+      cancelled = true;
       r.disconnect();
-      roomRef.current = null;
+      if (roomRef.current === r) roomRef.current = null;
       setRoom(null);
       setConnected(false);
     };
@@ -93,6 +106,24 @@ export function useRoomParticipants(room) {
       }
     };
 
+    // TrackSubscribed only fires for tracks subscribed AFTER this listener attaches --
+    // by the time this effect runs, the room may already have been connected for a
+    // while (the host went live before this viewer joined), so its tracks were already
+    // subscribed at the LiveKit level and that event already fired and is gone. Without
+    // this, the tile is created with videoTrack/audioTrack stuck at null forever: the
+    // participant shows up, but no video ever appears -- "Connecting..." indefinitely.
+    const seedTracks = (participant) => {
+      participant.trackPublications.forEach((pub) => {
+        if (!pub.track) return;
+        setParticipants((prev) => {
+          const tile = prev[participant.identity];
+          if (!tile) return prev;
+          const key = pub.track.kind === Track.Kind.Video ? "videoTrack" : "audioTrack";
+          return { ...prev, [participant.identity]: { ...tile, [key]: pub.track } };
+        });
+      });
+    };
+
     room.on(RoomEvent.ParticipantConnected, upsert);
     room.on(RoomEvent.ParticipantDisconnected, remove);
     room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
@@ -101,8 +132,12 @@ export function useRoomParticipants(room) {
     room.on(RoomEvent.LocalTrackPublished, () => upsert(room.localParticipant));
 
     upsert(room.localParticipant);
+    seedTracks(room.localParticipant);
     onPermissionsChanged(null, room.localParticipant);
-    room.remoteParticipants.forEach(upsert);
+    room.remoteParticipants.forEach((p) => {
+      upsert(p);
+      seedTracks(p);
+    });
 
     return () => {
       room.off(RoomEvent.ParticipantConnected, upsert);

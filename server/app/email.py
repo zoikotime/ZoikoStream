@@ -93,34 +93,6 @@ def _otp_html(name: str, otp: str) -> str:
     </div>""")
 
 
-def _member_invite_html(to: str, name: str, role: str, org_name: str, temp_password: str) -> str:
-    safe_name = html.escape(name or "there")
-    safe_role = html.escape(role.capitalize())
-    safe_org = html.escape(org_name or "your organization")
-    safe_email = html.escape(to)
-    safe_password = html.escape(temp_password)
-    login_url = f"{_base_url()}/login"
-    return _shell(f"""
-    {_header("You're invited!")}
-    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
-      <p>Hi {safe_name},</p>
-      <p>You've been added to <strong>{safe_org}</strong> on ZoikoStream as a
-         <strong>{safe_role}</strong>. Use these credentials to sign in:</p>
-      <div style="margin:24px 0;padding:16px 20px;background:#f2f2f4;border-radius:8px;">
-        <p style="margin:0 0 6px;"><strong>Email:</strong> {safe_email}</p>
-        <p style="margin:0;"><strong>Temporary password:</strong> {safe_password}</p>
-      </div>
-      <p>We'd recommend changing this password after you sign in.</p>
-      <p style="text-align:center;margin:32px 0;">
-        <a href="{login_url}" style="background:#7ac142;color:#fff;text-decoration:none;
-           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
-          Sign In
-        </a>
-      </p>
-      <p style="margin-bottom:0;">Team ZoikoStream</p>
-    </div>""")
-
-
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
 
@@ -129,41 +101,28 @@ def send_reset_otp_email(to: str, name: str, otp: str) -> None:
     _send(to, "Your ZoikoStream password reset code", _otp_html(name, otp))
 
 
-def send_member_invite_email(to: str, name: str, role: str, org_name: str, temp_password: str) -> None:
-    # Logged regardless of delivery success -- the invite email already puts this password
-    # in plaintext by design, and Resend's default sender can't deliver to anyone but the
-    # account owner until a domain is verified, so this is the only way to recover it in dev.
-    log.info("Invite credentials for %s (%s): %s", to, role, temp_password)
-    _send(to, f"You've been added to {org_name} on ZoikoStream", _member_invite_html(to, name, role, org_name, temp_password))
-
-
-def _added_to_org_html(name: str, role: str, org_name: str) -> str:
-    safe_name = html.escape(name or "there")
+def _invitation_html(role: str, org_name: str, invite_link: str) -> str:
     safe_role = html.escape(role.capitalize())
-    safe_org = html.escape(org_name or "another organization")
-    login_url = f"{_base_url()}/login"
+    safe_org = html.escape(org_name or "an organization")
     return _shell(f"""
-    {_header("You're in!")}
+    {_header("You're invited!")}
     <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
-      <p>Hi {safe_name},</p>
-      <p>You've been added to <strong>{safe_org}</strong> on ZoikoStream as a
-         <strong>{safe_role}</strong>. Sign in with your existing ZoikoStream account and
-         switch into it from your account menu.</p>
+      <p>You've been invited to join <strong>{safe_org}</strong> on ZoikoStream as a
+         <strong>{safe_role}</strong>.</p>
+      <p>This invitation expires in 7 days.</p>
       <p style="text-align:center;margin:32px 0;">
-        <a href="{login_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+        <a href="{invite_link}" style="background:#7ac142;color:#fff;text-decoration:none;
            padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
-          Sign In
+          Accept Invitation
         </a>
       </p>
       <p style="margin-bottom:0;">Team ZoikoStream</p>
     </div>""")
 
 
-def send_added_to_org_email(to: str, name: str, role: str, org_name: str) -> None:
-    # Unlike send_member_invite_email, this is for someone who already has a ZoikoStream
-    # login (matched by email) and is simply gaining membership in one more org -- no new
-    # password to generate or send.
-    _send(to, f"You've been added to {org_name} on ZoikoStream", _added_to_org_html(name, role, org_name))
+def send_invitation_email(to: str, role: str, org_name: str, invite_link: str) -> None:
+    log.info("Invitation link for %s (%s @ %s): %s", to, role, org_name, invite_link)
+    _send(to, f"You've been invited to join {org_name} on ZoikoStream", _invitation_html(role, org_name, invite_link))
 
 
 def _registration_html(name: str, event_title: str, watch_url: str) -> str:
@@ -188,6 +147,33 @@ def _registration_html(name: str, event_title: str, watch_url: str) -> str:
 def send_registration_confirmation_email(to: str, name: str, event_title: str, stream_id) -> None:
     watch_url = f"{_base_url()}/events/{stream_id}/watch"
     _send(to, f"You're registered for {event_title}", _registration_html(name, event_title, watch_url))
+
+
+def _role_assigned_html(name: str, role: str, event_title: str, studio_url: str) -> str:
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title)
+    cta = "Open Host Studio" if role == "host" else "Open Event"
+    return _shell(f"""
+    {_header("You've been assigned to an event")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>You've been made the <strong>{html.escape(role)}</strong> for
+         <strong>{safe_title}</strong> on ZoikoStream.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{studio_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          {cta}
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
+# role is "host" or "moderator" -- hosts land on the broadcasting studio, everyone else
+# just gets sent to the event itself (no moderator console route exists to link to yet).
+def send_role_assigned_email(to: str, name: str, role: str, event_title: str, stream_id) -> None:
+    studio_url = f"{_base_url()}/host/dashboard" if role == "host" else f"{_base_url()}/events/{stream_id}/watch"
+    _send(to, f"You're now {'hosting' if role == 'host' else 'the moderator for'} {event_title}", _role_assigned_html(name, role, event_title, studio_url))
 
 
 if __name__ == "__main__":

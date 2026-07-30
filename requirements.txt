@@ -15,4 +15,3 @@ pillow
 email-validator
 httpx
 livekit-api
-python-socketio

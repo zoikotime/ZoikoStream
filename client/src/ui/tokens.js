@@ -81,3 +81,60 @@ export const z = { header: "z-50", overlay: "z-[60]", modal: "z-[70]", toast: "z
 
 // Tiny className joiner (no clsx dependency needed for this).
 export const cx = (...parts) => parts.filter(Boolean).join(" ");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin console vocabulary — merged here from the former components/admin/tokens.js
+// so the whole app has ONE token module. Names that collided with the marketing
+// tokens above were resolved: admin's unused ACCENT="violet" string was dropped
+// (the ACCENT object above wins); admin's `surface` STRING became `panelSurface`
+// (the `surface` OBJECT above keeps its name). TONE is kept DISTINCT from STATUS —
+// they use different palettes (STATUS: emerald→violet via the index.css remap;
+// TONE: literal green), so merging them would change badge colors.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Type scale (px) as ready-to-use className strings. Numeric styles carry tabular-nums.
+export const type = {
+  metric: "text-[32px] leading-[36px] font-semibold tabular-nums tracking-tight",
+  stat: "text-[26px] leading-8 font-semibold tabular-nums tracking-tight",
+  h1: "text-[24px] leading-8 font-semibold tracking-tight",
+  h2: "text-[20px] leading-7 font-semibold tracking-tight",
+  title: "text-[16px] leading-6 font-semibold",
+  body: "text-[14px] leading-5",
+  label: "text-[13px] leading-5",
+  caption: "text-[12px] leading-4",
+  eyebrow: "text-[11px] font-semibold uppercase tracking-wider",
+  num: "tabular-nums",
+  mono: "font-mono tabular-nums",
+};
+
+// Interaction primitives — every interactive element composes these.
+export const focusRing =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-900";
+export const t150 = "transition-colors duration-150 ease-out motion-reduce:transition-none";
+export const tap = "transition duration-150 ease-out active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100";
+
+// Console surfaces — flat + bordered (shadow reserved for true overlays).
+// `panelSurface` was admin's `surface` string; `overlay` for menus/modals.
+export const panelSurface = "rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50";
+export const overlay = "rounded-lg border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900";
+
+// Semantic tones for the admin console (pill bg + text; dot uses bg-current).
+// Literal green for success (NOT the remapped emerald), so it reads as green.
+export const TONE = {
+  success: "bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-400",
+  warning: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400",
+  danger: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400",
+  info: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400",
+  brand: "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300",
+  neutral: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
+};
+
+// Chart series colors — consistent mapping between charts and their labels/legends.
+export const SERIES = {
+  brand: "#8b5cf6", // violet — primary
+  info: "#3b82f6", // blue
+  success: "#22c55e",
+  warning: "#f59e0b",
+  danger: "#f43f5e",
+  muted: "#64748b",
+};

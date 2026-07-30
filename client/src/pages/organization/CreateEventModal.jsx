@@ -5,6 +5,7 @@ import Modal from "../../ui/Modal";
 import Button from "../../ui/Button";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
+import InviteRoleInline from "../../components/organization/InviteRoleInline";
 
 const CATEGORIES = ["Webinar", "Conference", "Product Launch", "Workshop", "Q&A Session", "Internal"];
 const TIMEZONES = ["UTC", "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Kolkata", "Asia/Singapore"];
@@ -70,8 +71,8 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
   useEffect(() => {
     if (!open) return;
     api
-      .get("/organization/members")
-      .then((res) => setMembers(res.data))
+      .get("/organization/users")
+      .then((res) => setMembers(res.data.items))
       .catch(() => setMembers([]));
   }, [open]);
 
@@ -200,8 +201,9 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
                 <option value="">Unassigned</option>
                 {hosts.map((h) => <option key={h.id} value={h.id}>{h.full_name}</option>)}
               </select>
+              <InviteRoleInline role="host" />
               {hosts.length === 0 && (
-                <p className="mt-1 text-xs text-slate-400">No hosts yet — invite one from Members.</p>
+                <p className="mt-1 text-xs text-slate-400">No hosts yet.</p>
               )}
             </div>
             <div>
@@ -210,8 +212,9 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
                 <option value="">Unassigned</option>
                 {moderators.map((m) => <option key={m.id} value={m.id}>{m.full_name}</option>)}
               </select>
+              <InviteRoleInline role="moderator" />
               {moderators.length === 0 && (
-                <p className="mt-1 text-xs text-slate-400">No moderators yet — invite one from Members.</p>
+                <p className="mt-1 text-xs text-slate-400">No moderators yet.</p>
               )}
             </div>
           </div>

@@ -1,205 +1,302 @@
-import { useEffect, useState } from "react";
-import {
-  FiVideo,
-  FiMic,
-  FiUser,
-  FiEye,
-  FiSend,
-  FiRefreshCw,
-  FiX,
-} from "react-icons/fi";
-import { cx } from "../../ui/tokens";
-import Card from "../../ui/Card";
-import Button from "../../ui/Button";
-import { notify } from "../../ui/Toast";
+import { useMemo, useState } from "react";
+import { FiUserPlus, FiSearch, FiRefreshCw, FiX, FiTrash2, FiUsers, FiMail, FiSend } from "react-icons/fi";
 import api, { errMsg } from "../../api";
+import useApi from "../../hooks/useApi";
+import { useAuth } from "../../auth/AuthContext";
+import { notify } from "../../ui/Toast";
+import Modal from "../../ui/Modal";
+import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
+import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
+import StatCard from "../../components/admin/StatCard";
+import { ConsoleButton as Button } from "../../ui/Button";
+import Badge from "../../ui/Badge";
+import DataTable from "../../components/admin/DataTable";
+import SectionCard from "../../components/admin/SectionCard";
+import { cx, focusRing } from "../../ui/tokens";
+import { Label } from "../../ui/forms";
+import { fmtDate } from "../../data/events";
 
-const ROLES = [
-  { role: "host", label: "Host", icon: FiVideo, accent: "violet", desc: "Full control of the event" },
-  { role: "moderator", label: "Moderator", icon: FiMic, accent: "blue", desc: "Manage chat, polls & Q&A" },
-  { role: "speaker", label: "Speaker", icon: FiUser, accent: "emerald", desc: "Present on stage" },
-  { role: "viewer", label: "Viewer", icon: FiEye, accent: "amber", desc: "Watch and interact" },
-];
-const ROLE_LABEL = Object.fromEntries(ROLES.map((r) => [r.role, r.label]));
+const ROLES = ["org_admin", "host", "moderator", "speaker", "viewer"];
+const ROLE_LABEL = { org_admin: "Admin", host: "Host", moderator: "Moderator", speaker: "Speaker", viewer: "Viewer" };
+const roleLabel = (r) => ROLE_LABEL[r] || r;
 
-const ACCENT_ICON = {
-  violet: "bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400",
-  blue: "bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400",
-  emerald: "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400",
-  amber: "bg-amber-100 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400",
-};
+const INVITE_TONE = { pending: "warning", accepted: "success", cancelled: "neutral", expired: "danger", rejected: "danger" };
 
-const STATUS_PILL = {
-  Active: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400",
-  Disabled: "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400",
-};
-
-const input =
-  "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
+const control = cx(
+  "h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none",
+  "focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20",
+  "dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200",
+  focusRing
+);
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
-function InviteCard({ role, label, icon: Icon, accent, desc, onSend }) {
-  const [form, setForm] = useState({ name: "", email: "", role });
+function InviteModal({ open, onClose, onInvited }) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("viewer");
   const [sending, setSending] = useState(false);
-  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-  const valid = form.name.trim() && isEmail(form.email);
 
-  const submit = async () => {
+  const close = () => { setEmail(""); setRole("viewer"); onClose(); };
+
+  const send = async () => {
     setSending(true);
-    const ok = await onSend({ ...form });
-    setSending(false);
-    if (ok) setForm({ name: "", email: "", role });
-  };
-
-  return (
-    <Card className="flex flex-col" padding="md">
-      <div className="mb-4 flex items-center gap-3">
-        <span className={cx("grid h-10 w-10 shrink-0 place-items-center rounded-xl", ACCENT_ICON[accent])}>
-          <Icon className="text-lg" />
-        </span>
-        <div>
-          <h3 className="font-semibold text-slate-900 dark:text-white">Invite {label}</h3>
-          <p className="text-xs text-slate-500 dark:text-slate-400">{desc}</p>
-        </div>
-      </div>
-
-      <div className="flex flex-1 flex-col gap-3">
-        <input className={input} placeholder="Full name" value={form.name} onChange={(e) => set("name", e.target.value)} />
-        <input className={input} type="email" placeholder="Email address" value={form.email} onChange={(e) => set("email", e.target.value)} />
-        <select className={input} value={form.role} onChange={(e) => set("role", e.target.value)}>
-          {ROLES.map((r) => <option key={r.role} value={r.role}>{r.label}</option>)}
-        </select>
-        <Button size="sm" className="mt-auto w-full" disabled={!valid || sending} onClick={submit} title={valid ? undefined : "Enter a name and valid email"}>
-          <FiSend className="text-base" /> {sending ? "Sending…" : "Send Invitation"}
-        </Button>
-      </div>
-    </Card>
-  );
-}
-
-const th = "px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-400 whitespace-nowrap";
-const td = "px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap";
-
-export default function InviteMembers() {
-  const [members, setMembers] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const load = () => {
-    api
-      .get("/organization/members")
-      .then((res) => setMembers(res.data))
-      .catch((err) => notify.error(errMsg(err, "Failed to load members")))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(load, []);
-
-  const send = async ({ name, email, role }) => {
     try {
-      const res = await api.post("/organization/members", { full_name: name, email, role });
-      setMembers((list) => [res.data, ...list]);
-      notify.success(`Invitation sent to ${name}`);
-      return true;
-    } catch (err) {
-      notify.error(errMsg(err, "Failed to send invitation"));
-      return false;
+      await api.post("/organization/invitations", { email: email.trim().toLowerCase(), role });
+      notify.success(`Invitation sent to ${email.trim()}`);
+      onInvited?.();
+      close();
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setSending(false);
     }
   };
 
-  const resend = (id) => {
-    api
-      .post(`/organization/members/${id}/resend`)
-      .then((res) => {
-        setMembers((list) => list.map((m) => (m.id === id ? res.data : m)));
-        notify.success("Credentials resent");
-      })
-      .catch((err) => notify.error(errMsg(err, "Failed to resend credentials")));
+  return (
+    <Modal
+      open={open}
+      onClose={close}
+      title="Invite a member"
+      className="max-w-md"
+      footer={
+        <>
+          <Button variant="secondary" size="sm" onClick={close} disabled={sending}>Cancel</Button>
+          <Button size="sm" leftIcon={FiSend} onClick={send} loading={sending} disabled={!isEmail(email) || sending}>
+            Send Invitation
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div>
+          <Label>Email address</Label>
+          <div className="relative">
+            <FiMail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="teammate@company.com"
+              className={cx(control, "h-10 w-full pl-9")}
+            />
+          </div>
+        </div>
+        <div>
+          <Label>Role</Label>
+          <select value={role} onChange={(e) => setRole(e.target.value)} className={cx(control, "h-10 w-full")}>
+            {ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
+          </select>
+        </div>
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          They'll receive an email with a secure link to join your organization.
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
+export default function OrganizationMembers() {
+  const { user } = useAuth();
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const { data, loading, error, reload } = useApi(() =>
+    Promise.all([
+      api.get("/organization/users", { params: { page_size: 100 } }).then((r) => r.data.items),
+      api.get("/organization/invitations", { params: { page_size: 100 } }).then((r) => r.data.items),
+    ]).then(([members, invites]) => ({ members, invites }))
+  );
+  const members = useMemo(() => data?.members || [], [data]);
+  const invites = useMemo(() => data?.invites || [], [data]);
+  const pending = invites.filter((i) => i.status === "pending");
+
+  const filteredMembers = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return members;
+    return members.filter((m) => (m.full_name || "").toLowerCase().includes(q) || (m.email || "").toLowerCase().includes(q));
+  }, [members, query]);
+
+  const kpis = [
+    { label: "Members", value: members.length },
+    { label: "Active", value: members.filter((m) => m.is_active).length },
+    { label: "Admins", value: members.filter((m) => m.role === "org_admin").length },
+    { label: "Pending invites", value: pending.length },
+  ];
+
+  const changeRole = async (m, role) => {
+    try {
+      await api.patch(`/organization/users/${m.id}`, { role });
+      notify.success(`${m.full_name} is now ${roleLabel(role)}`);
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    }
   };
 
-  const remove = (id) => {
-    if (!window.confirm("Remove this member? They will no longer be able to sign in.")) return;
-    api
-      .delete(`/organization/members/${id}`)
-      .then(() => {
-        setMembers((list) => list.map((m) => (m.id === id ? { ...m, is_active: false } : m)));
-        notify.success("Member removed");
-      })
-      .catch((err) => notify.error(errMsg(err, "Failed to remove member")));
+  const removeMember = async (m) => {
+    if (!window.confirm(`Remove ${m.full_name} from the organization?`)) return;
+    try {
+      await api.delete(`/organization/users/${m.id}`);
+      notify.success("Member removed");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    }
   };
+
+  const resendInvite = async (inv) => {
+    try {
+      await api.patch(`/organization/invitations/${inv.id}`, { action: "resend" });
+      notify.success(`Invitation resent to ${inv.email}`);
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    }
+  };
+
+  const cancelInvite = async (inv) => {
+    try {
+      await api.delete(`/organization/invitations/${inv.id}`);
+      notify.success("Invitation cancelled");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    }
+  };
+
+  const memberColumns = [
+    {
+      key: "full_name",
+      header: "Member",
+      sortable: true,
+      sortValue: (r) => (r.full_name || "").toLowerCase(),
+      render: (r) => (
+        <div className="flex items-center gap-3">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-violet-100 text-xs font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
+            {(r.full_name || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase()}
+          </span>
+          <div className="min-w-0">
+            <p className="truncate font-medium text-slate-800 dark:text-slate-100">
+              {r.full_name}
+              {user?.email === r.email && <span className="ml-1.5 text-xs font-normal text-slate-400">(you)</span>}
+            </p>
+            <p className="truncate text-xs text-slate-500 dark:text-slate-400">{r.email}</p>
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "role",
+      header: "Role",
+      sortable: true,
+      render: (r) => (
+        <select
+          value={r.role}
+          onChange={(e) => changeRole(r, e.target.value)}
+          disabled={r.role === "super_admin" || user?.email === r.email}
+          title={user?.email === r.email ? "You can't change your own role" : undefined}
+          aria-label={`Role for ${r.full_name}`}
+          className={cx(control, "h-8 w-full max-w-[9rem] disabled:opacity-60")}
+        >
+          {r.role === "super_admin" && <option value="super_admin">Super Admin</option>}
+          {ROLES.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}
+        </select>
+      ),
+    },
+    {
+      key: "is_active",
+      header: "Status",
+      sortable: true,
+      sortValue: (r) => (r.is_active ? 1 : 0),
+      render: (r) => <Badge tone={r.is_active ? "success" : "neutral"} dot>{r.is_active ? "Active" : "Inactive"}</Badge>,
+    },
+    { key: "created_at", header: "Joined", align: "right", sortable: true, sortValue: (r) => (r.created_at ? new Date(r.created_at).getTime() : 0), render: (r) => fmtDate(r.created_at) },
+  ];
+
+  const inviteColumns = [
+    { key: "email", header: "Email", sortable: true, render: (r) => <span className="font-medium text-slate-800 dark:text-slate-100">{r.email}</span> },
+    { key: "role", header: "Role", render: (r) => <Badge tone="brand">{roleLabel(r.role)}</Badge> },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={INVITE_TONE[r.status] || "neutral"} dot={r.status === "pending"}>{r.status[0].toUpperCase() + r.status.slice(1)}</Badge> },
+    { key: "invited_by", header: "Invited by", render: (r) => r.invited_by || "—" },
+    { key: "expires_at", header: "Expires", align: "right", sortable: true, sortValue: (r) => (r.expires_at ? new Date(r.expires_at).getTime() : 0), render: (r) => fmtDate(r.expires_at) },
+  ];
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Invite Members</h1>
-        <p className="text-sm text-slate-500 dark:text-slate-400">Invite people to your organization by role</p>
-      </div>
+      <OrganizationPageHeader
+        title="Members"
+        subtitle="Manage who has access to your organization and their roles"
+        actions={<Button size="sm" leftIcon={FiUserPlus} onClick={() => setInviteOpen(true)}>Invite member</Button>}
+      />
 
-      {/* Invite cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {ROLES.map((r) => (
-          <InviteCard key={r.role} {...r} onSend={send} />
-        ))}
-      </div>
+      {error ? (
+        <OrganizationErrorState error={error} onRetry={reload} title="Couldn't load members" />
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+            {kpis.map((k) => <StatCard key={k.label} label={k.label} value={k.value} loading={loading} />)}
+          </div>
 
-      {/* Members table */}
-      <Card padding="none" className="overflow-hidden">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-          <h2 className="font-semibold text-slate-900 dark:text-white">Members</h2>
-          <span className="text-sm text-slate-400">{members.length} total</span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px]">
-            <thead className="border-b border-slate-100 dark:border-slate-800">
-              <tr>
-                <th className={th}>Name</th>
-                <th className={th}>Email</th>
-                <th className={th}>Role</th>
-                <th className={th}>Status</th>
-                <th className={`${th} text-right`}>Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {members.map((m) => {
-                const status = m.is_active ? "Active" : "Disabled";
-                return (
-                  <tr key={m.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                    <td className={cx(td, "font-medium text-slate-800 dark:text-slate-100")}>{m.full_name}</td>
-                    <td className={td}>{m.email}</td>
-                    <td className={td}>{ROLE_LABEL[m.role] || m.role}</td>
-                    <td className={td}>
-                      <span className={cx("rounded-full px-2.5 py-0.5 text-xs font-semibold", STATUS_PILL[status])}>{status}</span>
-                    </td>
-                    <td className={cx(td, "text-right")}>
-                      <div className="flex justify-end gap-2">
-                        <button
-                          onClick={() => resend(m.id)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-                        >
-                          <FiRefreshCw /> Resend credentials
-                        </button>
-                        {m.is_active && (
-                          <button
-                            onClick={() => remove(m.id)}
-                            className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1 text-xs font-medium text-rose-600 transition hover:bg-rose-50 dark:border-rose-500/30 dark:text-rose-400 dark:hover:bg-rose-500/10"
-                          >
-                            <FiX /> Remove
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-              {!loading && members.length === 0 && (
-                <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-slate-400">No members yet.</td></tr>
+          <SectionCard
+            title="Team members"
+            subtitle={`${members.length} in your organization`}
+            icon={FiUsers}
+            padding="none"
+            action={
+              <div className="relative">
+                <FiSearch className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search members…"
+                  className={cx(control, "w-full pl-8 sm:w-48")}
+                />
+              </div>
+            }
+          >
+            <DataTable
+              columns={memberColumns}
+              rows={filteredMembers}
+              rowKey={(r) => r.id}
+              loading={loading}
+              pageSize={10}
+              initialSort={{ key: "full_name", dir: "asc" }}
+              minWidth={720}
+              empty={{ icon: FiUsers, title: query ? "No members match your search" : "No members yet", description: query ? "Try a different search." : "Invite your first teammate to get started." }}
+              rowActions={(r) =>
+                user?.email !== r.email && r.role !== "super_admin" ? (
+                  <Button variant="ghost" size="sm" iconOnly leftIcon={FiTrash2} aria-label={`Remove ${r.full_name}`} className="text-rose-500 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10" onClick={() => removeMember(r)} />
+                ) : null
+              }
+            />
+          </SectionCard>
+
+          <SectionCard title="Pending invitations" subtitle={`${pending.length} awaiting acceptance`} icon={FiMail} padding="none">
+            <DataTable
+              columns={inviteColumns}
+              rows={invites}
+              rowKey={(r) => r.id}
+              loading={loading}
+              pageSize={10}
+              initialSort={{ key: "expires_at", dir: "desc" }}
+              minWidth={720}
+              empty={{ icon: FiMail, title: "No invitations", description: "Invite members to see their invitations here.", action: <Button size="sm" leftIcon={FiUserPlus} onClick={() => setInviteOpen(true)}>Invite member</Button> }}
+              rowActions={(r) => (
+                <>
+                  {r.status === "pending" && (
+                    <Button variant="ghost" size="sm" iconOnly leftIcon={FiRefreshCw} aria-label={`Resend to ${r.email}`} onClick={() => resendInvite(r)} />
+                  )}
+                  {r.status !== "accepted" && (
+                    <Button variant="ghost" size="sm" iconOnly leftIcon={FiX} aria-label={`Cancel invitation to ${r.email}`} className="text-rose-500 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10" onClick={() => cancelInvite(r)} />
+                  )}
+                </>
               )}
-              {loading && (
-                <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-slate-400">Loading…</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+            />
+          </SectionCard>
+        </>
+      )}
+
+      <InviteModal open={inviteOpen} onClose={() => setInviteOpen(false)} onInvited={reload} />
     </div>
   );
 }

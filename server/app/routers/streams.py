@@ -1,7 +1,7 @@
 import re
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -16,8 +16,12 @@ from app.models.channel import Channel
 from app.models.registration import Registration
 from app.models.chat import ChatMessage
 from app.models.recording import Recording
+from app.models.view import StreamView
+from app.models.qa import QaQuestion, QaVote
+from app.models.poll import Poll, PollOption, PollVote
 
 from app.security import get_current_user, get_optional_user
+from app.email import send_role_assigned_email
 
 from app.schemas.stream import (
     StreamCreate,
@@ -97,6 +101,17 @@ def _validate_assignee(db: Session, user: User, member_id, role: str, field: str
         raise HTTPException(400, f"{field} must reference a user with the '{role}' role")
 
 
+# The only way a host/moderator finds out they've been put on an event -- there's no
+# in-app notification system, so this is the whole mechanism. Fire-and-forget: a mail
+# hiccup shouldn't fail the assignment itself (see email.py's own best-effort _send).
+def _notify_assignment(background: BackgroundTasks, db: Session, member_id, role: str, event_title: str, stream_id) -> None:
+    if not member_id:
+        return
+    member = db.get(User, member_id)
+    if member:
+        background.add_task(send_role_assigned_email, member.email, member.full_name, role, event_title, stream_id)
+
+
 # CREATE STREAM
 @router.post(
     "",
@@ -105,6 +120,7 @@ def _validate_assignee(db: Session, user: User, member_id, role: str, field: str
 )
 def create_stream(
     data: StreamCreate,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
@@ -153,6 +169,9 @@ def create_stream(
         raise HTTPException(400, "Could not create event — check host_id/moderator_id/channel_id are valid")
 
     db.refresh(stream)
+
+    _notify_assignment(background, db, stream.host_id, "host", stream.title, stream.id)
+    _notify_assignment(background, db, stream.moderator_id, "moderator", stream.title, stream.id)
 
     return stream
 
@@ -215,6 +234,7 @@ def get_stream(
 def update_stream(
     stream_id: str,
     data: StreamUpdate,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
@@ -227,6 +247,8 @@ def update_stream(
     if "moderator_id" in updates:
         _validate_assignee(db, user, updates["moderator_id"], "moderator", "moderator_id")
 
+    prev_host_id, prev_moderator_id = stream.host_id, stream.moderator_id
+
     for field, value in updates.items():
         setattr(stream, field, value)
 
@@ -237,6 +259,11 @@ def update_stream(
         raise HTTPException(400, "Could not update event — check the fields you're changing are valid")
 
     db.refresh(stream)
+
+    if "host_id" in updates and stream.host_id and stream.host_id != prev_host_id:
+        _notify_assignment(background, db, stream.host_id, "host", stream.title, stream.id)
+    if "moderator_id" in updates and stream.moderator_id and stream.moderator_id != prev_moderator_id:
+        _notify_assignment(background, db, stream.moderator_id, "moderator", stream.title, stream.id)
 
     return stream
 
@@ -255,9 +282,22 @@ def delete_stream(
     _require_manager(user)
     stream = _get_org_stream(db, user, stream_id)
 
+    # FK-safe order: children before parents (bulk .delete() doesn't cascade).
+    poll_ids = [pid for (pid,) in db.query(Poll.id).filter(Poll.stream_id == stream.id).all()]
+    if poll_ids:
+        db.query(PollVote).filter(PollVote.poll_id.in_(poll_ids)).delete(synchronize_session=False)
+        db.query(PollOption).filter(PollOption.poll_id.in_(poll_ids)).delete(synchronize_session=False)
+        db.query(Poll).filter(Poll.id.in_(poll_ids)).delete(synchronize_session=False)
+
+    question_ids = [qid for (qid,) in db.query(QaQuestion.id).filter(QaQuestion.stream_id == stream.id).all()]
+    if question_ids:
+        db.query(QaVote).filter(QaVote.question_id.in_(question_ids)).delete(synchronize_session=False)
+        db.query(QaQuestion).filter(QaQuestion.id.in_(question_ids)).delete(synchronize_session=False)
+
     db.query(Registration).filter(Registration.stream_id == stream.id).delete()
     db.query(ChatMessage).filter(ChatMessage.stream_id == stream.id).delete()
     db.query(Recording).filter(Recording.stream_id == stream.id).delete()
+    db.query(StreamView).filter(StreamView.stream_id == stream.id).delete()
 
     db.delete(stream)
     db.commit()
@@ -369,8 +409,16 @@ def get_viewer_token(
     # connected (see services/livekit.update_publish_permission).
     can_publish = identity in ON_STAGE.get(str(stream.id), {})
 
+    # A host previewing their own event's public watch link (very common -- "let me
+    # check what viewers see") would otherwise resolve to the exact same identity as
+    # their own broadcasting connection in Dashboard.jsx. LiveKit only allows one
+    # connection per identity per room, so the second one kicks the first -- silently
+    # ending the actual broadcast. Only the LiveKit identity is suffixed here; `identity`
+    # (chat, votes, raised hand) is untouched since a host in this tab isn't on stage.
+    livekit_identity = f"{identity}:viewer" if (user and str(stream.host_id) == str(user.id)) else identity
+
     token = create_stream_token(
-        identity=identity,
+        identity=livekit_identity,
         room_name=stream.livekit_room,
         can_publish=can_publish,
         name=display_name or "Guest",

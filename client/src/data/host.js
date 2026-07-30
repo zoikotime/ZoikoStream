@@ -7,6 +7,13 @@ import { FiCalendar, FiClock, FiRadio, FiVideo } from "react-icons/fi";
 export const initials = (name = "") =>
   name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
 
+export const currentEvent = {
+  name: "Product Launch — Aurora Platform",
+  session: "Keynote & Live Demo",
+  scheduledFor: "3:00 PM – 4:30 PM IST",
+  viewers: 1284,
+};
+
 // Summary cards. `icon` is a react-icons component; `live` pulses (see StatsCard).
 export const summaryStats = [
   { title: "Today's Events", value: 3, icon: FiCalendar, accent: "blue" },
@@ -26,6 +33,14 @@ export const participants = [
   { id: 8, name: "Elena Rossi", role: "Attendee", speaking: false, muted: true, camOff: true, accent: "violet" },
 ];
 
+export const chatMessages = [
+  { id: 1, name: "Priya Nair", role: "Co-host", text: "We're live in 2 minutes — mic check done ✅", time: "2:58 PM" },
+  { id: 2, name: "Jordan Lee", role: "Attendee", text: "Audio is crystal clear from Berlin 👏", time: "3:01 PM" },
+  { id: 3, name: "Sofia Alvarez", role: "Speaker", text: "Pulling up the demo slides now.", time: "3:03 PM" },
+  { id: 4, name: "Noah Kim", role: "Attendee", text: "Will the recording be available afterwards?", time: "3:04 PM" },
+  { id: 5, name: "Marcus Reed", role: "Moderator", text: "Yes — recording link goes out by email tonight.", time: "3:05 PM" },
+];
+
 export const notifications = [
   { id: 1, kind: "record", text: "Recording started for this session", time: "3:00 PM" },
   { id: 2, kind: "join", text: "Sofia Alvarez joined as Speaker", time: "2:59 PM" },
@@ -33,11 +48,4 @@ export const notifications = [
   { id: 4, kind: "poll", text: "Poll “Which feature excites you most?” launched", time: "3:06 PM" },
   { id: 5, kind: "qa", text: "3 new questions in the Q&A queue", time: "3:07 PM" },
   { id: 6, kind: "system", text: "Viewer count passed 1,000 🎉", time: "3:08 PM" },
-];
-
-export const qaQueue = [
-  { id: 1, name: "Elena Rossi", text: "Does Aurora support multi-region failover out of the box?", votes: 42 },
-  { id: 2, name: "Noah Kim", text: "What's the pricing model for enterprise seats?", votes: 28 },
-  { id: 3, name: "Jordan Lee", text: "Can we self-host the recording pipeline?", votes: 19 },
-  { id: 4, name: "Anonymous", text: "Is there an SDK for React Native?", votes: 11 },
 ];

@@ -19,10 +19,23 @@ import EventDetails from "./pages/organization/EventDetails";
 import InviteMembers from "./pages/organization/InviteMembers";
 import AdminDashboard from "./pages/admin/Dashboard";
 import Organizations from "./pages/admin/Organizations";
+import LiveEvents from "./pages/admin/LiveEvents";
+import AdminUsers from "./pages/admin/Users";
+import Subscriptions from "./pages/admin/Subscriptions";
+import Analytics from "./pages/admin/Analytics";
+import AuditLogs from "./pages/admin/AuditLogs";
+import PlatformSettings from "./pages/admin/Settings";
+import SystemStatus from "./pages/admin/SystemStatus";
+import FeatureFlags from "./pages/admin/FeatureFlags";
+import ReleaseCenter from "./pages/admin/ReleaseCenter";
+import Support from "./pages/admin/Support";
+import Roles from "./pages/admin/Roles";
+import Developers from "./pages/admin/Developers";
 import AuthLayout from "./layouts/AuthLayout";
 import Login from "./pages/auth/Login";
 import CreateOrganization from "./pages/auth/CreateOrganization";
 import ForgotPassword from "./pages/auth/ForgotPassword";
+import AcceptInvitation from "./pages/auth/AcceptInvitation";
 import EventRegistration from "./pages/EventRegistration";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
@@ -64,8 +77,12 @@ function LandingOrDashboard() {
   );
 }
 
-// Menu items that don't have a page yet — kept in-layout so the sidebar doesn't bounce the user out.
-const adminStubs = ["users", "events", "analytics", "billing", "settings"];
+// Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
+// so the control-center nav never 404s. Dashboard + Organizations are real pages below.
+const adminStubs = [
+  ["infrastructure", "Media Infrastructure"],
+  ["security", "Security"],
+];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
 const legacyStubs = [
@@ -73,8 +90,6 @@ const legacyStubs = [
   ["recordings", "Recordings"], ["analytics", "Analytics"], ["users", "Users"],
   ["invitations", "Invitations"], ["billing", "Billing"], ["settings", "Settings"],
 ];
-
-const cap = (s) => s[0].toUpperCase() + s.slice(1);
 
 export default function App() {
   return (
@@ -86,13 +101,12 @@ export default function App() {
             <Route path="/" element={<LandingOrDashboard />} />
 
             {/* Authentication — one login for every role; brand panel shared via AuthLayout.
-                Login/CreateOrganization call the real API; ForgotPassword is still a
-                dummy flow pending an OTP-entry rework. After login, roleHome() picks the
-                dashboard. */}
+                All dummy: no API calls. After login, roleHome() picks the dashboard. */}
             <Route element={<AuthLayout />}>
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<CreateOrganization />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route path="/accept-invitation" element={<AcceptInvitation />} />
             </Route>
 
             {/* Public event registration landing (shareable link) */}
@@ -101,23 +115,33 @@ export default function App() {
             {/* Viewer Portal — attendee watch page from an invite link (public) */}
             <Route path="/events/:eventId/watch" element={<EventWatch />} />
 
-            {/* Host broadcasting studio — standalone full-screen page (own header/sidebar). */}
-            <Route element={<RoleRoute allow={["host"]} />}>
-              <Route path="/host/dashboard" element={<HostDashboard />} />
-            </Route>
+            {/* Host broadcasting studio — standalone full-screen page (own header/sidebar).
+                ponytail: open route for the demo; gate to a "host" role once auth supports it. */}
+            <Route path="/host/dashboard" element={<HostDashboard />} />
 
-            {/* Moderator console — standalone real-time audience-management page. */}
-            <Route element={<RoleRoute allow={["moderator"]} />}>
-              <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
-            </Route>
+            {/* Moderator console — standalone real-time audience-management page.
+                ponytail: open route for the demo; gate to a "moderator" role once auth supports it. */}
+            <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
 
             {/* Super admin (platform) area */}
             <Route element={<RoleRoute allow={["super_admin"]} />}>
               <Route element={<AdminLayout />}>
                 <Route path="/admin/dashboard" element={<AdminDashboard />} />
                 <Route path="/admin/organizations" element={<Organizations />} />
-                {adminStubs.map((p) => (
-                  <Route key={p} path={`/admin/${p}`} element={<Placeholder title={cap(p)} />} />
+                <Route path="/admin/live-events" element={<LiveEvents />} />
+                <Route path="/admin/users" element={<AdminUsers />} />
+                <Route path="/admin/subscriptions" element={<Subscriptions />} />
+                <Route path="/admin/analytics" element={<Analytics />} />
+                <Route path="/admin/audit" element={<AuditLogs />} />
+                <Route path="/admin/settings" element={<PlatformSettings />} />
+                <Route path="/admin/status" element={<SystemStatus />} />
+                <Route path="/admin/feature-flags" element={<FeatureFlags />} />
+                <Route path="/admin/releases" element={<ReleaseCenter />} />
+                <Route path="/admin/support" element={<Support />} />
+                <Route path="/admin/roles" element={<Roles />} />
+                <Route path="/admin/developers" element={<Developers />} />
+                {adminStubs.map(([path, title]) => (
+                  <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
                 ))}
               </Route>
             </Route>

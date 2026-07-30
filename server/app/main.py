@@ -10,9 +10,10 @@ from sqlalchemy.exc import OperationalError
 
 from .auth import router as auth_router
 from .api.dashboard import router as dashboard_router
+from .routers.admin import router as admin_router
 from .routers.channels import router as channel_router
 from .routers.streams import router as stream_router
-from .routers.members import router as members_router
+from .routers.organization import router as organization_router
 from .routers.chat import router as chat_router
 from .routers.registrations import router as registrations_router
 from .routers.recordings import router as recordings_router
@@ -57,9 +58,10 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(dashboard_router)
+app.include_router(admin_router)
 app.include_router(channel_router)
 app.include_router(stream_router)
-app.include_router(members_router)
+app.include_router(organization_router)
 app.include_router(chat_router)
 app.include_router(registrations_router)
 app.include_router(recordings_router)

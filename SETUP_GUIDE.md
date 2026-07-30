@@ -58,8 +58,11 @@
 
 ## Super Admin Credentials
 
-The email in `SUPER_ADMIN_EMAIL` (`.env`) auto-registers as `super_admin` on signup.
-Credentials themselves are never committed here — see your password manager / `.env`.
+```
+Email:    info@zoikostream.com
+Password: NoxxMC26070%!LGM
+Role:     super_admin
+```
 
 ## Testing the Setup
 
@@ -148,7 +151,6 @@ GET    /dashboard/platform/stats  → Platform-wide stats (super_admin only)
 3. Check API response: Network tab → `/auth/me` includes `organization_name`
 
 ## Files Modified
-
 
 ### Backend
 - `server/app/schemas.py` - Updated RegisterIn, UserOut

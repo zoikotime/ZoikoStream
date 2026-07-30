@@ -104,10 +104,10 @@ export default function OrganizationEvents() {
   const [createOpen, setCreateOpen] = useState(false);
 
   const load = () => {
-    Promise.all([api.get("/streams"), api.get("/organization/members")])
+    Promise.all([api.get("/streams"), api.get("/organization/users")])
       .then(([eventsRes, membersRes]) => {
         setEvents(eventsRes.data);
-        setMembers(membersRes.data);
+        setMembers(membersRes.data.items);
       })
       .catch((err) => notify.error(errMsg(err, "Failed to load events")))
       .finally(() => setLoading(false));
@@ -147,7 +147,8 @@ export default function OrganizationEvents() {
   const handleAction = async (action, event) => {
     if (action === "View") return navigate(`/organization/events/${event.id}`);
     if (action === "Copy Link") {
-      navigator.clipboard?.writeText(`${window.location.origin}/e/${event.id}`);
+      const path = event.registration_required ? `/e/${event.id}` : `/events/${event.id}/watch`;
+      navigator.clipboard?.writeText(`${window.location.origin}${path}`);
       return notify.success("Event link copied");
     }
     if (action === "Delete") {

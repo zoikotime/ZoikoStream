@@ -21,6 +21,7 @@ import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
+import InviteRoleInline from "../../components/organization/InviteRoleInline";
 import { STATUS_LABEL, STATUS_PILL, VISIBILITY_LABEL, VIS_PILL, fmtDate } from "../../data/events";
 
 const TABS = ["Overview", "Team", "Registration", "Recording", "Analytics", "Settings"];
@@ -41,17 +42,39 @@ function Meta({ icon: Icon, label: l, children }) {
   );
 }
 
-function PersonCard({ name, role }) {
-  if (!name) return <Card><p className="text-sm text-slate-500 dark:text-slate-400">No {role.toLowerCase()} assigned.</p></Card>;
+const assignSelect =
+  "mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200";
+
+// Shows who's assigned and, unlike the read-only display it replaced, lets an org admin
+// (re)assign from eligible members right here instead of only at event-creation time.
+function AssignmentCard({ role, roleKey, memberId, members, onAssign }) {
+  const name = members.find((m) => m.id === memberId)?.full_name || null;
+  const eligible = members.filter((m) => m.role === roleKey && m.is_active);
+
   return (
-    <Card className="flex items-center gap-3" padding="md">
-      <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-sm font-semibold text-white">
-        {name.split(" ").map((w) => w[0]).join("").slice(0, 2)}
-      </span>
-      <div className="min-w-0">
-        <p className="truncate font-medium text-slate-800 dark:text-slate-100">{name}</p>
-        <p className="text-xs text-slate-500 dark:text-slate-400">{role}</p>
+    <Card padding="md">
+      <div className="flex items-center gap-3">
+        <span
+          className={cx(
+            "grid h-11 w-11 shrink-0 place-items-center rounded-full text-sm font-semibold",
+            name ? "bg-gradient-to-br from-emerald-500 to-teal-600 text-white" : "bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500"
+          )}
+        >
+          {name ? name.split(" ").map((w) => w[0]).join("").slice(0, 2) : <FiUser />}
+        </span>
+        <div className="min-w-0">
+          <p className="truncate font-medium text-slate-800 dark:text-slate-100">{name || `No ${role.toLowerCase()} assigned`}</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">{role}</p>
+        </div>
       </div>
+      <select className={assignSelect} value={memberId || ""} onChange={(e) => onAssign(e.target.value || null)}>
+        <option value="">Unassigned</option>
+        {eligible.map((m) => <option key={m.id} value={m.id}>{m.full_name}</option>)}
+      </select>
+      <InviteRoleInline role={roleKey} />
+      {eligible.length === 0 && (
+        <p className="mt-1.5 text-xs text-slate-400">No {role.toLowerCase()}s yet.</p>
+      )}
     </Card>
   );
 }
@@ -292,13 +315,13 @@ export default function EventDetails() {
   useEffect(() => {
     Promise.all([
       api.get(`/streams/${id}`),
-      api.get("/organization/members").catch(() => ({ data: [] })),
+      api.get("/organization/users").catch(() => ({ data: { items: [] } })),
       api.get(`/streams/${id}/registrations`).catch(() => ({ data: [] })),
       api.get(`/streams/${id}/recordings`).catch(() => ({ data: [] })),
     ])
       .then(([eventRes, membersRes, registrationsRes, recordingsRes]) => {
         setEvent(eventRes.data);
-        setMembers(membersRes.data);
+        setMembers(membersRes.data.items);
         setRegistrations(registrationsRes.data);
         setRecordings(recordingsRes.data);
       })
@@ -320,7 +343,8 @@ export default function EventDetails() {
 
   const act = async (name) => {
     if (name === "Copy Link") {
-      navigator.clipboard?.writeText(`${window.location.origin}/e/${event.id}`);
+      const path = event.registration_required ? `/e/${event.id}` : `/events/${event.id}/watch`;
+      navigator.clipboard?.writeText(`${window.location.origin}${path}`);
       return notify.success("Event link copied");
     }
     if (name === "Publish") return updateEvent({ status: "scheduled" }, `"${event.title}" published`);
@@ -435,8 +459,20 @@ export default function EventDetails() {
 
       {tab === "Team" && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <PersonCard name={memberName(event.host_id)} role="Host" />
-          <PersonCard name={memberName(event.moderator_id)} role="Moderator" />
+          <AssignmentCard
+            role="Host"
+            roleKey="host"
+            memberId={event.host_id}
+            members={members}
+            onAssign={(id) => updateEvent({ host_id: id }, id ? "Host assigned" : "Host unassigned")}
+          />
+          <AssignmentCard
+            role="Moderator"
+            roleKey="moderator"
+            memberId={event.moderator_id}
+            members={members}
+            onAssign={(id) => updateEvent({ moderator_id: id }, id ? "Moderator assigned" : "Moderator unassigned")}
+          />
         </div>
       )}
 

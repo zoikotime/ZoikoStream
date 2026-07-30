@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, Link } from "react-router-dom";
 import {
   FiCalendar,
   FiClock,
@@ -38,6 +38,10 @@ const field =
 const labelCls = "mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300";
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
+// Same key EventWatch.jsx reads on the actual watch page -- so a viewer who registers
+// here isn't asked to re-enter their email a second time by RegistrationGate.
+const emailStorageKey = (eventId) => `zk_viewer_email_${eventId}`;
+
 function RegistrationForm({ event }) {
   const [form, setForm] = useState({ name: "", email: "", phone: "", company: "" });
   const [done, setDone] = useState(false);
@@ -53,6 +57,12 @@ function RegistrationForm({ event }) {
         <p className="text-sm text-slate-500 dark:text-slate-400">
           A confirmation has been sent to <span className="font-medium text-slate-700 dark:text-slate-200">{form.email}</span>.
         </p>
+        <Link
+          to={`/events/${event.id}/watch`}
+          className="mt-2 inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500"
+        >
+          Go to event <FiArrowRight />
+        </Link>
       </div>
     );
 
@@ -66,6 +76,7 @@ function RegistrationForm({ event }) {
         phone: form.phone || null,
         company: form.company || null,
       });
+      localStorage.setItem(emailStorageKey(event.id), form.email.trim().toLowerCase());
       setDone(true);
     } catch (err) {
       notify.error(errMsg(err, "Failed to register for this event"));

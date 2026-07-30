@@ -2,8 +2,6 @@
 .env
 *.env
 !.env.example
-*service-account*.json
-gcs-*.json
 
 # Python
 __pycache__/
@@ -11,6 +9,7 @@ __pycache__/
 .venv/
 server/venv/
 server/.venv/
+*.log
 
 # Node
 node_modules/
