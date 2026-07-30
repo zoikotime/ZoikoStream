@@ -32,7 +32,9 @@ export function ActionButton({ icon: Icon, label, title, tone = "slate", active 
 
 // `scroll` (default) makes the body a flex-1 internal scroll area — right for a
 // column that fills its height. Pass scroll={false} for cards inside a scrolling column.
-export default function Panel({ title, count, badge, action, scroll = true, className = "", children }) {
+// `toolbar` is an optional row pinned between the header and the scroll area — search /
+// filter controls belong there, not inside the body, where they'd scroll out of reach.
+export default function Panel({ title, count, badge, action, toolbar, scroll = true, className = "", children }) {
   return (
     <section className={cx("flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900", className)}>
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 dark:border-slate-800">
@@ -47,6 +49,9 @@ export default function Panel({ title, count, badge, action, scroll = true, clas
         </div>
         {action}
       </div>
+      {toolbar && (
+        <div className="shrink-0 space-y-2 border-b border-slate-100 px-3 py-2 dark:border-slate-800">{toolbar}</div>
+      )}
       <div className={cx("p-3", scroll && "flex-1 overflow-y-auto")}>{children}</div>
     </section>
   );

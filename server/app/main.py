@@ -1,20 +1,63 @@
+import asyncio
+import contextlib
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError
 
-from .auth import router as auth_router
-from .api.dashboard import router as dashboard_router
+from .routers.auth import router as auth_router
+from .routers.dashboard import router as dashboard_router
 from .routers.channels import router as channel_router
 from .routers.streams import router as stream_router
 from .routers.admin import router as admin_router
 from .routers.organization import router as organization_router
 from .routers.events import router as events_router
+from .routers.live import router as live_router
+from .services import bus
+from .services.broadcast import run_sampler
+from .services.moderation import run_scheduler
 from .config import settings
+from .db import DB_MAX_CONNECTIONS
 
-# ponytail: tables are created by `python create_tables.py` (or alembic) now, not on startup —
-# create_all here would miss the Stream model, which models/__init__.py doesn't register.
-app = FastAPI(title="ZoikoStream API")
+
+@contextlib.asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Two background tickers, each owning its own domain (which is also what keeps
+    moderation and broadcast from having to import each other):
+      * scheduler — fires scheduled polls/announcements, closes timed-out polls
+      * sampler   — writes analytics snapshots (the retention graph) and pushes live counters
+    The bus releases its Redis client on the way out.
+    ponytail: both run per PROCESS. With multiple workers, run them in one worker (or a cron
+    worker) or a scheduled poll launches once per worker and snapshots are written N times.
+
+    The default-executor swap is the other half of the DB pool sizing in db.py: every
+    socket action reaches Postgres via services.moderation.tx() -> asyncio.to_thread, which
+    uses this executor. Left at its default (min(32, cpu+4)) a busy event could park more
+    threads on connection checkout than the pool can ever satisfy. Bounding it to the pool
+    ceiling makes the queue form in the executor, where it is visible, instead of inside
+    SQLAlchemy's checkout timeout."""
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=DB_MAX_CONNECTIONS, thread_name_prefix="zoiko-db")
+    loop.set_default_executor(executor)
+
+    tasks = [asyncio.create_task(run_scheduler()), asyncio.create_task(run_sampler())]
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await bus.shutdown()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+# ponytail: schema is applied by `python create_tables.py`, not on startup — an app boot
+# should not be able to mutate the database.
+app = FastAPI(title="ZoikoStream API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +77,7 @@ app.include_router(stream_router)
 app.include_router(admin_router)
 app.include_router(organization_router)
 app.include_router(events_router)
+app.include_router(live_router)
 
 
 # A DB outage (e.g. Supabase paused, DNS blip) raises OperationalError. Without this,

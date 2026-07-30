@@ -1,81 +1,275 @@
 // client/src/components/host/FeatureModal.jsx
-// One modal, three faces — Invite Speaker / Create Poll / Q&A queue — driven by
-// the `modal` key from the Host Dashboard control bar. Reuses the shared Modal.
-import { useState } from "react";
+// One modal, three faces — Invite to stage / Broadcast settings / Recording log — driven by
+// the `modal` key from the control deck. Reuses the shared Modal + form system.
+//
+// Every switch here maps to a setting the SERVER enforces (services/broadcast.SETTING_SPECS
+// and moderation.chat_gate). Controls the browser genuinely can't apply are shown disabled
+// with the reason, rather than as a toggle that silently does nothing.
+import { FiAlertTriangle, FiDownload, FiVideo, FiCheck, FiClock } from "react-icons/fi";
 import Modal from "../../ui/Modal";
 import Button from "../../ui/Button";
-import { qaQueue } from "../../data/host";
+import Badge from "../../ui/Badge";
+import EmptyState from "../organization/OrganizationEmptyState";
+import { Input, Select, Switch, Label } from "../../ui/forms";
+import { downloadCsv } from "../../utils/export";
+import { hhmm, initials, accentFor } from "../../data/host";
+import { cx, ACCENT } from "../../ui/tokens";
+import {
+  RESOLUTION_OPTIONS, FRAMERATE_OPTIONS, BITRATE_GUIDE, PROCESSING_TOGGLES,
+  BACKGROUND_OPTIONS, CHAT_CONTROLS, SLOW_MODE_OPTIONS, STAGE_CONTROLS, RECORDING_TONE,
+} from "../../data/host";
 
-const control =
-  "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-700 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200";
-const label = "mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-400";
+const section = "text-[11px] font-semibold uppercase tracking-wide text-slate-400";
 
-function InviteSpeaker({ onClose }) {
+// One labelled switch bound to a server-enforced setting. Module-level so it isn't
+// re-created on every render of the settings body.
+function ToggleRow({ toggle, settings, disabled, onChange }) {
   return (
-    <form onSubmit={(e) => { e.preventDefault(); onClose(); }} className="space-y-4">
-      <div>
-        <label className={label}>Email address</label>
-        <input type="email" required placeholder="speaker@company.com" className={control} />
-      </div>
-      <div>
-        <label className={label}>Role on stage</label>
-        <select className={control} defaultValue="Speaker">
-          {["Speaker", "Co-host", "Moderator"].map((r) => <option key={r}>{r}</option>)}
-        </select>
-      </div>
-      <div>
-        <label className={label}>Personal note (optional)</label>
-        <textarea rows={3} placeholder="Join us on stage for the live demo…" className={control} />
-      </div>
-      <div className="flex justify-end gap-2 pt-1">
-        <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
-        <Button size="sm">Send invite</Button>
-      </div>
-    </form>
+    <Switch
+      checked={settings[toggle.key] !== false}
+      onChange={(v) => onChange({ [toggle.key]: v })}
+      label={toggle.label}
+      accent="emerald"
+      className={disabled ? "pointer-events-none opacity-50" : ""}
+    />
   );
 }
 
-function CreatePoll({ onClose }) {
-  const [options, setOptions] = useState(["", ""]);
-  const setAt = (i, v) => setOptions((prev) => prev.map((o, j) => (j === i ? v : o)));
-
-  return (
-    <form onSubmit={(e) => { e.preventDefault(); onClose(); }} className="space-y-4">
-      <div>
-        <label className={label}>Question</label>
-        <input required placeholder="Which feature are you most excited about?" className={control} />
-      </div>
-      <div className="space-y-2">
-        <label className={label}>Options</label>
-        {options.map((o, i) => (
-          <input key={i} value={o} onChange={(e) => setAt(i, e.target.value)} placeholder={`Option ${i + 1}`} className={control} />
-        ))}
-        <button type="button" onClick={() => setOptions((o) => [...o, ""])} className="text-sm font-medium text-emerald-600 hover:underline dark:text-emerald-400">
-          + Add option
-        </button>
-      </div>
-      <div className="flex justify-end gap-2 pt-1">
-        <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
-        <Button size="sm">Launch poll</Button>
-      </div>
-    </form>
+// ── invite to stage ───────────────────────────────────────────────────────────
+// Promotes someone already connected. Emailing an outside speaker is the existing
+// org invitation flow (/organization/users) — duplicating it here would be a second
+// invitation system.
+function InviteToStage({ participants, send, onClose }) {
+  const offStage = participants.filter(
+    (p) => !p.waiting && p.role !== "host" && !p.on_stage && p.role !== "speaker"
   );
-}
-
-function QAQueue() {
   return (
     <div className="space-y-3">
-      {qaQueue.map((q) => (
-        <div key={q.id} className="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-sm text-slate-700 dark:text-slate-200">{q.text}</p>
-              <p className="mt-1 text-xs text-slate-400">{q.name} · {q.votes} upvotes</p>
+      <p className="text-sm text-slate-600 dark:text-slate-300">
+        Bring someone who's already here onto the stage. To invite a speaker who hasn't
+        joined yet, use your organization's member invitations.
+      </p>
+      {offStage.length === 0 ? (
+        <EmptyState title="Everyone connected is already on stage" description="Attendees appear here as they join." className="py-8" />
+      ) : (
+        <div className="max-h-80 space-y-1 overflow-y-auto">
+          {offStage.map((p) => (
+            <div key={p.identity} className="flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/60">
+              <span className={cx("grid h-9 w-9 shrink-0 place-items-center rounded-full text-sm font-semibold", ACCENT[accentFor(p.identity)].chip)}>
+                {initials(p.name)}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{p.name || p.identity}</p>
+                <p className="text-xs text-slate-400">{p.role || "viewer"}</p>
+              </div>
+              <Button
+                appearance="console"
+                size="sm"
+                onClick={() => { send("participant.stage", { identity: p.identity, on_stage: true }); onClose(); }}
+              >
+                Invite to stage
+              </Button>
             </div>
-            <button className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">
-              Answer
-            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── broadcast settings ────────────────────────────────────────────────────────
+
+function SettingsBody({ settings, media, canHost, send }) {
+  const s = settings || {};
+  const set = (patch) => send("broadcast.settings", { settings: patch });
+  const disabled = !canHost;
+  const actual = media?.actual;
+  return (
+    <div className="space-y-5">
+      {disabled && (
+        <p className="flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+          <FiAlertTriangle aria-hidden="true" /> Only the event host can change these. You're viewing them read-only.
+        </p>
+      )}
+
+      {/* Video */}
+      <div className="space-y-2">
+        <p className={section}>Video</p>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <Label variant="console">Resolution (target)</Label>
+            <Select variant="console" value={s.resolution || "1080p"} disabled={disabled}
+                    onChange={(e) => set({ resolution: e.target.value })} aria-label="Resolution">
+              {RESOLUTION_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+            </Select>
           </div>
+          <div>
+            <Label variant="console">Frame rate</Label>
+            <Select variant="console" value={s.framerate || 30} disabled={disabled}
+                    onChange={(e) => set({ framerate: Number(e.target.value) })} aria-label="Frame rate">
+              {FRAMERATE_OPTIONS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+            </Select>
+          </div>
+        </div>
+
+        {/* Requested vs granted — the difference is the point. */}
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          {actual?.width
+            ? <>Camera is actually delivering <span className="font-semibold text-slate-700 dark:text-slate-200">{actual.width}×{actual.height}{actual.frameRate ? ` @ ${actual.frameRate}fps` : ""}</span>{" "}
+              {actual.height && s.resolution && actual.height < ({ "720p": 720, "1080p": 1080, "2k": 1440, "4k": 2160 }[s.resolution] || 0) && (
+                <Badge tone="warning" size="sm">below target</Badge>
+              )}</>
+            : "Start the preview to see what your camera actually delivers."}
+        </p>
+
+        <div>
+          <Label variant="console">Bitrate target (kbps)</Label>
+          <Input
+            variant="console"
+            type="number"
+            min={500}
+            max={20000}
+            step={100}
+            disabled={disabled}
+            value={s.bitrate_kbps ?? 4500}
+            onChange={(e) => set({ bitrate_kbps: Number(e.target.value) })}
+            aria-label="Bitrate target"
+          />
+          <p className="mt-1 text-xs text-slate-400">
+            Recommended for {s.resolution || "1080p"}: {(BITRATE_GUIDE[s.resolution] || 4500).toLocaleString()} kbps.
+            Applied by the media server when publishing.
+          </p>
+        </div>
+      </div>
+
+      {/* Audio + processing */}
+      <div className="space-y-2">
+        <p className={section}>Audio processing</p>
+        {PROCESSING_TOGGLES.map((t) => (
+          <div key={t.key}>
+            <ToggleRow toggle={t} settings={s} disabled={disabled} onChange={set} />
+            {!t.native && <p className="mt-0.5 pl-1 text-[11px] text-slate-400">{t.note}</p>}
+          </div>
+        ))}
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <Label variant="console">Mic gain</Label>
+            <Input variant="console" type="range" min={0} max={200} disabled={disabled}
+                   value={s.mic_gain ?? 100}
+                   onChange={(e) => set({ mic_gain: Number(e.target.value) })} aria-label="Mic gain" />
+          </div>
+          <div>
+            <Label variant="console">Monitor volume</Label>
+            <Input variant="console" type="range" min={0} max={100} disabled={disabled}
+                   value={s.speaker_volume ?? 100}
+                   onChange={(e) => set({ speaker_volume: Number(e.target.value) })} aria-label="Monitor volume" />
+          </div>
+        </div>
+        {actual && (
+          <p className="text-[11px] text-slate-400">
+            Browser reports: echo cancellation {String(actual.echoCancellation)}, noise suppression{" "}
+            {String(actual.noiseSuppression)}, auto gain {String(actual.autoGainControl)}.
+          </p>
+        )}
+      </div>
+
+      {/* Background — honest about what isn't wired */}
+      <div className="space-y-1">
+        <p className={section}>Background</p>
+        <Select variant="console" value={s.background || "none"} disabled
+                aria-label="Background" onChange={() => {}}>
+          {BACKGROUND_OPTIONS.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
+        </Select>
+        <p className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+          <FiAlertTriangle aria-hidden="true" />
+          Blur and virtual backgrounds need a segmentation model that isn't installed, so this is
+          disabled rather than pretending to apply.
+        </p>
+      </div>
+
+      {/* Chat control — enforced server-side */}
+      <div className="space-y-2">
+        <p className={section}>Chat control</p>
+        {CHAT_CONTROLS.map((t) => <ToggleRow key={t.key} toggle={t} settings={s} disabled={disabled} onChange={set} />)}
+        <div>
+          <Label variant="console">Slow mode</Label>
+          <Select variant="console" value={s.slow_mode_seconds ?? 0} disabled={disabled}
+                  onChange={(e) => set({ slow_mode_seconds: Number(e.target.value) })} aria-label="Slow mode">
+            {SLOW_MODE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </Select>
+        </div>
+      </div>
+
+      {/* Stage + audience */}
+      <div className="space-y-2">
+        <p className={section}>Stage &amp; audience</p>
+        {STAGE_CONTROLS.map((t) => <ToggleRow key={t.key} toggle={t} settings={s} disabled={disabled} onChange={set} />)}
+      </div>
+
+      {/* Recording */}
+      <div className="space-y-2">
+        <p className={section}>Recording</p>
+        <div>
+          <Label variant="console">Recording quality</Label>
+          <Select variant="console" value={s.recording_quality || "1080p"} disabled={disabled}
+                  onChange={(e) => set({ recording_quality: e.target.value })} aria-label="Recording quality">
+            {RESOLUTION_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+          </Select>
+        </div>
+        <ToggleRow toggle={{ key: "auto_upload", label: "Auto-upload when the recording stops" }} settings={s} disabled={disabled} onChange={set} />
+      </div>
+    </div>
+  );
+}
+
+// ── recording log ─────────────────────────────────────────────────────────────
+
+function RecordingLog({ recordings }) {
+  if (!recordings?.length) {
+    return <EmptyState icon={FiVideo} title="No recordings yet" description="Each start-to-stop cycle appears here with its timings." className="py-10" />;
+  }
+  const secs = (r) => {
+    if (!r.started_at) return "—";
+    const end = r.stopped_at ? new Date(r.stopped_at) : new Date();
+    const s = Math.max(0, Math.floor((end - new Date(r.started_at) - (r.paused_ms || 0)) / 1000));
+    return `${Math.floor(s / 60)}m ${s % 60}s`;
+  };
+  return (
+    <div className="space-y-2">
+      <div className="flex justify-end">
+        <Button
+          appearance="console"
+          variant="secondary"
+          size="sm"
+          leftIcon={FiDownload}
+          onClick={() => downloadCsv("recordings.csv", recordings, [
+            ["Started", (r) => r.started_at || ""], ["Stopped", (r) => r.stopped_at || ""],
+            ["Status", (r) => r.status], ["Quality", (r) => r.quality || ""],
+            ["Duration", secs], ["Captured", (r) => (r.enforced ? "yes" : "no")],
+            ["File", (r) => r.file_url || ""], ["Error", (r) => r.error || ""],
+          ])}
+        >
+          Export log
+        </Button>
+      </div>
+      {recordings.map((r) => (
+        <div key={r.id} className="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={RECORDING_TONE[r.status]} dot>{r.status}</Badge>
+            {r.quality && <Badge tone="neutral" size="sm">{r.quality}</Badge>}
+            {r.enforced
+              ? <Badge tone="success" size="sm"><FiCheck aria-hidden="true" /> captured</Badge>
+              : <Badge tone="warning" size="sm"><FiAlertTriangle aria-hidden="true" /> not captured</Badge>}
+            <span className="ml-auto flex items-center gap-1 text-xs text-slate-400">
+              <FiClock aria-hidden="true" /> {secs(r)}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            {hhmm(r.started_at)}{r.stopped_at ? ` → ${hhmm(r.stopped_at)}` : " → running"}
+            {r.auto_upload ? " · auto-upload on" : ""}
+          </p>
+          {r.file_url && <p className="mt-1 break-all font-mono text-[11px] text-slate-400">{r.file_url}</p>}
+          {r.error && <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">{r.error}</p>}
         </div>
       ))}
     </div>
@@ -83,17 +277,22 @@ function QAQueue() {
 }
 
 const CONFIG = {
-  invite: { title: "Invite a speaker", size: "md", Body: InviteSpeaker },
-  poll: { title: "Create a poll", size: "md", Body: CreatePoll },
-  qa: { title: "Q&A queue", size: "lg", Body: QAQueue },
+  invite: { title: "Invite to stage", size: "md" },
+  settings: { title: "Broadcast settings", size: "lg" },
+  recordings: { title: "Recording log", size: "lg" },
 };
 
-export default function FeatureModal({ modal, onClose }) {
+export default function FeatureModal({ modal, onClose, state, media, send }) {
   const cfg = modal && CONFIG[modal];
-  const Body = cfg?.Body;
   return (
     <Modal open={!!cfg} onClose={onClose} title={cfg?.title} size={cfg?.size || "md"}>
-      {Body && <Body onClose={onClose} />}
+      {modal === "invite" && (
+        <InviteToStage participants={state.participants || []} send={send} onClose={onClose} />
+      )}
+      {modal === "settings" && (
+        <SettingsBody settings={state.broadcast?.settings} media={media} canHost={state.canHost} send={send} />
+      )}
+      {modal === "recordings" && <RecordingLog recordings={state.recordings} />}
     </Modal>
   );
 }

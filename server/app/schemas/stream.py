@@ -18,7 +18,9 @@ class StreamUpdate(BaseModel):
     thumbnail_url: str | None = None
 
 
-class StreamResponse(BaseModel):
+class StreamBase(BaseModel):
+    """Everything about a stream that is safe to hand to any authorized reader."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -28,8 +30,6 @@ class StreamResponse(BaseModel):
     category: str | None
     thumbnail_url: str | None
 
-    stream_key: str
-
     is_live: bool
 
     started_at: datetime | None
@@ -37,8 +37,21 @@ class StreamResponse(BaseModel):
 
     created_at: datetime
 
+
+class StreamResponse(StreamBase):
+    """Single-stream reads, which are owner-scoped. `stream_key` is a PUBLISH credential —
+    it belongs only in a response the channel owner asked for by id."""
+
+    stream_key: str
+
+
+class StreamListItem(StreamBase):
+    """List rows deliberately omit `stream_key`: a list is the one shape that fans a
+    credential out across many rows at once."""
+
+
 class StreamListResponse(BaseModel):
     page: int
     limit: int
     total: int
-    items: list[StreamResponse]
+    items: list[StreamListItem]

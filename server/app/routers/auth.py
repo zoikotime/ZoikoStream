@@ -5,11 +5,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .config import settings
-from .db import get_db
-from .email import send_reset_otp_email, send_welcome_email
-from .models import Organization, User
-from .schemas import (
+from ..config import settings
+from ..db import get_db
+from ..email import send_reset_otp_email, send_welcome_email
+from ..models import Organization, User
+from ..ratelimit import rate_limit
+from ..schemas import (
     ForgotPasswordIn,
     LoginIn,
     RegisterIn,
@@ -18,14 +19,23 @@ from .schemas import (
     UserOut,
     VerifyOtpIn,
 )
-from .security import create_access_token, get_current_user, hash_password, verify_password
+from ..security import create_access_token, get_current_user, hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 OTP_TTL_MINUTES = 10
 
+# Per-IP budgets on the unauthenticated surface. Generous enough that a person fumbling
+# their password never notices, tight enough that a 4-digit OTP (10k combinations) can no
+# longer be walked in one sitting. See ratelimit.py for the per-worker caveat.
+_LOGIN_LIMIT = rate_limit("login", limit=10, window=60.0)
+_OTP_REQUEST_LIMIT = rate_limit("otp-request", limit=5, window=300.0)
+_OTP_VERIFY_LIMIT = rate_limit("otp-verify", limit=10, window=300.0)
+_REGISTER_LIMIT = rate_limit("register", limit=5, window=300.0)
 
-@router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
+
+@router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED,
+             dependencies=[_REGISTER_LIMIT])
 def register(data: RegisterIn, background: BackgroundTasks, db: Session = Depends(get_db)):
     email = data.email.lower()
     
@@ -76,7 +86,7 @@ def register(data: RegisterIn, background: BackgroundTasks, db: Session = Depend
     return TokenOut(access_token=create_access_token(user, remember=False), user=user_out)
 
 
-@router.post("/login", response_model=TokenOut)
+@router.post("/login", response_model=TokenOut, dependencies=[_LOGIN_LIMIT])
 def login(data: LoginIn, db: Session = Depends(get_db)):
     ident = data.identifier.strip().lower()
     user = db.scalar(
@@ -97,7 +107,7 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/forgot-password")
+@router.post("/forgot-password", dependencies=[_OTP_REQUEST_LIMIT])
 def forgot_password(data: ForgotPasswordIn, background: BackgroundTasks, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == data.email.lower()))
     # Always return 200 so the endpoint can't be used to probe which emails exist.
@@ -125,13 +135,13 @@ def _valid_otp_user(db: Session, email: str, otp: str) -> User:
     return user
 
 
-@router.post("/verify-otp")
+@router.post("/verify-otp", dependencies=[_OTP_VERIFY_LIMIT])
 def verify_otp(data: VerifyOtpIn, db: Session = Depends(get_db)):
     _valid_otp_user(db, data.email, data.otp)  # raises 400 if bad — code stays valid for the reset step
     return {"message": "Code verified."}
 
 
-@router.post("/reset-password")
+@router.post("/reset-password", dependencies=[_OTP_VERIFY_LIMIT])
 def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
     user = _valid_otp_user(db, data.email, data.otp)
     user.password_hash = hash_password(data.password)

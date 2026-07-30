@@ -8,15 +8,15 @@ Permissions:
   edit (PATCH)                                     -> org admin, or a host who owns/hosts it
   read (list / get / view assignees)               -> any org member
 """
-from app.services.event_email import send_event_created_email
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from ..crud import event as crud
 from ..db import get_db
+from ..email import send_event_created_email
 from ..models import Event, User
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import AssignmentUpdate, EventCreate, EventOut, EventUpdate
@@ -70,7 +70,7 @@ def list_events(
 
 
 @router.post("", response_model=EventOut, status_code=status.HTTP_201_CREATED)
-def create_event(data: EventCreate, admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
+def create_event(data: EventCreate, background: BackgroundTasks, admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
     if data.start_time and data.end_time and data.end_time <= data.start_time:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end_time must be after start_time")
     err = crud.status_transition_error("draft", data.status, data.title)
@@ -86,12 +86,11 @@ def create_event(data: EventCreate, admin: User = Depends(require_org_admin), db
         slug = None
     event = crud.create_event(db, admin.org_id, admin.id, data, slug)
 
-    send_event_created_email(
-        to=admin.email,
-        organizer_name=admin.full_name,
-        event_title=event.title,
-        start_time=event.start_time,
-        status=event.status,
+    # After the response, same as signup's welcome mail — a Resend outage never delays or
+    # breaks event creation (send_event_created_email is best-effort and logs its own errors).
+    background.add_task(
+        send_event_created_email,
+        admin.email, admin.full_name, event.title, event.start_time, event.status,
     )
 
     return event
