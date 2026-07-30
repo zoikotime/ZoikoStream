@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, Request
@@ -18,6 +19,7 @@ from .routers.live import router as live_router
 from .services import bus
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
+from .services.ops import request_stats, run_metric_sampler
 from .config import settings
 from .db import DB_MAX_CONNECTIONS
 
@@ -28,6 +30,7 @@ async def lifespan(_: FastAPI):
     moderation and broadcast from having to import each other):
       * scheduler — fires scheduled polls/announcements, closes timed-out polls
       * sampler   — writes analytics snapshots (the retention graph) and pushes live counters
+      * metrics   — writes platform metric samples (the admin console's KPI sparklines)
     The bus releases its Redis client on the way out.
     ponytail: both run per PROCESS. With multiple workers, run them in one worker (or a cron
     worker) or a scheduled poll launches once per worker and snapshots are written N times.
@@ -42,7 +45,8 @@ async def lifespan(_: FastAPI):
     executor = ThreadPoolExecutor(max_workers=DB_MAX_CONNECTIONS, thread_name_prefix="zoiko-db")
     loop.set_default_executor(executor)
 
-    tasks = [asyncio.create_task(run_scheduler()), asyncio.create_task(run_sampler())]
+    tasks = [asyncio.create_task(run_scheduler()), asyncio.create_task(run_sampler()),
+             asyncio.create_task(run_metric_sampler())]
     try:
         yield
     finally:
@@ -69,6 +73,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def measure_requests(request: Request, call_next):
+    """Feeds services.ops.request_stats so the admin console's API-health tile reports this
+    process's real error rate and p95 latency instead of a placeholder. A failed request
+    still gets recorded (as a 500) before the exception continues to the handlers below."""
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        request_stats.record((time.perf_counter() - start) * 1000, 500)
+        raise
+    request_stats.record((time.perf_counter() - start) * 1000, response.status_code)
+    return response
+
 
 app.include_router(auth_router)
 app.include_router(dashboard_router)

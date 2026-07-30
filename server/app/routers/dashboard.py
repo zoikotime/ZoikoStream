@@ -5,8 +5,9 @@ require_super_admin) rather than hand-rolled role comparisons — one authorizat
 implementation, and a denial is a real 403 instead of a 200 carrying an {"error": ...}
 body that a status-checking client reads as success.
 
-ponytail: total_viewers is still a placeholder (flagged on the line) — there is no viewer
-tracking to count yet. The event counters are real queries.
+Every number here is a query. The viewer counts previously shipped as hardcoded constants
+(12530 org / 84120 platform / 3 live events); they now sum BroadcastSession.peak_viewers,
+which the analytics sampler writes from real presence records.
 """
 
 from fastapi import APIRouter, Depends
@@ -14,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Event, Organization, User
+from ..models import BroadcastSession, Event, Organization, User
 from ..security import require_min_role, require_super_admin
 # Excluded from customer-facing counts — it only holds the super admin. Imported rather
 # than re-declared so the two dashboards can't disagree about what a "customer" org is.
@@ -55,7 +56,13 @@ def get_org_stats(
         "upcoming_events": event_counts.get("scheduled", 0),
         "live_events": event_counts.get("live", 0),
         "completed_events": event_counts.get("ended", 0) + event_counts.get("archived", 0),
-        "total_viewers": 12530,    # ponytail: placeholder — no viewer tracking yet
+        # Real peak audience across this org's broadcasts. BroadcastSession.peak_viewers is
+        # written by the analytics sampler from actual presence records, so this is a
+        # measurement — it replaces a hardcoded 12530 that shipped as if it were real.
+        "total_viewers": db.scalar(
+            select(func.coalesce(func.sum(BroadcastSession.peak_viewers), 0))
+            .where(BroadcastSession.org_id == user.org_id)
+        ) or 0,
         "total_users": org_users or 0,
     }
 
@@ -74,8 +81,14 @@ def get_platform_stats(
     return {
         "organizations": total_orgs or 0,
         "total_users": total_users or 0,
-        "live_events": 3,          # ponytail: placeholder — /admin/dashboard has the real count
-        "total_viewers": 84120,    # ponytail: placeholder
+        # Both were hardcoded placeholders. Counted from the same rows /admin/dashboard and
+        # the Command Center use, so the two never disagree.
+        "live_events": db.scalar(
+            select(func.count(BroadcastSession.id)).where(BroadcastSession.status == "live")
+        ) or 0,
+        "total_viewers": db.scalar(
+            select(func.coalesce(func.sum(BroadcastSession.peak_viewers), 0))
+        ) or 0,
     }
 
 

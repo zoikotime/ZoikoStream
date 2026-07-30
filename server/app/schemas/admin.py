@@ -229,6 +229,9 @@ class ApiKeyOut(BaseModel):
     label: str
     prefix: str
     created_at: datetime
+    # None = non-expiring. Keys minted before expiry existed keep None rather than being
+    # retroactively given a deadline.
+    expires_at: datetime | None = None
     revoked: bool = False
 
 
@@ -239,3 +242,19 @@ class ApiKeyCreated(ApiKeyOut):
 
 class ApiKeyCreate(BaseModel):
     label: str = Field(min_length=1, max_length=80)
+    # Optional lifetime. Omit for a non-expiring key.
+    expires_in_days: int | None = Field(None, ge=1, le=730)
+
+
+# ── Command Center ───────────────────────────────────────────────────────────
+# The console payloads are deep, heterogeneous and assembled in services/ops.py, so they
+# are returned as-is rather than mirrored into a parallel model tree that would have to be
+# edited twice on every change. Only the REQUEST bodies are modelled — those are the ones
+# that need validating.
+
+class ElevationRequest(BaseModel):
+    """Step-up privilege request. `minutes` is capped so an elevation can't be permanent."""
+    scope: str = Field(min_length=1, max_length=80)
+    scopes: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=3, max_length=300)
+    minutes: int = Field(15, ge=1, le=240)

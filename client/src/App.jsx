@@ -17,26 +17,6 @@ import OrganizationBilling from "./pages/organization/Billing";
 import OrganizationSettings from "./pages/organization/Settings";
 import EventDetails from "./pages/organization/EventDetails";
 import InviteMembers from "./pages/organization/InviteMembers";
-import AdminDashboard from "./pages/admin/Dashboard";
-import Organizations from "./pages/admin/Organizations";
-<<<<<<< HEAD
-<<<<<<< Updated upstream
-import AuthPage from "./pages/AuthPage";
-=======
-=======
->>>>>>> origin/main
-import LiveEvents from "./pages/admin/LiveEvents";
-import AdminUsers from "./pages/admin/Users";
-import Subscriptions from "./pages/admin/Subscriptions";
-import Analytics from "./pages/admin/Analytics";
-import AuditLogs from "./pages/admin/AuditLogs";
-import PlatformSettings from "./pages/admin/Settings";
-import SystemStatus from "./pages/admin/SystemStatus";
-import FeatureFlags from "./pages/admin/FeatureFlags";
-import ReleaseCenter from "./pages/admin/ReleaseCenter";
-import Support from "./pages/admin/Support";
-import Roles from "./pages/admin/Roles";
-import Developers from "./pages/admin/Developers";
 import AuthLayout from "./layouts/AuthLayout";
 import Login from "./pages/auth/Login";
 import CreateOrganization from "./pages/auth/CreateOrganization";
@@ -46,17 +26,28 @@ import EventRegistration from "./pages/EventRegistration";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import ModeratorDashboard from "./pages/moderator/Dashboard";
-<<<<<<< HEAD
 import OrganizationProfile from "./pages/organization/Profile";
 
 // Public marketing homepage — code-split from the app bundle.
 const Home = lazy(() => import("./pages/Home/Home"));
->>>>>>> Stashed changes
-=======
 
-// Public marketing homepage — code-split from the app bundle.
-const Home = lazy(() => import("./pages/Home/Home"));
->>>>>>> origin/main
+// Super Admin console — code-split as one area. Only super admins can reach /admin/*, so
+// shipping these 14 pages (plus their charts and tables) in the main bundle made every
+// visitor to the public homepage download them. Same pattern as Home above.
+const AdminDashboard = lazy(() => import("./pages/admin/Dashboard"));
+const Organizations = lazy(() => import("./pages/admin/Organizations"));
+const LiveEvents = lazy(() => import("./pages/admin/LiveEvents"));
+const AdminUsers = lazy(() => import("./pages/admin/Users"));
+const Subscriptions = lazy(() => import("./pages/admin/Subscriptions"));
+const Analytics = lazy(() => import("./pages/admin/Analytics"));
+const AuditLogs = lazy(() => import("./pages/admin/AuditLogs"));
+const PlatformSettings = lazy(() => import("./pages/admin/Settings"));
+const SystemStatus = lazy(() => import("./pages/admin/SystemStatus"));
+const FeatureFlags = lazy(() => import("./pages/admin/FeatureFlags"));
+const ReleaseCenter = lazy(() => import("./pages/admin/ReleaseCenter"));
+const Support = lazy(() => import("./pages/admin/Support"));
+const Roles = lazy(() => import("./pages/admin/Roles"));
+const Developers = lazy(() => import("./pages/admin/Developers"));
 
 // ponytail: one placeholder for routes not built yet — replace each with a real page as it lands
 function Placeholder({ title }) {
@@ -92,10 +83,26 @@ function LandingOrDashboard() {
 }
 
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
-// so the control-center nav never 404s. Dashboard + Organizations are real pages below.
+// so the console nav never 404s. Everything else in the sidebar is a real page below.
 const adminStubs = [
   ["infrastructure", "Media Infrastructure"],
-  ["security", "Security"],
+  ["security", "Trust & Safety"],
+  ["media", "Media"],
+  ["event-readiness", "Event Readiness"],
+  ["governance", "Governance"],
+];
+
+// Organization console destinations without a page yet — kept in-layout (Placeholder) so the
+// org nav never 404s. Everything else in that sidebar is a real page below.
+const orgStubs = [
+  ["developers", "Developer Platform"],
+  ["credentials", "Credentials"],
+  ["webhooks", "Webhooks"],
+  ["live-inputs", "Live Inputs"],
+  ["sessions", "Streaming Sessions"],
+  ["playback", "Playback & Access"],
+  ["audience", "Audience Access"],
+  ["support", "Support & Status"],
 ];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
@@ -164,14 +171,6 @@ export default function App() {
             <Route element={<RoleRoute allow={["org_admin"]} />}>
               <Route element={<OrganizationLayout />}>
                 <Route path="/organization/dashboard" element={<OrganizationDashboard />} />
-<<<<<<< HEAD
-<<<<<<< Updated upstream
-                {orgStubs.map((p) => (
-                  <Route key={p} path={`/organization/${p}`} element={<Placeholder title={cap(p)} />} />
-                ))}
-=======
-=======
->>>>>>> origin/main
                 <Route path="/organization/events" element={<OrganizationEvents />} />
                 <Route path="/organization/recordings" element={<OrganizationRecordings />} />
                 <Route path="/organization/analytics" element={<OrganizationAnalytics />} />
@@ -179,11 +178,10 @@ export default function App() {
                 <Route path="/organization/settings" element={<OrganizationSettings />} />
                 <Route path="/organization/events/:id" element={<EventDetails />} />
                 <Route path="/organization/users" element={<InviteMembers />} />
-<<<<<<< HEAD
                 <Route path="/organization/profile" element={<OrganizationProfile />} />
->>>>>>> Stashed changes
-=======
->>>>>>> origin/main
+                {orgStubs.map(([path, title]) => (
+                  <Route key={path} path={`/organization/${path}`} element={<Placeholder title={title} />} />
+                ))}
               </Route>
             </Route>
 

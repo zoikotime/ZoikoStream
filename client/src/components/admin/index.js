@@ -8,6 +8,5 @@ export { default as Badge } from "../../ui/Badge";
 export { default as StatCard } from "./StatCard";
 export { default as DataTable } from "./DataTable";
 export { default as Panel } from "./Panel";
-export { default as StatStrip } from "./StatStrip";
 export { default as HealthDot, healthColor } from "./HealthDot";
 export { default as Icon, ICONS } from "./icons";

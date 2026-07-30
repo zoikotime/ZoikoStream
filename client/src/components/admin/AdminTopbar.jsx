@@ -1,21 +1,55 @@
-import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import toast from "react-hot-toast";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
-  FiMenu, FiSearch, FiBell, FiPlus, FiGlobe, FiChevronDown, FiSun, FiMoon,
-  FiUser, FiLogOut, FiCommand,
+  FiMenu, FiSearch, FiCommand, FiSun, FiMoon, FiLogOut, FiUser, FiChevronDown,
 } from "react-icons/fi";
+import api from "../../api";
 import { useAuth } from "../../auth/AuthContext";
+import useInterval from "../../hooks/useInterval";
 import { useTheme } from "../../theme/ThemeContext";
-import { cx } from "../../ui/tokens";
-import Icon from "./icons";
+import { CONSOLE, cx, type } from "../../ui/tokens";
 import HealthDot from "./HealthDot";
-import { searchIndex, regionOptions, alerts, quickActions } from "../../data/platform";
 
-const initials = (name = "") =>
-  name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
+// Route -> breadcrumb leaf. Keys mirror the sidebar so the crumb always names the page the
+// operator is actually on.
+const CRUMBS = {
+  dashboard: "Command Center",
+  "live-events": "Live Operations",
+  "event-readiness": "Event Readiness",
+  organizations: "Organizations",
+  media: "Media",
+  security: "Trust & Safety",
+  users: "Identity & Access",
+  developers: "Developer Platform",
+  subscriptions: "Usage & Entitlements",
+  support: "Support Operations",
+  settings: "Platform Configuration",
+  governance: "Governance",
+  audit: "Audit",
+  status: "System Status",
+  analytics: "Analytics",
+  roles: "Roles & Permissions",
+  "feature-flags": "Feature Flags",
+  releases: "Release Center",
+};
 
-// Close a dropdown when clicking outside of it.
+// There is no default verdict. If the console can't reach its own status endpoint it says
+// so — reporting "All systems operational" from a failed request is the one lie this
+// console must never tell, because an operator would act on it during an incident.
+const VERDICT = {
+  ok: { status: "ok", label: "All systems operational" },
+  warn: { status: "warn", label: "Degraded performance" },
+  down: { status: "down", label: "Service disruption" },
+};
+const UNKNOWN = { status: "neutral", label: "Status unavailable" };
+
+// The operator's own timezone, named. The console is time-critical, so the zone is stated
+// rather than assumed — a 15:00 start means nothing without it.
+const ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const timeFmt = new Intl.DateTimeFormat("en-GB", {
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZoneName: "short",
+});
+
 function useClickOutside(onClose) {
   const ref = useRef(null);
   useEffect(() => {
@@ -26,20 +60,28 @@ function useClickOutside(onClose) {
   return ref;
 }
 
-// Platform command bar: global search + region + quick create + notifications + theme + profile.
-// Admin-only, so the shared org Topbar is left untouched.
-export default function AdminTopbar({ onMenuClick }) {
+const initials = (name = "") =>
+  name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
+
+export default function AdminTopbar({ onMenuClick, state, unknown, onRetry }) {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const { user, logout } = useAuth();
   const { theme, toggle } = useTheme();
 
   const [q, setQ] = useState("");
-  const [open, setOpen] = useState(null); // "search" | "region" | "create" | "notif" | "profile"
-  const [region, setRegion] = useState(regionOptions[0]);
+  const [hits, setHits] = useState({ term: "", items: [] });
+  const [open, setOpen] = useState(null); // "search" | "profile"
   const searchRef = useRef(null);
   const menuRef = useClickOutside(() => setOpen(null));
 
-  // ⌘K / Ctrl+K focuses the command bar (control-center convention).
+  const [clock, setClock] = useState(() => timeFmt.format(new Date()));
+  useInterval(() => setClock(timeFmt.format(new Date())), 1000);
+
+  const crumb = CRUMBS[pathname.split("/")[2]] || "Console";
+  const verdict = unknown ? UNKNOWN : VERDICT[state?.health?.overall] || UNKNOWN;
+
+  // ⌘K / Ctrl+K focuses the command bar (console convention).
   useEffect(() => {
     const onKey = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -53,173 +95,186 @@ export default function AdminTopbar({ onMenuClick }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const results = q
-    ? searchIndex.filter((r) => r.label.toLowerCase().includes(q.toLowerCase()))
-    : searchIndex.slice(0, 6);
+  // Real search against /admin/search, debounced. Results are organizations, events and
+  // users that actually exist — no client-side index to drift out of date.
+  //
+  // Hits are stored WITH the term they belong to, so results for a previous query can
+  // never paint under a newer one and the effect never has to clear state synchronously.
+  const term = q.trim();
+  useEffect(() => {
+    if (term.length < 2) return undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      api
+        .get("/admin/search", { params: { q: term }, signal: controller.signal })
+        .then((r) => setHits({ term, items: r.data }))
+        .catch(() => {}); // aborted or failed — the panel just shows no matches
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [term]);
+  const results = hits.term === term ? hits.items : [];
 
   const go = (to) => { setOpen(null); setQ(""); navigate(to); };
-  const runAction = (a) => (a.to ? go(a.to) : (setOpen(null), toast(`${a.label} — coming soon`, { icon: "🛠️" })));
+  const iconBtn = cx(
+    "grid h-9 w-9 place-items-center rounded-lg transition",
+    CONSOLE.muted,
+    "hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-white/[0.06] dark:hover:text-white"
+  );
 
-  const iconBtn = "grid h-9 w-9 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100";
+  const person = useMemo(
+    () => state?.user || { name: user?.full_name, email: user?.email },
+    [state, user]
+  );
 
   return (
-    <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-3 border-b border-slate-200 bg-white/80 px-3 backdrop-blur sm:px-5 dark:border-slate-800 dark:bg-slate-900/80" ref={menuRef}>
+    <header
+      ref={menuRef}
+      className={cx(
+        "sticky top-0 z-20 flex h-16 shrink-0 items-center gap-3 border-b px-3 backdrop-blur sm:px-5",
+        CONSOLE.bar
+      )}
+    >
       <button onClick={onMenuClick} className={cx(iconBtn, "lg:hidden")} aria-label="Toggle menu">
         <FiMenu className="text-xl" />
       </button>
 
-      {/* Global search / command bar */}
-      <div className="relative min-w-0 flex-1 max-w-xl">
-        <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+      {/* Breadcrumb */}
+      <nav aria-label="Breadcrumb" className="hidden shrink-0 items-center gap-1.5 text-[13px] md:flex">
+        <Link to="/admin/dashboard" className={cx(CONSOLE.faint, "hover:underline")}>
+          Super Admin
+        </Link>
+        <span className={CONSOLE.faint}>/</span>
+        <span className={cx("font-semibold", CONSOLE.heading)}>{crumb}</span>
+      </nav>
+
+      {/* Command bar */}
+      <div className="relative mx-auto min-w-0 w-full max-w-md">
+        <FiSearch className={cx("pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[15px]", CONSOLE.faint)} />
         <input
           ref={searchRef}
           value={q}
           onChange={(e) => { setQ(e.target.value); setOpen("search"); }}
           onFocus={() => setOpen("search")}
-          placeholder="Search organizations, users, events…"
-          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-10 pr-16 text-sm text-slate-800 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:ring-violet-500/20"
+          placeholder="Search organizations, events, sessions…"
+          aria-label="Search organizations, events and sessions"
+          className={cx(
+            "w-full rounded-full border py-2 pl-9 pr-14 text-[13px] outline-none transition",
+            "border-slate-200 bg-slate-100/70 text-slate-800 placeholder:text-slate-400 focus:border-violet-400 focus:bg-white",
+            "dark:border-white/10 dark:bg-white/[0.05] dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus:border-violet-500/60"
+          )}
         />
-        <kbd className="pointer-events-none absolute right-3 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-slate-400 sm:flex dark:border-slate-700 dark:bg-slate-900">
-          <FiCommand className="text-[10px]" />K
+        <kbd
+          className={cx(
+            "pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] font-medium sm:flex",
+            "border-slate-200 bg-white text-slate-400 dark:border-white/10 dark:bg-white/[0.04] dark:text-neutral-500"
+          )}
+        >
+          <FiCommand className="text-[9px]" />K
         </kbd>
 
-        {open === "search" && (
-          <div className="absolute left-0 right-0 top-12 z-20 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800">
-            <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-              {q ? "Results" : "Jump to"}
-            </p>
-            {results.length === 0 && <p className="px-3 py-3 text-sm text-slate-400">No matches for “{q}”.</p>}
-            {results.map((r) => (
-              <button
-                key={r.label + r.kind}
-                onMouseDown={() => go(r.to)}
-                className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60"
-              >
-                <Icon name={r.icon} className="text-slate-400" />
-                <span className="flex-1 truncate">{r.label}</span>
-                <span className="text-[10px] uppercase tracking-wide text-slate-400">{r.kind}</span>
-              </button>
-            ))}
+        {open === "search" && term.length >= 2 && (
+          <div
+            className={cx(
+              "absolute left-0 right-0 top-11 z-30 overflow-hidden rounded-xl border py-1 shadow-xl",
+              "border-slate-200 bg-white dark:border-white/10 dark:bg-neutral-950"
+            )}
+          >
+            {results.length === 0 ? (
+              <p className={cx("px-3 py-3 text-[13px]", CONSOLE.faint)}>No matches for “{term}”.</p>
+            ) : (
+              results.map((r) => (
+                <button
+                  key={`${r.kind}:${r.label}`}
+                  onMouseDown={() => go(r.to)}
+                  className={cx(
+                    "flex w-full items-center gap-3 px-3 py-2 text-left text-[13px]",
+                    CONSOLE.body,
+                    "hover:bg-slate-50 dark:hover:bg-white/[0.05]"
+                  )}
+                >
+                  <span className="min-w-0 flex-1 truncate">{r.label}</span>
+                  <span className={cx("shrink-0 truncate text-[11px]", CONSOLE.faint)}>{r.detail}</span>
+                  <span className={cx("shrink-0 text-[10px] uppercase tracking-wide", CONSOLE.faint)}>
+                    {r.kind}
+                  </span>
+                </button>
+              ))
+            )}
           </div>
         )}
       </div>
 
-      <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
-        {/* Region selector */}
-        <div className="relative hidden sm:block">
+      <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
+        {/* Systems verdict — real, from /admin/console-state. When that call failed this is
+            a retry button rather than a link, because the useful action is to re-ask. */}
+        {unknown ? (
           <button
-            onClick={() => setOpen(open === "region" ? null : "region")}
-            className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            onClick={onRetry}
+            className="hidden lg:block"
+            title="Couldn’t reach the platform API — click to retry"
           >
-            <FiGlobe className="text-slate-400" />
-            <span className="hidden max-w-[9rem] truncate lg:inline">{region.name}</span>
-            <FiChevronDown className="text-slate-400" />
+            <HealthDot status={UNKNOWN.status}>{UNKNOWN.label}</HealthDot>
           </button>
-          {open === "region" && (
-            <div className="absolute right-0 top-11 z-20 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800">
-              {regionOptions.map((r) => (
-                <button
-                  key={r.id}
-                  onClick={() => { setRegion(r); setOpen(null); }}
-                  className={cx(
-                    "flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700/60",
-                    r.id === region.id ? "font-semibold text-violet-700 dark:text-violet-300" : "text-slate-700 dark:text-slate-200"
-                  )}
-                >
-                  {r.name}
-                  {r.id === region.id && <span className="h-1.5 w-1.5 rounded-full bg-violet-500" />}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Quick create */}
-        <div className="relative">
-          <button
-            onClick={() => setOpen(open === "create" ? null : "create")}
-            className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-violet-700"
+        ) : (
+          <Link
+            to="/admin/status"
+            className="hidden lg:block"
+            title={`${state?.health?.degraded ?? 0} of ${state?.health?.total ?? 0} degraded`}
           >
-            <FiPlus className="text-base" />
-            <span className="hidden sm:inline">Create</span>
-          </button>
-          {open === "create" && (
-            <div className="absolute right-0 top-11 z-20 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800">
-              {quickActions.map((a) => (
-                <button
-                  key={a.label}
-                  onClick={() => runAction(a)}
-                  className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-700/60"
-                >
-                  <Icon name={a.icon} className="text-slate-400" /> {a.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+            <HealthDot status={verdict.status} pulse={verdict.status !== "ok"}>
+              {verdict.label}
+            </HealthDot>
+          </Link>
+        )}
 
-        {/* Notifications */}
-        <div className="relative">
-          <button
-            onClick={() => setOpen(open === "notif" ? null : "notif")}
-            className={cx(iconBtn, "relative")}
-            aria-label="Notifications"
-          >
-            <FiBell className="text-xl" />
-            <span className="absolute -right-0.5 -top-0.5 grid h-4 w-4 place-items-center rounded-full bg-rose-500 text-[10px] font-semibold text-white">
-              {alerts.length}
-            </span>
-          </button>
-          {open === "notif" && (
-            <div className="absolute right-0 top-11 z-20 w-80 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-800">
-              <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5 dark:border-slate-700">
-                <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">Alerts</span>
-                <button onClick={() => go("/admin/status")} className="text-xs font-medium text-violet-600 dark:text-violet-400">View all</button>
-              </div>
-              <div className="max-h-80 divide-y divide-slate-100 overflow-y-auto dark:divide-slate-700">
-                {alerts.map((a) => (
-                  <div key={a.id} className="flex gap-3 px-4 py-3">
-                    <HealthDot status={a.severity} label="" className="mt-1" />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{a.title}</p>
-                      <p className="truncate text-xs text-slate-500 dark:text-slate-400">{a.detail}</p>
-                      <p className="mt-0.5 text-[11px] text-slate-400">{a.when}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        {/* Operator timezone + live clock */}
+        <span className={cx("hidden items-center gap-1.5 text-[12px] xl:flex", CONSOLE.faint)}>
+          <span>{ZONE}</span>
+          <span aria-hidden="true">·</span>
+          <span className={cx(type.mono, "tabular-nums")}>{clock}</span>
+        </span>
 
-        {/* Theme toggle */}
-        <button onClick={toggle} className={iconBtn} aria-label="Toggle theme" title={theme === "dark" ? "Switch to light" : "Switch to dark"}>
-          {theme === "dark" ? <FiSun className="text-lg" /> : <FiMoon className="text-lg" />}
+        <button onClick={toggle} className={iconBtn} aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}>
+          {theme === "dark" ? <FiSun className="text-[17px]" /> : <FiMoon className="text-[17px]" />}
         </button>
 
         {/* Profile */}
         <div className="relative">
           <button
             onClick={() => setOpen(open === "profile" ? null : "profile")}
-            className="flex items-center gap-2 rounded-full border border-slate-200 py-1 pl-1 pr-2 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+            className={cx(
+              "flex items-center gap-2 rounded-full border py-1 pl-1 pr-2 transition",
+              "border-slate-200 hover:bg-slate-50 dark:border-white/10 dark:hover:bg-white/[0.05]"
+            )}
+            aria-label="Account menu"
           >
-            <span className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-xs font-semibold text-white">
-              {initials(user?.full_name)}
+            <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-[10px] font-semibold text-white">
+              {initials(person.name)}
             </span>
-            <FiChevronDown className="hidden text-slate-400 sm:block" />
+            <FiChevronDown className={cx("hidden text-[13px] sm:block", CONSOLE.faint)} />
           </button>
           {open === "profile" && (
-            <div className="absolute right-0 top-12 z-20 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800">
-              <div className="border-b border-slate-100 px-4 py-2.5 dark:border-slate-700">
-                <p className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{user?.full_name || "Super Admin"}</p>
-                <p className="truncate text-xs text-slate-500 dark:text-slate-400">{user?.email}</p>
+            <div
+              className={cx(
+                "absolute right-0 top-12 z-30 w-56 overflow-hidden rounded-xl border py-1 shadow-xl",
+                "border-slate-200 bg-white dark:border-white/10 dark:bg-neutral-950"
+              )}
+            >
+              <div className={cx("border-b px-4 py-2.5", CONSOLE.divider)}>
+                <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>
+                  {person.name || "Super Admin"}
+                </p>
+                <p className={cx("truncate text-[11px]", CONSOLE.faint)}>{person.email}</p>
               </div>
-              <button className="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-700/60">
+              <button
+                onClick={() => go("/admin/settings")}
+                className={cx("flex w-full items-center gap-2.5 px-4 py-2.5 text-[13px]", CONSOLE.body, "hover:bg-slate-50 dark:hover:bg-white/[0.05]")}
+              >
                 <FiUser /> Profile
               </button>
               <button
                 onClick={logout}
-                className="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-500/10"
+                className="flex w-full items-center gap-2.5 px-4 py-2.5 text-[13px] text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-500/10"
               >
                 <FiLogOut /> Log out
               </button>

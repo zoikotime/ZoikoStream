@@ -32,6 +32,9 @@ _ORG_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS security JSONB",
     "ADD COLUMN IF NOT EXISTS api_keys JSONB",
     "ADD COLUMN IF NOT EXISTS webhook_urls JSONB",
+    # Command Center: test orgs are excluded from readiness, badges and attention counts
+    # (that's what the console's "Include test mode" toggle switches back on).
+    "ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE",
 ]
 
 # Slug lookups are indexed; NULLs are allowed (many unset orgs), uniqueness is enforced in crud.
@@ -43,6 +46,25 @@ _ORG_INDEXES = [
 # a brand-new model, so create_all() below builds it — only existing tables need ALTERs.
 _USER_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    # Operating team an actor belongs to — shown against privileged activity in the console.
+    "ADD COLUMN IF NOT EXISTS department VARCHAR(80)",
+]
+
+# Blast-radius class for an event. Drives which readiness gates are mandatory and which
+# events surface on the Command Center's high-impact list.
+_EVENT_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS impact VARCHAR(20) NOT NULL DEFAULT 'standard'",
+]
+
+# Columns whose models gained fields after the table already existed. Without these the
+# SELECT that lists them fails outright ("column does not exist") — /admin/feature-flags
+# and /admin/support-tickets were both returning 500s because of this drift.
+_FEATURE_FLAG_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()",
+    "ADD COLUMN IF NOT EXISTS updated_by VARCHAR(255)",
+]
+_SUPPORT_TICKET_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ",
 ]
 
 
@@ -58,6 +80,12 @@ def ensure_schema():
             conn.execute(text(stmt))
         for clause in _USER_COLUMNS:
             conn.execute(text(f"ALTER TABLE users {clause}"))
+        for clause in _EVENT_COLUMNS:
+            conn.execute(text(f"ALTER TABLE events {clause}"))
+        for clause in _FEATURE_FLAG_COLUMNS:
+            conn.execute(text(f"ALTER TABLE feature_flags {clause}"))
+        for clause in _SUPPORT_TICKET_COLUMNS:
+            conn.execute(text(f"ALTER TABLE support_tickets {clause}"))
     print("Schema ready!")
 
 

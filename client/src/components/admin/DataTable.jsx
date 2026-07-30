@@ -36,7 +36,7 @@ function PageBtn({ disabled, active, onClick, children }) {
         focusRing,
         active
           ? "bg-violet-600 text-white"
-          : "text-slate-600 hover:bg-slate-100 disabled:pointer-events-none disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
+          : "text-slate-600 hover:bg-slate-100 disabled:pointer-events-none disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-white/[0.06]"
       )}
     >
       {children}
@@ -165,7 +165,7 @@ export default function DataTable({
               placeholder={searchPlaceholder}
               aria-label="Search table"
               className={cx(
-                "h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-700 outline-none placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200",
+                "h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-700 outline-none placeholder:text-slate-400 dark:border-white/10 dark:bg-white/[0.03] dark:text-neutral-200",
                 focusRing
               )}
             />
@@ -174,13 +174,13 @@ export default function DataTable({
       )}
 
       {selectable && selected.size > 0 && (
-        <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-2.5 dark:border-slate-800">
-          <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{selected.size} selected</span>
+        <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-2.5 dark:border-white/10">
+          <span className="text-sm font-medium text-slate-600 dark:text-neutral-300">{selected.size} selected</span>
           {bulkActions?.({ selected: [...selected], clear: clearSelection })}
           <button
             type="button"
             onClick={clearSelection}
-            className={cx("ml-auto rounded-md px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800", focusRing)}
+            className={cx("ml-auto rounded-md px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 dark:text-neutral-400 dark:hover:bg-white/[0.06]", focusRing)}
           >
             Clear
           </button>
@@ -190,9 +190,9 @@ export default function DataTable({
       <div className={cx("overflow-auto", className)} style={maxHeight ? { maxHeight } : undefined}>
         <table className="w-full border-collapse" style={{ minWidth }}>
           <thead
-            className={cx("bg-slate-50/90 backdrop-blur dark:bg-slate-900/80", maxHeight && "sticky top-0 z-10")}
+            className={cx("bg-slate-50/90 backdrop-blur dark:bg-white/[0.04]", maxHeight && "sticky top-0 z-10")}
           >
-            <tr className="border-b border-slate-200 dark:border-slate-800">
+            <tr className="border-b border-slate-200 dark:border-white/10">
               {selectable && (
                 <th className="w-10 px-4 py-2.5">
                   <CheckBox checked={allChecked} indeterminate={someChecked} onChange={toggleAll} label="Select all rows" />
@@ -231,7 +231,7 @@ export default function DataTable({
             </tr>
           </thead>
 
-          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+          <tbody className="divide-y divide-slate-100 dark:divide-white/[0.07]">
             {loading &&
               Array.from({ length: skeletonRows }).map((_, i) => (
                 <tr key={`sk-${i}`}>
@@ -240,7 +240,7 @@ export default function DataTable({
                     <td key={c.key} className="px-4 py-3">
                       <div
                         className={cx(
-                          "zk-skeleton h-4 rounded bg-slate-200 dark:bg-slate-800",
+                          "zk-skeleton h-4 rounded bg-slate-200 dark:bg-white/[0.07]",
                           c.align === "right" ? "ml-auto w-12" : "w-24"
                         )}
                       />
@@ -259,7 +259,7 @@ export default function DataTable({
                     key={key}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
                     className={cx(
-                      "group transition-colors duration-150 hover:bg-slate-50 dark:hover:bg-slate-800/40",
+                      "group transition-colors duration-150 hover:bg-slate-50 dark:hover:bg-white/[0.06]/40",
                       isSelected && "bg-violet-50/60 dark:bg-violet-500/10",
                       onRowClick && "cursor-pointer"
                     )}
@@ -273,7 +273,7 @@ export default function DataTable({
                       <td
                         key={c.key}
                         className={cx(
-                          "px-4 py-3 text-sm text-slate-600 dark:text-slate-300",
+                          "px-4 py-3 text-sm text-slate-600 dark:text-neutral-300",
                           alignCls(c.align),
                           c.mono ? "font-mono tabular-nums" : c.align === "right" && "tabular-nums",
                           c.className
@@ -299,13 +299,13 @@ export default function DataTable({
                   {empty ? (
                     <div className="mx-auto max-w-sm">
                       {empty.icon && (
-                        <div className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-full bg-slate-100 text-slate-400 dark:bg-slate-800">
+                        <div className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-full bg-slate-100 text-slate-400 dark:bg-white/[0.07]">
                           <empty.icon className="text-lg" />
                         </div>
                       )}
-                      <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">{empty.title}</p>
+                      <p className="text-sm font-semibold text-slate-700 dark:text-neutral-200">{empty.title}</p>
                       {empty.description && (
-                        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{empty.description}</p>
+                        <p className="mt-1 text-sm text-slate-500 dark:text-neutral-400">{empty.description}</p>
                       )}
                       {empty.action && <div className="mt-4 flex justify-center">{empty.action}</div>}
                     </div>
@@ -320,8 +320,8 @@ export default function DataTable({
       </div>
 
       {pageSize && !loading && sorted.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 dark:border-slate-800">
-          <p className="text-xs text-slate-500 dark:text-slate-400">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 dark:border-white/10">
+          <p className="text-xs text-slate-500 dark:text-neutral-400">
             Showing {(current - 1) * pageSize + 1}–{Math.min(current * pageSize, sorted.length)} of {sorted.length}
           </p>
           <div className="flex items-center gap-1">

@@ -1,78 +1,256 @@
-import { useAuth } from "../../auth/AuthContext";
-import api from "../../api";
+import { useMemo, useState } from "react";
+import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
-import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
-import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
-import StatCard from "../../components/admin/StatCard";
-import { BarChart, RadialChart } from "../../ui/charts";
-import RecentEvents from "../../components/Dashboard/RecentEvents";
-import StorageCard from "../../components/Dashboard/StorageCard";
-import QuickActions from "../../components/Dashboard/QuickActions";
+import useInterval from "../../hooks/useInterval";
+import { CONSOLE, cx, type } from "../../ui/tokens";
+import Skeleton from "../../ui/Skeleton";
+import { ConsoleButton } from "../../ui/Button";
+import { compact } from "../../components/admin/format";
+import MetricTile from "../../components/admin/MetricTile";
+import LifecycleRail from "../../components/admin/sections/LifecycleRail";
+import { useOrgScope } from "../../components/organization/orgScope";
+import AttentionRequired from "../../components/organization/AttentionRequired";
+import ManagedEvents from "../../components/organization/ManagedEvents";
+import SessionsTable from "../../components/organization/SessionsTable";
+import DeveloperOps from "../../components/organization/DeveloperOps";
+import EntitlementBars from "../../components/organization/EntitlementBars";
+import SecuritySupport from "../../components/organization/SecuritySupport";
 
-// ponytail: viewership/engagement/storage have no backend endpoint yet — kept as
-// static previews and marked. When GET /dashboard/org/analytics lands, feed these.
-const viewership = [
-  { label: "Mon", value: 90 },
-  { label: "Tue", value: 120 },
-  { label: "Wed", value: 80 },
-  { label: "Thu", value: 130 },
-  { label: "Fri", value: 110 },
-  { label: "Sat", value: 160 },
-  { label: "Sun", value: 190 },
-];
+const REFRESH_MS = 30_000;
+
+const HEALTH_TONE = {
+  ok: "text-green-600 dark:text-green-400",
+  warn: "text-amber-600 dark:text-amber-400",
+  down: "text-rose-600 dark:text-rose-400",
+  not_configured: CONSOLE.faint,
+};
+
+function OverviewSkeleton() {
+  return (
+    <div className="mx-auto max-w-[1500px] space-y-4">
+      <div className="space-y-3">
+        <Skeleton variant="title" className="w-72" />
+        <Skeleton variant="line" className="w-96" />
+      </div>
+      <Skeleton variant="block" className="h-28" />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Skeleton key={i} variant="block" className="h-40" />
+        ))}
+      </div>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Skeleton variant="block" className="h-56" />
+        <Skeleton variant="block" className="h-56" />
+      </div>
+    </div>
+  );
+}
 
 export default function OrganizationDashboard() {
-  const { user } = useAuth();
-  const { data: stats, loading, error, reload } = useApi(() =>
-    api.get("/dashboard/org/stats").then((r) => r.data)
+  // Opt into the topbar's workspace + range controls; they scope the fetch below.
+  const { filters, state: consoleState } = useOrgScope({ scoped: true });
+
+  const { data, loading, error, reload } = useApi(() =>
+    api
+      .get("/organization/overview", {
+        params: {
+          range: filters.range,
+          workspace: filters.workspace || undefined,
+        },
+      })
+      .then((r) => ({ ...r.data, fetched_at: Date.now() }))
   );
 
-  const orgName =
-    stats?.organization_name || user?.organization_name || "Zoiko Organization";
+  // Refetch when the scope changes. `filters` is the only dependency that alters the query.
+  const scopeKey = `${filters.range}|${filters.workspace || ""}`;
+  const [lastScope, setLastScope] = useState(scopeKey);
+  if (scopeKey !== lastScope) {
+    setLastScope(scopeKey);
+    reload();
+  }
 
-  const kpis = [
-    { label: "Upcoming Events", value: stats?.upcoming_events ?? 0 },
-    { label: "Live Events", value: stats?.live_events ?? 0 },
-    { label: "Completed Events", value: stats?.completed_events ?? 0 },
-    { label: "Total Viewers", value: stats?.total_viewers ?? 0 },
-  ];
+  useInterval(reload, REFRESH_MS);
+
+  // Freshness ticks locally; the clock is read inside the interval, never during render.
+  const [ageSeconds, setAgeSeconds] = useState(0);
+  useInterval(
+    () => setAgeSeconds(Math.floor((Date.now() - data.fetched_at) / 1000)),
+    1000,
+    Boolean(data)
+  );
+  const ageLabel = useMemo(
+    () => (ageSeconds < 1 ? "just now" : `${ageSeconds} sec ago`),
+    [ageSeconds]
+  );
+
+  if (loading && !data) return <OverviewSkeleton />;
+
+  if (error && !data) {
+    const status = error?.response?.status;
+    const diagnosis =
+      status === 404
+        ? "The API responded but doesn’t have /organization/overview — the server is running an older build. Restart it to pick up the current code."
+        : status === 401 || status === 403
+        ? "Your session isn’t authorised for this organization. Sign in again."
+        : status
+        ? `The API returned ${status}: ${errMsg(error)}`
+        : "The API is unreachable — check that the server is running and that VITE_API_URL points at it.";
+    return (
+      <div className="mx-auto max-w-[1500px]">
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 dark:border-rose-500/25 dark:bg-rose-500/10">
+          <p className="text-[13px] font-semibold text-rose-700 dark:text-rose-300">
+            Couldn’t load the organization overview
+          </p>
+          <p className="mt-1 text-[12px] text-rose-600 dark:text-rose-400">{diagnosis}</p>
+          <ConsoleButton variant="secondary" size="sm" className="mt-3" onClick={reload}>
+            Try again
+          </ConsoleButton>
+        </div>
+      </div>
+    );
+  }
+
+  const org = data?.organization || consoleState?.organization || {};
+  const workspace = data?.workspace || consoleState?.workspace;
+  const sessions = data?.sessions || {};
+  const media = data?.media_assets || {};
+  const ent = data?.entitlements || {};
+  const apiPosture = data?.api || {};
+  const health = data?.service_health || {};
+  const age = `${ageSeconds}s`;
 
   return (
-    <div className="space-y-6">
-      <OrganizationPageHeader
-        title={`Welcome, ${orgName}`}
-        subtitle="Here's what's happening across your organization today."
+    <div className="mx-auto max-w-[1500px] space-y-4">
+      {/* Header */}
+      <div>
+        <h1 className={cx("text-[26px] font-bold leading-tight tracking-tight sm:text-[30px]", CONSOLE.heading)}>
+          Organization Overview
+        </h1>
+        <p className={cx("mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]", CONSOLE.muted)}>
+          <span className="font-medium">{org.name || "Organization"}</span>
+          <span className={CONSOLE.faint}>·</span>
+          <span>{workspace?.label || "production"} workspace</span>
+          <span className={CONSOLE.faint}>·</span>
+          <span className={cx("text-green-600 dark:text-green-400", type.mono)}>
+            ● Refreshed {ageLabel}
+          </span>
+        </p>
+      </div>
+
+      {/* Lifecycle rail — dims the stages this organization does not use, because a healthy
+          tick for a service you never touch is noise, not reassurance. */}
+      <LifecycleRail
+        stages={data?.lifecycle || []}
+        eyebrow={`Platform health for ${org.name || "this organization"} — services in use`}
+        dimUnused
       />
 
-      {/* KPI cards — real loading skeletons, honest error state (no hidden fallback numbers) */}
-      {error ? (
-        <OrganizationErrorState error={error} onRetry={reload} title="Couldn't load dashboard stats" />
-      ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {kpis.map((k) => (
-            <StatCard key={k.label} label={k.label} value={k.value} loading={loading} />
-          ))}
-        </div>
-      )}
+      {/* KPI row — same tile component as the platform console. */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        <MetricTile
+          label="Active sessions"
+          value={sessions.active != null ? sessions.active.toLocaleString() : null}
+          note={
+            sessions.active
+              ? `${sessions.live || 0} live · ${sessions.paused || 0} paused`
+              : `${sessions.starting_soon || 0} starting in 30 min`
+          }
+          color="#8b5cf6"
+          to="/organization/sessions"
+          linkLabel="Streaming Sessions"
+          age={age}
+        />
 
-      {/* Chart + gauge */}
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="xl:col-span-2">
-          <BarChart title="Viewership Growth" subtitle="Daily viewers this week" data={viewership} />
-        </div>
-        <RadialChart title="Engagement" percent={75} label="avg. watch rate" footer="+6.3% vs last week" />
+        <MetricTile
+          label="API request success"
+          value={apiPosture.success_rate != null ? apiPosture.success_rate.toFixed(2) : null}
+          unit={apiPosture.success_rate != null ? "%" : null}
+          note={apiPosture.p95_ms != null ? `p95 ${apiPosture.p95_ms}ms` : apiPosture.note}
+          color="#22c55e"
+          to="/organization/developers"
+          linkLabel="Developer Platform"
+          age={age}
+        />
+
+        <MetricTile
+          label="Ready media assets"
+          value={media.ready != null ? media.ready.toLocaleString() : null}
+          note={
+            media.total
+              ? [
+                  media.processing ? `${media.processing} processing` : null,
+                  media.not_captured ? `${media.not_captured} not captured` : null,
+                ].filter(Boolean).join(" · ") || "all captured"
+              : "No recordings yet"
+          }
+          color="#3b82f6"
+          to="/organization/recordings"
+          linkLabel="Media & Replay"
+          age={age}
+        />
+
+        <MetricTile
+          label="Peak audience"
+          value={sessions.peak_audience != null ? compact(sessions.peak_audience) : null}
+          note={
+            sessions.current_audience != null
+              ? `${compact(sessions.current_audience)} watching now`
+              : "No audience recorded yet"
+          }
+          color="#22d3ee"
+          to="/organization/analytics"
+          linkLabel="Analytics"
+          age={age}
+        />
+
+        <MetricTile
+          label="Current usage"
+          value={ent.highest_percent != null ? ent.highest_percent.toFixed(0) : null}
+          unit={ent.highest_percent != null ? "%" : null}
+          tone={
+            ent.highest_percent >= 100
+              ? "text-rose-600 dark:text-rose-400"
+              : ent.highest_percent >= 80
+              ? "text-amber-600 dark:text-amber-400"
+              : undefined
+          }
+          note={
+            ent.highest_percent != null
+              ? `of ${ent.plan || "plan"} entitlement`
+              : "No plan limits set"
+          }
+          color="#f59e0b"
+          to="/organization/billing"
+          linkLabel="Usage & Entitlements"
+          age={age}
+        />
+
+        <MetricTile
+          label="Service health"
+          value={health.label || null}
+          tone={HEALTH_TONE[health.status]}
+          note={health.cause || "All services in use are operational"}
+          color="#22c55e"
+          to="/organization/support"
+          linkLabel="Support & Status"
+          age={age}
+        />
       </div>
 
-      {/* Recent events + side column */}
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="xl:col-span-2">
-          <RecentEvents />
-        </div>
-        <div className="space-y-6">
-          <StorageCard />
-          <QuickActions />
-        </div>
+      {/* Attention + managed events */}
+      <div className="grid gap-4 xl:grid-cols-2">
+        <AttentionRequired items={data?.attention || []} />
+        <ManagedEvents events={data?.upcoming_events || []} />
       </div>
+
+      {/* Sessions + developer operations */}
+      <div className="grid gap-4 xl:grid-cols-[1.35fr_1fr]">
+        <SessionsTable sessions={sessions} />
+        <DeveloperOps ops={data?.developer_ops} />
+      </div>
+
+      <EntitlementBars entitlements={ent} />
+      <SecuritySupport posture={data?.security_support} />
     </div>
   );
 }

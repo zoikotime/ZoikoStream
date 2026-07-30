@@ -141,6 +141,27 @@ p { text-wrap: pretty; }
 @keyframes zk-spin-slow { to { transform: rotate(360deg); } }
 .zk-spin-slow { animation: zk-spin-slow 42s linear infinite; }
 
+/* Thin, self-effacing scrollbar for dense console panes (the admin sidebar nav). The
+   default Windows scrollbar is ~16px of opaque chrome, which on a 256px rail reads as a
+   UI element rather than an affordance. Firefox gets `scrollbar-width`; WebKit/Blink get
+   the pseudo-elements. Track stays transparent so it disappears against either theme. */
+.zk-scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(203 213 225) transparent; /* slate-300 */
+}
+.dark .zk-scroll-thin {
+  scrollbar-color: rgb(64 64 64) transparent; /* neutral-700 */
+}
+.zk-scroll-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+.zk-scroll-thin::-webkit-scrollbar-track { background: transparent; }
+.zk-scroll-thin::-webkit-scrollbar-thumb {
+  background-color: rgb(203 213 225);
+  border-radius: 9999px;
+}
+.zk-scroll-thin::-webkit-scrollbar-thumb:hover { background-color: rgb(148 163 184); }
+.dark .zk-scroll-thin::-webkit-scrollbar-thumb { background-color: rgb(64 64 64); }
+.dark .zk-scroll-thin::-webkit-scrollbar-thumb:hover { background-color: rgb(115 115 115); }
+
 /* Skeleton shimmer for loading states. */
 .zk-skeleton { position: relative; overflow: hidden; }
 .zk-skeleton::after {

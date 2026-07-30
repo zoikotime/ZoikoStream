@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { FiPlus, FiSearch, FiEye, FiTrash2, FiCalendar, FiChevronDown } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
@@ -13,11 +13,6 @@ import DataTable from "../../components/admin/DataTable";
 import { cx, focusRing } from "../../ui/tokens";
 import { EVENT_STATUS, statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 import CreateEventModal from "./CreateEventModal";
-<<<<<<< HEAD
-import { useSearchParams } from "react-router-dom";
-import { useEffect } from "react";
-=======
->>>>>>> origin/main
 
 const control = cx(
   "h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none",
@@ -28,15 +23,11 @@ const control = cx(
 
 export default function OrganizationEvents() {
   const navigate = useNavigate();
-<<<<<<< HEAD
   const [searchParams, setSearchParams] = useSearchParams();
-=======
->>>>>>> origin/main
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
 
-<<<<<<< HEAD
   useEffect(() => {
     if (searchParams.get("create") === "true") {
       setCreateOpen(true);
@@ -47,8 +38,6 @@ export default function OrganizationEvents() {
     }
   }, [searchParams, setSearchParams]);
 
-=======
->>>>>>> origin/main
   const { data, loading, error, reload } = useApi(() =>
     api.get("/events", { params: { page_size: 100 } }).then((r) => r.data.items)
   );

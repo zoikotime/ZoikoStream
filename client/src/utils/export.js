@@ -15,11 +15,25 @@ export function toCsv(rows, columns) {
   return [head, ...body].join("\n");
 }
 
-export function downloadCsv(filename, rows, columns) {
-  const url = URL.createObjectURL(new Blob([toCsv(rows, columns)], { type: "text/csv;charset=utf-8" }));
+// Shared blob -> anchor -> revoke plumbing for every download on the client.
+function save(filename, blob) {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+export function downloadCsv(filename, rows, columns) {
+  save(filename, new Blob([toCsv(rows, columns)], { type: "text/csv;charset=utf-8" }));
+}
+
+// Snapshot export for the admin Command Center: the payload IS the record of what the
+// operator was looking at, so it is written verbatim rather than flattened into columns.
+export function downloadJson(data, filename) {
+  save(
+    filename.endsWith(".json") ? filename : `${filename}.json`,
+    new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" })
+  );
 }

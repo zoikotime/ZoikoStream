@@ -70,6 +70,10 @@ class User(Base):
         server_default=func.now(),
     )
 
+    # Operating team (e.g. "Platform Operations", "Live Events Ops"). Labels the actor on
+    # the Command Center's privileged-activity feed; NULL falls back to the role label.
+    department: Mapped[str | None] = mapped_column(String(80))
+
     reset_token: Mapped[str | None] = mapped_column(String(64))
     reset_token_expires: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)

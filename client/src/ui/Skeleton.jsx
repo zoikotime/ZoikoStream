@@ -4,7 +4,9 @@ import { cx } from "./tokens";
 const SHAPES = { line: "h-4 rounded-lg", title: "h-8 rounded-xl", block: "h-40 rounded-2xl", circle: "rounded-full", pill: "h-6 rounded-full" };
 
 export default function Skeleton({ variant = "line", className = "", style }) {
-  return <div className={cx("zk-skeleton bg-slate-200 dark:bg-slate-800", SHAPES[variant], className)} style={style} aria-hidden="true" />;
+  // Translucent dark fill (not a fixed grey) so the placeholder sits correctly on the org
+  // area's slate page AND on the admin console's true-black one.
+  return <div className={cx("zk-skeleton bg-slate-200 dark:bg-white/[0.07]", SHAPES[variant], className)} style={style} aria-hidden="true" />;
 }
 
 // Section-sized loading state — used as the homepage Suspense fallback.

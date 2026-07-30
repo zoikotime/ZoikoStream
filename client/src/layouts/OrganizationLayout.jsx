@@ -1,40 +1,59 @@
-import {
-  FiHome,
-  FiCalendar,
-  FiPlayCircle,
-  FiBarChart2,
-  FiUsers,
-  FiCreditCard,
-  FiSettings,
-} from "react-icons/fi";
+import { useCallback, useState } from "react";
+import api from "../api";
+import useApi from "../hooks/useApi";
+import useInterval from "../hooks/useInterval";
+import { CONSOLE } from "../ui/tokens";
 import AppShell from "./AppShell";
 import Sidebar from "../components/Dashboard/Sidebar";
 import Topbar from "../components/Dashboard/Topbar";
-import { useAuth } from "../auth/AuthContext";
+import { OrgScopeContext } from "../components/organization/orgScope";
 
-const nav = [
-  { to: "/organization/dashboard", label: "Dashboard", icon: FiHome, end: true },
-  { to: "/organization/events", label: "Events", icon: FiCalendar },
-  { to: "/organization/recordings", label: "Recordings", icon: FiPlayCircle },
-  { to: "/organization/analytics", label: "Analytics", icon: FiBarChart2 },
-  { to: "/organization/users", label: "Users", icon: FiUsers },
-  { to: "/organization/billing", label: "Billing", icon: FiCreditCard },
-  { to: "/organization/settings", label: "Settings", icon: FiSettings },
-];
+// Shell for all /organization/* pages.
+//
+// The chrome needs live org state on every page (nav badges, workspace identity, the
+// service-health verdict), so it is fetched once here and handed to both bars — one request
+// per shell, not two per page. Identity comes from the SERVER (/organization/console-state)
+// rather than the JWT, so the sidebar's role label always matches what the API will
+// actually authorize.
+//
+// The window scope (workspace + range) lives here too, because the topbar owns the controls
+// while the Overview page owns the fetch; it reaches the page through OrgScopeContext.
+const REFRESH_MS = 30_000;
 
-// Shell for all /organization/* pages: shared Sidebar + Topbar on the shared AppShell.
 export default function OrganizationLayout() {
-  const { user } = useAuth();
+  const { data: state, loading, error, reload } = useApi(() =>
+    api.get("/organization/console-state").then((r) => r.data)
+  );
+  useInterval(reload, REFRESH_MS);
 
-  // ponytail: org name isn't on the user payload yet — show a sensible default until it is.
-  const orgName = user?.organization_name || "Zoiko Organization";
+  const [filters, setFilters] = useState({ workspace: null, range: "24h" });
+  const [scoped, setScoped] = useState(false);
+
+  // A page opts into the topbar's scope controls by calling this; pages that don't
+  // (Events, Settings…) leave the controls hidden instead of showing dead ones.
+  const enableScope = useCallback(() => setScoped(true), []);
+
+  const unknown = Boolean(error) || (!state && !loading);
 
   return (
-    <AppShell
-      renderSidebar={({ open, setOpen }) => <Sidebar nav={nav} open={open} onClose={() => setOpen(false)} />}
-      renderTopbar={({ setOpen }) => (
-        <Topbar orgName={orgName} subtitle="Organization" onMenuClick={() => setOpen((v) => !v)} />
-      )}
-    />
+    <OrgScopeContext.Provider value={{ filters, setFilters, enableScope, state, reload }}>
+      <AppShell
+        surface={`${CONSOLE.page} text-slate-800 dark:text-neutral-200`}
+        mainClass="p-4 sm:p-6 lg:px-8 lg:py-7"
+        renderSidebar={({ open, setOpen }) => (
+          <Sidebar open={open} onClose={() => setOpen(false)} state={state} />
+        )}
+        renderTopbar={({ setOpen }) => (
+          <Topbar
+            onMenuClick={() => setOpen((v) => !v)}
+            state={state}
+            unknown={unknown}
+            onRetry={reload}
+            filters={scoped ? filters : undefined}
+            onFilters={scoped ? setFilters : undefined}
+          />
+        )}
+      />
+    </OrgScopeContext.Provider>
   );
 }

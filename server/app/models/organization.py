@@ -34,6 +34,9 @@ class Organization(Base):
     # Usage metrics — persisted here until a real metering pipeline populates them.
     storage_used_gb: Mapped[float] = mapped_column(Float, default=0, nullable=False)
     bandwidth_gb: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    # Test accounts are excluded from the Command Center's readiness, badge and attention
+    # counts unless the console's "Include test mode" toggle is on.
+    is_test: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # ── Org self-service settings (/organization/*). Added via create_tables.py ALTERs. ──
     # Profile

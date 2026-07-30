@@ -1,4 +1,4 @@
-import { cx } from "../../ui/tokens";
+import { CONSOLE, cx } from "../../ui/tokens";
 
 // The section container for the Operations Center. Flat and bordered (no shadow, no
 // hover-lift) — the "engineering console" surface, distinct from the org dashboard's
@@ -11,6 +11,7 @@ export default function Panel({
   title,
   description,
   action,
+  count,
   flush = false,
   className = "",
   bodyClass = "",
@@ -18,12 +19,7 @@ export default function Panel({
 }) {
   const hasHeader = eyebrow || title || action;
   return (
-    <section
-      className={cx(
-        "rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50",
-        className
-      )}
-    >
+    <section className={cx(CONSOLE.panel, className)}>
       {hasHeader && (
         <header className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
@@ -33,8 +29,15 @@ export default function Panel({
               </p>
             )}
             {title && (
-              <h2 className="mt-0.5 text-[15px] font-semibold tracking-tight text-slate-900 dark:text-white">
-                {title}
+              <h2 className="mt-0.5 flex items-center gap-2 text-[15px] font-semibold tracking-tight text-slate-900 dark:text-white">
+                <span className="min-w-0">{title}</span>
+                {/* `count` renders only when there is something to count, so a quiet panel
+                    doesn't carry a "0" badge. */}
+                {count > 0 && (
+                  <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full bg-rose-500/15 px-1 text-[10px] font-bold text-rose-600 dark:bg-rose-500/20 dark:text-rose-400">
+                    {count}
+                  </span>
+                )}
               </h2>
             )}
             {description && (
@@ -44,7 +47,7 @@ export default function Panel({
           {action && <div className="shrink-0 text-sm">{action}</div>}
         </header>
       )}
-      {hasHeader && <div className="border-t border-slate-100 dark:border-slate-800/70" />}
+      {hasHeader && <div className={cx("border-t", CONSOLE.divider)} />}
       <div className={cx(flush ? "" : "px-5 py-4", bodyClass)}>{children}</div>
     </section>
   );
