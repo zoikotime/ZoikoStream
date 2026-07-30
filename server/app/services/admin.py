@@ -126,11 +126,79 @@ def analytics(db: Session) -> dict:
     }
 
 
-def live_events(db: Session) -> list[dict]:
-    """Currently-live streams, joined up to their owning organization."""
-    streams = db.scalars(
-        select(Stream).where(Stream.is_live.is_(True)).order_by(Stream.started_at.desc())
-    ).all()
+ROLE_META = {
+    "super_admin": ("Super Admin", "Platform owner. Clears every gate and sees every organization.", [
+        "Manage all organizations, users and subscriptions",
+        "Read the platform audit log",
+        "Edit platform settings, feature flags and releases",
+        "Bypasses organization isolation on every query",
+    ]),
+    "org_admin": ("Organization Admin", "Owns one organization and everything inside it.", [
+        "Manage organization profile, branding, domain and settings",
+        "Invite, edit and remove members",
+        "Create, edit and delete events",
+        "Assign hosts, moderators and speakers",
+        "Host and moderate any event in the organization",
+    ]),
+    "host": ("Host", "Runs the broadcast for events they are assigned to.", [
+        "Go live, pause, resume and end the broadcast",
+        "Start, pause and stop recording",
+        "Control stage, waiting room and live settings",
+        "Edit events they own or are assigned to host",
+        "Full moderation on their assigned events",
+    ]),
+    "moderator": ("Moderator", "Runs the audience for events they are assigned to.", [
+        "Approve, pin, delete and annotate chat",
+        "Manage Q&A, polls and announcements",
+        "Mute, timeout, stage, ban and remove participants",
+        "Cannot end the broadcast or stop the recording",
+    ]),
+    "speaker": ("Speaker", "Presents on stage when invited by a host.", [
+        "Publish audio and video once granted the stage",
+        "Take part in chat, Q&A and polls",
+        "No moderation or broadcast controls",
+    ]),
+    "viewer": ("Viewer", "Attends events.", [
+        "Watch the stream",
+        "Send chat messages and reactions",
+        "Ask questions and vote in polls",
+        "Raise a hand",
+    ]),
+}
+
+
+def roles() -> list[dict]:
+    """The authorization ladder as reference data, derived from security._ROLE_RANK so this
+    can never drift from what is actually enforced. Read-only: authorization is
+    code-defined, so there is nothing here to edit."""
+    return [
+        {
+            "role": role,
+            "rank": rank,
+            "label": ROLE_META[role][0],
+            "description": ROLE_META[role][1],
+            "capabilities": ROLE_META[role][2],
+        }
+        for role, rank in sorted(_ROLE_RANK.items(), key=lambda kv: -kv[1])
+        if role in ROLE_META
+    ]
+
+
+def live_events(db: Session, state: str = "live") -> list[dict]:
+    """Streams for the platform monitor, joined up to their owning organization.
+    state="live"   -> currently broadcasting, newest first
+    state="recent" -> finished broadcasts, most recently ended first
+    """
+    if state == "recent":
+        stmt = (
+            select(Stream)
+            .where(Stream.is_live.is_(False), Stream.ended_at.isnot(None))
+            .order_by(Stream.ended_at.desc())
+            .limit(50)
+        )
+    else:
+        stmt = select(Stream).where(Stream.is_live.is_(True)).order_by(Stream.started_at.desc())
+    streams = db.scalars(stmt).all()
     out = []
     for s in streams:
         ch = s.channel
@@ -144,7 +212,8 @@ def live_events(db: Session) -> list[dict]:
             "region": org.region if org else None,
             "server": s.livekit_room,
             "started_at": s.started_at,
-            "health": "ok",
+            "ended_at": s.ended_at,
+            "health": "ok" if s.is_live else None,
             "viewers": None,        # source: LiveKit room stats (not integrated)
             "bitrate_kbps": None,   # source: LiveKit track stats (not integrated)
         })

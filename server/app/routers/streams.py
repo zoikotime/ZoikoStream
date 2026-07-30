@@ -1,370 +1,164 @@
-import secrets
+"""Streams API (/streams/*) — the legacy channel-based streaming surface.
+
+Isolation: streams carry no org_id; they reach an owner through their channel, so every
+read and write here is scoped by `Channel.owner_id == user.id` via crud/stream.py. That is
+narrower than the org_scoped() model used by /events and /organization, and it is the
+reason this router cannot simply share their helpers.
+
+Two reads used to be completely unauthenticated: the list (which also serialized
+`stream_key`, a publish credential, for every stream on the platform) and the viewer token.
+Both now require a session; the list is owner-scoped and `stream_key` is confined to
+single-stream owner reads via schemas.StreamListItem.
+
+ponytail: the remaining gap is structural — a viewer token still only proves the caller is
+signed in, not that they may watch THIS org's stream, because there is no org_id to check
+against. Closing that needs streams.org_id (a migration), which is why it is recorded here
+rather than faked with a join that doesn't exist.
+"""
+
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException , Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from sqlalchemy import select , func
-from datetime import datetime, timezone
 
-from app.db import get_db
-from app.config import settings
-
-from app.models import User
-from app.models.stream import Stream
-from app.models.channel import Channel
-
-
-from app.security import get_current_user
-
-from app.schemas.stream import (
+from ..config import settings
+from ..crud import stream as crud
+from ..db import get_db
+from ..models import Stream, User
+from ..schemas.stream import (
     StreamCreate,
-    StreamUpdate,
-    StreamResponse,
     StreamListResponse,
+    StreamResponse,
+    StreamUpdate,
 )
+from ..security import get_current_user
+from ..services.livekit import create_stream_token
 
-from app.services.livekit import create_stream_token
-
-
-router = APIRouter(
-    prefix="/streams",
-    tags=["Streams"]
-)
+router = APIRouter(prefix="/streams", tags=["Streams"])
 
 
-# CREATE STREAM
-@router.post(
-    "/",
-    response_model=StreamResponse,
-    status_code=201
-)
-def create_stream(
-    data: StreamCreate,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
-):
-
-    channel = db.scalar(
-        select(Channel)
-        .where(
-            Channel.id == data.channel_id,
-            Channel.owner_id == user.id
-        )
-    )
-
-    if not channel:
-        raise HTTPException(
-            403,
-            "You don't own this channel"
-        )
-
-
-    stream = Stream(
-        channel_id=data.channel_id,
-        title=data.title,
-        description=data.description,
-        category=data.category,
-        stream_key=secrets.token_urlsafe(32)
-    )
-
-
-    db.add(stream)
-    db.commit()
-    db.refresh(stream)
-
+def _owned_or_404(db: Session, stream_id: uuid.UUID, user: User) -> Stream:
+    stream = crud.get_owned_stream(db, stream_id, user.id)
+    if stream is None:
+        # Same response for "missing" and "not yours" — an existence oracle on another
+        # tenant's stream ids is worth nothing to a legitimate caller.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Stream not found")
     return stream
 
 
+@router.post("", response_model=StreamResponse, status_code=status.HTTP_201_CREATED)
+def create_stream(
+    data: StreamCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if crud.owned_channel(db, data.channel_id, user.id) is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't own this channel")
+    return crud.create_stream(db, data.channel_id, data)
 
-# GET ALL STREAMS
-@router.get(
-    "/",
-    response_model=StreamListResponse
-)
+
+@router.get("", response_model=StreamListResponse)
 def get_streams(
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100),
     search: str | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    query = select(Stream).order_by(Stream.created_at.desc())
-
-    if search:
-        query = query.where(
-            Stream.title.ilike(f"%{search}%")
-        )
-
-    total = db.scalar(
-        select(func.count()).select_from(query.subquery())
-    )
-
-    streams = db.scalars(
-        query.offset((page - 1) * limit).limit(limit)
-    ).all()
-
-    return {
-        "page": page,
-        "limit": limit,
-        "total": total,
-        "items": streams
-    }
+    """The caller's own streams. Rows omit `stream_key` (see schemas.StreamListItem)."""
+    items, total = crud.list_streams(db, user.id, search=search, page=page, limit=limit)
+    return {"page": page, "limit": limit, "total": total, "items": items}
 
 
-
-# GET SINGLE STREAM
-@router.get(
-    "/{stream_id}",
-    response_model=StreamResponse
-)
+@router.get("/{stream_id}", response_model=StreamResponse)
 def get_stream(
-    stream_id: str,
-    db: Session = Depends(get_db)
+    stream_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-
-    stream = db.scalar(
-        select(Stream)
-        .where(Stream.id == stream_id)
-    )
+    """Owner-scoped: this response includes `stream_key`."""
+    return _owned_or_404(db, stream_id, user)
 
 
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found"
-        )
-
-    return stream
-
-
-
-# UPDATE STREAM
-@router.put(
-    "/{stream_id}",
-    response_model=StreamResponse
-)
+@router.put("/{stream_id}", response_model=StreamResponse)
 def update_stream(
-    stream_id: str,
+    stream_id: uuid.UUID,
     data: StreamUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
+    user: User = Depends(get_current_user),
 ):
-
-    stream = db.scalar(
-        select(Stream)
-        .join(Channel)
-        .where(
-            Stream.id == stream_id,
-            Channel.owner_id == user.id
-        )
-    )
+    return crud.update_stream(db, _owned_or_404(db, stream_id, user), data)
 
 
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found or not owner"
-        )
-
-
-    if data.title is not None:
-        stream.title = data.title
-
-    if data.description is not None:
-        stream.description = data.description
-
-    if data.category is not None:
-        stream.category = data.category
-
-    if data.thumbnail_url is not None:
-        stream.thumbnail_url = data.thumbnail_url
-
-
-    db.commit()
-    db.refresh(stream)
-
-    return stream
-
-
-
-
-# DELETE STREAM
-@router.delete(
-    "/{stream_id}"
-)
+@router.delete("/{stream_id}")
 def delete_stream(
-    stream_id: str,
+    stream_id: uuid.UUID,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
+    user: User = Depends(get_current_user),
 ):
-
-    stream = db.scalar(
-        select(Stream)
-        .join(Channel)
-        .where(
-            Stream.id == stream_id,
-            Channel.owner_id == user.id
-        )
-    )
+    crud.delete_stream(db, _owned_or_404(db, stream_id, user))
+    return {"message": "Stream deleted successfully"}
 
 
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found or not owner"
-        )
-
-
-    db.delete(stream)
-    db.commit()
-
-
-    return {
-        "message": "Stream deleted successfully"
-    }
-
-# START STREAM
 @router.post("/{stream_id}/start")
 def start_stream(
-    stream_id: str,
+    stream_id: uuid.UUID,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
+    user: User = Depends(get_current_user),
 ):
-
-    stream = db.scalar(
-        select(Stream)
-        .join(Channel)
-        .where(
-            Stream.id == stream_id,
-            Channel.owner_id == user.id
-        )
-    )
-
-
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found"
-        )
-
-
+    stream = _owned_or_404(db, stream_id, user)
     if stream.is_live:
-        raise HTTPException(
-            400,
-            "Stream already live"
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Stream already live")
 
-
-    stream.is_live = True
-
-    stream.started_at = datetime.now(timezone.utc)
-
-    stream.livekit_room = f"stream_{stream.id}"
-
-
-    db.commit()
-    db.refresh(stream)
-
-
-    token = create_stream_token(
-        identity=str(user.id),
-        room_name=stream.livekit_room,
-        can_publish=True
-    )
-
-
+    stream = crud.start_stream(db, stream)
     return {
         "message": "Stream started",
         "room": stream.livekit_room,
-        "token": token,
-        "livekit_url": settings.LIVEKIT_URL
+        "token": create_stream_token(
+            identity=str(user.id), room_name=stream.livekit_room, can_publish=True
+        ),
+        "livekit_url": settings.LIVEKIT_URL,
     }
 
-# GET VIEWER TOKEN
-@router.get(
-    "/{stream_id}/token"
-)
+
+@router.get("/{stream_id}/token")
 def get_viewer_token(
     stream_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    
-    if stream_id.startswith("stream_"):
-        stream_id = stream_id.replace("stream_", "")
+    """Subscribe-only token for a live stream.
 
-    stream = db.scalar(
-        select(Stream)
-        .where(
-            Stream.id == stream_id
-        )
-    )
+    `stream_id` stays a plain str (not uuid.UUID) because callers may pass the LiveKit room
+    name — `stream_<uuid>` — and that behaviour predates this refactor.
+    """
+    raw = stream_id.removeprefix("stream_")
+    try:
+        parsed = uuid.UUID(raw)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Stream not found")
 
-
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found"
-        )
-
-
+    stream = crud.get_stream(db, parsed)
+    if stream is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Stream not found")
     if not stream.is_live:
-        raise HTTPException(
-            400,
-            "Stream is offline"
-        )
-
-
-    token = create_stream_token(
-        identity=f"viewer-{uuid.uuid4()}",
-        room_name=stream.livekit_room,
-        can_publish=False
-    )
-
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Stream is offline")
 
     return {
         "room": stream.livekit_room,
-        "token": token
+        "token": create_stream_token(
+            identity=f"viewer-{uuid.uuid4()}", room_name=stream.livekit_room, can_publish=False
+        ),
     }
 
-# STOP STREAM
-@router.post(
-    "/{stream_id}/stop",
-    response_model=StreamResponse
-)
+
+@router.post("/{stream_id}/stop", response_model=StreamResponse)
 def stop_stream(
-    stream_id: str,
+    stream_id: uuid.UUID,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
+    user: User = Depends(get_current_user),
 ):
-
-    stream = db.scalar(
-        select(Stream)
-        .join(Channel)
-        .where(
-            Stream.id == stream_id,
-            Channel.owner_id == user.id
-        )
-    )
-
-
-    if not stream:
-        raise HTTPException(
-            404,
-            "Stream not found or not owner"
-        )
-
-
+    stream = _owned_or_404(db, stream_id, user)
     if not stream.is_live:
-        raise HTTPException(
-            400,
-            "Stream is not live"
-        )
-
-
-    stream.is_live = False
-    stream.ended_at = datetime.now(timezone.utc)
-
-
-    db.commit()
-    db.refresh(stream)
-
-    return stream
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Stream is not live")
+    return crud.stop_stream(db, stream)

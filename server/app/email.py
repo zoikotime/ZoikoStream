@@ -1,6 +1,7 @@
 import base64
 import html
 import logging
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -136,8 +137,45 @@ def _invite_html(org_name: str, inviter: str, invite_url: str) -> str:
     </div>""")
 
 
+def _event_created_html(organizer: str, title: str, start: datetime | None, status: str) -> str:
+    safe_organizer = html.escape(organizer or "there")
+    safe_title = html.escape(title or "Untitled event")
+    when = start.strftime("%d %b %Y, %I:%M %p") if start else "Not scheduled"
+    return _shell(f"""
+    {_header("Event created")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_organizer},</p>
+      <p><strong>{safe_title}</strong> has been created on ZoikoStream.</p>
+      <table style="width:100%;border-collapse:collapse;margin:24px 0;font-size:14px;">
+        <tr><td style="padding:10px 0;color:#888;">Start time</td>
+            <td style="padding:10px 0;text-align:right;">{when}</td></tr>
+        <tr><td style="padding:10px 0;color:#888;">Status</td>
+            <td style="padding:10px 0;text-align:right;">{html.escape(status.title())}</td></tr>
+      </table>
+      <p>You can now invite hosts, assign moderators, add speakers, and publish the event
+         when you're ready.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{_base_url()}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Open ZoikoStream
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
+
+
+def send_event_created_email(
+    to: str, organizer_name: str, event_title: str, start_time: datetime | None, status: str
+) -> None:
+    _send(
+        to,
+        f"Event created: {event_title}",
+        _event_created_html(organizer_name, event_title, start_time, status),
+    )
 
 
 def send_invitation_email(to: str, org_name: str, inviter: str, invite_url: str) -> None:
@@ -163,5 +201,9 @@ if __name__ == "__main__":
     assert _logo_attachment() and _logo_attachment()["content_id"] == LOGO_CID, "logo attachment missing"
     invite = _invite_html("<b>Acme</b>", "<i>Bob</i>", "https://x/accept-invite?token=abc")
     assert "&lt;b&gt;Acme&lt;/b&gt;" in invite and "&lt;i&gt;Bob&lt;/i&gt;" in invite, "invite not escaped"
+    ev = _event_created_html("<i>Bob</i>", "<b>Launch</b>", None, "draft")
+    assert "&lt;b&gt;Launch&lt;/b&gt;" in ev and "&lt;i&gt;Bob&lt;/i&gt;" in ev, "event email not escaped"
+    assert "Not scheduled" in ev, "missing start_time not handled"
+    assert "01 Jan 2026" in _event_created_html("Bob", "Launch", datetime(2026, 1, 1, 9, 30), "live")
     assert "accept-invite?token=abc" in invite, "invite link missing"
     print("ok")
