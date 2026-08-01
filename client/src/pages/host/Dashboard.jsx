@@ -5,10 +5,11 @@
 // Live state comes from hooks/useLiveEvent — the same socket and reducer the moderator
 // console uses. Local camera/mic come from hooks/useMediaPreview (native getUserMedia).
 // The layout is unchanged: header, KPI row + stage above a pinned control deck, right sidebar.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiRadio } from "react-icons/fi";
 import useLiveEvent from "../../hooks/useLiveEvent";
 import useMediaPreview from "../../hooks/useMediaPreview";
+import useLiveKitPublish from "../../hooks/useLiveKitPublish";
 import Skeleton from "../../ui/Skeleton";
 import EmptyState from "../../components/organization/OrganizationEmptyState";
 import HostHeader from "../../components/host/HostHeader";
@@ -17,6 +18,7 @@ import StudioStage from "../../components/host/StudioStage";
 import ControlBar from "../../components/host/ControlBar";
 import HostPanel from "../../components/host/HostPanel";
 import FeatureModal from "../../components/host/FeatureModal";
+import StartMeetingPrompt from "../../components/host/StartMeetingPrompt";
 
 export default function HostDashboard() {
   const { state, resolved, loading, error, status, latency, attempt, send } = useLiveEvent();
@@ -37,6 +39,7 @@ export default function HostDashboard() {
 
   const canHost = state.canHost;
   const live = state.broadcast?.status === "live";
+  const ended = state.broadcast?.status === "ended";
 
   // Ask the server to reserve the room the first time the host opens the preview, so the
   // check happens against real infrastructure rather than just locally.
@@ -46,6 +49,29 @@ export default function HostDashboard() {
       return !on;
     });
   };
+
+  // Publishes whatever the preview above is currently holding — camera/mic tracks, muted
+  // state and all — into the LiveKit room once the broadcast is actually live. Gated on
+  // media.active (not just previewOn) so publishing waits for getUserMedia to have really
+  // resolved, rather than racing it.
+  useLiveKitPublish({
+    enabled: live && media.active,
+    url: state.livekitUrl,
+    token: state.publishToken,
+    streamRef: media.streamRef,
+  });
+
+  // Once, the first time this host lands on a console they're allowed to run: ask whether
+  // to start, rather than making them hunt for the "Preview" button. Confirming just arms
+  // the preview above — "Go Live" is still a separate, deliberate click, so the host always
+  // gets to check their camera/mic before anyone else can see them.
+  const [showStartPrompt, setShowStartPrompt] = useState(false);
+  const promptedRef = useRef(false);
+  useEffect(() => {
+    if (promptedRef.current || !canHost || previewOn || live || ended) return;
+    promptedRef.current = true;
+    setShowStartPrompt(true);
+  }, [canHost, previewOn, live, ended]);
 
   // Screen share uses the native picker. getDisplayMedia is the whole feature — no library.
   const toggleScreen = async () => {
@@ -157,7 +183,12 @@ export default function HostDashboard() {
             onToggleCamera={() => setCamera((v) => !v)}
             onToggleMic={() => setMic((v) => !v)}
             onToggleScreen={toggleScreen}
-            onGoLive={() => send("broadcast.golive", {})}
+            onGoLive={() => {
+              // A host who never clicked "Preview" still needs a live stream to publish —
+              // arm it now so useLiveKitPublish has tracks to grab once `live` flips true.
+              if (!previewOn) togglePreview();
+              send("broadcast.golive", {});
+            }}
             onPause={() => send("broadcast.pause", {})}
             onResume={() => send("broadcast.resume", {})}
             onEnd={() => send("broadcast.end", {})}
@@ -187,6 +218,16 @@ export default function HostDashboard() {
       </div>
 
       <FeatureModal modal={modal} onClose={() => setModal(null)} state={state} media={media} send={send} />
+
+      <StartMeetingPrompt
+        open={showStartPrompt}
+        eventTitle={state.event?.title}
+        onConfirm={() => {
+          setShowStartPrompt(false);
+          if (!previewOn) togglePreview();
+        }}
+        onDismiss={() => setShowStartPrompt(false)}
+      />
 
       {status === "unauthorized" && (
         <p role="alert" className="border-t border-rose-200 bg-rose-50 px-6 py-2 text-center text-sm text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">

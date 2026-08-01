@@ -127,7 +127,7 @@ export default function App() {
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<CreateOrganization />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
-              <Route path="/accept-invitation" element={<AcceptInvitation />} />
+              <Route path="/accept-invite" element={<AcceptInvitation />} />
             </Route>
 
             {/* Public event registration landing (shareable link) */}

@@ -6,6 +6,7 @@ import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Textarea, Select, Label, Switch } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
+import MemberPicker from "./MemberPicker";
 
 const CATEGORIES = ["Webinar", "Conference", "Product Launch", "Workshop", "Q&A Session", "Internal"];
 const TIMEZONES = ["UTC", "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Kolkata", "Asia/Singapore"];
@@ -58,13 +59,23 @@ const toISO = (date, time) => {
 
 export default function CreateEventModal({ open, onClose, onCreated }) {
   const [form, setForm] = useState(EMPTY);
+  const [hostIds, setHostIds] = useState(() => new Set());
   const [saving, setSaving] = useState(null); // "draft" | "published" | null
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
+  const toggleHost = (id) => {
+    setHostIds((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const canPublish = form.title.trim().length > 0;
 
   const close = () => {
     setForm(EMPTY);
+    setHostIds(new Set());
     onClose();
   };
 
@@ -91,6 +102,11 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         recording_enabled: form.recording_enabled,
         status,
       });
+      // Hosts are assigned right after creation (the event needs an id first) — the
+      // backend emails each newly-added host, so this alone covers "invite the host".
+      if (hostIds.size) {
+        await api.patch(`/events/${data.id}/hosts`, { user_ids: [...hostIds] });
+      }
       notify.success(status === "draft" ? "Draft saved" : `"${data.title}" published`);
       onCreated?.();
       close();
@@ -125,9 +141,9 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         </>
       }
     >
-      {/* ponytail: media upload (no storage endpoint) and host/speaker assignment
-          (needs a member picker of real user ids) are set from the event page after
-          creation — see /events/{id}/hosts etc. */}
+      {/* ponytail: media upload has no storage endpoint yet. Moderators/speakers are
+          assigned from the event page after creation (see AssignPeopleModal) — hosts get
+          a picker here too since that's the most common thing to set up-front. */}
       <div className="max-h-[65vh] overflow-y-auto pr-1">
         <Section title="Basic Information">
           <div className="space-y-4">
@@ -203,6 +219,10 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
               <Switch key={key} accent="violet" checked={form[key]} onChange={(v) => set(key, v)} label={l} />
             ))}
           </div>
+        </Section>
+
+        <Section title="Hosts">
+          <MemberPicker selected={hostIds} onToggle={toggleHost} />
         </Section>
       </div>
     </Modal>

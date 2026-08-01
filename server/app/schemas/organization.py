@@ -156,3 +156,11 @@ class InvitationAccept(BaseModel):
 
 class InvitationReject(BaseModel):
     token: str = Field(min_length=16)
+
+
+class InvitationPreview(BaseModel):
+    """Public, pre-accept view so the invitee's page can show who invited them before
+    asking for a password."""
+    email: EmailStr
+    role: str
+    organization_name: str

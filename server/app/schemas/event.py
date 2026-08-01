@@ -108,3 +108,23 @@ class EventOut(BaseModel):
 class AssignmentUpdate(BaseModel):
     """Replace the full set of assignees for one event role. All must be org members."""
     user_ids: list[uuid.UUID]
+
+
+class WatchOut(BaseModel):
+    """Public-facing view for GET /events/{id}/watch — deliberately thin: no org_id,
+    no created_by, nothing an anonymous visitor shouldn't see. A subscribe-only LiveKit
+    token is included only while the event is actually live."""
+    id: uuid.UUID
+    title: str | None = None
+    description: str | None = None
+    status: str
+    visibility: str
+    start_time: datetime | None = None
+    organization_name: str | None = None
+    host_name: str | None = None
+    chat_enabled: bool
+    qa_enabled: bool
+    polls_enabled: bool
+    livekit_url: str | None = None
+    livekit_token: str | None = None
+    room: str | None = None

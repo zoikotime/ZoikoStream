@@ -23,6 +23,7 @@ from ..schemas.organization import (
     InvitationAction,
     InvitationCreate,
     InvitationOut,
+    InvitationPreview,
     InvitationReject,
     OrgBrandingOut,
     OrgBrandingUpdate,
@@ -335,6 +336,20 @@ def delete_invitation(invitation_id: uuid.UUID, admin: User = Depends(require_or
 
 
 # ── Invitation accept / reject (public — the invitee holds a token, not a session) ──
+
+@router.get("/invitations/preview", response_model=InvitationPreview)
+def preview_invitation(token: str, db: Session = Depends(get_db)):
+    inv = crud.find_invitation_by_token(db, token)
+    if inv is None or inv.status != "pending":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or already-used invitation")
+    if inv.expires_at < datetime.now(timezone.utc):
+        crud.set_invitation_status(db, inv, "expired")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invitation has expired")
+    return InvitationPreview(
+        email=inv.email, role=inv.role,
+        organization_name=inv.organization.name if inv.organization else "your organization",
+    )
+
 
 @router.post("/invitations/accept", response_model=TokenOut)
 def accept_invitation(data: InvitationAccept, db: Session = Depends(get_db)):

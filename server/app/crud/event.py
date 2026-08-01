@@ -94,6 +94,13 @@ def get_event(db, org_id, event_id) -> Event | None:
     )
 
 
+def get_event_unscoped(db, event_id) -> Event | None:
+    """Not org-scoped: the /watch page is reachable by a signed-out visitor, who by
+    definition isn't a member of the event's org. The endpoint itself enforces
+    visibility (private events still require the caller to belong to the org)."""
+    return db.scalar(select(Event).where(Event.id == event_id, Event.deleted_at.is_(None)))
+
+
 def create_event(db, org_id, created_by, data, slug) -> Event:
     ev = Event(org_id=org_id, created_by=created_by, slug=slug,
                **data.model_dump(exclude={"slug"}))
