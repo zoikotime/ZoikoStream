@@ -164,6 +164,27 @@ def _event_created_html(organizer: str, title: str, start: datetime | None, stat
     </div>""")
 
 
+def _assignment_html(name: str, event_title: str, role: str, org_name: str, event_url: str) -> str:
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title or "an event")
+    safe_org = html.escape(org_name or "your organization")
+    safe_role = html.escape(role.title())
+    return _shell(f"""
+    {_header("You've been assigned")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>You've been added as a <strong>{safe_role}</strong> for
+         <strong>{safe_title}</strong> on {safe_org}'s ZoikoStream account.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{event_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Open the event
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
 
@@ -186,6 +207,11 @@ def send_reset_otp_email(to: str, name: str, otp: str) -> None:
     _send(to, "Your ZoikoStream password reset code", _otp_html(name, otp))
 
 
+def send_assignment_email(to: str, name: str, event_title: str, role: str, org_name: str, event_url: str) -> None:
+    _send(to, f"You've been added as {role} for {event_title}",
+          _assignment_html(name, event_title, role, org_name, event_url))
+
+
 if __name__ == "__main__":
     # Offline self-check: best-effort behavior + HTML escaping + OTP rendering. No network.
     from unittest.mock import patch
@@ -206,4 +232,7 @@ if __name__ == "__main__":
     assert "Not scheduled" in ev, "missing start_time not handled"
     assert "01 Jan 2026" in _event_created_html("Bob", "Launch", datetime(2026, 1, 1, 9, 30), "live")
     assert "accept-invite?token=abc" in invite, "invite link missing"
+    asn = _assignment_html("<i>Bob</i>", "<b>Launch</b>", "host", "<u>Acme</u>", "https://x/host/dashboard?event=1")
+    assert "&lt;i&gt;Bob&lt;/i&gt;" in asn and "&lt;b&gt;Launch&lt;/b&gt;" in asn and "&lt;u&gt;Acme&lt;/u&gt;" in asn, "assignment email not escaped"
+    assert "Host" in asn, "role not rendered"
     print("ok")

@@ -14,9 +14,10 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..crud import event as crud
 from ..db import get_db
-from ..email import send_event_created_email
+from ..email import send_assignment_email, send_event_created_email
 from ..models import Event, User
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import AssignmentUpdate, EventCreate, EventOut, EventUpdate
@@ -135,21 +136,41 @@ def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_admin), 
 
 # ── Assignments (host / moderator / speaker) ──────────────────────────────────
 # Reads: any member. Writes: org admin. Assignees must be live members of the same org.
+# Newly-added assignees (not already holding the role) get a best-effort notification email.
 
 def _list_role(db, org_id, event_id, role):
     _get_event_or_404(db, org_id, event_id)  # 404s if the event isn't in the caller's org
     return [_user_out(u) for u in crud.list_assignees(db, event_id, role)]
 
 
-def _set_role(db, admin, event_id, role, user_ids):
+def _console_url(role: str, event_id: uuid.UUID) -> str:
+    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    if role == "host":
+        return f"{base}/host/dashboard?event={event_id}"
+    if role == "moderator":
+        return f"{base}/moderator/dashboard?event={event_id}"
+    return base  # speakers have no dedicated console route yet
+
+
+def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
     ev = _get_event_or_404(db, admin.org_id, event_id)
     valid = crud.valid_member_ids(db, admin.org_id, user_ids)
     invalid = [str(u) for u in user_ids if u not in valid]
     if invalid:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"Not members of this organization: {', '.join(invalid)}")
+    previous_ids = {u.id for u in crud.list_assignees(db, event_id, role)}
     crud.set_assignees(db, ev, role, user_ids)
-    return [_user_out(u) for u in crud.list_assignees(db, event_id, role)]
+    assignees = crud.list_assignees(db, event_id, role)
+
+    org_name = admin.organization.name if admin.organization else None
+    event_url = _console_url(role, ev.id)
+    for u in assignees:
+        if u.id in previous_ids:
+            continue  # already held this role — don't re-notify on every save
+        background.add_task(send_assignment_email, u.email, u.full_name, ev.title, role, org_name, event_url)
+
+    return [_user_out(u) for u in assignees]
 
 
 @router.get("/{event_id}/hosts", response_model=list[AdminUserOut])
@@ -158,9 +179,9 @@ def get_hosts(event_id: uuid.UUID, user: User = Depends(get_current_user), db: S
 
 
 @router.patch("/{event_id}/hosts", response_model=list[AdminUserOut])
-def set_hosts(event_id: uuid.UUID, data: AssignmentUpdate,
+def set_hosts(event_id: uuid.UUID, data: AssignmentUpdate, background: BackgroundTasks,
               admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
-    return _set_role(db, admin, event_id, "host", data.user_ids)
+    return _set_role(db, admin, event_id, "host", data.user_ids, background)
 
 
 @router.get("/{event_id}/moderators", response_model=list[AdminUserOut])
@@ -169,9 +190,9 @@ def get_moderators(event_id: uuid.UUID, user: User = Depends(get_current_user), 
 
 
 @router.patch("/{event_id}/moderators", response_model=list[AdminUserOut])
-def set_moderators(event_id: uuid.UUID, data: AssignmentUpdate,
+def set_moderators(event_id: uuid.UUID, data: AssignmentUpdate, background: BackgroundTasks,
                    admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
-    return _set_role(db, admin, event_id, "moderator", data.user_ids)
+    return _set_role(db, admin, event_id, "moderator", data.user_ids, background)
 
 
 @router.get("/{event_id}/speakers", response_model=list[AdminUserOut])
@@ -180,6 +201,6 @@ def get_speakers(event_id: uuid.UUID, user: User = Depends(get_current_user), db
 
 
 @router.patch("/{event_id}/speakers", response_model=list[AdminUserOut])
-def set_speakers(event_id: uuid.UUID, data: AssignmentUpdate,
+def set_speakers(event_id: uuid.UUID, data: AssignmentUpdate, background: BackgroundTasks,
                  admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
-    return _set_role(db, admin, event_id, "speaker", data.user_ids)
+    return _set_role(db, admin, event_id, "speaker", data.user_ids, background)

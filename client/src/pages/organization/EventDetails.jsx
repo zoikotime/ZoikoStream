@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   FiArrowLeft, FiCalendar, FiClock, FiEye, FiUsers, FiMic,
-  FiUploadCloud, FiLink, FiTrash2, FiVideo, FiBarChart2, FiUserCheck,
+  FiUploadCloud, FiLink, FiTrash2, FiVideo, FiBarChart2, FiUserCheck, FiUserPlus, FiX,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
@@ -16,6 +16,7 @@ import { ConsoleButton as Button } from "../../ui/Button";
 import Badge from "../../ui/Badge";
 import { cx, focusRing } from "../../ui/tokens";
 import { statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
+import AssignPeopleModal, { ROLE_PATH } from "./AssignPeopleModal";
 
 const TABS = ["Overview", "Hosts", "Moderators", "Speakers", "Registration", "Recording", "Analytics", "Settings"];
 
@@ -35,22 +36,48 @@ function Meta({ icon: Icon, label, children }) {
 
 const initials = (name) => (name || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 
-function PeoplePanel({ people, role }) {
+function PeoplePanel({ people, role, onManage, onRemove }) {
   if (!people.length)
-    return <OrganizationEmptyState icon={FiUserCheck} title={`No ${role.toLowerCase()}s assigned`} description={`Assign ${role.toLowerCase()}s to this event from your organization's members.`} />;
+    return (
+      <OrganizationEmptyState
+        icon={FiUserCheck}
+        title={`No ${role.toLowerCase()}s assigned`}
+        description={`Assign ${role.toLowerCase()}s to this event from your organization's members.`}
+        action={
+          <Button size="sm" leftIcon={FiUserPlus} onClick={onManage}>
+            Add {role}
+          </Button>
+        }
+      />
+    );
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {people.map((u) => (
-        <div key={u.id} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/50">
-          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-violet-100 text-sm font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
-            {initials(u.full_name)}
-          </span>
-          <div className="min-w-0">
-            <p className="truncate font-medium text-slate-800 dark:text-slate-100">{u.full_name}</p>
-            <p className="truncate text-xs text-slate-500 dark:text-slate-400">{u.email}</p>
+    <div className="space-y-4">
+      <div className="flex justify-end">
+        <Button variant="secondary" size="sm" leftIcon={FiUserPlus} onClick={onManage}>
+          Manage {role}s
+        </Button>
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {people.map((u) => (
+          <div key={u.id} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/50">
+            <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-violet-100 text-sm font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
+              {initials(u.full_name)}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-medium text-slate-800 dark:text-slate-100">{u.full_name}</p>
+              <p className="truncate text-xs text-slate-500 dark:text-slate-400">{u.email}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onRemove(u.id)}
+              aria-label={`Remove ${u.full_name}`}
+              className="shrink-0 rounded-lg p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
+            >
+              <FiX />
+            </button>
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
@@ -60,6 +87,7 @@ export default function EventDetails() {
   const navigate = useNavigate();
   const [tab, setTab] = useState("Overview");
   const [busy, setBusy] = useState(false);
+  const [manageRole, setManageRole] = useState(null); // "Host" | "Moderator" | "Speaker" | null
 
   const { data, loading, error, reload } = useApi(() =>
     Promise.all([
@@ -117,6 +145,19 @@ export default function EventDetails() {
   };
 
   const canPublish = ["draft", "scheduled"].includes(event.status);
+
+  const ROLE_LIST = { Host: hosts, Moderator: moderators, Speaker: speakers };
+
+  const removeFromRole = async (role, userId) => {
+    const remaining = ROLE_LIST[role].filter((u) => u.id !== userId).map((u) => u.id);
+    try {
+      await api.patch(`/events/${event.id}/${ROLE_PATH[role]}`, { user_ids: remaining });
+      notify.success(`${role} removed`);
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -192,9 +233,15 @@ export default function EventDetails() {
         </div>
       )}
 
-      {tab === "Hosts" && <PeoplePanel people={hosts} role="Host" />}
-      {tab === "Moderators" && <PeoplePanel people={moderators} role="Moderator" />}
-      {tab === "Speakers" && <PeoplePanel people={speakers} role="Speaker" />}
+      {tab === "Hosts" && (
+        <PeoplePanel people={hosts} role="Host" onManage={() => setManageRole("Host")} onRemove={(uid) => removeFromRole("Host", uid)} />
+      )}
+      {tab === "Moderators" && (
+        <PeoplePanel people={moderators} role="Moderator" onManage={() => setManageRole("Moderator")} onRemove={(uid) => removeFromRole("Moderator", uid)} />
+      )}
+      {tab === "Speakers" && (
+        <PeoplePanel people={speakers} role="Speaker" onManage={() => setManageRole("Speaker")} onRemove={(uid) => removeFromRole("Speaker", uid)} />
+      )}
 
       {tab === "Registration" && (
         <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50">
@@ -249,6 +296,17 @@ export default function EventDetails() {
             <Button variant="danger" size="sm" leftIcon={FiTrash2} disabled={busy} onClick={del}>Delete Event</Button>
           </div>
         </SectionCard>
+      )}
+
+      {manageRole && (
+        <AssignPeopleModal
+          open
+          onClose={() => setManageRole(null)}
+          eventId={event.id}
+          role={manageRole}
+          assigned={ROLE_LIST[manageRole]}
+          onSaved={reload}
+        />
       )}
     </div>
   );
