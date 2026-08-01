@@ -4,16 +4,19 @@
 //
 // The video itself is real: GET /events/:eventId/watch (no auth required for public/
 // unlisted events) returns a subscribe-only LiveKit token while the event is live, and
-// VideoPlayer/useLiveKitViewer actually connect and render it. Everything else on this
-// page — chat panel, related recordings, the header/info copy — is still the original
-// mock data layer; there's no recording playback or real chat backend yet, so adapting
-// those would just be a second kind of dummy. `watchToMockEvent` below is the seam: it
-// maps the real API response onto the shape those mock-driven components already expect.
-import { useEffect, useState } from "react";
+// VideoPlayer/useLiveKitViewer actually connect and render it. Chat/Q&A/polls are real too,
+// over the same live socket the host/moderator consoles use — see the `liveReducer` below.
+// Related recordings and the header/info copy are still the original mock data layer; there's
+// no recording playback backend yet, so adapting that would just be a second kind of dummy.
+// `watchToMockEvent` below is the seam: it maps the real API response onto the shape those
+// mock-driven components already expect.
+import { useCallback, useEffect, useReducer, useState } from "react";
 import useInterval from "../../hooks/useInterval";
+import useEventStream from "../../hooks/useEventStream";
 import { Link, useParams } from "react-router-dom";
 import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
+import { useAuth } from "../../auth/AuthContext";
 import api from "../../api";
 import { startingViewers } from "../../data/watch";
 import WatchHeader from "../../components/watch/WatchHeader";
@@ -54,9 +57,57 @@ function watchToMockEvent(watch) {
 
 const POLL_MS = 10000; // how often a not-yet-live page checks whether the event went live
 
+// Real chat/Q&A/polls over the same live socket the host/moderator consoles use (see
+// live.py — any authenticated attendee may chat.send, qa.ask, qa.vote or poll.vote, no
+// moderator role needed). Anonymous public visitors have no JWT to open that socket with,
+// so all three are gated on being signed in; the video itself has no such gate (see the
+// /watch endpoint's anonymous LiveKit token).
+const LIVE_EMPTY = { messages: [], typing: {}, questions: [], polls: [] };
+function liveReducer(state, env) {
+  const { channel, type, data } = env;
+  switch (`${channel}/${type}`) {
+    case "moderator/snapshot":
+      return {
+        messages: data.messages || [], typing: {},
+        questions: data.questions || [], polls: data.polls || [],
+      };
+    case "chat/message.new":
+      return { ...state, messages: [...state.messages, data] };
+    case "chat/message.update":
+      return { ...state, messages: state.messages.map((m) => (m.id === data.id ? { ...m, ...data } : m)) };
+    case "chat/message.delete":
+      return { ...state, messages: state.messages.filter((m) => m.id !== data.id) };
+    case "chat/typing": {
+      const typing = { ...state.typing };
+      if (data.typing) typing[data.identity] = { name: data.name };
+      else delete typing[data.identity];
+      return { ...state, typing };
+    }
+    case "qa/question.new":
+      return { ...state, questions: [...state.questions, data] };
+    case "qa/question.update":
+      return { ...state, questions: state.questions.map((q) => (q.id === data.id ? { ...q, ...data } : q)) };
+    case "qa/question.delete":
+      return { ...state, questions: state.questions.filter((q) => q.id !== data.id) };
+    case "poll/poll.new":
+      return { ...state, polls: [data, ...state.polls] };
+    case "poll/poll.update":
+      return { ...state, polls: state.polls.map((p) => (p.id === data.id ? { ...p, ...data } : p)) };
+    case "poll/poll.delete":
+      return { ...state, polls: state.polls.filter((p) => p.id !== data.id) };
+    default:
+      return state;
+  }
+}
+
 export default function EventWatch() {
   const { eventId } = useParams();
   const { theme, toggle } = useTheme();
+  const { user } = useAuth();
+
+  const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
+  const onLiveEnvelope = useCallback((env) => dispatchPanel(env), []);
+  const { status: liveStatus, send: sendLive } = useEventStream(eventId, onLiveEnvelope);
 
   const [watch, setWatch] = useState(null);
   const [notFound, setNotFound] = useState(false);
@@ -146,7 +197,16 @@ export default function EventWatch() {
             <EventInfo event={event} />
           </div>
 
-          <WatchPanel className="h-[70vh] self-start lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]" />
+          <WatchPanel
+            className="h-[70vh] self-start lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]"
+            messages={panel.messages}
+            typing={panel.typing}
+            questions={panel.questions}
+            polls={panel.polls}
+            send={sendLive}
+            authed={!!user}
+            connected={liveStatus === "open"}
+          />
         </div>
 
         {/* Bottom section */}
