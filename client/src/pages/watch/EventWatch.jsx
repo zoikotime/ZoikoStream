@@ -1,33 +1,103 @@
 // client/src/pages/watch/EventWatch.jsx
 // Viewer Portal — what attendees see from an event invite link.
 // Route: /events/:eventId/watch. Standalone public page (NOT the Org Dashboard).
-// No backend: video is a dummy surface, all interactions run on local state.
-import { useState } from "react";
+//
+// The video itself is real: GET /events/:eventId/watch (no auth required for public/
+// unlisted events) returns a subscribe-only LiveKit token while the event is live, and
+// VideoPlayer/useLiveKitViewer actually connect and render it. Everything else on this
+// page — chat panel, related recordings, the header/info copy — is still the original
+// mock data layer; there's no recording playback or real chat backend yet, so adapting
+// those would just be a second kind of dummy. `watchToMockEvent` below is the seam: it
+// maps the real API response onto the shape those mock-driven components already expect.
+import { useEffect, useState } from "react";
 import useInterval from "../../hooks/useInterval";
 import { Link, useParams } from "react-router-dom";
 import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
-import { getEvent } from "../../data/events";
+import api from "../../api";
 import { startingViewers } from "../../data/watch";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
 import EventInfo from "../../components/watch/EventInfo";
 import RelatedRecordings from "../../components/watch/RelatedRecordings";
+import Spinner from "../../ui/Spinner";
+
+const STATUS_LABEL = { live: "Live", ended: "Completed" }; // anything else -> "Upcoming"
+
+// The header/info/panel components speak the old mock Event shape (name, host, date,
+// start/end, accent…). Real watch data doesn't have most of that — fill in what's real,
+// default the rest to something these components already render fine as empty.
+function watchToMockEvent(watch) {
+  const start = watch.start_time ? new Date(watch.start_time) : null;
+  const hhmm = (d) => (d ? d.toISOString().slice(11, 16) : "");
+  return {
+    id: watch.id,
+    name: watch.title || "Untitled event",
+    status: STATUS_LABEL[watch.status] || "Upcoming",
+    date: start ? start.toISOString().slice(0, 10) : "",
+    start: hhmm(start),
+    end: "",
+    timezone: "UTC",
+    host: watch.host_name || watch.organization_name || "Host",
+    moderators: [],
+    speakers: [],
+    category: null,
+    visibility: watch.visibility,
+    registration: "Open",
+    registered: null,
+    viewers: null,
+    accent: "emerald",
+    description: watch.description,
+  };
+}
+
+const POLL_MS = 10000; // how often a not-yet-live page checks whether the event went live
 
 export default function EventWatch() {
   const { eventId } = useParams();
   const { theme, toggle } = useTheme();
-  const event = getEvent(eventId);
 
+  const [watch, setWatch] = useState(null);
+  const [notFound, setNotFound] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const fetchWatch = () => {
+    api
+      .get(`/events/${eventId}/watch`)
+      .then(({ data }) => setWatch(data))
+      .catch(() => setNotFound(true))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    setNotFound(false);
+    fetchWatch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eventId]);
+
+  // Keeps a page opened before the host goes live from needing a manual refresh. Once
+  // live, useLiveKitViewer's own room connection is what actually reflects state.
+  useInterval(fetchWatch, POLL_MS, Boolean(watch) && watch.status !== "live" && watch.status !== "ended");
+
+  const event = watch ? watchToMockEvent(watch) : null;
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
 
   // Live viewer count that gently drifts (setState only in the interval callback).
-  const [viewers, setViewers] = useState(event?.viewers ?? startingViewers);
+  const [viewers, setViewers] = useState(startingViewers);
   useInterval(() => setViewers((v) => Math.max(0, v + Math.floor(Math.random() * 15) - 6)), 3000, live);
 
-  if (!event)
+  if (loading) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-slate-50 dark:bg-slate-950">
+        <Spinner />
+      </div>
+    );
+  }
+
+  if (notFound || !event)
     return (
       <div className="grid min-h-screen place-items-center bg-slate-50 dark:bg-slate-950">
         <div className="text-center">
@@ -72,7 +142,7 @@ export default function EventWatch() {
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
           <div className="space-y-6">
-            <VideoPlayer event={event} viewers={viewers} />
+            <VideoPlayer event={event} viewers={viewers} watch={watch} />
             <EventInfo event={event} />
           </div>
 

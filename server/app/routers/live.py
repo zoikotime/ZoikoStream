@@ -70,17 +70,25 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
         user = _user_from_token(token, db)
     finally:
         db.close()
+    # Org isolation + per-event moderator check happen BEFORE any envelope is sent, so an
+    # unauthorized socket never sees application data. We still `accept()` right before each
+    # rejection: a WebSocket close code can only reach the BROWSER once the handshake has
+    # completed — closing pre-accept is reported to the ASGI server as a bare HTTP 403 and
+    # the browser's CloseEvent.code comes back as 1006 (spec-mandated for a failed handshake),
+    # which silently defeats the client's FATAL_CODES-based reconnect-suppression
+    # (useEventStream.js) and makes it retry an expired/invalid token forever.
     if user is None:
+        await websocket.accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired token")
         return
 
-    # Org isolation + per-event moderator check happen BEFORE accept, so an unauthorized
-    # socket never sees a single envelope.
     ctx = await asyncio.to_thread(mod.resolve_ctx, event_id, user)
     if ctx is None:
+        await websocket.accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Event not found")
         return
     if await bus.is_banned(ctx.event_id, ctx.identity):
+        await websocket.accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="You have been removed from this event")
         return
 

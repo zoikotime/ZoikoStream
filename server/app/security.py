@@ -12,6 +12,7 @@ from .models import User
 
 ALGORITHM = "HS256"
 _bearer = HTTPBearer(auto_error=True)
+_bearer_optional = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -50,6 +51,24 @@ def get_current_user(
     if user is None or not user.is_active:
         raise unauthorized
     return user
+
+
+def get_current_user_optional(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Same decode as get_current_user, but returns None instead of 401 when there's no
+    token or it doesn't check out — for endpoints a signed-out visitor can also hit
+    (public event pages), where a bad/missing token just means "treat as anonymous"."""
+    if creds is None:
+        return None
+    try:
+        payload = jwt.decode(creds.credentials, settings.SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload["sub"]
+    except (JWTError, KeyError):
+        return None
+    user = db.get(User, user_id)
+    return user if user and user.is_active else None
 
 
 def require_super_admin(user: User = Depends(get_current_user)) -> User:

@@ -1,6 +1,10 @@
 // client/src/components/watch/VideoPlayer.jsx
-// Large "broadcast" player surface (dummy — no real stream). Live indicator,
-// play/pause, volume control, a scrubber for replays, and real fullscreen.
+// Large "broadcast" player surface. Live indicator, play/pause, volume control, a scrubber
+// for replays, and real fullscreen — all unchanged. What's new: when `watch` carries a live
+// LiveKit token (GET /events/{id}/watch), this actually connects and renders the host's
+// camera/mic via useLiveKitViewer instead of the static avatar placeholder. No token yet,
+// or the event isn't live -> same placeholder as before (there's still no recording
+// playback wired, so "ended" stays a mock replay scrubber).
 import { useEffect, useRef, useState } from "react";
 import {
   FiPlay, FiPause, FiVolume2, FiVolume1, FiVolumeX,
@@ -8,6 +12,7 @@ import {
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import { initials } from "../../data/watch";
+import useLiveKitViewer from "../../hooks/useLiveKitViewer";
 
 const STAGE = {
   violet: "from-violet-900 via-slate-900 to-black",
@@ -23,9 +28,16 @@ function VolumeIcon({ muted, volume }) {
   return volume < 50 ? <FiVolume1 /> : <FiVolume2 />;
 }
 
-export default function VideoPlayer({ event, viewers }) {
+export default function VideoPlayer({ event, viewers, watch }) {
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
+  const canStream = Boolean(watch?.status === "live" && watch?.livekit_token);
+
+  const { mediaRef, connected, hasVideo, error: streamError } = useLiveKitViewer({
+    enabled: canStream,
+    url: watch?.livekit_url,
+    token: watch?.livekit_token,
+  });
 
   const wrapRef = useRef(null);
   const [playing, setPlaying] = useState(isLive);
@@ -40,12 +52,26 @@ export default function VideoPlayer({ event, viewers }) {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
+  // Real playback: mirror play/pause/volume state onto the actual <video> element.
+  useEffect(() => {
+    if (!canStream || !mediaRef.current) return;
+    if (playing) mediaRef.current.play().catch(() => {}); // autoplay can be blocked pre-interaction
+    else mediaRef.current.pause();
+  }, [canStream, playing, hasVideo, mediaRef]);
+
+  useEffect(() => {
+    if (!canStream || !mediaRef.current) return;
+    mediaRef.current.muted = muted;
+    mediaRef.current.volume = Math.min(1, Math.max(0, volume / 100));
+  }, [canStream, muted, volume, mediaRef]);
+
   const toggleFs = () => {
     if (document.fullscreenElement) document.exitFullscreen?.();
     else wrapRef.current?.requestFullscreen?.();
   };
 
   const showPlayOverlay = !playing || (!isLive && !isEnded);
+  const showPlaceholder = !canStream || !hasVideo;
 
   return (
     <div
@@ -56,6 +82,17 @@ export default function VideoPlayer({ event, viewers }) {
       )}
     >
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.12),transparent_60%)]" />
+
+      {/* Real video, when there's a live stream to show. Sits under the placeholder/overlay
+          layers and simply has nothing to paint until a track is actually subscribed. */}
+      {canStream && (
+        <video
+          ref={mediaRef}
+          autoPlay
+          playsInline
+          className={cx("absolute inset-0 h-full w-full object-contain bg-black", hasVideo ? "opacity-100" : "opacity-0")}
+        />
+      )}
 
       {/* Live indicator + viewer count */}
       <div className="absolute inset-x-0 top-0 z-10 flex items-start justify-between p-4">
@@ -75,30 +112,42 @@ export default function VideoPlayer({ event, viewers }) {
         )}
       </div>
 
-      {/* Stage content */}
-      <div className="absolute inset-0 grid place-items-center px-4 text-center">
-        {isEnded && !playing ? (
-          <div className="flex flex-col items-center gap-3">
-            <p className="text-lg font-semibold text-white">This event has ended</p>
-            <button
-              onClick={() => setPlaying(true)}
-              className="inline-flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/25"
-            >
-              <FiRotateCcw /> Watch the replay
-            </button>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-3">
-            <span className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-white/25 to-white/5 text-3xl font-bold text-white shadow-lg backdrop-blur">
-              {initials(event.host)}
-            </span>
-            <div>
-              <p className="text-sm font-semibold text-white">{event.host}</p>
-              <p className="text-xs text-white/70">{isLive ? "On air now" : "Host"}</p>
+      {/* Stage content — the placeholder. Shown until the host's video track actually
+          arrives, so "live but nobody's camera is on yet" reads honestly instead of a
+          blank black rectangle. */}
+      {showPlaceholder && (
+        <div className="absolute inset-0 grid place-items-center px-4 text-center">
+          {isEnded && !playing ? (
+            <div className="flex flex-col items-center gap-3">
+              <p className="text-lg font-semibold text-white">This event has ended</p>
+              <button
+                onClick={() => setPlaying(true)}
+                className="inline-flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/25"
+              >
+                <FiRotateCcw /> Watch the replay
+              </button>
             </div>
-          </div>
-        )}
-      </div>
+          ) : (
+            <div className="flex flex-col items-center gap-3">
+              <span className="grid h-24 w-24 place-items-center rounded-full bg-gradient-to-br from-white/25 to-white/5 text-3xl font-bold text-white shadow-lg backdrop-blur">
+                {initials(event.host)}
+              </span>
+              <div>
+                <p className="text-sm font-semibold text-white">{event.host}</p>
+                <p className="text-xs text-white/70">
+                  {canStream && streamError
+                    ? "Couldn't connect to the stream"
+                    : canStream && connected
+                      ? "Waiting for the host's camera…"
+                      : isLive
+                        ? "On air now"
+                        : "Host"}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Center play/pause overlay */}
       {showPlayOverlay && !(isEnded && !playing) && (

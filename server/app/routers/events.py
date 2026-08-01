@@ -20,8 +20,9 @@ from ..db import get_db
 from ..email import send_assignment_email, send_event_created_email
 from ..models import Event, User
 from ..schemas.admin import AdminUserOut, Page
-from ..schemas.event import AssignmentUpdate, EventCreate, EventOut, EventUpdate
-from ..security import get_current_user, require_org_admin
+from ..schemas.event import AssignmentUpdate, EventCreate, EventOut, EventUpdate, WatchOut
+from ..security import get_current_user, get_current_user_optional, require_org_admin
+from ..services import livekit
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -100,6 +101,42 @@ def create_event(data: EventCreate, background: BackgroundTasks, admin: User = D
 @router.get("/{event_id}", response_model=EventOut)
 def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _get_event_or_404(db, user.org_id, event_id)
+
+
+@router.get("/{event_id}/watch", response_model=WatchOut)
+def watch_event(
+    event_id: uuid.UUID,
+    user: User | None = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    """The public viewer page's one read: thin event info, plus a subscribe-only LiveKit
+    token while the event is live. Not org-scoped — a signed-out visitor watching a public
+    event isn't a member of any org — but a private event still requires the caller to
+    belong to the org (or be super_admin)."""
+    ev = crud.get_event_unscoped(db, event_id)
+    if ev is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    if ev.visibility == "private":
+        if user is None or (user.role != "super_admin" and user.org_id != ev.org_id):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private")
+
+    room = f"event_{ev.id}"
+    token = url = None
+    if ev.status == "live" and livekit.configured():
+        identity = f"viewer-{user.id}" if user else f"viewer-{uuid.uuid4()}"
+        token = livekit.create_stream_token(identity, room, False)
+        url = livekit.settings.LIVEKIT_URL
+
+    org_name = ev.organization.name if ev.organization else None
+    hosts = crud.list_assignees(db, ev.id, "host")
+
+    return WatchOut(
+        id=ev.id, title=ev.title, description=ev.description, status=ev.status,
+        visibility=ev.visibility, start_time=ev.start_time,
+        organization_name=org_name, host_name=hosts[0].full_name if hosts else org_name,
+        chat_enabled=ev.chat_enabled, qa_enabled=ev.qa_enabled, polls_enabled=ev.polls_enabled,
+        livekit_url=url, livekit_token=token, room=room if token else None,
+    )
 
 
 @router.patch("/{event_id}", response_model=EventOut)
