@@ -1,46 +1,65 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import Card from "../../ui/Card";
+import Spinner from "../../ui/Spinner";
 import { notify } from "../../ui/Toast";
+import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import { roleHome } from "../../auth/roleHome";
-import { fakeSession } from "../../auth/dummy";
 import { Field, PasswordField, SubmitButton } from "../../ui/forms";
 
 const ROLE_LABEL = {
+  org_admin: "Organization Admin",
   host: "Host",
   moderator: "Moderator",
-  viewer: "Viewer",
   speaker: "Speaker",
-  org_admin: "Organization Admin",
+  viewer: "Viewer",
 };
 
-// Invited Hosts / Moderators / Viewers land here from their invitation email. They set a
-// password and are dropped straight into their assigned dashboard. Everything is read from
-// the (dummy) invite link, e.g. /accept-invitation?email=host@acme.com&role=host&org=Acme.
+// Invited members land here from their invitation email:
+// {CORS origin}/accept-invite?token=<raw token> — built by _invite_url() in
+// routers/organization.py. The token identifies the invite; everything else (who invited
+// them, their role, the org name) is fetched from the server rather than trusted from the URL.
 export default function AcceptInvitation() {
   const [params] = useSearchParams();
   const { setSession } = useAuth();
   const navigate = useNavigate();
+  const token = params.get("token") || "";
 
-  const email = params.get("email") || "";
-  const role = ROLE_LABEL[params.get("role")] ? params.get("role") : "viewer";
-  const org = params.get("org") || "your organization";
-  const eventId = params.get("event"); // viewers are invited to a specific event
+  const [invite, setInvite] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [loadingInvite, setLoadingInvite] = useState(true);
 
-  // Where the accepted user goes. Viewers have no dashboard: an invited viewer lands on
-  // their event's watch page (or the public site if no event was attached); staff/admins
-  // go to their role dashboard.
-  const destination =
-    role === "viewer" ? (eventId ? `/events/${eventId}/watch` : "/") : roleHome(role) || "/";
-
-  const [name, setName] = useState(params.get("name") || "");
+  const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState({});
 
-  const submit = (e) => {
+  useEffect(() => {
+    if (!token) {
+      setLoadError("This invitation link is missing its token.");
+      setLoadingInvite(false);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get("/organization/invitations/preview", { params: { token } })
+      .then(({ data }) => {
+        if (!cancelled) setInvite(data);
+      })
+      .catch((error) => {
+        if (!cancelled) setLoadError(errMsg(error, "This invitation is invalid or has expired."));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingInvite(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const submit = async (e) => {
     e.preventDefault();
     const next = {};
     if (!name.trim()) next.name = "Your name is required.";
@@ -49,30 +68,61 @@ export default function AcceptInvitation() {
     setErrors(next);
     if (Object.keys(next).length) return;
 
-    setLoading(true);
-    // ponytail: dummy — accept the invite and enter the role's dashboard. Swap for
-    // POST /auth/accept-invitation later.
-    setTimeout(() => {
-      const session = fakeSession(email, { role, full_name: name.trim(), organization_name: org });
-      setSession(session);
+    setSubmitting(true);
+    try {
+      const { data } = await api.post("/organization/invitations/accept", {
+        token,
+        full_name: name.trim(),
+        password,
+      });
+      setSession(data);
       notify.success("Welcome to ZoikoStream!");
-      navigate(destination, { replace: true });
-    }, 600);
+      navigate(roleHome(data.user.role) || "/", { replace: true });
+    } catch (error) {
+      notify.error(errMsg(error, "Couldn't accept this invitation."));
+    } finally {
+      setSubmitting(false);
+    }
   };
+
+  if (loadingInvite) {
+    return (
+      <Card padding="xl" className="flex items-center justify-center">
+        <Spinner />
+      </Card>
+    );
+  }
+
+  if (loadError || !invite) {
+    return (
+      <Card padding="xl">
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Invitation not found</h1>
+        <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
+          {loadError || "This invitation link is invalid."}
+        </p>
+        <p className="mt-8 text-center text-sm text-slate-500 dark:text-slate-400">
+          <Link to="/login" className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400">
+            Back to Sign In
+          </Link>
+        </p>
+      </Card>
+    );
+  }
+
+  const roleLabel = ROLE_LABEL[invite.role] || invite.role;
 
   return (
     <Card padding="xl">
       <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Accept Invitation</h1>
       <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-        You've been invited to join <span className="font-semibold text-slate-700 dark:text-slate-200">{org}</span> as a{" "}
-        <span className="font-semibold text-emerald-700 dark:text-emerald-400">{ROLE_LABEL[role]}</span>. Set a password to
+        You've been invited to join{" "}
+        <span className="font-semibold text-slate-700 dark:text-slate-200">{invite.organization_name}</span> as a{" "}
+        <span className="font-semibold text-emerald-700 dark:text-emerald-400">{roleLabel}</span>. Set a password to
         continue.
       </p>
 
       <form onSubmit={submit} noValidate className="mt-8 space-y-4">
-        {email && (
-          <Field label="Work Email" value={email} readOnly disabled className="opacity-70" />
-        )}
+        <Field label="Work Email" value={invite.email} readOnly disabled className="opacity-70" />
         <Field
           label="Full Name"
           autoComplete="name"
@@ -98,7 +148,7 @@ export default function AcceptInvitation() {
           error={errors.confirm}
         />
 
-        <SubmitButton loading={loading}>Set Password & Continue</SubmitButton>
+        <SubmitButton loading={submitting}>Set Password & Continue</SubmitButton>
 
         <p className="text-center text-sm text-slate-500 dark:text-slate-400">
           Already accepted?{" "}
