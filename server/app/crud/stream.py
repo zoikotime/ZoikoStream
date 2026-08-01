@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import Channel, Stream
+from ..models import Channel, Stream, User
 
 STREAM_KEY_BYTES = 32
 
@@ -23,12 +23,30 @@ def owned_channel(db: Session, channel_id: uuid.UUID, owner_id: uuid.UUID) -> Ch
 
 
 def create_stream(db: Session, channel_id: uuid.UUID, data) -> Stream:
+    channel = db.get(Channel, channel_id)
+
+    if channel is None:
+        raise ValueError("Channel not found")
+
+    owner = db.get(User, channel.owner_id)
+
+    if owner is None:
+        raise ValueError("Owner not found")
+
     stream = Stream(
-        channel_id=channel_id,
+        channel_id=channel.id,
+        org_id=owner.org_id,
+
         title=data.title,
         description=data.description,
         category=data.category,
+
         stream_key=secrets.token_urlsafe(STREAM_KEY_BYTES),
+
+        status="draft",
+        visibility="public",
+        registration_required=False,
+        timezone="UTC",
     )
     db.add(stream)
     db.commit()
