@@ -136,13 +136,15 @@ export default function App() {
             {/* Viewer Portal — attendee watch page from an invite link (public) */}
             <Route path="/events/:eventId/watch" element={<EventWatch />} />
 
-            {/* Host broadcasting studio — standalone full-screen page (own header/sidebar).
-                ponytail: open route for the demo; gate to a "host" role once auth supports it. */}
-            <Route path="/host/dashboard" element={<HostDashboard />} />
-
-            {/* Moderator console — standalone real-time audience-management page.
-                ponytail: open route for the demo; gate to a "moderator" role once auth supports it. */}
-            <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
+            {/* Host broadcasting studio + moderator console — standalone full-screen pages
+                (own header/sidebar). Unauthenticated -> /login; wrong role -> their own home.
+                Assignment to a *specific* event is still enforced server-side (canHost/
+                canModerate from resolve_ctx) — this only stops an anonymous or wrong-role
+                visitor from ever loading the console in the first place. */}
+            <Route element={<RoleRoute allow={["host", "moderator", "org_admin", "super_admin"]} />}>
+              <Route path="/host/dashboard" element={<HostDashboard />} />
+              <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
+            </Route>
 
             {/* Super admin (platform) area */}
             <Route element={<RoleRoute allow={["super_admin"]} />}>

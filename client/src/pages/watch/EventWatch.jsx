@@ -24,6 +24,8 @@ import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
 import EventInfo from "../../components/watch/EventInfo";
 import RelatedRecordings from "../../components/watch/RelatedRecordings";
+import RegistrationGate from "../../components/watch/RegistrationGate";
+import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import Spinner from "../../ui/Spinner";
 
 const STATUS_LABEL = { live: "Live", ended: "Completed" }; // anything else -> "Upcoming"
@@ -114,8 +116,9 @@ export default function EventWatch() {
   const [loading, setLoading] = useState(true);
 
   const fetchWatch = () => {
+    const reg = localStorage.getItem(`zk_reg_${eventId}`);
     api
-      .get(`/events/${eventId}/watch`)
+      .get(`/events/${eventId}/watch`, { params: reg ? { reg } : undefined })
       .then(({ data }) => setWatch(data))
       .catch(() => setNotFound(true))
       .finally(() => setLoading(false));
@@ -135,6 +138,7 @@ export default function EventWatch() {
   const event = watch ? watchToMockEvent(watch) : null;
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
+  const timeGated = Boolean(watch?.expired || watch?.not_started);
 
   // Live viewer count that gently drifts (setState only in the interval callback).
   const [viewers, setViewers] = useState(startingViewers);
@@ -191,22 +195,34 @@ export default function EventWatch() {
 
       {/* Main layout: player + info (70%) / chat panel (30%) */}
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+        {/* Outside the scheduled start_time/end_time window: no video, no chat — just the
+            notice. The host's own broadcast/console is unaffected by this (see watch_event). */}
+        <div className={`grid grid-cols-1 gap-6 ${timeGated ? "" : "lg:grid-cols-[minmax(0,1fr)_360px]"}`}>
           <div className="space-y-6">
-            <VideoPlayer event={event} viewers={viewers} watch={watch} />
+            {watch.expired ? (
+              <AccessWindowNotice variant="expired" />
+            ) : watch.registration_required && !watch.registered ? (
+              <RegistrationGate eventId={eventId} eventTitle={event.name} onRegistered={fetchWatch} />
+            ) : watch.not_started ? (
+              <AccessWindowNotice variant="not_started" startTime={watch.start_time} />
+            ) : (
+              <VideoPlayer event={event} viewers={viewers} watch={watch} />
+            )}
             <EventInfo event={event} />
           </div>
 
-          <WatchPanel
-            className="h-[70vh] self-start lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]"
-            messages={panel.messages}
-            typing={panel.typing}
-            questions={panel.questions}
-            polls={panel.polls}
-            send={sendLive}
-            authed={!!user}
-            connected={liveStatus === "open"}
-          />
+          {!timeGated && (
+            <WatchPanel
+              className="h-[70vh] self-start lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]"
+              messages={panel.messages}
+              typing={panel.typing}
+              questions={panel.questions}
+              polls={panel.polls}
+              send={sendLive}
+              authed={!!user}
+              connected={liveStatus === "open"}
+            />
+          )}
         </div>
 
         {/* Bottom section */}

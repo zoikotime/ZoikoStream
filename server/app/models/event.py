@@ -95,3 +95,20 @@ class EventAssignment(Base):
 
     event: Mapped["Event"] = relationship(back_populates="assignments")
     user: Mapped["User"] = relationship()
+
+
+class EventRegistration(Base):
+    """A self-serve registration for a `registration_required` event. No User row —
+    registrants are anonymous public visitors, identified only by name/email; access to
+    the watch page's stream is granted via a signed token (see security.py), not login."""
+
+    __tablename__ = "event_registrations"
+    __table_args__ = (UniqueConstraint("event_id", "email", name="uq_event_registration_email"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    event: Mapped["Event"] = relationship()

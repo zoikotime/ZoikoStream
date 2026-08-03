@@ -35,6 +35,7 @@ const EMPTY = {
   timezone: "UTC",
   visibility: "public",
   registration_required: false,
+  registration_limit: "",
   chat_enabled: true,
   polls_enabled: false,
   qa_enabled: true,
@@ -96,6 +97,8 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         end_time,
         visibility: form.visibility,
         registration_required: form.registration_required,
+        registration_limit: form.registration_required && form.registration_limit !== ""
+          ? Number(form.registration_limit) : null,
         chat_enabled: form.chat_enabled,
         polls_enabled: form.polls_enabled,
         qa_enabled: form.qa_enabled,
@@ -210,7 +213,22 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         </Section>
 
         <Section title="Registration">
-          <Switch accent="violet" checked={form.registration_required} onChange={(v) => set("registration_required", v)} label="Registration Required" />
+          <div className="space-y-4">
+            <Switch accent="violet" checked={form.registration_required} onChange={(v) => set("registration_required", v)} label="Registration Required" />
+            {form.registration_required && (
+              <div>
+                <Label>Capacity limit (optional)</Label>
+                <Input
+                  variant="console"
+                  type="number"
+                  min="1"
+                  value={form.registration_limit}
+                  onChange={(e) => set("registration_limit", e.target.value)}
+                  placeholder="No limit"
+                />
+              </div>
+            )}
+          </div>
         </Section>
 
         <Section title="Features">
