@@ -21,6 +21,7 @@ no indicator:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from sqlalchemy import select
@@ -122,7 +123,19 @@ def playback_blocked_reason(event: Event, *, registered: bool | None = None,
     `registered` is the caller's verdict (a DB lookup, so it happens in the router) and is None
     when the caller did not check — in which case enforcement is skipped rather than guessed.
     `exempt` covers the organizing org and platform admins, who never register for their own event.
+
+    The scheduled window time-boxes the MEDIA and is deliberately independent of `status`,
+    which the host drives by hand: going live early or running past end_time never force-ends
+    their broadcast, it only stops handing new viewers a token. Checked before `status` so a
+    scheduled event says "hasn't started yet" instead of the vaguer "not live right now", and
+    it applies to `exempt` callers too — an organizer previewing outside the window should see
+    what an attendee sees.
     """
+    now = datetime.now(timezone.utc)
+    if event.start_time and now < event.start_time:
+        return "This event hasn't started yet."
+    if event.end_time and now > event.end_time:
+        return "This event has ended."
     if event.status not in ("live", "paused"):
         return "This event is not live right now."
     if not livekit.configured():

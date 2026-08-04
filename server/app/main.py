@@ -18,6 +18,8 @@ from .routers.events import router as events_router
 from .routers.live import router as live_router
 from .routers.speaker import router as speaker_router
 from .routers.attendee import router as attendee_router
+from .routers.media import router as media_router
+from .routers.analytics import router as analytics_router
 from .routers.webhooks import router as webhooks_router
 from .services import bus
 from .services.broadcast import run_sampler
@@ -102,6 +104,8 @@ app.include_router(events_router)
 app.include_router(live_router)
 app.include_router(speaker_router)
 app.include_router(attendee_router)
+app.include_router(media_router)
+app.include_router(analytics_router)
 app.include_router(webhooks_router)
 
 

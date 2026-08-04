@@ -80,10 +80,14 @@ class Fixture:
         self.event = Event(org_id=self.org.id, created_by=self.admin.id, title=f"Att Event {uniq}",
                            slug=f"att-event-{uniq}", status="live", visibility="public",
                            start_time=now + timedelta(hours=2), timezone="Europe/London")
-        # Registration-gated, so enforcement is testable.
+        # Registration-gated, so enforcement is testable. Its start_time is in the PAST on
+        # purpose: `live` plus a future start is a contradictory event, and now that the
+        # scheduled window gates playback (services.viewer.playback_blocked_reason) such an
+        # event is refused for being early — which would mask the registration reason these
+        # tests are actually asserting on.
         self.gated = Event(org_id=self.org.id, created_by=self.admin.id, title="Gated",
                            slug=f"att-gated-{uniq}", status="live", visibility="public",
-                           registration_required=True, start_time=now + timedelta(days=1))
+                           registration_required=True, start_time=now - timedelta(minutes=30))
         # Private to the organizing org: an outside attendee must not see it at all.
         self.private = Event(org_id=self.org.id, created_by=self.admin.id, title="Private",
                              slug=f"att-priv-{uniq}", status="live", visibility="private")

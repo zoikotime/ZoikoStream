@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func,
+    BigInteger, Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -117,8 +117,10 @@ class Event(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    organization: Mapped["Organization"] = relationship()
-    creator: Mapped["User"] = relationship(foreign_keys=[created_by])
+    # lazy="joined" on both many-to-ones: event listings serialize the org and the creator's
+    # name, so lazily loading them cost two round trips per event row.
+    organization: Mapped["Organization"] = relationship(lazy="joined")
+    creator: Mapped["User"] = relationship(foreign_keys=[created_by], lazy="joined")
     assignments: Mapped[list["EventAssignment"]] = relationship(back_populates="event", cascade="all, delete-orphan")
     access_links: Mapped[list["EventAccessLink"]] = relationship(back_populates="event", cascade="all, delete-orphan")
 
@@ -140,6 +142,15 @@ class EventAssignment(Base):
     # that says "you are on this event", so it is the right home; a user_preferences table would
     # be a second place to check the same permission.
     notes: Mapped[str | None] = mapped_column(Text)
+    # How long this person's microphone was actually live, in milliseconds.
+    #
+    # Speaking time is tracked in Redis presence while the room is up (moderation.py accumulates
+    # `speaking_ms` from real unmute spans), but presence is ephemeral — so the host console could
+    # show a live leaderboard and nothing could ever answer "how much did this speaker talk last
+    # quarter". Flushed onto this row when the broadcast ends, which makes it the only durable
+    # source for speaker analytics. NULL means the event never went live or predates this column,
+    # which is a different statement from 0 and is reported as such.
+    speaking_ms: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped["Event"] = relationship(back_populates="assignments")

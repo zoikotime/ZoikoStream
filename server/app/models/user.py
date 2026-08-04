@@ -91,8 +91,13 @@ class User(Base):
     # reactivated via a status change. Also flipped is_active=False so their tokens die.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # lazy="joined": org arrives in the same SELECT as the user. Every authenticated request
+    # loads the caller (security.get_current_user) and most serializers then read org.name —
+    # as a lazy load that was a second round trip per user row (10 extra queries on a 10-row
+    # /admin/users page). Many-to-one on an indexed FK, so the LEFT JOIN is near-free and one
+    # round trip beats N.
     organization: Mapped["Organization"] = relationship(
-        back_populates="users"
+        back_populates="users", lazy="joined"
     )
 
     channels: Mapped[list["Channel"]] = relationship(

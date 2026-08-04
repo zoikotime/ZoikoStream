@@ -3,6 +3,7 @@ token may be issued, and the two server-side projections that keep console-only 
 an attendee's socket. Pure logic — no database, no Redis, no LiveKit.
 Run: `python test_viewer.py` (or pytest)."""
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app.services import moderation as m
@@ -17,7 +18,7 @@ def _event(**kw):
     # omits it is testing a different object from the one production passes.
     return SimpleNamespace(
         **{"id": uuid.uuid4(), "org_id": ORG, "visibility": "public", "status": "live",
-           "registration_required": False, **kw}
+           "registration_required": False, "start_time": None, "end_time": None, **kw}
     )
 
 
@@ -73,6 +74,22 @@ def test_playback_refused_without_livekit():
     v.livekit.configured = lambda: False
     assert v.playback_blocked_reason(_event(status="live"))
     v.livekit.configured = lambda: True  # restore for any later check
+
+
+def test_scheduled_window_time_boxes_the_media():
+    """A start/end time is a hard window on the TOKEN, independent of `status` — a host who
+    goes live early or runs long keeps broadcasting, but new viewers stop being let in."""
+    v.livekit.configured = lambda: True
+    now = datetime.now(timezone.utc)
+    hour = timedelta(hours=1)
+
+    assert v.playback_blocked_reason(_event(start_time=now + hour)) is not None
+    assert v.playback_blocked_reason(_event(end_time=now - hour)) is not None
+    # Inside the window, and a window-less event, both issue.
+    assert v.playback_blocked_reason(_event(start_time=now - hour, end_time=now + hour)) is None
+    assert v.playback_blocked_reason(_event()) is None
+    # The organizer is NOT exempt: previewing outside the window shows what an attendee sees.
+    assert v.playback_blocked_reason(_event(start_time=now + hour), exempt=True) is not None
 
 
 def test_registration_gates_the_media_not_the_page():

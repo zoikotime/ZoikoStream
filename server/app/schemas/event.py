@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
 Visibility = Literal["public", "private", "unlisted", "invite_only"]
 CreateStatus = Literal["draft", "published", "scheduled"]  # other states only via transitions

@@ -108,6 +108,17 @@ export default function useMediaPreview({ enabled, camera, mic, settings, hold =
     setActual(null);
   }, []);
 
+  // Every acquisition attempt chains onto the previous one instead of firing independently.
+  // Two `getUserMedia()` calls for the same camera racing each other (StrictMode's dev-only
+  // double-invoke: mount -> cleanup -> mount, fired before the first call has even resolved
+  // so cleanup's stop() has nothing to stop yet; the same race is reachable in production
+  // from a fast preview off/on toggle) commonly fails one of them with
+  // NotReadableError("Device in use") on Windows/Chrome. Chaining guarantees attempt N+1's
+  // getUserMedia() only starts after attempt N has fully settled — including stopping its
+  // own stream if it was cancelled in the meantime — so there is never a second in-flight
+  // request for the same device.
+  const acquireRef = useRef(Promise.resolve());
+
   // Acquire once, then adjust in place. Re-running on every toggle would flash the camera
   // light and re-prompt on some browsers.
   // Turning the preview off is handled by this effect's CLEANUP (below), not by an early
@@ -116,7 +127,8 @@ export default function useMediaPreview({ enabled, camera, mic, settings, hold =
     if (!enabled || !supported()) return undefined;
 
     let cancelled = false;
-    (async () => {
+    const task = acquireRef.current.catch(() => {}).then(async () => {
+      if (cancelled) return;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: videoConstraints(cfg.current, picked.camera),
@@ -155,7 +167,8 @@ export default function useMediaPreview({ enabled, camera, mic, settings, hold =
           );
         }
       }
-    })();
+    });
+    acquireRef.current = task;
 
     return () => {
       cancelled = true;
@@ -220,10 +233,11 @@ export default function useMediaPreview({ enabled, camera, mic, settings, hold =
     actual,
     error,
     active,
-    // The live MediaStream, exposed so ONE camera acquisition can serve both the local monitor
-    // and the LiveKit publisher. `streamRef` (not a copy) because the publisher reads it inside
-    // effects that must see the current value, and `streamVersion` tells it when the tracks
-    // underneath were replaced by a device switch.
+    // The live MediaStream, exposed so ONE camera acquisition serves both the local monitor and
+    // the LiveKit publisher rather than a second, competing getUserMedia call. `streamRef` (a ref,
+    // not a copy) because the publisher reads it inside effects that must see the current value
+    // without re-rendering every consumer, and `streamVersion` tells it when the tracks underneath
+    // were replaced by a device switch.
     streamRef,
     stream,
     streamVersion,

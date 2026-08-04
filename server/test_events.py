@@ -154,7 +154,7 @@ def test_access_link_token_is_hashed_not_stored():
 
 def _ev(**kw):
     base = dict(org_id="org-1", visibility="public", access_password_hash=None, status="live",
-                registration_required=False)
+                registration_required=False, start_time=None, end_time=None)
     return SimpleNamespace(**{**base, **kw})
 
 

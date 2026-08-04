@@ -187,6 +187,10 @@ _LIVE_QUESTION_COLUMNS = [
 ]
 _EVENT_ASSIGNMENT_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS notes TEXT",
+    # Durable speaking time, flushed from Redis presence when the broadcast ends. Without it,
+    # "how long did this speaker talk" is answerable while the room is up and never afterwards —
+    # which is the whole of speaker analytics. NULL (not 0) when the event never went live.
+    "ADD COLUMN IF NOT EXISTS speaking_ms BIGINT",
 ]
 
 # Attendee & Viewer experience. `event_registrations` is a brand-new table (create_all builds it);

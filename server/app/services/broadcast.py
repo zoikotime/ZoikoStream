@@ -35,6 +35,7 @@ from ..models import (
     AnalyticsSnapshot,
     BroadcastSession,
     Event,
+    EventAssignment,
     LiveMessage,
     LivePoll,
     LiveQuestion,
@@ -412,8 +413,12 @@ async def _end(ctx, payload, emergency: bool = False):
     # file. Returns None when nothing was rolling, so no pre-check query is needed.
     stopped = await _stop_recording_rows(ctx, now)
     closed = await livekit.close_room(ctx.room) if emergency else False
+    # Read presence BEFORE the room is torn down — this is the last moment the speaking totals
+    # exist anywhere. See `_flush_speaking_time`.
+    speaking = await _speaking_totals(ctx)
 
     def work(db):
+        _persist_speaking_time(db, ctx, speaking)
         ev = db.get(Event, ctx.event_id)
         session = _current_session(db, ctx)
         if session is None:
@@ -442,6 +447,43 @@ async def _end(ctx, payload, emergency: bool = False):
         # So the console's recording panel reflects the auto-stop, not just the broadcast end.
         frames.append(("recording", "recording.update", stopped))
     return frames
+
+
+async def _speaking_totals(ctx) -> dict[str, int]:
+    """{identity: speaking_ms} for everyone currently in presence, however briefly they spoke."""
+    return {
+        p["identity"]: int(p.get("speaking_ms") or 0)
+        for p in await bus.presence_all(ctx.event_id)
+        if p.get("identity") and int(p.get("speaking_ms") or 0) > 0
+    }
+
+
+def _persist_speaking_time(db, ctx, totals: dict[str, int]) -> int:
+    """Flush live speaking time onto the durable EventAssignment rows.
+
+    Presence is ephemeral (Redis, cleared when the room empties), so this is the ONLY moment the
+    figure can be saved — and without it "how long did this speaker talk" is answerable live and
+    never again, which makes historical speaker analytics impossible.
+
+    ACCUMULATES rather than overwrites: a host who ends, restarts and ends again in one event has
+    two presence generations, and the second must not erase the first. Only people with a real
+    assignment are recorded; an attendee who was briefly staged has no row to write to, and
+    inventing one would make them look like a booked speaker.
+    """
+    if not totals:
+        return 0
+    written = 0
+    for assignment in db.scalars(
+        select(EventAssignment).where(EventAssignment.event_id == ctx.event_id)
+    ).all():
+        # Presence identities are bare user ids for everyone except the publisher, whose identity
+        # carries the "#host" suffix — so both spellings have to be considered for one person.
+        ms = totals.get(str(assignment.user_id), 0) + totals.get(
+            publisher_identity(str(assignment.user_id)), 0)
+        if ms > 0:
+            assignment.speaking_ms = (assignment.speaking_ms or 0) + ms
+            written += 1
+    return written
 
 
 async def _preview(ctx, payload):

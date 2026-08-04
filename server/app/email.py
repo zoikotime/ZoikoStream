@@ -296,6 +296,26 @@ def send_invitation_revoked_email(to: str, org_name: str, role_label: str,
           ))
 
 
+def send_assignment_email(to: str, name: str | None, event_title: str | None, role: str,
+                          org_name: str | None, event_url: str) -> None:
+    """To someone an admin just put on an event's team. Not an invitation — they already have
+    an account and the role is already granted, so there is nothing to accept; the button just
+    opens their console. Built from the same _shell/_detail_rows/_button pieces as the
+    invitation mail so the two don't drift into looking like different products."""
+    safe_title = html.escape(event_title or "an event")
+    _send(to, f"You've been added as {role} for {event_title or 'an event'}", _shell(f"""
+    {_header("You've been assigned")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {html.escape(name or "there")},</p>
+      <p>You've been added as a <strong>{html.escape(role.title())}</strong> for
+         <strong>{safe_title}</strong> on {html.escape(org_name or "your organization")}'s
+         ZoikoStream account.</p>
+      {_detail_rows([("Organization", org_name or ""), ("Event", event_title or ""),
+                     ("Your role", role.title())])}
+      <p style="text-align:center;margin:28px 0 8px;">{_button(event_url, "Open the event")}</p>
+    </div>"""))
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
 

@@ -42,6 +42,7 @@ const OrganizationDashboard = lazy(() => import("./pages/organization/Dashboard"
 const OrganizationEvents = lazy(() => import("./pages/organization/Events"));
 const EventDetails = lazy(() => import("./pages/organization/EventDetails"));
 const OrganizationRecordings = lazy(() => import("./pages/organization/Recordings"));
+const RecordingDetail = lazy(() => import("./pages/organization/RecordingDetail"));
 const OrganizationAnalytics = lazy(() => import("./pages/organization/Analytics"));
 const OrganizationBilling = lazy(() => import("./pages/organization/Billing"));
 const OrganizationSettings = lazy(() => import("./pages/organization/Settings"));
@@ -155,7 +156,7 @@ export default function App() {
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<CreateOrganization />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
-              <Route path="/accept-invitation" element={<AcceptInvitation />} />
+              <Route path="/accept-invite" element={<AcceptInvitation />} />
             </Route>
 
             {/* Public event registration landing (shareable link) */}
@@ -262,6 +263,7 @@ export default function App() {
                 <Route path="/organization/dashboard" element={<OrganizationDashboard />} />
                 <Route path="/organization/events" element={<OrganizationEvents />} />
                 <Route path="/organization/recordings" element={<OrganizationRecordings />} />
+                <Route path="/organization/recordings/:id" element={<RecordingDetail />} />
                 <Route path="/organization/analytics" element={<OrganizationAnalytics />} />
                 <Route path="/organization/billing" element={<OrganizationBilling />} />
                 <Route path="/organization/settings" element={<OrganizationSettings />} />
