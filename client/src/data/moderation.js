@@ -55,21 +55,59 @@ export const QUALITY = {
 
 export const TIMEOUT_OPTIONS = [1, 5, 15, 60];
 
+// ── lobby / stage ────────────────────────────────────────────────────────────
+
+// Longest wait first by default — the person who has been staring at a holding screen for six
+// minutes is the one to admit next.
+export const LOBBY_SORTS = [
+  { key: "waiting", label: "Longest wait" },
+  { key: "recent", label: "Newest first" },
+  { key: "name", label: "Name" },
+];
+
+// Canned private replies to a raised hand — the three sentences a moderator types all day.
+export const HAND_REPLIES = [
+  "We'll come to you right after this section.",
+  "Please put your question in the Q&A tab and we'll read it out.",
+  "We're out of time for live questions, sorry!",
+];
+
+// ── alerts ───────────────────────────────────────────────────────────────────
+
+export const ALERT_TONE = {
+  critical: {
+    box: "border-rose-200 bg-rose-50/60 dark:border-rose-500/30 dark:bg-rose-500/10",
+    icon: "text-rose-500",
+  },
+  warning: {
+    box: "border-amber-200 bg-amber-50/60 dark:border-amber-500/30 dark:bg-amber-500/10",
+    icon: "text-amber-500",
+  },
+  info: {
+    box: "border-slate-200 dark:border-slate-800",
+    icon: "text-slate-400",
+  },
+};
+
 // ── chat ─────────────────────────────────────────────────────────────────────
 
 // Automatic detections from services/moderation.flag_text — flags only, never auto-deleted.
+// `reported` is the one flag a HUMAN adds (chat.report, a viewer action).
 export const FLAG_LABELS = {
   profanity: "Profanity",
   spam: "Spam",
   link: "Link",
   duplicate: "Duplicate",
+  reported: "Reported",
 };
 
 export const CHAT_FILTERS = [
   { key: "all", label: "All" },
   { key: "pending", label: "Needs review" },
   { key: "flagged", label: "Flagged" },
+  { key: "reported", label: "Reported" },
   { key: "pinned", label: "Pinned" },
+  { key: "highlighted", label: "Highlighted" },
 ];
 
 export const QUICK_REACTIONS = ["👍", "🎉", "❤️", "😮"];

@@ -16,6 +16,9 @@ from .routers.admin import router as admin_router
 from .routers.organization import router as organization_router
 from .routers.events import router as events_router
 from .routers.live import router as live_router
+from .routers.speaker import router as speaker_router
+from .routers.attendee import router as attendee_router
+from .routers.webhooks import router as webhooks_router
 from .services import bus
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
@@ -97,6 +100,9 @@ app.include_router(admin_router)
 app.include_router(organization_router)
 app.include_router(events_router)
 app.include_router(live_router)
+app.include_router(speaker_router)
+app.include_router(attendee_router)
+app.include_router(webhooks_router)
 
 
 # A DB outage (e.g. Supabase paused, DNS blip) raises OperationalError. Without this,

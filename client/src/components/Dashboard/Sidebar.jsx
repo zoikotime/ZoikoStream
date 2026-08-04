@@ -2,7 +2,7 @@ import { NavLink } from "react-router-dom";
 import {
   FiX, FiGrid, FiLayers, FiUsers, FiCode, FiKey, FiLink2, FiUploadCloud,
   FiActivity, FiFilm, FiPlayCircle, FiRadio, FiUserCheck, FiBarChart2,
-  FiCreditCard, FiShield, FiLifeBuoy, FiChevronDown,
+  FiCreditCard, FiShield, FiLifeBuoy, FiChevronDown, FiMail,
 } from "react-icons/fi";
 import { CONSOLE, cx, focusRing, type } from "../../ui/tokens";
 
@@ -22,6 +22,10 @@ const GROUPS = [
       { to: "/organization/dashboard", label: "Overview", icon: FiGrid, end: true },
       { to: "/organization/profile", label: "Organization & Workspaces", icon: FiLayers },
       { to: "/organization/users", label: "Members & Access", icon: FiUsers },
+      // Badge counts invitations that LAPSED unanswered or whose email failed — not every
+      // pending one, which would badge the system working normally and train the admin to
+      // ignore it. See services/org._invitations_needing_attention.
+      { to: "/organization/invitations", label: "Invitations", icon: FiMail, badge: "invitations_attention" },
     ],
   },
   {

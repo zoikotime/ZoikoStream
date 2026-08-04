@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import {
   FiMic, FiMicOff, FiUserX, FiSearch, FiSlash, FiClock,
   FiArrowUpCircle, FiArrowDownCircle, FiMoreVertical, FiUsers,
+  FiVideo, FiVideoOff, FiMonitor, FiMessageSquare, FiAlertTriangle, FiX,
 } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
@@ -85,6 +86,7 @@ function Action({ icon: Icon, label, tone = "slate", onClick }) {
 // The full action set for one participant, in a drawer so each action can be labelled.
 function ProfileDrawer({ p, open, onClose, canModerate, send }) {
   const [minutes, setMinutes] = useState(5);
+  const [warning, setWarning] = useState("");
   if (!p) return null;
 
   const act = (action, payload) => send(action, { identity: p.identity, ...payload });
@@ -114,6 +116,11 @@ function ProfileDrawer({ p, open, onClose, canModerate, send }) {
         <Row label="On stage" value={onStage ? "Yes" : "No"} />
         <Row label="Joined" value={joinedLabel(p)} />
         {p.muted_until && <Row label="Muted until" value={hhmm(p.muted_until)} />}
+        {p.chat_muted && (
+          <Row label="Chat" value={p.chat_muted_until ? `Muted until ${hhmm(p.chat_muted_until)}` : "Muted"} />
+        )}
+        {p.camera_allowed === false && <Row label="Camera" value="Disabled by a moderator" />}
+        {p.share_allowed === false && <Row label="Screen share" value="Disabled by a moderator" />}
       </div>
 
       {!canModerate ? (
@@ -138,11 +145,61 @@ function ProfileDrawer({ p, open, onClose, canModerate, send }) {
             </div>
           </div>
 
+          {/* Chat mute, separate from the microphone above. The server refuses this against a
+              host or moderator — staff bypass audience controls, so a mute on them would show
+              in the roster while their messages kept landing. */}
+          <Action
+            icon={p.chat_muted ? FiMessageSquare : FiSlash}
+            label={p.chat_muted ? "Unmute in chat" : `Mute in chat (${minutes} min)`}
+            onClick={() => act("chat.mute", { muted: !p.chat_muted, minutes })}
+          />
+
+          <Action
+            icon={p.camera_allowed === false ? FiVideo : FiVideoOff}
+            label={p.camera_allowed === false ? "Allow camera" : "Disable camera"}
+            onClick={() => act("stage.camera", { allowed: p.camera_allowed === false })}
+          />
+          <Action
+            icon={FiMonitor}
+            label={p.share_allowed === false ? "Allow screen share" : "Disable screen share"}
+            onClick={() => act("stage.share", { allowed: p.share_allowed === false })}
+          />
+
           <Action
             icon={onStage ? FiArrowDownCircle : FiArrowUpCircle}
             label={onStage ? "Remove from stage" : "Invite to stage"}
             onClick={() => act("participant.stage", { on_stage: !onStage })}
           />
+          {p.hand && (
+            <Action icon={FiX} label="Decline raised hand" onClick={() => act("participant.dismiss_hand")} />
+          )}
+
+          {/* Warn before you remove. A private notice is the only escalation step between
+              "muted" and "gone", and it reaches only this person (routers/live.py narrows it). */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!warning.trim()) return;
+              act("participant.notify", { text: warning.trim() });
+              setWarning("");
+            }}
+            className="flex items-center gap-2"
+          >
+            <Input
+              variant="console"
+              value={warning}
+              onChange={(e) => setWarning(e.target.value)}
+              placeholder="Warn privately…"
+              aria-label={`Send ${p.name || p.identity} a private warning`}
+            />
+            <button
+              type="submit"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-amber-600 text-white transition hover:bg-amber-500"
+              aria-label="Send warning"
+            >
+              <FiAlertTriangle className="text-sm" />
+            </button>
+          </form>
           <Action
             icon={FiArrowUpCircle}
             label={role === "viewer" ? "Promote to speaker" : "Promote to moderator"}
@@ -248,6 +305,7 @@ export default function ParticipantsPanel({ participants, canModerate, loading, 
                 </button>
 
                 {p.muted && <Badge tone="danger" size="sm">Muted</Badge>}
+                {p.chat_muted && <Badge tone="warning" size="sm" title="Muted in chat">No chat</Badge>}
                 {!p.muted && p.speaking && <Badge tone="success" size="sm">Speaking</Badge>}
 
                 {canModerate && (

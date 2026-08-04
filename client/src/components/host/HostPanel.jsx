@@ -2,21 +2,21 @@
 // Right sidebar for the Producer console. Tabs: People, Chat, Q&A, Polls, Analytics, Activity.
 //
 // This file deliberately contains almost no panel implementation. Chat, Q&A, polls,
-// announcements, the activity feed and the participant roster already exist as live
-// components in components/moderation/* — the host console composes the SAME components as
-// tabs rather than a column. The only thing genuinely new to the host is the analytics tab
-// and the waiting-room queue, so that is all that's written here.
+// announcements, the activity feed, the participant roster and the analytics block already
+// exist as live components in components/moderation/* — the host console composes the SAME
+// components as tabs rather than a column. The waiting-room queue is the only thing genuinely
+// new to the host, so that is all that's written here.
 import { useState } from "react";
 import {
   FiUsers, FiMessageSquare, FiHelpCircle, FiBarChart2, FiTrendingUp, FiActivity,
-  FiCheck, FiX, FiMicOff, FiClock, FiSmartphone, FiMonitor, FiGlobe,
+  FiCheck, FiX, FiMicOff, FiClock,
 } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
-import EmptyState from "../organization/OrganizationEmptyState";
 import ParticipantsPanel from "../moderation/ParticipantsPanel";
 import { ChatTab, QATab } from "../moderation/ChatQAPanel";
 import { PollManagement, Announcements, ActivityFeed } from "../moderation/ModeratorSidebar";
+import AnalyticsPanel from "../moderation/AnalyticsPanel";
 import { initials, accentFor } from "../../data/host";
 
 const TABS = [
@@ -77,122 +77,6 @@ function WaitingRoom({ waiting, canModerate, send }) {
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-// ── analytics ─────────────────────────────────────────────────────────────────
-
-const fmtDuration = (s) => {
-  if (s == null) return "—";
-  const m = Math.floor(s / 60);
-  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : m >= 1 ? `${m}m ${s % 60}s` : `${s}s`;
-};
-
-function Stat({ label, value, hint }) {
-  return (
-    <div className="rounded-xl border border-slate-200 p-2.5 dark:border-slate-800">
-      <p className="truncate text-[11px] text-slate-500 dark:text-slate-400" title={hint}>{label}</p>
-      <p className="text-lg font-semibold tabular-nums text-slate-900 dark:text-white">{value}</p>
-    </div>
-  );
-}
-
-// Retention sparkline. Inline SVG rather than a chart library: it's a single polyline over
-// the server's analytics samples, and recharts is already loaded elsewhere for real charts.
-function Retention({ points }) {
-  if (!points?.length) {
-    return <p className="py-6 text-center text-xs text-slate-400">Collecting samples… the graph fills in every 15s.</p>;
-  }
-  const values = points.map((p) => p.viewers);
-  const max = Math.max(...values, 1);
-  const step = points.length > 1 ? 100 / (points.length - 1) : 0;
-  const path = values.map((v, i) => `${i * step},${40 - (v / max) * 36}`).join(" ");
-  return (
-    <div>
-      <svg viewBox="0 0 100 40" preserveAspectRatio="none" className="h-20 w-full" role="img"
-           aria-label={`Viewer retention, peaking at ${max}`}>
-        <polyline points={`0,40 ${path} 100,40`} fill="rgb(16 185 129 / 0.15)" stroke="none" />
-        <polyline points={path} fill="none" stroke="rgb(16 185 129)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-      </svg>
-      <div className="flex justify-between text-[10px] text-slate-400">
-        <span>{points.length} samples</span>
-        <span>peak {max.toLocaleString()}</span>
-      </div>
-    </div>
-  );
-}
-
-function Distribution({ title, icon: Icon, rows, note }) {
-  const total = (rows || []).reduce((s, r) => s + r.value, 0);
-  return (
-    <div>
-      <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-        <Icon aria-hidden="true" /> {title}
-      </p>
-      {!rows?.length ? (
-        <p className="text-xs text-slate-400">{note || "No data yet."}</p>
-      ) : (
-        <div className="space-y-1">
-          {rows.map((r) => (
-            <div key={r.label} className="relative overflow-hidden rounded-lg border border-slate-200 px-2 py-1 dark:border-slate-700">
-              <div className="absolute inset-y-0 left-0 bg-violet-500/15 transition-[width] duration-500"
-                   style={{ width: `${total ? (r.value / total) * 100 : 0}%` }} />
-              <div className="relative flex items-center justify-between text-xs">
-                <span className="text-slate-700 dark:text-slate-200">{r.label}</span>
-                <span className="tabular-nums text-slate-500 dark:text-slate-400">{r.value}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AnalyticsTab({ analytics, health }) {
-  const a = analytics;
-  if (!a) {
-    return <EmptyState icon={FiTrendingUp} title="No analytics yet" description="Numbers appear once the broadcast has an audience." className="py-10" />;
-  }
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-2">
-        <Stat label="Live viewers" value={(a.viewers ?? 0).toLocaleString()} />
-        <Stat label="Peak viewers" value={(a.peak_viewers ?? 0).toLocaleString()} />
-        <Stat label="Concurrent users" value={(a.participants ?? 0).toLocaleString()} hint="Everyone connected, including staff" />
-        <Stat label="Avg watch time" value={fmtDuration(a.avg_watch_seconds)} hint="Mean time in room of everyone currently connected" />
-        <Stat label="Engagement" value={`${a.engagement ?? 0}/100`} hint="Weighted interactions per viewer — a heuristic, see services/broadcast.engagement_score" />
-        <Stat label="Chat rate" value={`${a.chat_per_minute ?? 0}/min`} hint="Messages in the last minute" />
-        <Stat label="Questions" value={(a.questions_asked ?? 0).toLocaleString()} />
-        <Stat label="Reactions" value={(a.reactions ?? 0).toLocaleString()} />
-        <Stat label="Poll votes" value={(a.poll_votes ?? 0).toLocaleString()} />
-        <Stat
-          label="Poll participation"
-          value={a.poll_participation == null ? "—" : `${a.poll_participation}%`}
-          hint="Votes as a share of peak viewers"
-        />
-      </div>
-
-      {health?.issues?.length > 0 && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-2.5 dark:border-amber-500/30 dark:bg-amber-500/10">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">Health</p>
-          <ul className="mt-1 space-y-0.5 text-xs text-amber-800 dark:text-amber-300">
-            {health.issues.map((i) => <li key={i}>• {i}</li>)}
-          </ul>
-        </div>
-      )}
-
-      <div>
-        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Retention</p>
-        <Retention points={a.retention} />
-      </div>
-
-      <Distribution title="Devices" icon={FiSmartphone} rows={a.devices} />
-      <Distribution title="Platforms" icon={FiMonitor} rows={a.platforms} />
-      <Distribution title="Browsers" icon={FiGlobe} rows={a.browsers} />
-      {/* Stated, not faked: there's no GeoIP in this stack. */}
-      <Distribution title="Countries" icon={FiGlobe} rows={a.countries} note={a.countries_note} />
     </div>
   );
 }
@@ -288,7 +172,7 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, class
 
         {tab === "analytics" && (
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
-            <AnalyticsTab analytics={analytics} health={health} />
+            <AnalyticsPanel analytics={analytics} health={health} />
           </div>
         )}
 

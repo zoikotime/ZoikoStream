@@ -178,3 +178,48 @@ p { text-wrap: pretty; }
   .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift,
   .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow { animation: none; }
 }
+
+/* ── attendee experience ───────────────────────────────────────────────────── */
+
+/* Floating reactions. Distinct from zk-float (a gentle bob used elsewhere): this one rises and
+   fades once, which is what a tapped emoji does. Paired with motion-reduce: in the component, so
+   somebody who asked for less motion gets the counts without the confetti. */
+@keyframes zk-rise {
+  0%   { transform: translateY(0) scale(0.7); opacity: 0; }
+  15%  { transform: translateY(-24px) scale(1.1); opacity: 1; }
+  70%  { opacity: 1; }
+  100% { transform: translateY(-190px) scale(1) rotate(var(--zk-rise-tilt, 8deg)); opacity: 0; }
+}
+
+/* Accessibility preferences (services/attendee.PREFERENCE_SPECS), applied to <html> so they reach
+   portals, modals and the player chrome too — a class on a page wrapper would miss all three. */
+:root.zk-text-large   { font-size: 17.5px; }
+:root.zk-text-larger  { font-size: 19px; }
+
+/* High contrast: raise text and border contrast without inventing a third theme. Ratios go up,
+   the palette does not change, so nothing needs a parallel set of tokens. */
+:root.zk-high-contrast {
+  --zk-contrast-boost: 1;
+}
+:root.zk-high-contrast body { color: #000; }
+:root.zk-high-contrast.dark body,
+:root.zk-high-contrast[data-theme="dark"] body { color: #fff; }
+:root.zk-high-contrast :where(a, button):focus-visible {
+  outline: 3px solid currentColor;
+  outline-offset: 2px;
+}
+/* Hairline borders are the first thing to disappear at low vision — make every one of them solid. */
+:root.zk-high-contrast :where([class*="border-slate-1"], [class*="border-slate-2"], [class*="border-white/1"]) {
+  border-color: currentColor;
+}
+
+/* An explicit reduced-motion opt-in, for somebody whose OS setting says otherwise. The
+   motion-reduce: variants used throughout already cover the OS-level preference. */
+:root.zk-reduced-motion *,
+:root.zk-reduced-motion *::before,
+:root.zk-reduced-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}

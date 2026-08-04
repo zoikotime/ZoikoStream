@@ -34,6 +34,13 @@ from ..services import moderation as mod
 # permission set, and the broadcast/analytics half of the opening snapshot. Import is
 # one-way (broadcast -> moderation), which is why it happens here and not in moderation.
 from ..services import broadcast  # noqa: F401
+# Same again for the speaker/panellist half: the presentation, whiteboard, notes and
+# technical-issue actions, the speaker tier of the permission gate, and the speaker's own
+# snapshot block (including the source-scoped publish grant).
+from ..services import speaker  # noqa: F401
+# And the audience half: the ephemeral reaction stream, plus the identity/reactions/resources block
+# every tier's snapshot carries.
+from ..services import attendee  # noqa: F401
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/live", tags=["live"])
@@ -94,7 +101,13 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     async with bus.subscribe(ctx.event_id) as queue:
         # This connection is a participant too — one presence record per identity, so a
         # moderator watching from two tabs still counts once.
-        role = "host" if ctx.can_host else "moderator" if ctx.can_moderate else "viewer"
+        #
+        # `speaker` is in this ladder now. Without it an ASSIGNED speaker arrived as "viewer":
+        # they vanished from the stage roster, were counted in the audience figure, lost the
+        # staff exemption in mute-all, and — now that presence drives the publish grant
+        # (mod.allowed_sources) — could not have published at all.
+        role = ("host" if ctx.can_host else "moderator" if ctx.can_moderate
+                else "speaker" if ctx.can_speak else "viewer")
         # Waiting room holds plain attendees for the host to admit; staff never wait.
         waiting = bool(state.get("waiting_room")) and role == "viewer"
         rec = await bus.presence_upsert(ctx.event_id, ctx.identity, {
@@ -102,16 +115,46 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             "muted": False, "speaking": False, "hand": False, "quality": "excellent",
             **agent,
         })
-        await websocket.send_json(bus.envelope("moderator", "snapshot", await mod.snapshot(ctx)))
+        # Three projections, most privileged first. See mod.viewer_snapshot /
+        # mod.speaker_snapshot — the full one carries recordings, the moderation activity feed
+        # and the whole analytics block, which neither of the other two tiers may see.
+        snap = await mod.snapshot(ctx)
+        await websocket.send_json(bus.envelope("moderator", "snapshot", (
+            snap if ctx.can_moderate
+            else mod.speaker_snapshot(snap) if ctx.can_speak
+            else mod.viewer_snapshot(snap)
+        )))
         await bus.publish(ctx.event_id, "participants", "participant.join", rec)
         if waiting:
             # Surfaces in the host console's waiting-room queue.
             await bus.publish(ctx.event_id, "stage", "waiting.join", rec)
 
         async def writer():
-            """Only this task writes to the socket, so sends never interleave."""
+            """Only this task writes to the socket, so sends never interleave.
+
+            The bus fans every envelope out to every subscriber of the event, so this is
+            also the one place a feed can be narrowed by tier — projecting only the
+            snapshot would still have streamed an attendee the analytics ticks, the moderation
+            activity feed and the presence roster for the rest of the event."""
+            # Resolved once per connection, not per envelope: the tier cannot change while the
+            # socket is open (resolve_ctx ran before accept).
+            project = (None if ctx.can_moderate
+                       else mod.speaker_envelope if ctx.can_speak
+                       else mod.viewer_envelope)
             while True:
-                await websocket.send_json(await queue.get())
+                env = await queue.get()
+                # Directed envelopes (a moderator's private reply to one participant) are
+                # published on the shared bus and narrowed HERE. Checked before the tier
+                # projection so it applies to every reader — other moderators must not see a
+                # private reply either.
+                to = (env.get("data") or {}).get("to_identity")
+                if to and to != ctx.identity:
+                    continue
+                if project is not None:
+                    env = project(env)
+                    if env is None:
+                        continue
+                await websocket.send_json(env)
 
         pump = asyncio.create_task(writer())
         try:
@@ -159,6 +202,13 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
 
 _TRACK_EVENTS = {"track_published": True, "track_unpublished": False}
 
+# livekit.api.TrackSource enum -> the names presence stores. A participant publishes camera,
+# microphone and screen share CONCURRENTLY, so presence keeps the set and derives the boolean
+# from it; collapsing them into one flag made ending a screen share look like going off air.
+_TRACK_SOURCE_NAMES = {
+    1: "camera", 2: "microphone", 3: "screen_share", 4: "screen_share_audio", 0: "unknown",
+}
+
 
 @router.post("/webhooks/livekit", include_in_schema=False)
 async def livekit_webhook(request: Request, authorization: str = Header(None)):
@@ -172,29 +222,60 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
     except Exception:  # noqa: BLE001 — a bad signature is a 401, not a 500
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid LiveKit webhook signature")
 
-    event_id = mod.event_id_from_room(evt.room.name if evt.room else None)
+    # Egress events do NOT carry `room` — the room name lives on egress_info instead. Reading
+    # only evt.room made every egress_started/egress_ended return "ignored", so the recording
+    # status never updated and the finished file's size/location were never recorded.
+    room_name = evt.room.name if evt.room else None
+    if not room_name and evt.egress_info is not None:
+        room_name = getattr(evt.egress_info, "room_name", None)
+    event_id = mod.event_id_from_room(room_name)
     if not event_id:
         return {"ignored": evt.event}
 
     kind = evt.event
     p = evt.participant
 
+    # Presence is keyed on the BARE user id. The publisher connects with a "#host" suffix (see
+    # services/broadcast.publisher_identity) so it cannot collide with the same person's
+    # attendee connection, and every write here must land on the record the socket owns.
+    ident = broadcast.base_identity(p.identity) if p else None
+
     if kind == "participant_joined" and p:
-        rec = await bus.presence_upsert(event_id, p.identity, {
-            "name": p.name or p.identity, "role": "viewer", "muted": False,
-            "speaking": False, "hand": False, "quality": "excellent",
+        # Only facts this webhook actually knows: they are in the media room. It must NOT write
+        # role/muted/speaking/quality — the SOCKET set role="host" for this same identity on
+        # accept, and re-asserting "viewer" here demoted the host the moment they published,
+        # dropping them out of their own stage filmstrip, zeroing the host count and removing
+        # them from mute-all's staff exemption.
+        rec = await bus.presence_upsert(event_id, ident, {
+            "name": p.name or ident, "in_room": True,
         })
         await bus.publish(event_id, "participants", "participant.join", rec)
-        await mod.feed_activity(event_id, "join", f"{rec['name']} joined the event")
+        await mod.feed_activity(event_id, "join", f"{rec.get('name')} joined the event")
 
     elif kind == "participant_left" and p:
-        rec = await bus.presence_remove(event_id, p.identity)
-        if rec:
-            await bus.publish(event_id, "participants", "participant.leave", rec)
-            await mod.feed_activity(event_id, "leave", f"{rec.get('name')} left the event")
+        # Mark them out of the media room; do NOT delete the record. The socket connection owns
+        # the presence row and removes it in its own finally block — deleting here would erase a
+        # still-connected participant (and their waiting-room state) just because their media
+        # dropped.
+        rec = await bus.presence_upsert(event_id, ident, {
+            "in_room": False, "publishing": False, "publishing_sources": [],
+        })
+        await bus.publish(event_id, "participants", "participant.update", rec)
+        await mod.feed_activity(event_id, "leave", f"{rec.get('name')} left the event")
 
     elif kind in _TRACK_EVENTS and p:
-        rec = await bus.presence_upsert(event_id, p.identity, {"publishing": _TRACK_EVENTS[kind]})
+        # Track SOURCE matters: camera, microphone and screen_share are published concurrently,
+        # so a single boolean meant ending a screen share reported the whole broadcast as "no
+        # media being published" — health_of would emit level "down" mid-broadcast on a
+        # completely normal action. Keep the set, derive the boolean.
+        source = getattr(getattr(evt, "track", None), "source", None)
+        name = _TRACK_SOURCE_NAMES.get(source, str(source or "unknown"))
+        current = await bus.presence_get(event_id, ident)
+        sources = set(current.get("publishing_sources") or [])
+        sources.add(name) if _TRACK_EVENTS[kind] else sources.discard(name)
+        rec = await bus.presence_upsert(event_id, ident, {
+            "publishing_sources": sorted(sources), "publishing": bool(sources),
+        })
         await bus.publish(event_id, "participants", "participant.update", rec)
 
     elif kind in ("room_started", "room_finished"):
@@ -225,5 +306,17 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
         recording = kind == "egress_started"
         await bus.publish(event_id, "moderator", "recording.status", {"recording": recording})
         await mod.feed_activity(event_id, "recording", "Recording started" if recording else "Recording finished", persist=True)
+        if not recording:
+            # egress_ended is the ONLY place the real file size and location exist. Until now
+            # they were dropped, so LiveRecording.size_bytes stayed NULL and the console could
+            # never say whether a recording was actually captured.
+            #
+            # Matched on egress_id — the handle we stored when we STARTED it. Never on the room
+            # name: this endpoint is signature-verified but otherwise unauthenticated, and
+            # keying on a room would let a forged-but-signed payload write to whichever
+            # recording row happened to match.
+            updated = await asyncio.to_thread(broadcast.record_egress_result, evt.egress_info)
+            if updated:
+                await bus.publish(event_id, "recording", "recording.update", updated)
 
     return {"ok": True, "event": kind}

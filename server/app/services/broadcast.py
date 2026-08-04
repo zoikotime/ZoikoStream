@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from .. import email
 from ..models import (
     AnalyticsSnapshot,
     BroadcastSession,
@@ -38,14 +39,21 @@ from ..models import (
     LivePoll,
     LiveQuestion,
     LiveRecording,
+    Organization,
 )
-from . import bus, livekit
+from ..crud import event as crud_event
+from ..db import SessionLocal
+from . import bus, livekit, storage
 from . import moderation as mod
 
 log = logging.getLogger(__name__)
 
 SAMPLE_SECONDS = 15          # analytics sampling cadence == retention-graph resolution
 RETENTION_POINTS = 240       # ~1h of history at 15s in the initial snapshot
+# A capture that has failed this many times is not going to succeed by being asked again — the
+# cause is configuration (no bucket, bad credentials, egress quota), not luck. The cap keeps a
+# stuck room from spending an egress attempt every few seconds for the rest of the event.
+MAX_RECORDING_RETRIES = 3
 
 # Live control defaults. Seeded from the Event's stored feature flags on first go-live, then
 # owned by the session so a mid-broadcast toggle never rewrites the event's configuration.
@@ -60,14 +68,38 @@ DEFAULT_SETTINGS = {
     "noise_cancellation": True, "echo_cancellation": True, "auto_gain": True,
     "mic_gain": 100, "speaker_volume": 100, "background": "none",
     "recording_quality": "1080p", "auto_upload": True,
+    # Stage composition. Lives here rather than in a new table because it is exactly what a
+    # broadcast setting is: durable on the session, validated by clean_settings, and broadcast
+    # to every console over the settings.update envelope that already exists — so the host,
+    # the moderators and the recording composite converge on one layout with no new plumbing.
+    # `pinned_identity` is the participant kept large in presentation/spotlight; "" = nobody.
+    "layout": "grid", "pinned_identity": "",
 }
 
 RESOLUTIONS = ("720p", "1080p", "2k", "4k")
 BACKGROUNDS = ("none", "blur", "image")
+LAYOUTS = ("grid", "gallery", "presentation", "spotlight")
+
+# The host's PUBLISHER connection needs an identity distinct from their attendee/playback one.
+# LiveKit allows one connection per identity per room and drops the older one, so a host with
+# the watch page open in a second tab would otherwise disconnect their own broadcast. Presence,
+# audit and every moderator action stay keyed on the BARE user id — routers/live.py strips this
+# suffix before writing presence.
+PUBLISHER_SUFFIX = "#host"
+
+
+def publisher_identity(identity: str) -> str:
+    return f"{identity}{PUBLISHER_SUFFIX}"
+
+
+def base_identity(identity: str | None) -> str:
+    """Strip any connection-role suffix, yielding the presence/user key."""
+    return (identity or "").split("#", 1)[0]
 
 # Whitelist + validation for the single settings action. A dict of specs beats twenty
 # near-identical handlers, and an unknown key is dropped rather than trusted.
 _BOOL = "bool"
+_IDENTITY = "identity"
 SETTING_SPECS: dict[str, object] = {
     **{k: _BOOL for k in (
         "chat_enabled", "qa_enabled", "polls_enabled", "reactions_enabled", "subscriber_only",
@@ -83,11 +115,38 @@ SETTING_SPECS: dict[str, object] = {
     "resolution": RESOLUTIONS,
     "recording_quality": RESOLUTIONS,
     "background": BACKGROUNDS,
+    "layout": LAYOUTS,
+    # A participant identity, so it cannot be an enum. _IDENTITY is its own spec kind rather
+    # than a bare `str` check: an unbounded string from the wire would be stored on the session
+    # and echoed to every console, so it is length-capped and stripped. "" clears the pin.
+    "pinned_identity": _IDENTITY,
 }
 
 
+# Which of the settings above a MODERATOR may change. Chat/Q&A/poll gating, the automatic
+# filters, the waiting room and hand-raising are audience management, which is the moderator's
+# job — a moderator who can see spam but cannot turn the spam filter on is not moderating.
+#
+# Everything omitted stays host-only, and the omissions are the point: encoder targets
+# (resolution, framerate, bitrate, background, gain) and the stage composition (layout,
+# pinned_identity) are the HOST's broadcast. A moderator changing those would be exactly the
+# "cannot override host permissions" line in the role hierarchy.
+MODERATOR_SETTINGS = frozenset({
+    "chat_enabled", "qa_enabled", "polls_enabled", "reactions_enabled", "subscriber_only",
+    "emoji_only", "profanity_filter", "spam_filter", "auto_moderation", "waiting_room",
+    "raise_hand_enabled", "slow_mode_seconds",
+    # A moderator already controls screen sharing per PERSON (stage.share), so withholding the
+    # room-wide switch would be a distinction without a difference.
+    "allow_screen_share",
+})
+
+
 def clean_settings(patch: dict) -> dict:
-    """Keep only known keys with valid values. Returns the accepted subset."""
+    """Keep only known keys with valid values. Returns the accepted subset.
+
+    An unknown key is DROPPED, not rejected — this is a whitelist, so a client sending
+    something new cannot write it into the session.
+    """
     out = {}
     for key, spec in SETTING_SPECS.items():
         if key not in patch:
@@ -95,6 +154,12 @@ def clean_settings(patch: dict) -> dict:
         value = patch[key]
         if spec == _BOOL:
             out[key] = bool(value)
+        elif spec == _IDENTITY:
+            # Free text, so it is bounded and normalized rather than trusted. Not validated
+            # against live presence on purpose: a pin set a moment before someone reconnects
+            # must survive, and the renderer already falls back to the grid when the pinned
+            # identity is absent.
+            out[key] = str(value or "").strip()[:128]
         elif isinstance(spec, tuple) and len(spec) == 2 and all(isinstance(x, int) for x in spec):
             try:
                 out[key] = max(spec[0], min(int(value), spec[1]))
@@ -133,6 +198,14 @@ def recording_out(r: LiveRecording) -> dict:
         "stopped_at": _iso(r.stopped_at), "paused_ms": r.paused_ms,
         "size_bytes": r.size_bytes, "file_url": r.file_url,
         "auto_upload": r.auto_upload, "enforced": r.enforced, "error": r.error,
+        # Library facts the console needs to offer Retry and to link into the media library.
+        # `file_url` is whatever LiveKit reported; `has_file` is the honest answer to "is there
+        # something to play", and it is false unless WE assigned a key and bytes arrived.
+        "duration_ms": r.duration_ms,
+        "has_file": bool(r.storage_key and r.size_bytes),
+        "retryable": r.status == "failed" and (r.retry_count or 0) < MAX_RECORDING_RETRIES,
+        "retry_count": r.retry_count or 0,
+        "retry_of": str(r.retry_of) if r.retry_of else None,
     }
 
 
@@ -233,9 +306,10 @@ async def _golive(ctx, payload):
         session.status = "live"
         session.started_at = session.started_at or now
         session.paused_at = None
-        # The event's own lifecycle only moves forward from a publishable state — reuse the
-        # existing guard rather than writing "live" unconditionally.
-        if ev is not None and ev.status in ("published", "scheduled"):
+        # The event's own lifecycle only moves forward from a publishable state — ask the
+        # shared guard rather than writing "live" unconditionally or re-listing the states
+        # here (paused -> live is a resume, and it became legal in the same guard).
+        if ev is not None and not crud_event.status_transition_error(ev.status, "live", ev.title):
             ev.status = "live"
             ev.start_time = ev.start_time or now
         act = mod.record(db, ctx, "system", "Host started the stream", audit="live.broadcast.golive",
@@ -249,17 +323,48 @@ async def _golive(ctx, payload):
     frames = [("broadcast", "broadcast.update", {**session, "enforced": enforced})]
     if act:
         frames.append(("activity", "activity.new", act))
+
+    # AUTOMATIC RECORDING. `events.auto_start_recording` has been a stored, editable, documented
+    # setting all along and nothing ever read it to start a capture — it only widened `auto_upload`.
+    # An organizer who ticked "record automatically" got no recording. Started AFTER the session is
+    # live (an egress needs a room with a publisher) and only when nothing is already rolling, so a
+    # resume from pause does not open a second file.
+    if act and await _auto_record_wanted(ctx):
+        started = await _recording_start(ctx, {})
+        if isinstance(started, list):
+            frames.extend(started)
+        else:
+            # A string is the "already running" / refusal path. Not an error worth failing Go Live
+            # over — the broadcast is up, which is what the host clicked for.
+            log.info("auto-record skipped for %s: %s", ctx.event_id, started)
     return frames
+
+
+async def _auto_record_wanted(ctx) -> bool:
+    """True when this event is configured to record itself and nothing is capturing yet."""
+    def work(db):
+        ev = db.get(Event, ctx.event_id)
+        if ev is None or not ev.auto_start_recording:
+            return False
+        return _current_recording(db, ctx) is None
+
+    return await mod.tx(work)
 
 
 async def _pause(ctx, payload):
     now = datetime.now(timezone.utc)
 
     def work(db):
+        ev = db.get(Event, ctx.event_id)
         session = _current_session(db, ctx)
         if session is None or session.status != "live":
             return None
         session.status, session.paused_at = "paused", now
+        # Mirror it onto the event so the org console and the attendee badge read "paused"
+        # rather than "live with nothing playing". Same guard as go-live/end: the event
+        # lifecycle only moves through transitions crud.status_transition_error allows.
+        if ev is not None and not crud_event.status_transition_error(ev.status, "paused", ev.title):
+            ev.status = "paused"
         return session_out(session), mod.record(
             db, ctx, "system", "Host paused the stream", audit="live.broadcast.pause",
             target_type="broadcast_session", target_id=session.id)
@@ -275,12 +380,17 @@ async def _resume(ctx, payload):
     now = datetime.now(timezone.utc)
 
     def work(db):
+        ev = db.get(Event, ctx.event_id)
         session = _current_session(db, ctx)
         if session is None or session.status != "paused":
             return None
         if session.paused_at:
             session.paused_ms += int((now - session.paused_at).total_seconds() * 1000)
         session.status, session.paused_at = "live", None
+        # paused -> live is an allowed transition (see crud.status_transition_error), which
+        # is what makes a resume a resume rather than a second go-live.
+        if ev is not None and not crud_event.status_transition_error(ev.status, "live", ev.title):
+            ev.status = "live"
         return session_out(session), mod.record(
             db, ctx, "system", "Host resumed the stream", audit="live.broadcast.resume",
             target_type="broadcast_session", target_id=session.id)
@@ -312,8 +422,9 @@ async def _end(ctx, payload, emergency: bool = False):
             session.paused_ms += int((now - session.paused_at).total_seconds() * 1000)
         session.status, session.ended_at, session.paused_at = "ended", now, None
         session.ended_reason = reason
-        # Reuse the event lifecycle guard: "ended" is only legal from "live".
-        if ev is not None and ev.status == "live":
+        # Reuse the event lifecycle guard: "ended" is legal from live OR paused, so a host
+        # who paused and then ended still closes the event out.
+        if ev is not None and not crud_event.status_transition_error(ev.status, "ended", ev.title):
             ev.status = "ended"
             ev.end_time = ev.end_time or now
         text = "Host triggered an emergency stop" if emergency else "Host ended the stream"
@@ -338,14 +449,16 @@ async def _preview(ctx, payload):
     real infrastructure. No session row — nothing has been broadcast yet."""
     enforced = await livekit.ensure_room(ctx.room)
     state = await bus.state_set(ctx.event_id, {"status": "preview"})
+    # NO publish_token here. Whatever a handler returns is fanned to EVERY subscriber of the
+    # event by mod.dispatch -> bus.publish, and routers/live.py only narrows the feed for
+    # attendees (viewer_only = not ctx.can_moderate). A moderator would therefore have received
+    # the HOST's publisher credential verbatim — and since it carries the host's identity, using
+    # it would both impersonate them and disconnect them on duplicate identity.
+    # The host already holds a token from their own snapshot (snapshot_extra, gated on
+    # ctx.can_host), and the client reducer keeps it across a preview frame.
     return [("broadcast", "broadcast.preview", {
         "status": "preview", "enforced": enforced,
         "settings": state.get("settings", DEFAULT_SETTINGS),
-        # A publisher token is issued here so wiring a real publisher is a drop-in; nothing
-        # in this app publishes yet (no livekit-client on the frontend).
-        "publish_token": livekit.create_stream_token(ctx.identity, ctx.room, True)
-        if livekit.configured() else None,
-        "livekit_url": livekit.settings.LIVEKIT_URL or None,
     })]
 
 
@@ -360,12 +473,22 @@ async def _countdown(ctx, payload):
 
 async def _settings(ctx, payload):
     patch = clean_settings(payload.get("settings") or payload)
+    # This action is NOT in HOST_ONLY (see the bottom of this file) — it self-filters instead,
+    # so one handler serves both consoles. A moderator's patch is narrowed to the audience
+    # controls; asking for a host-only key is refused rather than silently dropped, because a
+    # toggle that appears to move and doesn't is worse than a toggle that says no.
+    if not ctx.can_host:
+        refused = sorted(set(patch) - MODERATOR_SETTINGS)
+        patch = {k: v for k, v in patch.items() if k in MODERATOR_SETTINGS}
+        if refused and not patch:
+            return f"Only the event host can change {', '.join(refused)}"
     if not patch:
         return "No recognised settings in that request"
     merged = await _apply_settings(ctx, patch)
     changed = ", ".join(f"{k}={patch[k]}" for k in sorted(patch))
+    who = "Host" if ctx.can_host else "Moderator"
     act = await mod.tx(lambda db: mod.record(
-        db, ctx, "system", f"Host changed live settings ({changed})",
+        db, ctx, "system", f"{who} changed live settings ({changed})",
         audit="live.broadcast.settings", target_type="broadcast_session", meta=patch))
     return [("broadcast", "settings.update", {"settings": merged, "changed": patch}),
             ("activity", "activity.new", act)]
@@ -397,39 +520,214 @@ async def _stop_recording_rows(ctx, now):
     return await mod.tx(work)
 
 
-async def _recording_start(ctx, payload):
+async def _recording_start(ctx, payload, retry_of: uuid.UUID | None = None):
+    """Begin a capture. `retry_of` re-attempts a failed one (see `_recording_retry`)."""
     now = datetime.now(timezone.utc)
     state = await bus.state_get(ctx.event_id)
     settings = state.get("settings") or DEFAULT_SETTINGS
     quality = payload.get("quality") if payload.get("quality") in RESOLUTIONS else settings.get("recording_quality", "1080p")
 
-    existing = await mod.tx(lambda db: (lambda r: recording_out(r) if r else None)(_current_recording(db, ctx)))
-    if existing:
-        return "A recording is already running"
-
-    filepath = f"zoikostream/{ctx.org_id}/{ctx.event_id}/{int(now.timestamp())}.mp4"
-    egress_id, error = await livekit.start_recording(ctx.room, quality, filepath)
-
-    def work(db):
+    # CLAIM the slot before touching LiveKit. The old shape was read-then-write — check for a
+    # current recording, then start an egress, then insert — so a double-clicked Record button
+    # started TWO egresses, and only the newest row was ever stopped: the first kept capturing
+    # (and billing) with nothing pointing at it. Inserting the row first makes the second click
+    # lose on _current_recording and return before it can spend anything.
+    def claim(db):
+        if _current_recording(db, ctx) is not None:
+            return None
+        prior = db.get(LiveRecording, retry_of) if retry_of else None
         r = LiveRecording(
             event_id=ctx.event_id, org_id=ctx.org_id, status="recording", quality=quality,
-            egress_id=egress_id, started_at=now, enforced=bool(egress_id), error=error,
+            started_at=now, enforced=False,
             auto_upload=bool(settings.get("auto_upload", True)),
-            file_url=filepath if egress_id else None, created_by=ctx.user_id,
+            created_by=ctx.user_id,
+            # A retry inherits where the failed attempt was filed, so recovering a capture does
+            # not also silently move it back to the library root and lose its tags.
+            retry_of=retry_of,
+            retry_count=((prior.retry_count if prior else 0) or 0) + 1 if retry_of else 0,
+            folder_id=prior.folder_id if prior else None,
+            title=prior.title if prior else None,
+            category=prior.category if prior else None,
+            tags=list(prior.tags or []) if prior else [],
+            visibility=prior.visibility if prior else "organization",
         )
         session = _current_session(db, ctx)
         if session:
             r.session_id = session.id
         db.add(r)
         db.flush()
-        note = "Recording started" if egress_id else "Recording started (not captured — LiveKit egress unavailable)"
+        # The key is derived from the row's OWN id, which is why it can only be assigned after the
+        # insert — and why a retry writes a different object instead of overwriting the one it is
+        # retrying (whose bytes, however truncated, may still be worth something).
+        r.storage_key = storage.recording_key(ctx.org_id, ctx.event_id, r.id)
+        ev = db.get(Event, ctx.event_id)
+        return str(r.id), r.storage_key, (ev.title if ev else None)
+
+    claimed = await mod.tx(claim)
+    if claimed is None:
+        return "A recording is already running"
+    claimed_id, key, event_title = claimed
+
+    egress_id, error = await livekit.start_recording(
+        ctx.room, quality, key, download_name=f"{event_title or 'recording'}.mp4"
+    )
+
+    def work(db):
+        # Fill in the egress outcome on the row we already own.
+        r = db.get(LiveRecording, uuid.UUID(claimed_id))
+        r.egress_id = egress_id
+        r.enforced = bool(egress_id)
+        r.error = error
+        r.file_url = key if egress_id else None
+        if not egress_id:
+            # No egress means no file will EVER arrive for this row, so it is a failure now rather
+            # than a "recording" that sits spinning until someone stops a capture that never began.
+            # This is what makes it eligible for retry from the media library.
+            r.status, r.stopped_at = "failed", now
+            r.storage_key = None
+        note = ("Recording started" if egress_id
+                else f"Recording could not start — {error or 'egress unavailable'}")
         return recording_out(r), mod.record(db, ctx, "recording", note,
                                            audit="live.recording.start",
                                            target_type="live_recording", target_id=r.id,
-                                           meta={"quality": quality, "enforced": bool(egress_id)})
+                                           meta={"quality": quality, "enforced": bool(egress_id),
+                                                 "retry_of": str(retry_of) if retry_of else None})
 
     rec, act = await mod.tx(work)
+    if not egress_id:
+        await _notify_recording_failed(ctx, rec, error)
     return [("recording", "recording.update", rec), ("activity", "activity.new", act)]
+
+
+async def _recording_retry(ctx, payload):
+    """Re-attempt a failed capture. The host console's Recording Queue offers this per row.
+
+    Only a FAILED recording is retryable, and only while the room is still live — retrying a
+    finished event cannot recapture anything, and offering the button there would be a lie about
+    what the platform can do. A retry is a new row (see `retry_of`) so the failure stays on record.
+    """
+    try:
+        rid = uuid.UUID(str(payload.get("recording_id")))
+    except (TypeError, ValueError, AttributeError):
+        return "Unknown recording"
+
+    def check(db):
+        r = db.get(LiveRecording, rid)
+        # org_id AND event_id: this socket is scoped to one event, so a valid id from a sibling
+        # event in the same org must not be retryable through it either.
+        if r is None or r.org_id != ctx.org_id or r.event_id != ctx.event_id:
+            return "Unknown recording"
+        if r.status != "failed":
+            return "Only a failed recording can be retried"
+        if (r.retry_count or 0) >= MAX_RECORDING_RETRIES:
+            return f"This capture has already been retried {MAX_RECORDING_RETRIES} times"
+        return None
+
+    problem = await mod.tx(check)
+    if problem:
+        return problem
+
+    state = await bus.state_get(ctx.event_id)
+    if state.get("status") != "live":
+        return "The broadcast must be live to retry a recording"
+    return await _recording_start(ctx, payload, retry_of=rid)
+
+
+async def _notify_recording_failed(ctx, rec: dict, error: str | None) -> None:
+    """Email the organization that a capture failed, if they asked to hear about it.
+
+    Sent inline, like every other mail in this codebase (there is no queue worker). Wrapped
+    because a mail provider outage must never turn a recording failure into a socket error — the
+    host has already been told on screen; this is the second channel, not the first.
+    """
+    def load(db):
+        ev = db.get(Event, ctx.event_id)
+        org = db.get(Organization, ctx.org_id)
+        if org is None:
+            return None
+        prefs = org.notifications or {}
+        # Default ON: a silent recording failure is the kind of thing an organizer finds out about
+        # a week later when they go looking for the file.
+        if prefs.get("recording_failed") is False:
+            return None
+        to = org.support_email or prefs.get("alert_email")
+        return (to, org.name, ev.title if ev else "an event") if to else None
+
+    target = await mod.tx(load)
+    if not target:
+        return
+    to, org_name, title = target
+    try:
+        await asyncio.to_thread(email.send_recording_failed_email, to, org_name, title,
+                                error or "The capture did not start.")
+    except Exception:  # noqa: BLE001 — notification is best-effort by design
+        log.warning("recording-failure notification to %s could not be sent", to, exc_info=True)
+
+
+def record_egress_result(egress_info) -> dict | None:
+    """Write the finished file's real size and location onto its LiveRecording row.
+
+    Called from the signature-verified LiveKit webhook (routers/live.py) on egress_ended, which
+    is the only moment those facts exist. Synchronous because it runs through asyncio.to_thread
+    like every other DB touch on the socket side.
+
+    Matched on egress_id, the handle stored when the recording was started. That is what keeps
+    an unauthenticated (if signed) callback from writing to another tenant's row — the id was
+    minted by us, for one recording, and is not guessable from the payload.
+
+    Returns the updated recording dict for broadcast, or None when nothing matched (a replayed
+    webhook, or an egress this deployment did not start).
+    """
+    egress_id = getattr(egress_info, "egress_id", None)
+    if not egress_id:
+        return None
+    # LiveKit reports per-output results; a room composite to MP4 yields one file entry. Fall
+    # back to the top-level fields older server versions set instead.
+    files = list(getattr(egress_info, "file_results", None) or [])
+    first = files[0] if files else getattr(egress_info, "file", None)
+    size = int(getattr(first, "size", 0) or 0) if first is not None else 0
+    location = (getattr(first, "location", None) or getattr(first, "filename", None)) if first is not None else None
+    # FileInfo.duration is NANOseconds. This is the real playable length of the file, which is why
+    # it is stored rather than derived from stopped_at - started_at: that span includes every
+    # paused stretch, and the file does not.
+    duration_ns = int(getattr(first, "duration", 0) or 0) if first is not None else 0
+    error = getattr(egress_info, "error", None) or None
+
+    db = SessionLocal()
+    try:
+        r = db.scalar(select(LiveRecording).where(LiveRecording.egress_id == egress_id))
+        if r is None:
+            return None
+        if size:
+            # size_bytes is BigInteger — an INTEGER column would overflow at 2 GB, which a
+            # multi-hour 1080p capture passes comfortably.
+            r.size_bytes = size
+        if location:
+            r.file_url = location
+        if duration_ns:
+            r.duration_ms = duration_ns // 1_000_000
+        if error:
+            r.error = str(error)[:400]
+            r.enforced = False
+            # No usable file: `failed` is what makes this row retryable and what stops the library
+            # offering a download for an object that was never written.
+            r.status, r.stopped_at = "failed", r.stopped_at or datetime.now(timezone.utc)
+            db.commit()
+            return recording_out(r)
+        # A file with bytes on disk is the proof that "enforced" was true.
+        if size:
+            r.enforced = True
+        if r.status != "stopped":
+            r.status = "stopped"
+            r.stopped_at = r.stopped_at or datetime.now(timezone.utc)
+        db.commit()
+        return recording_out(r)
+    except Exception:  # noqa: BLE001 — a webhook must not 500 on a bookkeeping write
+        db.rollback()
+        log.exception("failed to record egress result for %s", egress_id)
+        return None
+    finally:
+        db.close()
 
 
 async def _recording_pause(ctx, payload, resume: bool = False):
@@ -479,19 +777,25 @@ async def _recording_stop(ctx, payload):
 # moderator console and are reused as-is. Only what the host console adds lives here.
 
 async def _stage_media(ctx, payload, kind: str):
-    """Force a participant's camera or screen share off (or allow it back on). LiveKit's
-    publish permission is the real lever, so revoking it is what actually stops a track."""
+    """Force a participant's camera or screen share off (or allow it back on).
+
+    Was `set_stage(room, identity, allowed)` — the all-or-nothing publish permission. That meant
+    "turn this speaker's camera off" and "stop this speaker sharing" BOTH revoked their whole
+    publish grant, cutting their microphone mid-sentence. Sources are the level these controls
+    are actually about, so the flag is written to presence and the resulting source SET is what
+    gets pushed to LiveKit.
+    """
     identity = str(payload.get("identity") or "")
     if not identity:
         return []
     allowed = bool(payload.get("allowed", True))
-    enforced = await livekit.set_stage(ctx.room, identity, allowed)
-    field = "camera_allowed" if kind == "camera" else "share_allowed"
+    field = {"camera": "camera_allowed", "share": "share_allowed", "mic": "mic_allowed"}[kind]
     rec = await bus.presence_upsert(ctx.event_id, identity, {field: allowed})
+    enforced = await livekit.set_publish_sources(ctx.room, identity, mod.allowed_sources(rec))
     name = rec.get("name") or identity
     verb = "enabled" if allowed else "disabled"
     act = await mod.tx(lambda db: mod.record(
-        db, ctx, "mod", f"{name}'s {kind} was {verb} by the host",
+        db, ctx, "mod", f"{name}'s {kind} was {verb} by {ctx.name}",
         audit=f"live.stage.{kind}", target_type="participant", target_id=identity,
         meta={"allowed": allowed, "enforced_in_livekit": enforced}))
     return [("participants", "participant.update", rec), ("activity", "activity.new", act),
@@ -523,16 +827,30 @@ async def _stage_admit(ctx, payload):
 
 
 async def _stage_admit_all(ctx, payload):
-    """One click for the common case: a queue built up while the host was talking."""
+    """One click for the common case: a queue built up while the host was talking.
+
+    `admit: false` is the bulk REJECT, same handler — the lobby is one queue and the two
+    decisions differ only in which per-person branch runs. Doing it here rather than looping
+    stage.admit in the browser matters: N frames would hit the socket's own rate limit
+    (routers/live.RATE_LIMIT) and half the queue would silently survive.
+    """
+    admit = bool(payload.get("admit", True))
     waiting = [p for p in await bus.presence_all(ctx.event_id) if p.get("waiting")]
     frames = []
     for p in waiting:
-        rec = await bus.presence_upsert(ctx.event_id, p["identity"], {"waiting": False})
-        frames.append(("participants", "participant.update", rec))
+        if admit:
+            rec = await bus.presence_upsert(ctx.event_id, p["identity"], {"waiting": False})
+            frames.append(("participants", "participant.update", rec))
+        else:
+            await livekit.remove_participant(ctx.room, p["identity"])
+            rec = await bus.presence_remove(ctx.event_id, p["identity"]) or p
+            frames.append(("participants", "participant.leave", rec))
+    verb = "admitted" if admit else "denied"
     act = await mod.tx(lambda db: mod.record(
-        db, ctx, "mod", f"Host admitted {len(waiting)} waiting attendee(s)",
-        audit="live.stage.admit_all", target_type="participant", meta={"count": len(waiting)}))
-    return [*frames, ("stage", "waiting.cleared", {"count": len(waiting)}),
+        db, ctx, "mod", f"{ctx.name} {verb} {len(waiting)} waiting attendee(s)",
+        audit=f"live.stage.{'admit_all' if admit else 'deny_all'}", target_type="participant",
+        meta={"count": len(waiting), "admit": admit}))
+    return [*frames, ("stage", "waiting.cleared", {"count": len(waiting), "admit": admit}),
             ("activity", "activity.new", act)]
 
 
@@ -547,7 +865,7 @@ async def _stage_mute_all(ctx, payload):
         rec = await bus.presence_upsert(ctx.event_id, p["identity"], {"muted": True})
         frames.append(("participants", "participant.update", rec))
     act = await mod.tx(lambda db: mod.record(
-        db, ctx, "mod", f"Host muted {len(targets)} participant(s)",
+        db, ctx, "mod", f"{ctx.name} muted {len(targets)} participant(s)",
         audit="live.stage.mute_all", target_type="participant", meta={"count": len(targets)}))
     return [*frames, ("activity", "activity.new", act)]
 
@@ -595,6 +913,50 @@ def _split(people: list[dict]) -> dict:
         "hands": sum(1 for p in active if p.get("hand")),
         "poor_connections": sum(1 for p in active if p.get("quality") in ("poor", "lost")),
         "publishing": sum(1 for p in active if p.get("publishing")),
+    }
+
+
+def _speaking_leaderboard(people: list[dict], limit: int = 8) -> list[dict]:
+    """Who has actually held the floor, longest first.
+
+    Accumulated server-side on the falling edge of each publisher's speaking flag
+    (services/moderation._participant_state), so a client cannot inflate its own total. Anyone
+    still speaking has their in-progress stretch added, otherwise the current speaker appears
+    frozen at their previous total for as long as they keep talking.
+    """
+    now_ts = datetime.now(timezone.utc).timestamp()
+    rows = []
+    for p in people:
+        if p.get("waiting"):
+            continue
+        ms = int(p.get("speaking_ms") or 0)
+        if p.get("speaking") and p.get("speaking_since"):
+            ms += int(max(0.0, now_ts - float(p["speaking_since"])) * 1000)
+        if ms <= 0:
+            continue
+        rows.append({"identity": p.get("identity"), "name": p.get("name"),
+                     "role": p.get("role"), "seconds": round(ms / 1000)})
+    return sorted(rows, key=lambda r: -r["seconds"])[:limit]
+
+
+def _publisher_telemetry(people: list[dict]) -> dict:
+    """Encoder health, reported by the publishers themselves — the browser's peer connection is
+    the only place outbound bitrate, packet loss and RTT exist.
+
+    Aggregated across everyone currently publishing rather than shown per-person: the host cares
+    whether THE BROADCAST is healthy. Absent when nobody is publishing, so the panel renders "—"
+    rather than a zero that reads like a measurement.
+    """
+    pub = [p for p in people if p.get("publishing") and not p.get("waiting")]
+    def avg(key):
+        vals = [p[key] for p in pub if isinstance(p.get(key), (int, float))]
+        return round(sum(vals) / len(vals)) if vals else None
+    return {
+        "publishers": len(pub),
+        "bitrate_kbps": sum(p.get("bitrate_kbps") or 0 for p in pub) or None,
+        "packet_loss": avg("packet_loss"),
+        "rtt_ms": avg("rtt_ms"),
+        "fps": avg("fps"),
     }
 
 
@@ -681,6 +1043,10 @@ async def analytics_now(ctx) -> dict:
             "devices": _distribution(people, "device"),
             "platforms": _distribution(people, "platform"),
             "browsers": _distribution(people, "browser"),
+            # Who held the floor, and how the encoders are actually doing. Both derived from
+            # real presence records — see the two helpers for what each figure is and is not.
+            "speaking_time": _speaking_leaderboard(people),
+            "publish": _publisher_telemetry(people),
             # No GeoIP in this stack; a fabricated map is worse than an absent one.
             "countries": None,
             "countries_note": "Country breakdown needs a GeoIP lookup (not integrated).",
@@ -742,10 +1108,18 @@ async def snapshot_extra(ctx) -> dict:
         "countdown_until": state.get("countdown_until"),
         "health": health_of(split, session["status"], recording["enforced"] if recording else None),
         "livekit_url": livekit.settings.LIVEKIT_URL or None,
-        # Present only for hosts, and only when LiveKit is configured. Nothing publishes
-        # yet (the frontend has no livekit-client) — this is here so that wiring is a drop-in.
-        "publish_token": livekit.create_stream_token(ctx.identity, ctx.room, True)
-        if (ctx.can_host and livekit.configured()) else None,
+        # Present only for hosts, and only when LiveKit is configured. Stripped from the
+        # attendee projection by VIEWER_SNAPSHOT_KEYS, which is an allow-list.
+        #
+        # The identity is SUFFIXED. LiveKit permits one connection per identity per room and
+        # disconnects the older one (DisconnectReason.DUPLICATE_IDENTITY); the attendee playback
+        # token uses the bare user id (routers/events.py), so a host who opened the watch page in
+        # another tab would kick their own broadcast off air. The webhook strips the suffix
+        # before touching presence, so moderator targeting still uses the bare id.
+        "publish_identity": publisher_identity(ctx.identity),
+        "publish_token": livekit.create_stream_token(
+            publisher_identity(ctx.identity), ctx.room, True
+        ) if (ctx.can_host and livekit.configured()) else None,
     }
 
 
@@ -778,6 +1152,10 @@ async def _sample_once() -> list[tuple[str, dict]]:
                 viewers=split["viewers"], participants=split["participants"],
                 on_stage=split["speakers"] + split["hosts"], messages=counts["messages"],
                 questions=counts["questions"], reactions=counts["reactions"], hands=split["hands"],
+                # Lobby depth. Presence is the live truth inside a console; this is what a
+                # DASHBOARD listing many events reads, so it costs one query instead of a
+                # Redis round trip per event (crud.event.summarize).
+                waiting=split["waiting"],
             ))
             if peak > s["peak"]:
                 session = db.get(BroadcastSession, uuid.UUID(s["id"]))
@@ -824,8 +1202,10 @@ ACTIONS = {
     "recording.pause": _recording_pause,
     "recording.resume": lambda c, p: _recording_pause(c, p, resume=True),
     "recording.stop": _recording_stop,
+    "recording.retry": _recording_retry,
     "stage.camera": lambda c, p: _stage_media(c, p, "camera"),
     "stage.share": lambda c, p: _stage_media(c, p, "share"),
+    "stage.mic": lambda c, p: _stage_media(c, p, "mic"),
     "stage.admit": _stage_admit,
     "stage.admit_all": _stage_admit_all,
     "stage.mute_all": _stage_mute_all,
@@ -833,7 +1213,13 @@ ACTIONS = {
 
 # Broadcast + recording control is host-only. Stage controls stay available to moderators
 # (they already have participant.* powers, and muting the room is audience management).
-HOST_ONLY = {a for a in ACTIONS if a.startswith(("broadcast.", "recording."))}
+#
+# broadcast.settings is the one exception: it carries both the host's encoder targets and the
+# audience controls a moderator is responsible for, so it filters its own patch by role
+# (MODERATOR_SETTINGS) rather than being refused outright. Splitting it into two actions would
+# duplicate the whitelist, the persistence and the audit path for one permission check.
+HOST_ONLY = {a for a in ACTIONS
+             if a.startswith(("broadcast.", "recording.")) and a != "broadcast.settings"}
 
 mod.ACTIONS.update(ACTIONS)
 mod.HOST_ONLY.update(HOST_ONLY)

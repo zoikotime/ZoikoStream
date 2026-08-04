@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -73,6 +73,13 @@ class User(Base):
     # Operating team (e.g. "Platform Operations", "Live Events Ops"). Labels the actor on
     # the Command Center's privileged-activity feed; NULL falls back to the role label.
     department: Mapped[str | None] = mapped_column(String(80))
+
+    # Per-PERSON settings that span every event: language, accessibility switches, favourite
+    # speakers, notification opt-outs. A JSON column rather than four tables (or four columns)
+    # because none of it is ever queried across users — it is read whole, for one person, by that
+    # person. Validated by services.attendee.clean_preferences, which is a whitelist, so an
+    # unknown key cannot be written.
+    preferences: Mapped[dict | None] = mapped_column(JSON)
 
     reset_token: Mapped[str | None] = mapped_column(String(64))
     reset_token_expires: Mapped[datetime | None] = mapped_column(

@@ -6,6 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..crud import organization as invite_crud
 from ..db import get_db
 from ..email import send_reset_otp_email, send_welcome_email
 from ..models import Organization, User
@@ -55,6 +56,33 @@ def register(data: RegisterIn, background: BackgroundTasks, db: Session = Depend
     exists = db.scalar(select(User).where(User.email == email))
     if exists:
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already taken")
+
+    # An invited person who uses the SIGNUP FORM instead of clicking their link must not end up
+    # with a NEW organization: their email would then belong to another org, their invitation
+    # could never be accepted, and re-inviting them would 409 forever.
+    #
+    # But CONSUMING the invitation here is far worse, and this endpoint did exactly that until
+    # it was caught: a second accept path keyed on the EMAIL ADDRESS ALONE. RegisterIn carries
+    # no token and this route proves no ownership of the address, so anyone who knew an invited
+    # corporate address could take that seat with a password of their choosing — bypassing the
+    # 256-bit token entirely. It also honoured a grant from an inviter who had since been
+    # demoted or deleted, assigned onto a soft-deleted event, and wrote no audit row, because
+    # none of _open_invitation_or_refuse's five re-validations ran here.
+    #
+    # So: REFUSE, and write nothing. The invitation stays pending and redeemable through its
+    # token, which POST /organization/invitations/accept already exchanges for an account and a
+    # session — with every one of those checks applied.
+    invitation = invite_crud.find_open_invitation_for_email(db, email)
+    if invitation is not None:
+        org = db.get(Organization, invitation.org_id)
+        # A suspended org is the one case where we fall through: it cannot grow the tenant it
+        # froze, so let this person create their own organization instead of stranding them.
+        if org is not None and org.status != "suspended":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "You already have a pending invitation. Please use the invitation link we "
+                "emailed you to join — it sets up your account.",
+            )
 
     org = Organization(name=data.organization_name)
     db.add(org)

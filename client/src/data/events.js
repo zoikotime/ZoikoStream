@@ -31,20 +31,82 @@ export const fmtDuration = (mins) => {
   return h ? `${h}h${m ? ` ${m}m` : ""}` : `${m}m`;
 };
 
-// Backend EventStatus -> display label + admin Badge tone (+ pulse dot for live).
+// Backend EventStatus -> display label + admin Badge tone (+ pulse dot while on air).
+// Keep the keys in sync with models/event.py EVENT_STATUSES — this map is the single source
+// of the status vocabulary for every screen (table, detail header, KPI row, filters).
 export const EVENT_STATUS = {
   draft: { label: "Draft", tone: "neutral" },
   scheduled: { label: "Scheduled", tone: "info" },
   published: { label: "Published", tone: "info" },
   live: { label: "Live", tone: "brand", pulse: true },
+  // Distinct from both live and ended: the broadcast is held, not finished. Amber because
+  // it is a state that needs someone's attention, not a resting state.
+  paused: { label: "Paused", tone: "warning", pulse: true },
   ended: { label: "Ended", tone: "neutral" },
   cancelled: { label: "Cancelled", tone: "danger" },
   archived: { label: "Archived", tone: "neutral" },
 };
 export const statusMeta = (s) => EVENT_STATUS[s] || { label: s || "—", tone: "neutral" };
 
-export const VISIBILITY_LABEL = { public: "Public", private: "Private", unlisted: "Unlisted" };
+// Statuses in lifecycle order — used by the filter dropdown and the lifecycle rail so both
+// read in the order an event actually moves through them, not alphabetically.
+export const STATUS_ORDER = [
+  "draft", "scheduled", "published", "live", "paused", "ended", "cancelled", "archived",
+];
+
+// An event is "on air" in both live and paused: the room exists and the audience is in it.
+export const isOnAir = (s) => s === "live" || s === "paused";
+
+export const VISIBILITY_LABEL = {
+  public: "Public",
+  private: "Private",
+  unlisted: "Unlisted",
+  invite_only: "Invite only",
+};
 export const visLabel = (v) => VISIBILITY_LABEL[v] || v || "—";
+
+// What each visibility value actually MEANS for access — shown next to the picker so an
+// admin is not guessing. Mirrors services/viewer.py access_for.
+export const VISIBILITY_HELP = {
+  public: "Any signed-in viewer with the link can watch",
+  unlisted: "Not listed anywhere; any signed-in viewer with the link can watch",
+  private: "Organization members only",
+  invite_only: "Organization members, plus anyone holding a viewer access link",
+};
+
+// Event-team roles. host/moderator/speaker carry real authority in the live consoles
+// (services/moderation.py resolve_ctx); the other three are credited team roles with no
+// broadcast powers of their own — the labels say so rather than implying otherwise.
+export const TEAM_ROLES = [
+  { key: "host", label: "Host", plural: "Hosts", grants: "Broadcast control" },
+  { key: "moderator", label: "Moderator", plural: "Moderators", grants: "Audience moderation" },
+  { key: "speaker", label: "Speaker", plural: "Speakers", grants: "Can be invited on stage" },
+  { key: "producer", label: "Producer", plural: "Producers", grants: "Credited — no live powers" },
+  { key: "cohost", label: "Co-host", plural: "Co-hosts", grants: "Credited — no live powers" },
+  { key: "panelist", label: "Panelist", plural: "Panelists", grants: "Credited — no live powers" },
+];
+export const roleMeta = (key) => TEAM_ROLES.find((r) => r.key === key) || { key, label: key, plural: key, grants: "" };
+
+// Encoder targets. Same vocabulary as models/event.py STREAM_QUALITIES and
+// services/broadcast.py RESOLUTIONS, so the stored value needs no translation.
+export const STREAM_QUALITY = [
+  { value: "720p", label: "720p · HD" },
+  { value: "1080p", label: "1080p · Full HD" },
+  { value: "2k", label: "2K · QHD" },
+  { value: "4k", label: "4K · UHD" },
+];
+
+export const CATEGORIES = [
+  "Webinar", "Conference", "Product Launch", "Workshop", "Q&A Session", "Training",
+  "Town Hall", "Internal",
+];
+
+// A short list rather than the full IANA set: these cover the org's actual regions, and a
+// 400-entry <select> is worse for keyboard users than eight relevant options.
+export const TIMEZONES = [
+  "UTC", "America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London",
+  "Europe/Berlin", "Asia/Kolkata", "Asia/Singapore", "Australia/Sydney",
+];
 
 // ── Legacy mock ───────────────────────────────────────────────────────────────
 // Still consumed by the public attendee pages (EventRegistration, watch/EventWatch),
