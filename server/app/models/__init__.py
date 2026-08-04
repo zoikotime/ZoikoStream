@@ -10,6 +10,7 @@ from .invitation import Invitation, INVITATION_STATUSES
 from .event import (
     Event,
     EventAssignment,
+    EventRegistration,
     EVENT_STATUSES,
     EVENT_VISIBILITY,
     ASSIGNMENT_ROLES,

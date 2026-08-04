@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
 Visibility = Literal["public", "private", "unlisted"]
 CreateStatus = Literal["draft", "published", "scheduled"]  # other states only via transitions
@@ -113,7 +113,8 @@ class AssignmentUpdate(BaseModel):
 class WatchOut(BaseModel):
     """Public-facing view for GET /events/{id}/watch — deliberately thin: no org_id,
     no created_by, nothing an anonymous visitor shouldn't see. A subscribe-only LiveKit
-    token is included only while the event is actually live."""
+    token is included only while the event is actually live (and, if registration is
+    required, only once the caller is registered)."""
     id: uuid.UUID
     title: str | None = None
     description: str | None = None
@@ -125,6 +126,32 @@ class WatchOut(BaseModel):
     chat_enabled: bool
     qa_enabled: bool
     polls_enabled: bool
+    registration_required: bool = False
+    registered: bool = True
+    not_started: bool = False
+    expired: bool = False
     livekit_url: str | None = None
     livekit_token: str | None = None
     room: str | None = None
+
+
+class RegistrationCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    email: EmailStr
+
+
+class RegistrationOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    email: str
+    token: str
+
+
+class RegistrantOut(BaseModel):
+    """Admin-facing view of a registrant — no access token in here."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    email: str
+    created_at: datetime | None = None

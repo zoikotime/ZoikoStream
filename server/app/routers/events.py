@@ -9,7 +9,7 @@ Permissions:
   read (list / get / view assignees)               -> any org member
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -17,11 +17,17 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..crud import event as crud
 from ..db import get_db
-from ..email import send_assignment_email, send_event_created_email
+from ..email import send_assignment_email, send_event_created_email, send_registration_confirmation_email
 from ..models import Event, User
 from ..schemas.admin import AdminUserOut, Page
-from ..schemas.event import AssignmentUpdate, EventCreate, EventOut, EventUpdate, WatchOut
-from ..security import get_current_user, get_current_user_optional, require_org_admin
+from ..schemas.event import (
+    AssignmentUpdate, EventCreate, EventOut, EventUpdate,
+    RegistrantOut, RegistrationCreate, RegistrationOut, WatchOut,
+)
+from ..security import (
+    create_registration_token, decode_registration_token,
+    get_current_user, get_current_user_optional, require_org_admin,
+)
 from ..services import livekit
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -106,13 +112,22 @@ def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: S
 @router.get("/{event_id}/watch", response_model=WatchOut)
 def watch_event(
     event_id: uuid.UUID,
+    reg: str | None = Query(None, description="Registration access token from POST /register"),
     user: User | None = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
     """The public viewer page's one read: thin event info, plus a subscribe-only LiveKit
     token while the event is live. Not org-scoped — a signed-out visitor watching a public
     event isn't a member of any org — but a private event still requires the caller to
-    belong to the org (or be super_admin)."""
+    belong to the org (or be super_admin). Independently, a registration_required event
+    withholds the stream token until the caller is registered (org members always pass;
+    everyone else needs a valid `reg` token from having registered).
+
+    A scheduled start_time/end_time also time-boxes the VIEWER link: before start_time or
+    after end_time, no stream token goes out even if the host is live — this is deliberately
+    independent of `status`, which the host still drives manually (going live early or
+    running long past end_time never force-ends their broadcast; it only stops handing new
+    viewers a token)."""
     ev = crud.get_event_unscoped(db, event_id)
     if ev is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
@@ -120,9 +135,21 @@ def watch_event(
         if user is None or (user.role != "super_admin" and user.org_id != ev.org_id):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private")
 
+    is_org_member = bool(user and (user.role == "super_admin" or user.org_id == ev.org_id))
+    registered = is_org_member or (bool(reg) and decode_registration_token(reg, ev.id) is not None)
+
+    now = datetime.now(timezone.utc)
+    not_started = bool(ev.start_time and now < ev.start_time)
+    expired = bool(ev.end_time and now > ev.end_time)
+
     room = f"event_{ev.id}"
     token = url = None
-    if ev.status == "live" and livekit.configured():
+    can_stream = (
+        ev.status == "live" and livekit.configured()
+        and not not_started and not expired
+        and (not ev.registration_required or registered)
+    )
+    if can_stream:
         identity = f"viewer-{user.id}" if user else f"viewer-{uuid.uuid4()}"
         token = livekit.create_stream_token(identity, room, False)
         url = livekit.settings.LIVEKIT_URL
@@ -135,8 +162,49 @@ def watch_event(
         visibility=ev.visibility, start_time=ev.start_time,
         organization_name=org_name, host_name=hosts[0].full_name if hosts else org_name,
         chat_enabled=ev.chat_enabled, qa_enabled=ev.qa_enabled, polls_enabled=ev.polls_enabled,
+        registration_required=ev.registration_required, registered=registered or not ev.registration_required,
+        not_started=not_started, expired=expired,
         livekit_url=url, livekit_token=token, room=room if token else None,
     )
+
+
+def _registration_console_url(event_id: uuid.UUID) -> str:
+    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    return f"{base}/events/{event_id}/watch"
+
+
+@router.post("/{event_id}/register", response_model=RegistrationOut)
+def register_for_event(
+    event_id: uuid.UUID,
+    data: RegistrationCreate,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Self-serve, anonymous registration for a registration_required event — no auth,
+    mirrors watch_event's public reach. Idempotent on email: resubmitting the same
+    address never errors, it just re-issues a fresh access token."""
+    ev = crud.get_event_unscoped(db, event_id)
+    if ev is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    if not ev.registration_required:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event does not require registration")
+
+    existing = crud.get_registration(db, event_id, data.email)
+    if existing is not None:
+        return RegistrationOut(
+            id=existing.id, name=existing.name, email=existing.email,
+            token=create_registration_token(existing),
+        )
+
+    if ev.registration_limit is not None and crud.count_registrations(db, event_id) >= ev.registration_limit:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This event is full")
+
+    reg = crud.create_registration(db, event_id, data.name, data.email)
+    background.add_task(
+        send_registration_confirmation_email,
+        reg.email, reg.name, ev.title or "this event", _registration_console_url(ev.id),
+    )
+    return RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=create_registration_token(reg))
 
 
 @router.patch("/{event_id}", response_model=EventOut)
@@ -241,3 +309,10 @@ def get_speakers(event_id: uuid.UUID, user: User = Depends(get_current_user), db
 def set_speakers(event_id: uuid.UUID, data: AssignmentUpdate, background: BackgroundTasks,
                  admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
     return _set_role(db, admin, event_id, "speaker", data.user_ids, background)
+
+
+@router.get("/{event_id}/registrations", response_model=list[RegistrantOut])
+def get_registrations(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Who has self-registered for this event. Org-scoped like every other event read."""
+    _get_event_or_404(db, user.org_id, event_id)
+    return crud.list_registrations(db, event_id)

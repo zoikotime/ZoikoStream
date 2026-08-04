@@ -114,7 +114,9 @@ export default function EventDetails() {
   const st = statusMeta(event.status);
 
   const copyLink = () => {
-    navigator.clipboard?.writeText(`${window.location.origin}/e/${event.slug || event.id}`);
+    // /e/:id is a separate, fully-mocked marketing page (fake demo data only) — the real,
+    // backend-wired viewer page is /events/:eventId/watch.
+    navigator.clipboard?.writeText(`${window.location.origin}/events/${event.id}/watch`);
     notify.success("Event link copied");
   };
 

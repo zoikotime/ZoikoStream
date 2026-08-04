@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import get_db
-from .models import User
+from .models import EventRegistration, User
 
 ALGORITHM = "HS256"
 _bearer = HTTPBearer(auto_error=True)
@@ -69,6 +70,30 @@ def get_current_user_optional(
         return None
     user = db.get(User, user_id)
     return user if user and user.is_active else None
+
+
+def create_registration_token(registration: EventRegistration) -> str:
+    """Scoped access token for an anonymous event registrant — not tied to a User row,
+    so it can't go through create_access_token/get_current_user. Long-lived (90 days):
+    it only ever unlocks the one already-public event it was issued for."""
+    payload = {
+        "reg": str(registration.id),
+        "event_id": str(registration.event_id),
+        "email": registration.email,
+        "exp": datetime.now(timezone.utc) + timedelta(days=90),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_registration_token(token: str, event_id: uuid.UUID) -> str | None:
+    """Returns the registered email if `token` verifies and matches `event_id`, else None."""
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("event_id") != str(event_id):
+        return None
+    return payload.get("email")
 
 
 def require_super_admin(user: User = Depends(get_current_user)) -> User:

@@ -185,6 +185,25 @@ def _assignment_html(name: str, event_title: str, role: str, org_name: str, even
     </div>""")
 
 
+def _registration_html(name: str, event_title: str, event_url: str) -> str:
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title or "the event")
+    return _shell(f"""
+    {_header("You're registered")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>You're registered for <strong>{safe_title}</strong>. We'll see you there —
+         come back to this link when it's time to watch.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{event_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          View the event
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
 
@@ -210,6 +229,10 @@ def send_reset_otp_email(to: str, name: str, otp: str) -> None:
 def send_assignment_email(to: str, name: str, event_title: str, role: str, org_name: str, event_url: str) -> None:
     _send(to, f"You've been added as {role} for {event_title}",
           _assignment_html(name, event_title, role, org_name, event_url))
+
+
+def send_registration_confirmation_email(to: str, name: str, event_title: str, event_url: str) -> None:
+    _send(to, f"You're registered for {event_title}", _registration_html(name, event_title, event_url))
 
 
 if __name__ == "__main__":

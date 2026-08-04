@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Event, EventAssignment, User
+from ..models import Event, EventAssignment, EventRegistration, User
 
 _EVENT_SORTS = {
     "created_at": Event.created_at,
@@ -165,3 +165,36 @@ def set_assignees(db, event, role, user_ids) -> None:
     for uid in dict.fromkeys(user_ids):  # dedupe, keep order
         db.add(EventAssignment(event_id=event.id, user_id=uid, role=role))
     db.commit()
+
+
+# ── Registrations (self-serve, anonymous) ─────────────────────────────────────
+
+def get_registration(db, event_id, email) -> EventRegistration | None:
+    return db.scalar(
+        select(EventRegistration).where(
+            EventRegistration.event_id == event_id,
+            EventRegistration.email == email.lower(),
+        )
+    )
+
+
+def count_registrations(db, event_id) -> int:
+    return db.scalar(
+        select(func.count()).select_from(EventRegistration).where(EventRegistration.event_id == event_id)
+    )
+
+
+def create_registration(db, event_id, name, email) -> EventRegistration:
+    reg = EventRegistration(event_id=event_id, name=name, email=email.lower())
+    db.add(reg)
+    db.commit()
+    db.refresh(reg)
+    return reg
+
+
+def list_registrations(db, event_id) -> list[EventRegistration]:
+    return db.scalars(
+        select(EventRegistration)
+        .where(EventRegistration.event_id == event_id)
+        .order_by(EventRegistration.created_at)
+    ).all()
