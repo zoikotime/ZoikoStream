@@ -72,7 +72,7 @@ export default function ModeratorHeader({
 
   return (
     <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 bg-white px-4 py-3 sm:px-6 dark:border-slate-800 dark:bg-slate-900">
-      <Link to="/organization/dashboard">
+      <Link to="/moderator/dashboard">
         <Logo height="h-7">
           <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Moderator Console</span>
         </Logo>
@@ -153,7 +153,9 @@ export default function ModeratorHeader({
         >
           {theme === "dark" ? <FiSun className="text-lg" /> : <FiMoon className="text-lg" />}
         </button>
-        <Link to="/organization/dashboard" className="hidden text-slate-400 hover:text-rose-500 sm:block" aria-label="Exit console" title="Exit console">
+        {/* Back to the moderator's own landing page — not the org console, which a moderator
+            has no access to (RoleRoute allow=["org_admin"]). */}
+        <Link to="/moderator/dashboard" className="hidden text-slate-400 hover:text-rose-500 sm:block" aria-label="Exit console" title="Exit console">
           <FiLogOut className="text-xl" />
         </Link>
       </div>

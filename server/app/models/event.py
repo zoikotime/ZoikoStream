@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func,
+    BigInteger, Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -14,11 +14,33 @@ if TYPE_CHECKING:
     from .organization import Organization
     from .user import User
 
-# Lifecycle. Guarded transitions (crud.status_transition_error): publish needs a title,
-# live only from published/scheduled, ended only from live, archive not while live.
-EVENT_STATUSES = ("draft", "published", "scheduled", "live", "ended", "cancelled", "archived")
-EVENT_VISIBILITY = ("public", "private", "unlisted")
-ASSIGNMENT_ROLES = ("host", "moderator", "speaker")
+# Lifecycle. Guarded transitions live in ONE place (crud.status_transition_error) and are
+# reused by the API, the bulk endpoint and the broadcast socket actions — see that function
+# for the rules. `paused` is a first-class event state (not only a BroadcastSession state)
+# because the audience-facing status badge has to distinguish "held" from "ended".
+EVENT_STATUSES = (
+    "draft", "published", "scheduled", "live", "paused", "ended", "cancelled", "archived",
+)
+
+# `private` means organization-members-only (services.viewer.access_for). `invite_only`
+# additionally admits anyone holding a valid EventAccessLink token — so "invite only" is
+# expressed as a visibility value plus the link table below, not as a parallel flag nobody
+# reads.
+EVENT_VISIBILITY = ("public", "private", "unlisted", "invite_only")
+
+# Event-team roles. One table serves all six (see EventAssignment). host/moderator/speaker
+# are the three the realtime layer grants power to (services.moderation.resolve_ctx);
+# producer/cohost/panelist are credited team roles that carry no broadcast authority of
+# their own — kept explicit here rather than implied, so nothing silently escalates.
+ASSIGNMENT_ROLES = ("host", "moderator", "speaker", "producer", "cohost", "panelist")
+
+# Roles whose assignment confers realtime capability. resolve_ctx reads host/moderator;
+# a producer/cohost/panelist assignment is metadata until it is also given one of these.
+PRIVILEGED_ASSIGNMENT_ROLES = ("host", "moderator", "speaker")
+
+# Stream quality targets — same vocabulary as services.broadcast.RESOLUTIONS so the value
+# stored here can be handed straight to the encoder/egress without a mapping layer.
+STREAM_QUALITIES = ("720p", "1080p", "2k", "4k")
 
 
 class Event(Base):
@@ -43,6 +65,14 @@ class Event(Base):
     tags: Mapped[list | None] = mapped_column(JSON, default=list)
     language: Mapped[str | None] = mapped_column(String(40))
     timezone: Mapped[str | None] = mapped_column(String(60))
+    # Free text ("New York, USA" / "Online") — the viewer landing page shows it beside the
+    # date. Not a structured address: nothing geocodes it, so a single line is the honest shape.
+    location: Mapped[str | None] = mapped_column(String(200))
+
+    # Accessibility advertised to attendees BEFORE they join. Stored config only — the
+    # caption/translation pipelines are not built, so these say "available", not "running".
+    captions_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    translation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Schedule
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -52,6 +82,13 @@ class Event(Base):
     visibility: Mapped[str] = mapped_column(String(20), default="public", nullable=False)
     registration_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     registration_limit: Mapped[int | None] = mapped_column(Integer)
+    # Concurrent audience ceiling, distinct from registration_limit (how many may sign up).
+    # Stored config: nothing enforces it yet — there is no admission control in the bus
+    # (documented in the audit as C7), so this is the organizer's stated intent, not a cap.
+    max_participants: Mapped[int | None] = mapped_column(Integer)
+    # Optional shared passphrase for the attendee page. Hashed with the SAME bcrypt helpers
+    # as user passwords (app.security) — a viewer gate is still a credential.
+    access_password_hash: Mapped[str | None] = mapped_column(String(255))
 
     # Feature toggles — stored config the streaming/chat phases will read; behavior not built here.
     waiting_room_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -63,6 +100,12 @@ class Event(Base):
     allow_screen_share: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     auto_start_recording: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     auto_end_event: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Whether the finished recording may be watched back. Separate from recording_enabled on
+    # purpose: an event can be recorded for compliance and never published as a replay.
+    replay_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Encoder/egress target for this event. The live session may override it per-broadcast
+    # (BroadcastSession.settings.resolution); this is the event's default.
+    stream_quality: Mapped[str] = mapped_column(String(16), default="1080p", nullable=False)
 
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
     # Blast-radius class: standard | high | unrepeatable. Decides which readiness gates are
@@ -74,9 +117,12 @@ class Event(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    organization: Mapped["Organization"] = relationship()
-    creator: Mapped["User"] = relationship(foreign_keys=[created_by])
+    # lazy="joined" on both many-to-ones: event listings serialize the org and the creator's
+    # name, so lazily loading them cost two round trips per event row.
+    organization: Mapped["Organization"] = relationship(lazy="joined")
+    creator: Mapped["User"] = relationship(foreign_keys=[created_by], lazy="joined")
     assignments: Mapped[list["EventAssignment"]] = relationship(back_populates="event", cascade="all, delete-orphan")
+    access_links: Mapped[list["EventAccessLink"]] = relationship(back_populates="event", cascade="all, delete-orphan")
 
 
 class EventAssignment(Base):
@@ -90,25 +136,57 @@ class EventAssignment(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), nullable=False)  # host | moderator | speaker
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # see ASSIGNMENT_ROLES
+    # The assignee's PRIVATE notes for this event — a speaker's talking points, visible to nobody
+    # else. This row is exactly per-event-per-person, already org-scoped and already the thing
+    # that says "you are on this event", so it is the right home; a user_preferences table would
+    # be a second place to check the same permission.
+    notes: Mapped[str | None] = mapped_column(Text)
+    # How long this person's microphone was actually live, in milliseconds.
+    #
+    # Speaking time is tracked in Redis presence while the room is up (moderation.py accumulates
+    # `speaking_ms` from real unmute spans), but presence is ephemeral — so the host console could
+    # show a live leaderboard and nothing could ever answer "how much did this speaker talk last
+    # quarter". Flushed onto this row when the broadcast ends, which makes it the only durable
+    # source for speaker analytics. NULL means the event never went live or predates this column,
+    # which is a different statement from 0 and is reported as such.
+    speaking_ms: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped["Event"] = relationship(back_populates="assignments")
     user: Mapped["User"] = relationship()
 
 
-class EventRegistration(Base):
-    """A self-serve registration for a `registration_required` event. No User row —
-    registrants are anonymous public visitors, identified only by name/email; access to
-    the watch page's stream is granted via a signed token (see security.py), not login."""
+class EventAccessLink(Base):
+    """A shareable viewer link for one event.
 
-    __tablename__ = "event_registrations"
-    __table_args__ = (UniqueConstraint("event_id", "email", name="uq_event_registration_email"),)
+    Deliberately the SAME security shape as models.invitation.Invitation, because it is the
+    same problem: the raw token is handed to a human and NEVER stored — only its sha256 hash
+    lives here. Revocation is a timestamp rather than a row delete so a revoked link stays
+    auditable, and rotation reuses the row (mirroring crud.organization.resend_invitation)
+    so "regenerate" doesn't orphan the label or the usage history.
+
+    `org_id` is copied from the event, like every table in models/live.py, so a link can be
+    org-isolated without a join.
+    """
+
+    __tablename__ = "event_access_links"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+
+    # Human label so an admin can tell two links apart ("Press", "Partners").
+    label: Mapped[str | None] = mapped_column(String(120))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    # NULL = no expiry. A past value is refused at redemption time (crud.find_access_link).
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Redemption count + last use: the only usage signal available without a registrations
+    # table, and enough to answer "is this link circulating?".
+    uses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    event: Mapped["Event"] = relationship()
+    event: Mapped["Event"] = relationship(back_populates="access_links")

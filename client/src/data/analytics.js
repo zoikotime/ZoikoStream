@@ -1,108 +1,126 @@
 // client/src/data/analytics.js
-// Dummy data for the Analytics Dashboard (/organization/analytics).
-// ponytail: mock data — swap for GET /organization/analytics when the backend lands.
-// Trend series are generated deterministically (sine shape, no Math.random) so the
-// date-range selector produces stable, believable charts that react to the range.
+// Vocabulary and formatters for the Analytics platform. NO mock data — every figure comes from
+// /analytics/*. What used to live here (generated sine-wave trends, invented device and traffic
+// mixes, hard-coded top events) is gone: the platform now measures these, and the ones it cannot
+// measure arrive from the API in an `unavailable` block with the reason, so the UI prints why
+// instead of drawing a plausible shape.
 
-// Chart colors — hex mirrors of the app's ACCENT tokens (recharts needs hex, not classes).
+// Chart colours — hex mirrors of the app's ACCENT tokens (recharts needs hex, not classes).
 export const CHART = {
   violet: "#7c3aed", blue: "#3b82f6", emerald: "#10b981",
   amber: "#f59e0b", rose: "#f43f5e", indigo: "#6366f1", cyan: "#06b6d4",
 };
 export const CATEGORICAL = [CHART.violet, CHART.blue, CHART.emerald, CHART.amber, CHART.rose, CHART.indigo, CHART.cyan];
 
-export const RANGES = [
-  { key: "7d", label: "Last 7 days", factor: 0.25 },
-  { key: "30d", label: "Last 30 days", factor: 1 },
-  { key: "90d", label: "Last 90 days", factor: 2.8 },
-  { key: "12m", label: "Last 12 months", factor: 11 },
+// Report periods. Keys match services/analytics.PERIODS on the server, which owns the calendar
+// arithmetic — the client never computes a date range, it names one.
+export const PERIODS = [
+  { key: "today", label: "Today" },
+  { key: "weekly", label: "This week" },
+  { key: "monthly", label: "This month" },
+  { key: "quarterly", label: "This quarter" },
+  { key: "yearly", label: "This year" },
+  { key: "custom", label: "Custom range" },
 ];
-export const rangeLabel = (key) => RANGES.find((r) => r.key === key)?.label ?? "";
 
-// Summary KPIs scale with the selected window (30d is the baseline).
-const BASE = { viewers: 128540, watchHours: 48200, peak: 9820, engagement: 72 };
-export const summary = (factor) => ({
-  viewers: Math.round(BASE.viewers * factor),
-  watchHours: Math.round(BASE.watchHours * factor),
-  peak: Math.round(BASE.peak * (1 + (factor - 1) * 0.12)), // a peak grows slowly, not linearly
-  engagement: BASE.engagement, // an average — roughly window-independent
-});
+export const EVENT_SORTS = [
+  { key: "attended", label: "Most attended" },
+  { key: "registrations", label: "Most registrations" },
+  { key: "peak", label: "Highest peak" },
+  { key: "engagement", label: "Most engaged" },
+  { key: "watch", label: "Most watch time" },
+  { key: "recent", label: "Most recent" },
+  { key: "title", label: "Title (A–Z)" },
+];
 
-const LABELS = {
-  "7d": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-  "30d": ["Apr 1", "Apr 6", "Apr 11", "Apr 16", "Apr 21", "Apr 26"],
-  "90d": ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W10", "W11", "W12"],
-  "12m": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+// Export scopes — keys match services/analytics.EXPORT_COLUMNS.
+export const DATASETS = [
+  { key: "events", label: "Events" },
+  { key: "trends", label: "Trends" },
+  { key: "speakers", label: "Speakers" },
+  { key: "attendees", label: "Attendees" },
+  { key: "recordings", label: "Recordings" },
+];
+
+export const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// ── formatters ───────────────────────────────────────────────────────────────
+// Every one of these treats null as "not measured" and renders an em dash. That is the whole
+// contract with the backend: it sends null rather than 0 when there is no measurement, and the UI
+// must not turn that back into a zero.
+
+export const num = (value) =>
+  value === null || value === undefined ? "—" : Number(value).toLocaleString();
+
+export const pct = (value, digits = 0) =>
+  value === null || value === undefined ? "—" : `${Number(value).toFixed(digits)}%`;
+
+/** Seconds → "3h 12m" / "12m" / "48s". Null-safe. */
+export const dur = (seconds) => {
+  if (seconds === null || seconds === undefined) return "—";
+  const total = Math.round(Number(seconds));
+  if (!total) return "0s";
+  const h = Math.floor(total / 3600);
+  const m = Math.round((total % 3600) / 60);
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return total < 60 ? `${total}s` : `${m}m`;
 };
-// Per-bucket base value — a month holds more than a day, so buckets differ by range.
-const VIEWER_BASE = { "7d": 4200, "30d": 21000, "90d": 26000, "12m": 96000 };
-const WATCH_BASE = { "7d": 1600, "30d": 8000, "90d": 9800, "12m": 36000 };
-const ATT_BASE = { "7d": 5200, "30d": 24000, "90d": 30000, "12m": 110000 };
 
-// Wavy upward trend, deterministic per index.
-const shape = (labels, base, growth = 0.7) =>
-  labels.map((label, i) => ({
-    label,
-    value: Math.round(base * (1 + growth * (i / Math.max(1, labels.length - 1))) * (0.85 + 0.15 * Math.sin(i * 1.3))),
-  }));
+/** Watch time in HOURS, the unit an executive summary wants. */
+export const hours = (seconds) =>
+  seconds === null || seconds === undefined ? "—" : `${Math.round(Number(seconds) / 360) / 10} hrs`;
 
-export const trends = (rangeKey) => {
-  const labels = LABELS[rangeKey] || LABELS["12m"];
-  return {
-    viewership: shape(labels, VIEWER_BASE[rangeKey] ?? 96000),
-    watchTime: shape(labels, WATCH_BASE[rangeKey] ?? 36000, 0.6),
-    attendance: labels.map((label, i) => {
-      const registered = Math.round((ATT_BASE[rangeKey] ?? 110000) * (1 + 0.6 * (i / Math.max(1, labels.length - 1))) * (0.9 + 0.1 * Math.sin(i)));
-      return { label, registered, attended: Math.round(registered * (0.66 + 0.05 * Math.sin(i * 1.7))) };
-    }),
-  };
+export const bytes = (n) => {
+  const value = Number(n || 0);
+  if (!value) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+  const scaled = value / 1024 ** i;
+  return `${scaled >= 100 || i === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[i]}`;
 };
 
-// % of the audience still watching across event progress (window-independent).
-export const retention = [
-  { label: "0%", value: 100 }, { label: "10%", value: 96 }, { label: "20%", value: 89 },
-  { label: "30%", value: 83 }, { label: "40%", value: 77 }, { label: "50%", value: 71 },
-  { label: "60%", value: 66 }, { label: "70%", value: 60 }, { label: "80%", value: 54 },
-  { label: "90%", value: 49 }, { label: "100%", value: 44 },
-];
+/** A growth delta for StatsCard: null when there was no previous period to compare against. */
+export const growth = (value) =>
+  value === null || value === undefined
+    ? {}
+    : { delta: `${Math.abs(value).toFixed(1)}%`, up: value >= 0 };
 
-export const topEvents = [
-  { label: "Tech Summit 2024", value: 12500 },
-  { label: "Annual Partner Summit", value: 11040 },
-  { label: "Customer Meet 2024", value: 8600 },
-  { label: "Cloud Technology Webinar", value: 7420 },
-  { label: "Q1 Product Roadmap", value: 5210 },
-];
+/**
+ * Bucketed period label for a chart axis. The server returns ISO timestamps at the bucket
+ * boundary; the bucket decides how much of it is worth showing.
+ */
+export function bucketLabel(iso, bucket) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const opts = {
+    hour: { hour: "numeric" },
+    day: { day: "numeric", month: "short" },
+    week: { day: "numeric", month: "short" },
+    month: { month: "short", year: "2-digit" },
+    quarter: { month: "short", year: "2-digit" },
+    year: { year: "numeric" },
+  }[bucket] || { day: "numeric", month: "short" };
+  return date.toLocaleDateString(undefined, opts);
+}
 
-export const locations = [
-  { label: "United States", value: 38 },
-  { label: "India", value: 21 },
-  { label: "Germany", value: 12 },
-  { label: "United Kingdom", value: 9 },
-  { label: "Singapore", value: 7 },
-  { label: "Brazil", value: 5 },
-];
+/** Shape a trend series for the AreaChart/BarChart primitives. */
+export const series = (rows, keys, bucket) =>
+  (rows || []).map((row) => {
+    const point = { label: bucketLabel(row.period, bucket) };
+    keys.forEach((key) => { point[key] = row[key] ?? 0; });
+    return point;
+  });
 
-export const devices = [
-  { label: "Desktop", value: 58 },
-  { label: "Mobile", value: 29 },
-  { label: "Tablet", value: 8 },
-  { label: "Smart TV", value: 5 },
-];
+/** The engagement tone thresholds the old dashboard used, kept so the visual language is stable. */
+export const engagementTone = (value) =>
+  value >= 70 ? CHART.emerald : value >= 55 ? CHART.amber : CHART.rose;
 
-export const trafficSources = [
-  { label: "Direct", value: 34 },
-  { label: "Email", value: 26 },
-  { label: "Social", value: 20 },
-  { label: "Search", value: 13 },
-  { label: "Referral", value: 7 },
-];
-
-export const reports = [
-  { id: 1, event: "Tech Summit 2024", date: "2024-05-20", viewers: 12500, watchHours: 8420, engagement: 78 },
-  { id: 7, event: "Customer Meet 2024", date: "2024-05-10", viewers: 8600, watchHours: 6900, engagement: 81 },
-  { id: 25, event: "Annual Partner Summit", date: "2024-01-30", viewers: 11040, watchHours: 9330, engagement: 74 },
-  { id: 6, event: "Cloud Technology Webinar", date: "2024-05-14", viewers: 3420, watchHours: 2110, engagement: 64 },
-  { id: 22, event: "Q1 Product Roadmap", date: "2024-03-18", viewers: 5210, watchHours: 2540, engagement: 59 },
-  { id: 8, event: "Security & Compliance Briefing", date: "2024-04-30", viewers: 512, watchHours: 280, engagement: 47 },
-];
+/** The browser's own timezone, as an IANA name — the default the charts bucket by. */
+export const localZone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+};

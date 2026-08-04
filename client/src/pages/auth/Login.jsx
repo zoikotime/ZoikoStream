@@ -9,8 +9,8 @@ import { Field, PasswordField, SubmitButton, Checkbox } from "../../ui/forms";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
-// One login page for every role. After login the (later) backend decides the role; for now
-// fakeSession() infers it from the email so every dashboard is reachable from here.
+// One login page for every role. POST /auth/login returns the real role and roleHome() sends
+// them to the surface it opens.
 export default function Login() {
   const { setSession } = useAuth();
   const navigate = useNavigate();

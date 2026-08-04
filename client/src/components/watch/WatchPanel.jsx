@@ -1,270 +1,207 @@
 // client/src/components/watch/WatchPanel.jsx
-// Viewer Portal right column — tabbed Chat / Q&A / Polls. All three are real, over the
-// live socket EventWatch opens (see its `liveReducer`) — same backend the host/moderator
-// consoles use. Signed-out visitors get a sign-in prompt instead of dead controls.
-import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
-import { FiSend, FiChevronUp, FiCheckCircle } from "react-icons/fi";
+// Right rail of the attendee watch page: who is presenting, whether this browser can play
+// the stream, and where to get help. Three sibling cards in one file — they share the
+// panel chrome and none of them is reused anywhere else.
+//
+// Nothing here is hardcoded. The organizer comes from the organization record, the checks
+// are live browser probes (hooks/usePlaybackCheck), and the help links come from the
+// platform settings store. A link the super admin hasn't configured is not rendered.
+import { FiCheck, FiX, FiMinus, FiAlertTriangle, FiArrowRight, FiExternalLink, FiRefreshCw } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
-import { initials } from "../../data/watch";
-import { hhmm } from "../../data/moderation";
+import { CHECK_STATE } from "../../hooks/usePlaybackCheck";
 
-// Shared by Q&A and Polls: an anonymous public visitor has no account to open the live
-// socket with, so there's no real data to show them either — same sign-in prompt as Chat.
-function SignInGate({ label }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
-      <p className="text-sm text-slate-500 dark:text-slate-400">{label}</p>
-      <Link to="/login" className="text-sm font-semibold text-emerald-600 hover:text-emerald-500 dark:text-emerald-400">
-        Sign in
-      </Link>
-    </div>
-  );
-}
+const panel =
+  "rounded-2xl border border-slate-200 bg-white p-5 dark:border-white/10 dark:bg-white/[0.02]";
+const eyebrow =
+  "text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-500";
 
-const TABS = [
-  { key: "chat", label: "Chat" },
-  { key: "qa", label: "Q&A" },
-  { key: "polls", label: "Polls" },
-];
+// ── presented by ──────────────────────────────────────────────────────────────
 
-// Real chat, wired to the same live socket the host/moderator consoles use. `authed` gates
-// sending: an anonymous public visitor has no account to open that socket with, so they see
-// a sign-in prompt instead of a composer that would silently do nothing.
-function Chat({ messages = [], typing = {}, send, authed, connected }) {
-  const [text, setText] = useState("");
-  const scroller = useRef(null);
-
-  useEffect(() => {
-    const el = scroller.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length]);
-
-  if (!authed) return <SignInGate label="Sign in to join the chat." />;
-
-  const submit = (e) => {
-    e.preventDefault();
-    const t = text.trim();
-    if (!t) return;
-    send("chat.send", { text: t });
-    setText("");
-  };
-
-  const typists = Object.values(typing).map((t) => t.name);
+export function OrganizerCard({ organizer }) {
+  if (!organizer) return null;
+  const initials = (organizer.name || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 
   return (
-    <div className="flex h-full flex-col">
-      <div ref={scroller} className="flex-1 space-y-3 overflow-y-auto pr-1">
-        {messages.map((m) => (
-          <div key={m.id} className={cx(m.pinned && "rounded-lg bg-emerald-50 p-2 dark:bg-emerald-500/10")}>
-            <div className="flex items-center gap-2">
-              <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-slate-200 text-[10px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-200">
-                {initials(m.name)}
-              </span>
-              <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">{m.name}</span>
-              {m.pinned && <span className="rounded bg-emerald-600/10 px-1.5 text-[10px] font-semibold uppercase text-emerald-600 dark:text-emerald-400">Pinned</span>}
-              <span className="ml-auto text-[11px] text-slate-400">{hhmm(m.created_at)}</span>
-            </div>
-            <p className="ml-8 text-sm text-slate-600 dark:text-slate-300">{m.text}</p>
-          </div>
-        ))}
-        {messages.length === 0 && (
-          <p className="py-8 text-center text-sm text-slate-400">No messages yet — say hello.</p>
+    <section className={panel} aria-labelledby="organizer-heading">
+      <h2 id="organizer-heading" className={eyebrow}>Presented by</h2>
+
+      <div className="mt-4 flex items-center gap-3">
+        {organizer.logo_url ? (
+          <img
+            src={organizer.logo_url}
+            alt=""
+            className="h-10 w-10 shrink-0 rounded-lg object-cover"
+            loading="lazy"
+          />
+        ) : (
+          // Initials tile rather than a stock placeholder image — it's derived from the
+          // real org name, so it can't be mistaken for a logo the organizer uploaded.
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-violet-600 text-sm font-bold text-white">
+            {initials}
+          </span>
         )}
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 truncate text-sm font-semibold text-slate-900 dark:text-white">
+            {organizer.name}
+            {organizer.verified && (
+              <FiCheck className="shrink-0 text-emerald-500 dark:text-emerald-400" title="Verified organizer" aria-label="Verified organizer" />
+            )}
+          </p>
+          <p className="truncate text-xs text-slate-500 dark:text-neutral-500">
+            {organizer.verified ? "Official organizer" : "Organizer"}
+          </p>
+        </div>
       </div>
-      {typists.length > 0 && (
-        <p className="h-4 truncate text-[11px] text-slate-400">
-          {typists.length === 1 ? `${typists[0]} is typing…` : `${typists.length} people are typing…`}
+
+      {organizer.description && (
+        <p className="mt-4 text-[13px] leading-relaxed text-slate-600 dark:text-neutral-400">
+          {organizer.description}
         </p>
       )}
-      <form onSubmit={submit} className="mt-3 flex items-center gap-2">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Say something…"
-          className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-700 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-        />
-        <button
-          type="submit"
-          disabled={!connected}
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-          aria-label="Send message"
-        >
-          <FiSend />
-        </button>
-      </form>
-    </div>
-  );
-}
 
-// Real Q&A. No per-user vote ledger on the server (see moderation._qa_vote), so the "voted"
-// highlight is purely local — it survives this tab session, not a reload, same as the mock
-// it replaced.
-function QA({ questions = [], send, authed, connected }) {
-  const [voted, setVoted] = useState({});
-  const [text, setText] = useState("");
-
-  if (!authed) return <SignInGate label="Sign in to ask a question." />;
-
-  const toggleVote = (id) => {
-    const on = !voted[id];
-    setVoted((v) => ({ ...v, [id]: on }));
-    send("qa.vote", on ? { id } : { id, down: true });
-  };
-
-  const ask = (e) => {
-    e.preventDefault();
-    const t = text.trim();
-    if (!t) return;
-    send("qa.ask", { text: t });
-    setText("");
-  };
-
-  const sorted = [...questions].sort((a, b) => b.votes - a.votes);
-
-  return (
-    <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-2 overflow-y-auto pr-1">
-        {sorted.map((q) => (
-          <div key={q.id} className="flex gap-3 rounded-xl border border-slate-100 p-3 dark:border-slate-800">
-            <button
-              onClick={() => toggleVote(q.id)}
-              className={cx(
-                "flex h-12 w-11 shrink-0 flex-col items-center justify-center rounded-lg border text-xs font-semibold transition",
-                voted[q.id]
-                  ? "border-emerald-500 bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400"
-                  : "border-slate-200 text-slate-500 hover:border-slate-300 dark:border-slate-700 dark:text-slate-400"
-              )}
-              aria-pressed={!!voted[q.id]}
+      {(organizer.website || organizer.social_links?.length > 0) && (
+        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-xs">
+          {organizer.website && (
+            <a
+              href={organizer.website}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 font-medium text-violet-600 hover:text-violet-500 dark:text-violet-400"
             >
-              <FiChevronUp className="text-base" />
-              {q.votes}
-            </button>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm text-slate-700 dark:text-slate-200">{q.text}</p>
-              <div className="mt-1 flex items-center gap-2">
-                <span className="text-xs text-slate-400">{q.name}</span>
-                {q.status === "answered" && (
-                  <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                    <FiCheckCircle className="text-sm" /> Answered
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-        ))}
-        {sorted.length === 0 && (
-          <p className="py-8 text-center text-sm text-slate-400">No questions yet — ask the first one.</p>
-        )}
-      </div>
-      <form onSubmit={ask} className="mt-3 flex items-center gap-2">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Ask a question…"
-          className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-700 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-        />
-        <button type="submit" disabled={!connected} className="rounded-xl bg-emerald-600 px-3.5 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50">
-          Ask
-        </button>
-      </form>
-    </div>
+              Website <FiExternalLink />
+            </a>
+          )}
+          {organizer.social_links?.map((s) => (
+            <a
+              key={s.url}
+              href={s.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-slate-500 hover:text-slate-700 dark:text-neutral-400 dark:hover:text-neutral-200"
+            >
+              {s.label}
+            </a>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
-// Options are index-addressed on the server (moderation._poll_vote takes `option` as an
-// array index, not an id — see poll_out), so voting sends the option's position, not a key.
-function Poll({ poll, send }) {
-  const [choice, setChoice] = useState(null);
-  const voted = choice !== null;
-  const opts = poll.options || [];
-  const total = opts.reduce((s, o) => s + (o.votes || 0), 0);
+// ── before you watch ──────────────────────────────────────────────────────────
 
-  const vote = (index) => {
-    setChoice(index);
-    send("poll.vote", { id: poll.id, option: index });
-  };
+// One icon + tint per check state. `unknown` deliberately reads as neutral, not green:
+// "this browser won't tell us" is not the same claim as "this works".
+const MARK = {
+  [CHECK_STATE.OK]: { Icon: FiCheck, cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
+  [CHECK_STATE.WARN]: { Icon: FiAlertTriangle, cls: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+  [CHECK_STATE.FAIL]: { Icon: FiX, cls: "bg-rose-500/15 text-rose-600 dark:text-rose-400" },
+  [CHECK_STATE.UNKNOWN]: { Icon: FiMinus, cls: "bg-slate-500/15 text-slate-500 dark:text-neutral-400" },
+  [CHECK_STATE.CHECKING]: { Icon: FiRefreshCw, cls: "bg-slate-500/10 text-slate-400 dark:text-neutral-500" },
+};
 
+export function ReadinessCard({ checks, running, onRerun }) {
   return (
-    <div className="rounded-xl border border-slate-100 p-4 dark:border-slate-800">
-      <p className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-100">{poll.question}</p>
-      <div className="space-y-2">
-        {opts.map((o, i) => {
-          const pct = total ? Math.round((o.votes / total) * 100) : 0;
-          if (!voted && poll.status === "live")
-            return (
-              <button
-                key={i}
-                onClick={() => vote(i)}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-left text-sm font-medium text-slate-700 transition hover:border-emerald-400 hover:bg-emerald-50 dark:border-slate-700 dark:text-slate-200 dark:hover:border-emerald-500/50 dark:hover:bg-emerald-500/10"
-              >
-                {o.label}
-              </button>
-            );
+    <section className={panel} aria-labelledby="readiness-heading">
+      <h2 id="readiness-heading" className={eyebrow}>Before you watch</h2>
+
+      <ul className="mt-4 space-y-3">
+        {checks.map(({ id, label, state, detail }) => {
+          const { Icon, cls } = MARK[state] || MARK[CHECK_STATE.UNKNOWN];
           return (
-            <div key={i} className="relative overflow-hidden rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-700">
-              <div className={cx("absolute inset-y-0 left-0", i === choice ? "bg-emerald-500/20" : "bg-slate-100 dark:bg-slate-800")} style={{ width: `${pct}%` }} />
-              <div className="relative flex items-center justify-between text-sm">
-                <span className={cx("font-medium", i === choice ? "text-emerald-700 dark:text-emerald-300" : "text-slate-700 dark:text-slate-200")}>
-                  {i === choice && "✓ "}{o.label}
+            <li key={id} className="flex items-center gap-2.5 text-sm">
+              <span className={cx("grid h-5 w-5 shrink-0 place-items-center rounded", cls)}>
+                <Icon className={cx("text-xs", state === CHECK_STATE.CHECKING && "animate-spin motion-reduce:animate-none")} aria-hidden />
+              </span>
+              <span className="text-slate-700 dark:text-neutral-200">{label}</span>
+              {detail && (
+                <span className="ml-auto truncate text-xs text-slate-400 dark:text-neutral-500" title={detail}>
+                  {detail}
                 </span>
-                <span className="tabular-nums text-slate-500 dark:text-slate-400">{pct}%</span>
-              </div>
-            </div>
+              )}
+            </li>
           );
         })}
-      </div>
-      <p className="mt-2 text-xs text-slate-400">
-        {total.toLocaleString()} votes{voted ? " · thanks for voting" : poll.status !== "live" ? " · closed" : ""}
-      </p>
-    </div>
+      </ul>
+
+      <button
+        onClick={onRerun}
+        disabled={running}
+        className={cx(
+          "mt-5 w-full rounded-lg px-4 py-2.5 text-sm font-medium transition",
+          "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100",
+          "dark:border-white/10 dark:bg-white/[0.04] dark:text-neutral-200 dark:hover:bg-white/[0.08]",
+          "disabled:cursor-not-allowed disabled:opacity-60",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+        )}
+      >
+        {running ? "Checking…" : "Run check again"}
+      </button>
+    </section>
   );
 }
 
-function Polls({ polls = [], send, authed }) {
-  if (!authed) return <SignInGate label="Sign in to vote in polls." />;
+// ── need help ─────────────────────────────────────────────────────────────────
 
-  const visible = polls.filter((p) => p.status === "live" || p.status === "closed");
+// label -> [settings key, action text]. A key the super admin hasn't set is simply not
+// rendered, so an unconfigured deployment shows a shorter card rather than dead links.
+const HELP_ROWS = [
+  ["Live chat", "live_chat_url", "Start chat"],
+  ["Email support", "support_email", "Contact"],
+  ["Help center", "help_center_url", "Browse"],
+  ["FAQs", "faq_url", "Read"],
+  ["Report an issue", "report_issue_url", "Report"],
+];
 
-  if (!visible.length) {
-    return <p className="py-8 text-center text-sm text-slate-400">No polls yet.</p>;
-  }
+// Privacy and terms share a row in the design ("Access & privacy details · Review"), so
+// they're resolved separately rather than as another HELP_ROWS entry.
+const LEGAL = ["privacy_url", "terms_url"];
+
+export function SupportCard({ support, organizer }) {
+  // Organizer support address wins over the platform's: an attendee with a problem about
+  // THIS event should reach its organizer first.
+  const email = organizer?.support_email || support?.support_email;
+
+  const rows = HELP_ROWS.map(([label, key, action]) => {
+    const value = key === "support_email" ? email : support?.[key];
+    if (!value) return null;
+    return { label, action, href: key === "support_email" ? `mailto:${value}` : value, external: key !== "support_email" };
+  }).filter(Boolean);
+
+  const legalHref = LEGAL.map((k) => support?.[k]).find(Boolean);
+  if (!rows.length && !legalHref) return null;
 
   return (
-    <div className="h-full space-y-4 overflow-y-auto">
-      {visible.map((p) => (
-        <Poll key={p.id} poll={p} send={send} />
-      ))}
-    </div>
-  );
-}
+    <section className={panel} aria-labelledby="support-heading">
+      <h2 id="support-heading" className={eyebrow}>Need help?</h2>
 
-export default function WatchPanel({ className = "", messages, typing, questions, polls, send, authed, connected }) {
-  const [tab, setTab] = useState("chat");
-
-  return (
-    <div className={cx("flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900", className)}>
-      <div className="flex shrink-0 border-b border-slate-200 dark:border-slate-800">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={cx(
-              "flex-1 border-b-2 px-3 py-3 text-sm font-medium transition",
-              tab === t.key
-                ? "border-emerald-500 text-emerald-600 dark:text-emerald-400"
-                : "border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
-            )}
-          >
-            {t.label}
-          </button>
+      <ul className="mt-2 divide-y divide-slate-100 dark:divide-white/[0.07]">
+        {rows.map(({ label, action, href, external }) => (
+          <li key={label} className="flex items-center justify-between gap-3 py-2.5">
+            <span className="text-sm text-slate-700 dark:text-neutral-300">{label}</span>
+            <a
+              href={href}
+              {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+              className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-violet-600 transition hover:text-violet-500 dark:text-violet-400 dark:hover:text-violet-300"
+            >
+              {action} <FiArrowRight className="text-xs" />
+            </a>
+          </li>
         ))}
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col p-3">
-        {tab === "chat" && <Chat messages={messages} typing={typing} send={send} authed={authed} connected={connected} />}
-        {tab === "qa" && <QA questions={questions} send={send} authed={authed} connected={connected} />}
-        {tab === "polls" && <Polls polls={polls} send={send} authed={authed} />}
-      </div>
-    </div>
+        {legalHref && (
+          <li className="flex items-center justify-between gap-3 py-2.5">
+            <span className="text-sm text-slate-700 dark:text-neutral-300">Access &amp; privacy details</span>
+            <a
+              href={legalHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-violet-600 transition hover:text-violet-500 dark:text-violet-400 dark:hover:text-violet-300"
+            >
+              Review <FiArrowRight className="text-xs" />
+            </a>
+          </li>
+        )}
+      </ul>
+    </section>
   );
 }
