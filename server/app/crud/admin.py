@@ -11,12 +11,11 @@ from sqlalchemy.orm import Session
 
 from ..models import (
     AuditLog,
-    Channel,
+    Event,
     FeatureFlag,
     Organization,
     Plan,
     Release,
-    Stream,
     Subscription,
     SupportTicket,
     User,
@@ -52,16 +51,13 @@ def _user_counts(db: Session, org_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
 
 
 def _event_counts(db: Session, org_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
-    """Events = streams owned (via channel -> user) by the org."""
+    """Events owned directly by the org."""
     if not org_ids:
         return {}
     rows = db.execute(
-        select(User.org_id, func.count(Stream.id))
-        .select_from(Stream)
-        .join(Channel, Stream.channel_id == Channel.id)
-        .join(User, Channel.owner_id == User.id)
-        .where(User.org_id.in_(org_ids))
-        .group_by(User.org_id)
+        select(Event.org_id, func.count(Event.id))
+        .where(Event.org_id.in_(org_ids), Event.deleted_at.is_(None))
+        .group_by(Event.org_id)
     ).all()
     return {oid: n for oid, n in rows}
 

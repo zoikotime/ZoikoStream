@@ -136,6 +136,32 @@ def recording_out(r: LiveRecording) -> dict:
     }
 
 
+def record_egress_result(egress_info) -> dict | None:
+    """Called from the egress_ended webhook — no Ctx here, this is LiveKit talking to us
+    server-to-server, not a signed-in moderator. Finds the LiveRecording row by egress_id
+    and writes back what actually happened: real size, final status, any error LiveKit
+    reported. file_url is NOT touched — it already holds the object key we told LiveKit to
+    write to (see _recording_start), which is what services.livekit.signed_url() needs;
+    LiveKit's reported `location` is a gs:// URI, not something a browser can fetch."""
+    db = mod.SessionLocal()
+    try:
+        r = db.scalar(select(LiveRecording).where(LiveRecording.egress_id == egress_info.egress_id))
+        if r is None:
+            return None
+        info = egress_info.file_results[0] if egress_info.file_results else egress_info.file
+        r.status = "failed" if egress_info.error else "stopped"
+        r.stopped_at = r.stopped_at or datetime.now(timezone.utc)
+        if info and info.size:
+            r.size_bytes = info.size
+        if egress_info.error:
+            r.error = egress_info.error
+        db.commit()
+        db.refresh(r)
+        return recording_out(r)
+    finally:
+        db.close()
+
+
 def _current_session(db, ctx) -> BroadcastSession | None:
     """The session this console is controlling: the newest one that hasn't ended."""
     return db.scalar(

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
@@ -14,6 +14,11 @@ const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 export default function Login() {
   const { setSession } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Set by RoleRoute/ProtectedRoute when signing in was forced by hitting a gated URL
+  // directly (e.g. an assignment-notification link to /moderator/dashboard?event=<id>
+  // while signed out) — land back on THAT page, not the bare role dashboard.
+  const from = location.state?.from;
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -38,7 +43,8 @@ export default function Login() {
       });
       setSession(data);
       notify.success(`Welcome back, ${data.user.full_name}!`);
-      navigate(roleHome(data.user.role) || "/", { replace: true });
+      const dest = from ? `${from.pathname}${from.search || ""}` : roleHome(data.user.role) || "/";
+      navigate(dest, { replace: true });
     } catch (error) {
       notify.error(errMsg(error, "Unable to sign in right now."));
     } finally {

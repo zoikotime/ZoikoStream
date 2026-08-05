@@ -12,6 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..crud import event as event_crud
 from ..crud import organization as crud
 from ..db import get_db
 from ..email import send_invitation_email
@@ -35,9 +36,10 @@ from ..schemas.organization import (
     OrgProfileOut,
     OrgProfileUpdate,
     OrgSecurity,
+    RecordingOut,
 )
 from ..security import create_access_token, get_current_user, hash_password, require_org_admin
-from ..services import org as org_svc
+from ..services import livekit, org as org_svc
 
 # Roles an org admin may assign/invite. Excludes super_admin (platform-only, never via this API).
 ORG_ASSIGNABLE_ROLES = ("org_admin", "host", "moderator", "speaker", "viewer")
@@ -84,6 +86,44 @@ def overview(
     if workspace and workspace not in {w["slug"] for w in org_svc.workspaces(org)}:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown workspace '{workspace}'")
     return org_svc.overview(db, org, user, range_=range_, include_test=include_test)
+
+
+@router.get("/recordings", response_model=list[RecordingOut])
+def list_recordings(
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """The org-wide recordings library (/organization/recordings). Only rows that actually
+    captured something (status=stopped, enforced=True) — a failed/unenforced attempt has no
+    file behind it and would be a dead "Watch Replay" link. Any member may read this, same
+    as the rest of the read surface here."""
+    out = []
+    for rec, ev in event_crud.list_org_recordings(db, org.id):
+        duration = None
+        if rec.started_at and rec.stopped_at:
+            duration = int((rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000)
+        out.append(RecordingOut(
+            id=rec.id, event_id=ev.id, title=ev.title, category=ev.category,
+            started_at=rec.started_at, duration_seconds=duration, size_bytes=rec.size_bytes,
+            url=livekit.signed_url(rec.file_url),
+        ))
+    return out
+
+
+@router.delete("/recordings/{recording_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_recording(
+    recording_id: uuid.UUID,
+    admin: User = Depends(require_org_admin),
+    db: Session = Depends(get_db),
+):
+    """Removes both the file (best-effort — see livekit.delete_object) and the DB row.
+    Org-admin only: this is a destructive, unrecoverable action on org data."""
+    rec = event_crud.get_org_recording(db, admin.org_id, recording_id)
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
+    livekit.delete_object(rec.file_url)
+    db.delete(rec)
+    db.commit()
 
 
 @router.get("/console-state")

@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # worker). Set it to share live-event traffic + presence across workers/hosts.
     REDIS_URL: str = ""
 
+    # GCS — recording storage. Blank = egress has no destination, so LiveKit Cloud rejects
+    # the request outright (services/livekit.py surfaces that as an "unenforced" recording
+    # rather than failing the host's click). GCS_CREDENTIALS_PATH points at a service
+    # account JSON key file (kept outside the repo) with Storage Object Admin on the bucket.
+    GCS_BUCKET: str = ""
+    GCS_CREDENTIALS_PATH: str = ""
+
     RESEND_API_KEY: str = ""  # blank = welcome emails skipped (logged), registration still works
     # ponytail: onboarding@resend.dev only delivers to the Resend account owner. Verify
     # zoikostream.com in Resend and switch this to noreply@zoikostream.com before launch.

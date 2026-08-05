@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Organization, Plan, Stream, Subscription, User
+from ..models import BroadcastSession, Event, Organization, Plan, Subscription, User
 from ..security import _ROLE_RANK
 
 # Excluded from customer-facing counts — it only holds the super admin (matches dashboard.py).
@@ -42,12 +42,16 @@ def _monthly_revenue(db: Session) -> float:
 
 
 def _streaming_hours(db: Session) -> float:
-    """Real total broadcast hours from stream start/end timestamps (live = up to now)."""
+    """Real total broadcast hours from broadcast-session start/end timestamps (live = up
+    to now). paused_ms is subtracted so time spent paused doesn't count as streamed."""
     now = datetime.now(timezone.utc)
-    streams = db.scalars(select(Stream).where(Stream.started_at.isnot(None))).all()
-    # ponytail: loads all streams; add a SQL age() sum if this table gets large.
-    secs = sum(((s.ended_at or now) - s.started_at).total_seconds() for s in streams if s.started_at)
-    return round(secs / 3600, 1)
+    sessions = db.scalars(select(BroadcastSession).where(BroadcastSession.started_at.isnot(None))).all()
+    # ponytail: loads all sessions; add a SQL age() sum if this table gets large.
+    secs = sum(
+        ((s.ended_at or now) - s.started_at).total_seconds() - (s.paused_ms or 0) / 1000
+        for s in sessions if s.started_at
+    )
+    return round(max(secs, 0) / 3600, 1)
 
 
 def dashboard_summary(db: Session) -> dict:
@@ -56,7 +60,7 @@ def dashboard_summary(db: Session) -> dict:
         select(func.count(Organization.id)).where(_customer_orgs(), Organization.status == "active")
     ) or 0
     total_users = db.scalar(select(func.count(User.id))) or 0
-    live_events = db.scalar(select(func.count(Stream.id)).where(Stream.is_live.is_(True))) or 0
+    live_events = db.scalar(select(func.count(Event.id)).where(Event.status == "live")) or 0
     storage_used = db.scalar(
         select(func.coalesce(func.sum(Organization.storage_used_gb), 0)).where(_customer_orgs())
     ) or 0
@@ -185,35 +189,37 @@ def roles() -> list[dict]:
 
 
 def live_events(db: Session, state: str = "live") -> list[dict]:
-    """Streams for the platform monitor, joined up to their owning organization.
-    state="live"   -> currently broadcasting, newest first
+    """Broadcast sessions for the platform monitor, joined up to their event and org.
+    state="live"   -> currently broadcasting (including paused mid-broadcast), newest first
     state="recent" -> finished broadcasts, most recently ended first
     """
     if state == "recent":
         stmt = (
-            select(Stream)
-            .where(Stream.is_live.is_(False), Stream.ended_at.isnot(None))
-            .order_by(Stream.ended_at.desc())
+            select(BroadcastSession)
+            .where(BroadcastSession.status == "ended", BroadcastSession.ended_at.isnot(None))
+            .order_by(BroadcastSession.ended_at.desc())
             .limit(50)
         )
     else:
-        stmt = select(Stream).where(Stream.is_live.is_(True)).order_by(Stream.started_at.desc())
-    streams = db.scalars(stmt).all()
+        stmt = (
+            select(BroadcastSession)
+            .where(BroadcastSession.status.in_(("live", "paused")))
+            .order_by(BroadcastSession.started_at.desc())
+        )
+    sessions = db.scalars(stmt).all()
     out = []
-    for s in streams:
-        ch = s.channel
-        owner = ch.owner if ch else None
-        org = owner.organization if owner else None
+    for s in sessions:
+        ev = db.get(Event, s.event_id)
+        org = ev.organization if ev else None
         out.append({
             "id": str(s.id),
-            "title": s.title,
-            "channel": ch.name if ch else None,
+            "title": ev.title if ev else None,
             "organization": org.name if org else None,
             "region": org.region if org else None,
-            "server": s.livekit_room,
+            "server": f"event_{s.event_id}",  # matches services.moderation.Ctx.room
             "started_at": s.started_at,
             "ended_at": s.ended_at,
-            "health": "ok" if s.is_live else None,
+            "health": "ok" if s.status in ("live", "paused") else None,
             "viewers": None,        # source: LiveKit room stats (not integrated)
             "bitrate_kbps": None,   # source: LiveKit track stats (not integrated)
         })

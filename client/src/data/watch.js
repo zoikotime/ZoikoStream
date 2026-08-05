@@ -63,11 +63,3 @@ export const pollsSeed = [
     ],
   },
 ];
-
-// Recordings surfaced under the player once an event has ended.
-export const relatedRecordings = [
-  { id: 6, title: "Cloud Technology Webinar", duration: "1:02:14", date: "May 14, 2024", views: 3420, accent: "rose" },
-  { id: 7, title: "Customer Meet 2024", duration: "2:48:30", date: "May 10, 2024", views: 890, accent: "emerald" },
-  { id: 8, title: "Security & Compliance Briefing", duration: "58:20", date: "Apr 30, 2024", views: 512, accent: "blue" },
-  { id: 5, title: "Developer Deep Dive", duration: "1:24:05", date: "Jun 5, 2024", views: 1210, accent: "indigo" },
-];

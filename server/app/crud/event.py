@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Event, EventAssignment, EventRegistration, User
+from ..models import Event, EventAssignment, EventRegistration, LiveRecording, User
 
 _EVENT_SORTS = {
     "created_at": Event.created_at,
@@ -198,3 +198,41 @@ def list_registrations(db, event_id) -> list[EventRegistration]:
         .where(EventRegistration.event_id == event_id)
         .order_by(EventRegistration.created_at)
     ).all()
+
+
+def get_latest_recording(db, event_id) -> LiveRecording | None:
+    """The most recent finished, actually-captured recording for this event — what a
+    viewer's replay link points at. `enforced=False` rows (LiveKit egress unavailable) are
+    excluded: there is no file behind them."""
+    return db.scalar(
+        select(LiveRecording)
+        .where(LiveRecording.event_id == event_id, LiveRecording.status == "stopped",
+               LiveRecording.enforced.is_(True))
+        .order_by(LiveRecording.stopped_at.desc())
+    )
+
+
+def get_org_recording(db, org_id, recording_id) -> LiveRecording | None:
+    """A single recording, scoped through its event's org_id (not the recording's own
+    org_id copy — see list_org_recordings)."""
+    return db.scalar(
+        select(LiveRecording)
+        .join(Event, Event.id == LiveRecording.event_id)
+        .where(LiveRecording.id == recording_id, Event.org_id == org_id)
+    )
+
+
+def list_org_recordings(db, org_id, limit: int = 100) -> list[tuple[LiveRecording, Event]]:
+    """Every captured recording across the org, newest first — the org-wide Recordings
+    library. Joined to Event for title/category; org-scoped via Event.org_id (matches every
+    other org-isolation check in this module) rather than LiveRecording.org_id directly, so
+    a stale org_id copy on the recording row can never leak a row from another tenant."""
+    rows = db.execute(
+        select(LiveRecording, Event)
+        .join(Event, Event.id == LiveRecording.event_id)
+        .where(Event.org_id == org_id, LiveRecording.status == "stopped",
+               LiveRecording.enforced.is_(True))
+        .order_by(LiveRecording.stopped_at.desc())
+        .limit(limit)
+    ).all()
+    return list(rows)

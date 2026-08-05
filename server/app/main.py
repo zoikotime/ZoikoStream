@@ -10,8 +10,6 @@ from sqlalchemy.exc import OperationalError
 
 from .routers.auth import router as auth_router
 from .routers.dashboard import router as dashboard_router
-from .routers.channels import router as channel_router
-from .routers.streams import router as stream_router
 from .routers.admin import router as admin_router
 from .routers.organization import router as organization_router
 from .routers.events import router as events_router
@@ -91,8 +89,6 @@ async def measure_requests(request: Request, call_next):
 
 app.include_router(auth_router)
 app.include_router(dashboard_router)
-app.include_router(channel_router)
-app.include_router(stream_router)
 app.include_router(admin_router)
 app.include_router(organization_router)
 app.include_router(events_router)

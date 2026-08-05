@@ -10,7 +10,6 @@ from app.db import Base
 
 if TYPE_CHECKING:
     from .organization import Organization
-    from .channel import Channel
 
 # Phase 1 role set. "org_admin" is the existing slug for the organization admin
 # (kept as-is — renaming to organization_admin would ripple through auth, dashboard,
@@ -86,8 +85,4 @@ class User(Base):
 
     organization: Mapped["Organization"] = relationship(
         back_populates="users"
-    )
-
-    channels: Mapped[list["Channel"]] = relationship(
-        back_populates="owner"
     )

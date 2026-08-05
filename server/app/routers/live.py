@@ -60,6 +60,24 @@ def _user_from_token(token: str | None, db: Session) -> User | None:
     return user if user and user.is_active else None
 
 
+async def _accept(websocket: WebSocket, event_id: uuid.UUID) -> bool:
+    """accept(), swallowing the one specific race that isn't a bug: resolve_ctx/ensure_state
+    await a thread/Redis round-trip, and a client that navigates away or closes the tab
+    mid-flight leaves the transport already torn down by the time we get here — uvicorn then
+    rejects the belated accept with a RuntimeError ("Expected 'websocket.send' or
+    'websocket.close', but got 'websocket.accept'"). Returns False so the caller bails out
+    without touching the (already-dead) socket again; any OTHER RuntimeError — a real bug —
+    still propagates."""
+    try:
+        await websocket.accept()
+        return True
+    except RuntimeError as exc:
+        if "websocket.accept" not in str(exc):
+            raise
+        log.debug("live socket for event %s: client gone before accept completed: %s", event_id, exc)
+        return False
+
+
 @router.websocket("/events/{event_id}/ws")
 async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | None = None):
     # Real device/platform mix for the host's analytics panel, straight off the handshake.
@@ -78,17 +96,20 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     # which silently defeats the client's FATAL_CODES-based reconnect-suppression
     # (useEventStream.js) and makes it retry an expired/invalid token forever.
     if user is None:
-        await websocket.accept()
+        if not await _accept(websocket, event_id):
+            return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired token")
         return
 
     ctx = await asyncio.to_thread(mod.resolve_ctx, event_id, user)
     if ctx is None:
-        await websocket.accept()
+        if not await _accept(websocket, event_id):
+            return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Event not found")
         return
     if await bus.is_banned(ctx.event_id, ctx.identity):
-        await websocket.accept()
+        if not await _accept(websocket, event_id):
+            return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="You have been removed from this event")
         return
 
@@ -96,7 +117,8 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     # applies the host's waiting-room / chat state instead of serving defaults.
     state = await broadcast.ensure_state(ctx)
 
-    await websocket.accept()
+    if not await _accept(websocket, event_id):
+        return
     limiter = SlidingWindow(RATE_LIMIT, RATE_WINDOW)
 
     async with bus.subscribe(ctx.event_id) as queue:
@@ -233,5 +255,12 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
         recording = kind == "egress_started"
         await bus.publish(event_id, "moderator", "recording.status", {"recording": recording})
         await mod.feed_activity(event_id, "recording", "Recording started" if recording else "Recording finished", persist=True)
+        if not recording:
+            # The ONLY place the real file size and final status exist — until now they
+            # were dropped, so LiveRecording.size_bytes stayed NULL and the console could
+            # never say whether a recording was actually captured.
+            updated = await asyncio.to_thread(broadcast.record_egress_result, evt.egress_info)
+            if updated:
+                await bus.publish(event_id, "recording", "recording.update", updated)
 
     return {"ok": True, "event": kind}
