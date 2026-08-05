@@ -36,8 +36,9 @@ function useLiveEventsData() {
 }
 
 // Platform-wide Live Events monitor. Every row comes from GET /admin/live-events, which is
-// derived straight from the streams table — no fabricated viewers/bitrate/recording state;
-// fields the platform doesn't measure yet (LiveKit room stats) render as "—", not a number.
+// derived straight from broadcast_sessions joined to their event — no fabricated
+// viewers/bitrate/recording state; fields the platform doesn't measure yet (LiveKit room
+// stats) render as "—", not a number.
 export default function LiveEvents() {
   const { data, loading, error } = useLiveEventsData();
   const [tab, setTab] = useState("live");
@@ -73,10 +74,7 @@ export default function LiveEvents() {
       </div>
     ) },
     { key: "title", header: "Event", className: "whitespace-nowrap", render: (e) => (
-      <>
-        <p className="font-medium text-slate-800 dark:text-slate-100">{e.title}</p>
-        <p className="text-xs text-slate-400">{e.channel || "—"}</p>
-      </>
+      <p className="font-medium text-slate-800 dark:text-slate-100">{e.title}</p>
     ) },
     { key: "region", header: "Region", className: "whitespace-nowrap", render: (e) => e.region || dash },
     { key: "started_at", header: tab === "live" ? "Started" : "Started", align: "right", className: "whitespace-nowrap", render: (e) => (e.started_at ? timeAgo(e.started_at) : dash) },
@@ -99,7 +97,7 @@ export default function LiveEvents() {
           <p className="text-sm text-slate-500 dark:text-slate-400">Real-time streaming monitor across every organization</p>
         </div>
         <span className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" /> Live · from the streams table
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-500" /> Live · from broadcast sessions
         </span>
       </div>
 

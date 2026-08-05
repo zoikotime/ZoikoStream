@@ -4,9 +4,10 @@
 // live presence rather than a fixed list.
 //
 // What the preview is and isn't: it renders this machine's actual camera and mic, so the
-// resolution/frame-rate readout is measured, not echoed back. It is NOT yet published to
-// LiveKit — that needs livekit-client — and the banner says so instead of implying that
-// viewers can see it.
+// resolution/frame-rate readout is measured, not echoed back. Once live, hooks/useLiveKitPublish
+// actually publishes these same tracks to viewers — `isPublishing` (that hook's `connected`)
+// is what switches the banner from "local preview only" to a real confirmation, so the host
+// is never left staring at a stale "not sending" warning while they're already on air.
 import { useEffect, useState } from "react";
 import {
   FiMonitor, FiVideoOff, FiEye, FiMic, FiMicOff, FiAlertTriangle, FiCameraOff, FiUploadCloud,
@@ -57,7 +58,7 @@ function Countdown({ until, onDone }) {
 
 export default function StudioStage({
   broadcast, recording, analytics, participants, media, screenShare, camera, mic,
-  countdownUntil, onCountdownDone, publishToken,
+  countdownUntil, onCountdownDone, publishToken, isPublishing, publishError,
 }) {
   // Destructured so `videoRef` is a plain binding: passing the whole media bag around makes
   // every `media.*` read look like a ref access to the React hooks lint rules.
@@ -155,12 +156,26 @@ export default function StudioStage({
                 {actual.frameRate ? ` @ ${actual.frameRate}fps` : ""}
               </span>
             )}
-            {previewActive && (
+            {previewActive && isPublishing && (
+              <p className="flex items-center gap-1.5 text-[11px] text-emerald-300">
+                <FiUploadCloud aria-hidden="true" />
+                Live — this feed is being published to viewers.
+              </p>
+            )}
+            {previewActive && !isPublishing && publishError && (
+              <p className="flex items-center gap-1.5 text-[11px] text-rose-300">
+                <FiAlertTriangle aria-hidden="true" />
+                Not publishing — {publishError}
+              </p>
+            )}
+            {previewActive && !isPublishing && !publishError && (
               <p className="flex items-center gap-1.5 text-[11px] text-amber-300/90">
                 <FiUploadCloud aria-hidden="true" />
-                {publishToken
-                  ? "Local preview only — a publisher token is ready, but no media is being sent yet."
-                  : "Local preview only — this feed is not being published to viewers."}
+                {live
+                  ? "Connecting the publisher — this feed will reach viewers in a moment."
+                  : publishToken
+                    ? "Local preview only — a publisher token is ready, but no media is being sent yet."
+                    : "Local preview only — this feed is not being published to viewers."}
               </p>
             )}
           </div>

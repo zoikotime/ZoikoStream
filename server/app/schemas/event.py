@@ -133,6 +133,10 @@ class WatchOut(BaseModel):
     livekit_url: str | None = None
     livekit_token: str | None = None
     room: str | None = None
+    # Populated once the event has ended and a recording actually captured something
+    # (enforced=True) — same registration/private-event gate as the live token above.
+    recording_url: str | None = None
+    recording_duration_seconds: int | None = None
 
 
 class RegistrationCreate(BaseModel):

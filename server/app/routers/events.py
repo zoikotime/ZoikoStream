@@ -154,6 +154,19 @@ def watch_event(
         token = livekit.create_stream_token(identity, room, False)
         url = livekit.settings.LIVEKIT_URL
 
+    # Replay: same access rule as the live token (registration_required gates it the same
+    # way), but independent of not_started/expired — the whole point of a replay is that it
+    # stays watchable after the scheduled window closes.
+    recording_url = recording_duration = None
+    if not can_stream and (not ev.registration_required or registered):
+        rec = crud.get_latest_recording(db, ev.id)
+        if rec:
+            recording_url = livekit.signed_url(rec.file_url)
+            if rec.started_at and rec.stopped_at:
+                recording_duration = int(
+                    (rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000
+                )
+
     org_name = ev.organization.name if ev.organization else None
     hosts = crud.list_assignees(db, ev.id, "host")
 
@@ -165,6 +178,7 @@ def watch_event(
         registration_required=ev.registration_required, registered=registered or not ev.registration_required,
         not_started=not_started, expired=expired,
         livekit_url=url, livekit_token=token, room=room if token else None,
+        recording_url=recording_url, recording_duration_seconds=recording_duration,
     )
 
 

@@ -3,13 +3,12 @@
 // Route: /events/:eventId/watch. Standalone public page (NOT the Org Dashboard).
 //
 // The video itself is real: GET /events/:eventId/watch (no auth required for public/
-// unlisted events) returns a subscribe-only LiveKit token while the event is live, and
-// VideoPlayer/useLiveKitViewer actually connect and render it. Chat/Q&A/polls are real too,
-// over the same live socket the host/moderator consoles use — see the `liveReducer` below.
-// Related recordings and the header/info copy are still the original mock data layer; there's
-// no recording playback backend yet, so adapting that would just be a second kind of dummy.
-// `watchToMockEvent` below is the seam: it maps the real API response onto the shape those
-// mock-driven components already expect.
+// unlisted events) returns a subscribe-only LiveKit token while the event is live, and a
+// signed recording URL once it's ended (see services/livekit.py signed_url) — VideoPlayer
+// renders whichever applies. Chat/Q&A/polls are real too, over the same live socket the
+// host/moderator consoles use — see the `liveReducer` below. The header/info copy is still
+// the original mock data layer. `watchToMockEvent` below is the seam: it maps the real API
+// response onto the shape those mock-driven components already expect.
 import { useCallback, useEffect, useReducer, useState } from "react";
 import useInterval from "../../hooks/useInterval";
 import useEventStream from "../../hooks/useEventStream";
@@ -23,7 +22,6 @@ import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
 import EventInfo from "../../components/watch/EventInfo";
-import RelatedRecordings from "../../components/watch/RelatedRecordings";
 import RegistrationGate from "../../components/watch/RegistrationGate";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import Spinner from "../../ui/Spinner";
@@ -138,7 +136,13 @@ export default function EventWatch() {
   const event = watch ? watchToMockEvent(watch) : null;
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
-  const timeGated = Boolean(watch?.expired || watch?.not_started);
+  // watch.expired means "the scheduled window lapsed before the host ever went live" —
+  // it does NOT mean "there's nothing left to show". Ending a broadcast backfills
+  // Event.end_time to that moment (services/broadcast.py `ev.end_time = ev.end_time or
+  // now`), so `expired` flips true within milliseconds of any normal "End Event" click.
+  // Checked here so a real ended-with-replay event is never mistaken for an event that
+  // simply expired unwatched.
+  const timeGated = Boolean((watch?.expired && !ended) || watch?.not_started);
 
   // Live viewer count that gently drifts (setState only in the interval callback).
   const [viewers, setViewers] = useState(startingViewers);
@@ -199,7 +203,9 @@ export default function EventWatch() {
             notice. The host's own broadcast/console is unaffected by this (see watch_event). */}
         <div className={`grid grid-cols-1 gap-6 ${timeGated ? "" : "lg:grid-cols-[minmax(0,1fr)_360px]"}`}>
           <div className="space-y-6">
-            {watch.expired ? (
+            {ended ? (
+              <VideoPlayer event={event} viewers={viewers} watch={watch} />
+            ) : watch.expired ? (
               <AccessWindowNotice variant="expired" />
             ) : watch.registration_required && !watch.registered ? (
               <RegistrationGate eventId={eventId} eventTitle={event.name} onRegistered={fetchWatch} />
@@ -223,11 +229,6 @@ export default function EventWatch() {
               connected={liveStatus === "open"}
             />
           )}
-        </div>
-
-        {/* Bottom section */}
-        <div className="mt-10">
-          <RelatedRecordings ended={ended} />
         </div>
       </main>
 

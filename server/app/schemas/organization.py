@@ -164,3 +164,19 @@ class InvitationPreview(BaseModel):
     email: EmailStr
     role: str
     organization_name: str
+
+
+# ── Recordings ───────────────────────────────────────────────────────────────
+
+class RecordingOut(BaseModel):
+    """One captured recording, org-wide (GET /organization/recordings). `url` is a
+    time-limited signed link generated per-request — never persisted, so it can't go
+    stale in a cached response."""
+    id: uuid.UUID
+    event_id: uuid.UUID
+    title: str | None = None
+    category: str | None = None
+    started_at: datetime | None = None
+    duration_seconds: int | None = None
+    size_bytes: int | None = None
+    url: str | None = None

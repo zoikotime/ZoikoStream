@@ -8,8 +8,14 @@ state change and the broadcast happen either way, the media enforcement is what'
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import timedelta
+from functools import lru_cache
+from pathlib import Path
 
+from google.cloud import storage as gcs_storage
+from google.oauth2 import service_account
 from livekit import api
 
 from app.config import settings
@@ -116,7 +122,8 @@ async def close_room(room: str) -> bool:
 # Recording is composite room egress. LiveKit needs somewhere to PUT the file: with no
 # s3/gcp/azure block it writes inside its own container, which on LiveKit Cloud means the
 # request is rejected. We surface that as (None, error) so the console can say "recording
-# not enforced" instead of implying a file exists.
+# not enforced" instead of implying a file exists. When GCS is configured (below), every
+# egress gets a real destination and this stops happening.
 
 # Presets only reach 1080p; 2K/4K need explicit encoding options.
 _PRESETS = {
@@ -129,11 +136,76 @@ _ADVANCED = {
 }
 
 
+@lru_cache(maxsize=1)
+def _gcs_credentials_json() -> str | None:
+    """Raw contents of the service account key file, read once per process. LiveKit's
+    GCPUpload wants the JSON as a string, not a path — the egress worker talks to GCS
+    directly, this process never touches the uploaded bytes."""
+    if not settings.GCS_CREDENTIALS_PATH:
+        return None
+    try:
+        return Path(settings.GCS_CREDENTIALS_PATH).read_text()
+    except OSError as exc:
+        log.warning("Couldn't read GCS_CREDENTIALS_PATH: %s", exc)
+        return None
+
+
+def gcs_configured() -> bool:
+    return bool(settings.GCS_BUCKET and _gcs_credentials_json())
+
+
+@lru_cache(maxsize=1)
+def _gcs_client() -> gcs_storage.Client | None:
+    creds_json = _gcs_credentials_json()
+    if not creds_json:
+        return None
+    info = json.loads(creds_json)
+    creds = service_account.Credentials.from_service_account_info(info)
+    return gcs_storage.Client(credentials=creds, project=info.get("project_id"))
+
+
+def signed_url(object_key: str, expires_minutes: int = 180) -> str | None:
+    """A time-limited playback URL for a private recording. None if GCS isn't configured,
+    the object doesn't exist, or signing fails — never a broken/expired-looking link."""
+    if not object_key:
+        return None
+    client = _gcs_client()
+    if client is None:
+        return None
+    try:
+        blob = client.bucket(settings.GCS_BUCKET).blob(object_key)
+        return blob.generate_signed_url(
+            version="v4", expiration=timedelta(minutes=expires_minutes), method="GET"
+        )
+    except Exception as exc:  # noqa: BLE001 — a signing failure must not break the page
+        log.warning("GCS signed URL failed for %s: %s", object_key, exc)
+        return None
+
+
+def delete_object(object_key: str) -> bool:
+    """Best-effort delete of a recording's file. Returns False (never raises) if GCS isn't
+    configured or the object is already gone — the DB row is the source of truth for
+    whether a recording exists from the app's point of view, so a storage-side miss must
+    not block removing it."""
+    if not object_key:
+        return False
+    client = _gcs_client()
+    if client is None:
+        return False
+    try:
+        client.bucket(settings.GCS_BUCKET).blob(object_key).delete()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("GCS delete failed for %s: %s", object_key, exc)
+        return False
+
+
 def _egress_request(room: str, quality: str, filepath: str) -> api.RoomCompositeEgressRequest:
-    req = api.RoomCompositeEgressRequest(
-        room_name=room,
-        file_outputs=[api.EncodedFileOutput(file_type=api.EncodedFileType.MP4, filepath=filepath)],
-    )
+    output = api.EncodedFileOutput(file_type=api.EncodedFileType.MP4, filepath=filepath)
+    creds_json = _gcs_credentials_json()
+    if creds_json and settings.GCS_BUCKET:
+        output.gcp.CopyFrom(api.GCPUpload(credentials=creds_json, bucket=settings.GCS_BUCKET))
+    req = api.RoomCompositeEgressRequest(room_name=room, file_outputs=[output])
     if quality in _ADVANCED:
         width, height = _ADVANCED[quality]
         req.advanced.CopyFrom(api.EncodingOptions(width=width, height=height, framerate=30))

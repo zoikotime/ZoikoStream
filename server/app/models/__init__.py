@@ -1,7 +1,5 @@
 from .organization import Organization, ORG_STATUSES
 from .user import User, ROLES
-from .channel import Channel
-from .stream import Stream
 from .plan import Plan
 from .subscription import Subscription, SUBSCRIPTION_STATUSES
 from .audit_log import AuditLog
