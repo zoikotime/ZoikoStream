@@ -131,6 +131,4 @@ class Stream(Base):
     )
 
 
-    # lazy="joined": every stream listing reads channel.name (and through it the owning org),
-    # which cost one round trip per stream as a lazy load.
-    channel = relationship("Channel", lazy="joined")
+    channel = relationship("Channel")

@@ -41,11 +41,6 @@ CHANNELS = (
     "recording",   # start / pause / resume / stop + timer + storage
     "analytics",   # viewer count, peak, retention samples, engagement, distributions
     "stage",       # stage roster, hand-raise queue, waiting room admissions
-    # speaker console additions
-    "presentation",  # which deck/slide is on screen, and approval decisions
-    "whiteboard",    # collaborative drawing objects
-    # attendee additions
-    "reaction",      # ephemeral floating reactions (never persisted — see services/attendee.py)
 )
 
 # A slow client must never stall the event loop or the other subscribers, so each
@@ -188,17 +183,6 @@ async def presence_upsert(event_id, identity: str, patch: dict) -> dict:
     return rec
 
 
-async def presence_get(event_id, identity: str) -> dict:
-    """One participant's current record, or {} if absent. Exists so a caller that needs to
-    ACCUMULATE (speaking time) can read the prior value without pulling the whole roster."""
-    event_id = eid(event_id)
-    r = await redis()
-    if r is None:
-        return dict(_memory.get(event_id, {}).get(identity) or {})
-    raw = await r.hget(_pkey(event_id), identity)
-    return json.loads(raw) if raw else {}
-
-
 async def presence_remove(event_id, identity: str) -> dict | None:
     event_id = eid(event_id)
     r = await redis()
@@ -227,11 +211,8 @@ async def presence_clear(event_id) -> None:
         _memory.pop(event_id, None)
         _state.pop(event_id, None)
         _bans.pop(event_id, None)
-        _boards.pop(event_id, None)
-        _counters.pop(f"reactions:{event_id}", None)
     else:
-        await r.delete(_pkey(event_id), _bkey(event_id), _skey(event_id), _wkey(event_id),
-                       _ckey(f"reactions:{event_id}"))
+        await r.delete(_pkey(event_id), _bkey(event_id), _skey(event_id))
 
 
 # ── live session state (broadcast + chat/Q&A settings) ────────────────────────
@@ -276,110 +257,6 @@ async def state_clear(event_id) -> None:
         _state.pop(eid(event_id), None)
     else:
         await r.delete(_skey(event_id))
-
-
-# ── whiteboard ────────────────────────────────────────────────────────────────
-# One hash per event, object id -> object. Deliberately NOT in the DB and NOT in the state key
-# above: a whiteboard is per-broadcast working material (like presence), and a stroke every few
-# milliseconds would either be a write storm on Postgres or a full rewrite of the settings blob
-# on every pen movement.
-#
-# ponytail: capped at MAX_BOARD_OBJECTS and dropped when the room ends. Export is client-side
-# (SVG/PNG), so a whiteboard somebody wants to keep leaves as a file rather than a table. Add a
-# `whiteboards` table only if a saved-and-reopened board is ever actually required.
-
-MAX_BOARD_OBJECTS = 2000
-
-
-def _wkey(event_id) -> str:
-    return f"live:{eid(event_id)}:board"
-
-
-_boards: dict[str, dict[str, dict]] = {}
-
-
-async def board_add(event_id, obj: dict) -> dict | None:
-    """Store one object. Returns None when the board is full, so the caller can say so rather
-    than silently dropping the stroke a speaker just drew."""
-    event_id = eid(event_id)
-    r = await redis()
-    if r is None:
-        board = _boards.setdefault(event_id, {})
-        if len(board) >= MAX_BOARD_OBJECTS and obj["id"] not in board:
-            return None
-        board[obj["id"]] = obj
-        return obj
-    if await r.hlen(_wkey(event_id)) >= MAX_BOARD_OBJECTS and not await r.hexists(_wkey(event_id), obj["id"]):
-        return None
-    await r.hset(_wkey(event_id), obj["id"], json.dumps(obj, default=str))
-    return obj
-
-
-async def board_remove(event_id, obj_id: str) -> bool:
-    event_id = eid(event_id)
-    r = await redis()
-    if r is None:
-        return _boards.get(event_id, {}).pop(obj_id, None) is not None
-    return bool(await r.hdel(_wkey(event_id), obj_id))
-
-
-async def board_all(event_id) -> list[dict]:
-    event_id = eid(event_id)
-    r = await redis()
-    if r is None:
-        rows = list(_boards.get(event_id, {}).values())
-    else:
-        rows = [json.loads(v) for v in (await r.hgetall(_wkey(event_id))).values()]
-    # Paint order is creation order — a later stroke sits on top of an earlier one.
-    return sorted(rows, key=lambda o: o.get("at") or 0)
-
-
-async def board_clear(event_id) -> int:
-    event_id = eid(event_id)
-    r = await redis()
-    if r is None:
-        return len(_boards.pop(event_id, {}) or {})
-    n = await r.hlen(_wkey(event_id))
-    await r.delete(_wkey(event_id))
-    return n
-
-
-# ── counters ──────────────────────────────────────────────────────────────────
-# Small named tallies that must survive a worker but are not worth a row: live reaction totals.
-# HINCRBY is atomic, so unlike state_set this is safe with thousands of concurrent writers — which
-# is exactly the situation reactions create.
-
-def _ckey(name) -> str:
-    return f"live:{name}"
-
-
-_counters: dict[str, dict[str, int]] = {}
-
-
-async def counter_bump(name: str, field: str, by: int = 1) -> dict:
-    """Increment one field and return the whole tally."""
-    r = await redis()
-    if r is None:
-        bucket = _counters.setdefault(name, {})
-        bucket[field] = bucket.get(field, 0) + by
-        return dict(bucket)
-    await r.hincrby(_ckey(name), field, by)
-    return {k: int(v) for k, v in (await r.hgetall(_ckey(name))).items()}
-
-
-async def counter_all(name: str) -> dict:
-    r = await redis()
-    if r is None:
-        return dict(_counters.get(name, {}))
-    return {k: int(v) for k, v in (await r.hgetall(_ckey(name))).items()}
-
-
-async def counter_clear(name: str) -> None:
-    r = await redis()
-    if r is None:
-        _counters.pop(name, None)
-    else:
-        await r.delete(_ckey(name))
 
 
 # ── bans ──────────────────────────────────────────────────────────────────────

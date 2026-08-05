@@ -30,7 +30,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -440,13 +440,10 @@ def attention(db: Session, org: Organization, ent: dict, readiness: list[dict]) 
             "to": "/organization/settings",
         })
 
-    # Members waiting on an invitation decision. Filtered on the clock and on deleted_at:
-    # `pending` alone counts rows that have already lapsed or been hidden, which had this card
-    # reporting invitations nobody could still accept.
+    # Members waiting on an invitation decision.
     pending = db.scalar(
         select(func.count(Invitation.id)).where(
-            Invitation.org_id == org.id, Invitation.status == "pending",
-            Invitation.expires_at > _now(), Invitation.deleted_at.is_(None))
+            Invitation.org_id == org.id, Invitation.status == "pending")
     ) or 0
     if pending:
         items.append({
@@ -481,8 +478,7 @@ def security_support(db: Session, org: Organization) -> dict:
     ) or 0
     pending_members = db.scalar(
         select(func.count(Invitation.id)).where(
-            Invitation.org_id == org.id, Invitation.status == "pending",
-            Invitation.expires_at > _now(), Invitation.deleted_at.is_(None))
+            Invitation.org_id == org.id, Invitation.status == "pending")
     ) or 0
 
     return {
@@ -577,22 +573,6 @@ def _readiness_state(ev: dict) -> str:
 
 # ── payloads ──────────────────────────────────────────────────────────────────
 
-def _invitations_needing_attention(db: Session, org_id) -> int:
-    """Invitations an admin should look at: expired-unanswered, or whose email failed to send.
-    Deliberately NOT "all pending" — a pending invitation that was delivered yesterday is the
-    system working, and badging it would train the admin to ignore the badge."""
-    return db.scalar(
-        select(func.count(Invitation.id)).where(
-            Invitation.org_id == org_id,
-            Invitation.deleted_at.is_(None),
-            or_(
-                and_(Invitation.status == "expired", Invitation.accepted_at.is_(None)),
-                and_(Invitation.status == "pending", Invitation.send_error.isnot(None)),
-            ),
-        )
-    ) or 0
-
-
 def console_state(db: Session, org: Organization, user: User) -> dict:
     """Small payload the org shell needs on every page: identity, workspace, nav badges."""
     active_sessions = db.scalar(
@@ -617,13 +597,6 @@ def console_state(db: Session, org: Organization, user: User) -> dict:
                     Event.org_id == org.id, Event.deleted_at.is_(None),
                     Event.status == "live")
             ) or 0,
-            # In-app signal that an invitation needs attention: it lapsed unanswered, or its
-            # email never left the building. This platform has no notifications table, so the
-            # honest in-app increment is a count on the payload the org shell ALREADY polls.
-            # Computed for admins only — console_state is readable by any member, and an
-            # invitation backlog is not a member's business.
-            "invitations_attention": _invitations_needing_attention(db, org.id)
-            if user.role in ("org_admin", "super_admin") else 0,
         },
         "user": {"name": user.full_name, "email": user.email,
                  "role_label": _role_label(user.role)},

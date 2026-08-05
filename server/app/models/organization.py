@@ -56,25 +56,10 @@ class Organization(Base):
     # Domain verification (custom domain lives in `domain` above). Real DNS check is a later
     # flow; this defaults False and flips only when that flow lands — not faked here.
     domain_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # Platform-issued organizer badge, shown to attendees next to the organizer name. Set by
-    # the super admin only — DISTINCT from domain_verified above, which is a DNS fact and says
-    # nothing about whether the platform vouches for this organizer.
-    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # [{"label": "X", "url": "https://..."}] — rendered on the public organizer card.
-    social_links: Mapped[list | None] = mapped_column(JSON, default=list)
     # Grouped settings as JSON blobs (matches PlatformSetting.value). Shape enforced by the
     # Pydantic schemas, not the column, so toggles can evolve without a migration.
     notifications: Mapped[dict | None] = mapped_column(JSON, default=dict)
     security: Mapped[dict | None] = mapped_column(JSON, default=dict)
-    # Recording + media-library policy: download rules, retention thresholds, watermark, auto-record.
-    # One JSON blob for the same reason as the two above — the shape is enforced by the Pydantic
-    # schema (schemas/media.py) so a new toggle is not a migration. Defaults live in
-    # services/media.DEFAULT_MEDIA_POLICY, never in this column, so an org row written before a
-    # toggle existed still resolves to the current default instead of a missing key.
-    media: Mapped[dict | None] = mapped_column(JSON, default=dict)
-    # Storage allowance in GB. A column, not a JSON key: it is compared against a SUM() in SQL and
-    # read by the platform admin's account screens alongside storage_used_gb above.
-    storage_quota_gb: Mapped[float] = mapped_column(Float, default=100, nullable=False)
     # Developer: read-only in this phase (no key-management endpoints yet). Empty until a
     # later phase writes them.
     api_keys: Mapped[list | None] = mapped_column(JSON, default=list)

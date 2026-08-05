@@ -47,8 +47,6 @@ class Channel(Base):
         server_default=func.now(),
     )
 
-    # lazy="joined": same reason as User.organization — the platform monitor walks
-    # stream -> channel -> owner -> organization per row (services/admin.live_events).
     owner: Mapped["User"] = relationship(
-        back_populates="channels", lazy="joined"
+        back_populates="channels"
     )

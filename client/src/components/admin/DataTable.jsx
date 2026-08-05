@@ -18,13 +18,6 @@ import { cx, focusRing } from "../../ui/tokens";
 // }]
 // search:    searchable + (searchKeys?: string[] | getSearchText?(row)) + searchPlaceholder?
 // selection: selectable + rowKey + onSelectionChange?(Set) + bulkActions?({selected, clear})
-// server:    sort + onSortChange({key,dir}|null)   -> sorting is delegated to the caller
-//            total + page + onPageChange(n)        -> `rows` IS one page; totals come from
-//                                                     the API, not from rows.length
-//
-// Server mode exists because fetching page_size=100 and paginating in the browser silently
-// truncates any org with more rows than that. Both halves are independent: a screen can
-// take server sort with local paging, or neither.
 const alignCls = (a) => (a === "right" ? "text-right" : "text-left");
 
 function SortIcon({ active, dir }) {
@@ -32,31 +25,12 @@ function SortIcon({ active, dir }) {
   return dir === "asc" ? <FiChevronUp aria-hidden="true" /> : <FiChevronDown aria-hidden="true" />;
 }
 
-// First, last, and a window around the current page. Without this, a server-paginated table
-// of 4 000 rows renders 200 page buttons.
-function pageWindow(current, count, span = 1) {
-  if (count <= 7) return Array.from({ length: count }, (_, i) => i + 1);
-  const pages = new Set([1, count]);
-  for (let p = current - span; p <= current + span; p += 1) {
-    if (p > 1 && p < count) pages.add(p);
-  }
-  const sorted = [...pages].sort((a, b) => a - b);
-  const out = [];
-  sorted.forEach((p, i) => {
-    if (i && p - sorted[i - 1] > 1) out.push("…");
-    out.push(p);
-  });
-  return out;
-}
-
-function PageBtn({ disabled, active, onClick, label, children }) {
+function PageBtn({ disabled, active, onClick, children }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      aria-label={label}
-      aria-current={active ? "page" : undefined}
       className={cx(
         "grid h-8 min-w-8 place-items-center rounded-md px-2 text-sm font-medium transition-colors duration-150",
         focusRing,
@@ -111,24 +85,11 @@ export default function DataTable({
   selectable = false,
   onSelectionChange,
   bulkActions,
-  // server-side sort / pagination (opt-in)
-  sort: sortProp,
-  onSortChange,
-  total,
-  page: pageProp,
-  onPageChange,
 }) {
-  const serverSort = typeof onSortChange === "function";
-  const serverPaged = typeof onPageChange === "function" && typeof total === "number";
-
-  const [localSort, setLocalSort] = useState(initialSort); // { key, dir } | null
-  const [localPage, setLocalPage] = useState(1);
+  const [sort, setSort] = useState(initialSort); // { key, dir } | null
+  const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(() => new Set());
-
-  const sort = serverSort ? sortProp ?? null : localSort;
-  const setPage = serverPaged ? onPageChange : setLocalPage;
-  const page = serverPaged ? pageProp || 1 : localPage;
 
   // Built-in search: narrow rows before sort/paginate.
   const q = query.trim().toLowerCase();
@@ -143,19 +104,15 @@ export default function DataTable({
   }, [rows, q, searchable, getSearchText, searchKeys, columns]);
 
   // Reset to page 1 when the underlying set changes (filter narrows it, or search).
-  // Render-phase reset — the documented alternative to a setState-in-effect. Skipped in
-  // server mode: there, a new `rows` array IS the result of the caller changing the page,
-  // so resetting would fight it.
+  // Render-phase reset — the documented alternative to a setState-in-effect.
   const [prevKey, setPrevKey] = useState({ rows, q });
-  if (!serverPaged && (rows !== prevKey.rows || q !== prevKey.q)) {
+  if (rows !== prevKey.rows || q !== prevKey.q) {
     setPrevKey({ rows, q });
-    setLocalPage(1);
+    setPage(1);
   }
 
   const sorted = useMemo(() => {
-    // Server mode: `rows` arrives already ordered by the API. Re-sorting here would only
-    // reorder the visible page, which reads as a broken sort.
-    if (serverSort || !sort) return filtered;
+    if (!sort) return filtered;
     const col = columns.find((c) => c.key === sort.key);
     if (!col) return filtered;
     const val = col.sortValue || ((r) => r[col.key]);
@@ -168,17 +125,14 @@ export default function DataTable({
       if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
       return String(av).localeCompare(String(bv)) * dir;
     });
-  }, [filtered, sort, columns, serverSort]);
+  }, [filtered, sort, columns]);
 
-  const rowTotal = serverPaged ? total : sorted.length;
-  const pageCount = pageSize ? Math.max(1, Math.ceil(rowTotal / pageSize)) : 1;
+  const pageCount = pageSize ? Math.max(1, Math.ceil(sorted.length / pageSize)) : 1;
   const current = Math.min(page, pageCount);
-  const paged = pageSize && !serverPaged ? sorted.slice((current - 1) * pageSize, current * pageSize) : sorted;
+  const paged = pageSize ? sorted.slice((current - 1) * pageSize, current * pageSize) : sorted;
 
-  // Same three-state cycle in both modes: asc -> desc -> unsorted.
-  const nextSort = (key, s) => (s?.key === key ? (s.dir === "asc" ? { key, dir: "desc" } : null) : { key, dir: "asc" });
   const toggleSort = (key) =>
-    serverSort ? onSortChange(nextSort(key, sort)) : setLocalSort((s) => nextSort(key, s));
+    setSort((s) => (s?.key === key ? (s.dir === "asc" ? { key, dir: "desc" } : null) : { key, dir: "asc" }));
 
   // Selection acts on the full filtered/sorted set (not just the current page).
   const allKeys = selectable ? sorted.map(rowKey) : [];
@@ -365,28 +319,24 @@ export default function DataTable({
         </table>
       </div>
 
-      {pageSize && !loading && rowTotal > 0 && (
+      {pageSize && !loading && sorted.length > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 dark:border-white/10">
-          <p className="text-xs text-slate-500 dark:text-neutral-400" aria-live="polite">
-            Showing {(current - 1) * pageSize + 1}–{Math.min(current * pageSize, rowTotal)} of {rowTotal}
+          <p className="text-xs text-slate-500 dark:text-neutral-400">
+            Showing {(current - 1) * pageSize + 1}–{Math.min(current * pageSize, sorted.length)} of {sorted.length}
           </p>
-          <nav className="flex items-center gap-1" aria-label="Pagination">
-            <PageBtn disabled={current === 1} onClick={() => setPage(current - 1)} label="Previous page">
-              <FiChevronLeft aria-hidden="true" />
+          <div className="flex items-center gap-1">
+            <PageBtn disabled={current === 1} onClick={() => setPage(current - 1)}>
+              <FiChevronLeft />
             </PageBtn>
-            {pageWindow(current, pageCount).map((p, i) =>
-              p === "…" ? (
-                <span key={`gap-${i}`} className="px-1 text-sm text-slate-400" aria-hidden="true">…</span>
-              ) : (
-                <PageBtn key={p} active={p === current} onClick={() => setPage(p)} label={`Page ${p}`}>
-                  {p}
-                </PageBtn>
-              )
-            )}
-            <PageBtn disabled={current === pageCount} onClick={() => setPage(current + 1)} label="Next page">
-              <FiChevronRight aria-hidden="true" />
+            {Array.from({ length: pageCount }, (_, i) => i + 1).map((p) => (
+              <PageBtn key={p} active={p === current} onClick={() => setPage(p)}>
+                {p}
+              </PageBtn>
+            ))}
+            <PageBtn disabled={current === pageCount} onClick={() => setPage(current + 1)}>
+              <FiChevronRight />
             </PageBtn>
-          </nav>
+          </div>
         </div>
       )}
     </div>

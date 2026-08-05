@@ -26,35 +26,11 @@ def test_broadcast_control_is_host_only():
     moderator = _ctx(can_moderate=True, role="moderator")
     viewer = _ctx()
     for action in ("broadcast.golive", "broadcast.end", "broadcast.emergency_stop",
-                   "broadcast.pause", "recording.start", "recording.stop"):
+                   "broadcast.pause", "broadcast.settings", "recording.start", "recording.stop"):
         assert action in m.ACTIONS, f"{action} not registered"
         assert action in m.HOST_ONLY, f"{action} must be host-only"
         assert asyncio.run(m.dispatch(moderator, action, {})), f"moderator reached {action}"
         assert asyncio.run(m.dispatch(viewer, action, {})), f"viewer reached {action}"
-
-
-def test_settings_splits_by_role_rather_than_being_host_only():
-    """broadcast.settings carries BOTH the host's encoder targets and the audience controls a
-    moderator is responsible for, so it filters its own patch (MODERATOR_SETTINGS) instead of
-    being refused outright — a moderator who can see spam but can't switch the spam filter on is
-    not moderating. The media half stays the host's."""
-    assert "broadcast.settings" not in m.HOST_ONLY
-    moderator = _ctx(can_moderate=True, role="moderator")
-
-    # A viewer never reaches it at all: it is not in VIEWER_ACTIONS.
-    assert asyncio.run(m.dispatch(_ctx(), "broadcast.settings", {"settings": {"emoji_only": True}}))
-
-    for key in ("chat_enabled", "slow_mode_seconds", "profanity_filter", "spam_filter",
-                "auto_moderation", "waiting_room", "raise_hand_enabled"):
-        assert key in bc.MODERATOR_SETTINGS, key
-    for key in ("resolution", "framerate", "bitrate_kbps", "mic_gain", "background",
-                "recording_quality", "layout", "pinned_identity"):
-        assert key not in bc.MODERATOR_SETTINGS, f"{key} must stay host-only"
-
-    # Asking for a host-only key is REFUSED, not silently dropped: a toggle that appears to move
-    # and doesn't is worse than one that says no.
-    err = asyncio.run(m.dispatch(moderator, "broadcast.settings", {"settings": {"bitrate_kbps": 9000}}))
-    assert err and "host" in err.lower(), err
 
 
 def test_stage_controls_stay_open_to_moderators():

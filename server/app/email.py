@@ -30,20 +30,12 @@ def _logo_attachment() -> dict | None:
     return {"filename": "zoiko-logo.png", "content": content, "content_id": LOGO_CID}
 
 
-def _send(to: str, subject: str, html_body: str) -> tuple[bool, str | None, str | None]:
-    """Post one email to Resend. Returns (ok, provider_message_id, error).
-
-    Still best-effort — it never raises, so a mail outage cannot break the request that
-    triggered it. But it now REPORTS the outcome, because the invitation system records
-    `sent` vs `failed` on the row and a silently swallowed failure would leave an
-    invitation sitting at `pending` forever with nobody able to tell why.
-
-    `provider_message_id` is Resend's id, stored so a later delivery webhook can be matched
-    back to the invitation it belongs to.
-    """
+def _send(to: str, subject: str, html_body: str) -> None:
+    """Post one email to Resend. Best-effort: logs and swallows failures so a mail
+    outage never breaks the request that triggered it."""
     if not settings.RESEND_API_KEY:
         log.warning("RESEND_API_KEY not set; skipping email to %s", to)
-        return False, None, "Email is not configured on this deployment"
+        return
     payload = {"from": settings.MAIL_FROM, "to": [to], "subject": subject, "html": html_body}
     logo = _logo_attachment()
     if logo:
@@ -56,18 +48,10 @@ def _send(to: str, subject: str, html_body: str) -> tuple[bool, str | None, str 
             timeout=10,
         )
         resp.raise_for_status()
-        message_id = None
-        try:
-            message_id = (resp.json() or {}).get("id")
-        except ValueError:
-            pass   # a 2xx with an unparseable body still means it was accepted
-        return True, message_id, None
     except httpx.HTTPError as e:
-        # Resend returns the reason in the body — surface it for debugging AND for the row.
+        # Resend returns the reason in the body — surface it for debugging.
         body = getattr(e, "response", None)
-        detail = body.text if body is not None else str(e)
-        log.error("Email to %s failed: %s %s", to, e, detail)
-        return False, None, detail[:400]
+        log.error("Email to %s failed: %s %s", to, e, body.text if body else "")
 
 
 def _shell(inner: str) -> str:
@@ -134,6 +118,25 @@ def _otp_html(name: str, otp: str) -> str:
     </div>""")
 
 
+def _invite_html(org_name: str, inviter: str, invite_url: str) -> str:
+    safe_org = html.escape(org_name or "an organization")
+    safe_inviter = html.escape(inviter or "An admin")
+    return _shell(f"""
+    {_header("You're invited")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>{safe_inviter} has invited you to join <strong>{safe_org}</strong> on ZoikoStream.</p>
+      <p>Click below to accept the invitation and set up your account. This link expires soon.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{invite_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Accept invitation
+        </a>
+      </p>
+      <p style="color:#888;font-size:13px;">If you weren't expecting this, you can ignore this email.</p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
 def _event_created_html(organizer: str, title: str, start: datetime | None, status: str) -> str:
     safe_organizer = html.escape(organizer or "there")
     safe_title = html.escape(title or "Untitled event")
@@ -161,159 +164,44 @@ def _event_created_html(organizer: str, title: str, start: datetime | None, stat
     </div>""")
 
 
-# ── invitations ───────────────────────────────────────────────────────────────
-# ONE template serves org-membership and event invitations: the event rows simply do not
-# render when there is no event. Two near-identical templates would drift.
-#
-# Neither button ACTS on being opened. Both land on the accept page, which requires a
-# deliberate click to POST. That is not politeness — mail scanners, link previewers and
-# corporate security proxies fetch every URL in an email, and a GET that accepted (or
-# declined) an invitation would be triggered by a robot before the human ever read it.
-
-def _detail_rows(rows: list[tuple[str, str]]) -> str:
-    """The grey label / right-aligned value table used by the invitation emails.
-    Rows whose value is falsy are dropped, so an unscheduled event renders one fewer line
-    instead of "Date: None"."""
-    cells = "".join(
-        f"""<tr><td style="padding:9px 0;color:#888;font-size:13px;">{html.escape(label)}</td>
-              <td style="padding:9px 0;text-align:right;font-size:13px;color:#333;">
-                <strong>{html.escape(str(value))}</strong></td></tr>"""
-        for label, value in rows if value
-    )
-    return f"""<table role="presentation" width="100%" style="border-collapse:collapse;margin:22px 0;
-                 border-top:1px solid #eee;border-bottom:1px solid #eee;">{cells}</table>"""
-
-
-def _button(url: str, label: str, *, primary: bool = True) -> str:
-    bg, color, border = ("#7ac142", "#fff", "#7ac142") if primary else ("#fff", "#555", "#d8d8dd")
-    return f"""<a href="{url}" style="background:{bg};color:{color};text-decoration:none;
-        padding:13px 26px;border:1px solid {border};border-radius:4px;font-weight:bold;
-        font-size:14px;display:inline-block;margin:4px 6px;">{html.escape(label)}</a>"""
-
-
-def _invitation_html(*, org_name: str, inviter: str, role_label: str, accept_url: str,
-                     decline_url: str, expires: str, event_title: str | None = None,
-                     event_when: str | None = None, message: str | None = None) -> str:
-    safe_org = html.escape(org_name or "an organization")
-    safe_inviter = html.escape(inviter or "An administrator")
-    what = (
-        f"invited you to join <strong>{html.escape(event_title)}</strong>"
-        if event_title else f"invited you to join <strong>{safe_org}</strong> on ZoikoStream"
-    )
-    rows = _detail_rows([
-        ("Organization", org_name),
-        ("Event", event_title or ""),
-        ("Date", event_when or ""),
-        ("Your role", role_label),
-        ("Invitation expires", expires),
-    ])
-    note = (
-        f"""<div style="background:#f7f7f9;border-left:3px solid #7ac142;padding:12px 16px;
-              margin:0 0 20px;font-size:14px;color:#444;">{html.escape(message)}</div>"""
-        if message else ""
-    )
-    return _shell(f"""
-    {_header("You're invited")}
-    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
-      <p>{safe_inviter} has {what}.</p>
-      {note}
-      {rows}
-      <p style="text-align:center;margin:28px 0 8px;">
-        {_button(accept_url, "Accept invitation")}
-        {_button(decline_url, "Decline", primary=False)}
-      </p>
-      <p style="color:#888;font-size:13px;text-align:center;margin-top:20px;">
-        This invitation is personal to {html.escape("you")} and can only be used once.
-        If you weren't expecting it, you can ignore this email or decline above.
-      </p>
-      <p style="margin-bottom:0;">Team ZoikoStream</p>
-    </div>""")
-
-
-def _invitation_outcome_html(*, heading: str, lead: str, rows: list[tuple[str, str]],
-                             footer: str | None = None) -> str:
-    """Notification to the INVITER when an invitation is accepted or declined, and to the
-    invitee when access is revoked. No call to action — these report a fact."""
-    return _shell(f"""
-    {_header(heading)}
-    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
-      <p>{lead}</p>
-      {_detail_rows(rows)}
-      {f'<p style="color:#888;font-size:13px;">{footer}</p>' if footer else ""}
-      <p style="margin-bottom:0;">Team ZoikoStream</p>
-    </div>""")
-
-
-def send_invitation_email(
-    to: str, org_name: str, inviter: str, accept_url: str, decline_url: str, *,
-    role_label: str, expires: str, event_title: str | None = None,
-    event_when: str | None = None, message: str | None = None,
-) -> tuple[bool, str | None, str | None]:
-    """The invitation itself. Returns _send's (ok, message_id, error) so the caller can
-    record `sent` or `failed` on the row rather than guessing."""
-    subject = (
-        f"You're invited to {event_title} on ZoikoStream" if event_title
-        else f"You're invited to join {org_name} on ZoikoStream"
-    )
-    return _send(to, subject, _invitation_html(
-        org_name=org_name, inviter=inviter, role_label=role_label, accept_url=accept_url,
-        decline_url=decline_url, expires=expires, event_title=event_title,
-        event_when=event_when, message=message,
-    ))
-
-
-def send_invitation_accepted_email(to: str, invitee: str, org_name: str, role_label: str,
-                                   event_title: str | None = None) -> None:
-    """To the inviter. The platform has no in-app notification store, so this email IS the
-    notification (the audit log is the durable record)."""
-    _send(to, f"{invitee} accepted your invitation", _invitation_outcome_html(
-        heading="Invitation accepted",
-        lead=f"<strong>{html.escape(invitee)}</strong> has accepted your invitation and now has access.",
-        rows=[("Organization", org_name), ("Event", event_title or ""), ("Role", role_label)],
-    ))
-
-
-def send_invitation_declined_email(to: str, invitee: str, org_name: str,
-                                   event_title: str | None = None) -> None:
-    _send(to, f"{invitee} declined your invitation", _invitation_outcome_html(
-        heading="Invitation declined",
-        lead=f"<strong>{html.escape(invitee)}</strong> has declined your invitation.",
-        rows=[("Organization", org_name), ("Event", event_title or "")],
-        footer="You can invite them again from the invitations page if this was unexpected.",
-    ))
-
-
-def send_invitation_revoked_email(to: str, org_name: str, role_label: str,
-                                  event_title: str | None = None) -> None:
-    """To the invitee, when an admin withdraws access AFTER acceptance. Telling them is the
-    point — silently removing someone's access is how a host turns up to a locked studio."""
-    _send(to, f"Your access to {event_title or org_name} was removed",
-          _invitation_outcome_html(
-              heading="Access removed",
-              lead=f"An administrator at <strong>{html.escape(org_name)}</strong> has removed your access.",
-              rows=[("Organization", org_name), ("Event", event_title or ""), ("Role removed", role_label)],
-              footer="Your ZoikoStream account itself is unchanged. Contact the organizer if you think this is a mistake.",
-          ))
-
-
-def send_assignment_email(to: str, name: str | None, event_title: str | None, role: str,
-                          org_name: str | None, event_url: str) -> None:
-    """To someone an admin just put on an event's team. Not an invitation — they already have
-    an account and the role is already granted, so there is nothing to accept; the button just
-    opens their console. Built from the same _shell/_detail_rows/_button pieces as the
-    invitation mail so the two don't drift into looking like different products."""
+def _assignment_html(name: str, event_title: str, role: str, org_name: str, event_url: str) -> str:
+    safe_name = html.escape(name or "there")
     safe_title = html.escape(event_title or "an event")
-    _send(to, f"You've been added as {role} for {event_title or 'an event'}", _shell(f"""
+    safe_org = html.escape(org_name or "your organization")
+    safe_role = html.escape(role.title())
+    return _shell(f"""
     {_header("You've been assigned")}
     <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
-      <p>Hi {html.escape(name or "there")},</p>
-      <p>You've been added as a <strong>{html.escape(role.title())}</strong> for
-         <strong>{safe_title}</strong> on {html.escape(org_name or "your organization")}'s
-         ZoikoStream account.</p>
-      {_detail_rows([("Organization", org_name or ""), ("Event", event_title or ""),
-                     ("Your role", role.title())])}
-      <p style="text-align:center;margin:28px 0 8px;">{_button(event_url, "Open the event")}</p>
-    </div>"""))
+      <p>Hi {safe_name},</p>
+      <p>You've been added as a <strong>{safe_role}</strong> for
+         <strong>{safe_title}</strong> on {safe_org}'s ZoikoStream account.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{event_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Open the event
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
+def _registration_html(name: str, event_title: str, event_url: str) -> str:
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title or "the event")
+    return _shell(f"""
+    {_header("You're registered")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>You're registered for <strong>{safe_title}</strong>. We'll see you there —
+         come back to this link when it's time to watch.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{event_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          View the event
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
 
 
 def send_welcome_email(to: str, name: str) -> None:
@@ -330,33 +218,21 @@ def send_event_created_email(
     )
 
 
+def send_invitation_email(to: str, org_name: str, inviter: str, invite_url: str) -> None:
+    _send(to, f"You're invited to join {org_name} on ZoikoStream", _invite_html(org_name, inviter, invite_url))
+
+
 def send_reset_otp_email(to: str, name: str, otp: str) -> None:
     _send(to, "Your ZoikoStream password reset code", _otp_html(name, otp))
 
 
-def send_recording_failed_email(to: str, org_name: str, event_title: str, reason: str) -> None:
-    """Tell the organization a capture did not happen, and why.
+def send_assignment_email(to: str, name: str, event_title: str, role: str, org_name: str, event_url: str) -> None:
+    _send(to, f"You've been added as {role} for {event_title}",
+          _assignment_html(name, event_title, role, org_name, event_url))
 
-    Operational alerts are the one class of mail worth sending unprompted: a recording failure is
-    invisible until somebody goes looking for a file that is not there, and by then the event is
-    over and unrecapturable. The reason is included verbatim because it is usually actionable
-    (no bucket configured, bad credentials, egress quota) — a generic "something went wrong"
-    would send the admin to the logs for information we already have.
-    """
-    _send(
-        to,
-        f"Recording failed: {event_title}",
-        _shell(
-            _header("Recording failed")
-            + f"<p style='margin:0 0 14px;color:#334155;font-size:15px'>Hi {html.escape(org_name)},</p>"
-            "<p style='margin:0 0 14px;color:#334155;font-size:15px'>The recording for "
-            f"<strong>{html.escape(event_title)}</strong> could not be captured, so no file was "
-            "produced for this session.</p>"
-            + _detail_rows([("Reason", reason)])
-            + "<p style='margin:16px 0 0;color:#64748b;font-size:13px'>If the broadcast is still "
-            "live you can retry the capture from the host console's recording panel.</p>"
-        ),
-    )
+
+def send_registration_confirmation_email(to: str, name: str, event_title: str, event_url: str) -> None:
+    _send(to, f"You're registered for {event_title}", _registration_html(name, event_title, event_url))
 
 
 if __name__ == "__main__":
@@ -366,50 +242,20 @@ if __name__ == "__main__":
     with patch.object(settings, "RESEND_API_KEY", ""):
         send_welcome_email("nobody@example.com", "<script>")  # must not raise
         send_reset_otp_email("nobody@example.com", "<script>", "0421")
-        # Unconfigured mail must report the failure rather than silently claim success —
-        # the invitation row's `sent` vs `failed` state depends on this return value.
-        ok, mid, err = _send("nobody@example.com", "s", "<p>b</p>")
-        assert ok is False and mid is None and err, "_send must report an unconfigured provider"
-        send_invitation_accepted_email("a@example.com", "<i>Ann</i>", "Acme", "Host", "Launch")
-        send_invitation_declined_email("a@example.com", "Ann", "Acme")
-        send_invitation_revoked_email("a@example.com", "Acme", "Host", "Launch")
     assert "&lt;script&gt;" in _welcome_html("<script>"), "name not HTML-escaped"
     assert "0421" in _otp_html("Alice", "0421"), "otp not rendered"
     assert "Alice" in _otp_html("Alice", "0421")
     assert f"cid:{LOGO_CID}" in _welcome_html("Alice"), "logo cid missing from welcome email"
     assert f"cid:{LOGO_CID}" in _otp_html("Alice", "0421"), "logo cid missing from otp email"
     assert _logo_attachment() and _logo_attachment()["content_id"] == LOGO_CID, "logo attachment missing"
+    invite = _invite_html("<b>Acme</b>", "<i>Bob</i>", "https://x/accept-invite?token=abc")
+    assert "&lt;b&gt;Acme&lt;/b&gt;" in invite and "&lt;i&gt;Bob&lt;/i&gt;" in invite, "invite not escaped"
     ev = _event_created_html("<i>Bob</i>", "<b>Launch</b>", None, "draft")
     assert "&lt;b&gt;Launch&lt;/b&gt;" in ev and "&lt;i&gt;Bob&lt;/i&gt;" in ev, "event email not escaped"
     assert "Not scheduled" in ev, "missing start_time not handled"
     assert "01 Jan 2026" in _event_created_html("Bob", "Launch", datetime(2026, 1, 1, 9, 30), "live")
-
-    # ── invitation email ──────────────────────────────────────────────────────
-    invite = _invitation_html(
-        org_name="<b>Acme</b>", inviter="<i>Bob</i>", role_label="Host",
-        accept_url="https://x/accept-invitation?token=abc",
-        decline_url="https://x/accept-invitation?token=abc&decline=1",
-        expires="08 Aug 2026", event_title="<u>Launch</u>", event_when="01 Aug 2026, 10:00 AM",
-        message="<script>alert(1)</script>",
-    )
-    for raw, escaped in [("<b>Acme</b>", "&lt;b&gt;Acme&lt;/b&gt;"),
-                         ("<i>Bob</i>", "&lt;i&gt;Bob&lt;/i&gt;"),
-                         ("<u>Launch</u>", "&lt;u&gt;Launch&lt;/u&gt;")]:
-        assert escaped in invite, f"{raw} not HTML-escaped in the invitation email"
-    assert "<script>alert(1)</script>" not in invite, "admin message not escaped — XSS in the invite"
-    assert "accept-invitation?token=abc" in invite, "accept link missing"
-    assert "decline=1" in invite, "decline link missing"
-    assert "Accept invitation" in invite and "Decline" in invite, "both buttons required"
-    assert "Host" in invite and "08 Aug 2026" in invite, "role + expiry must be stated"
-    assert "01 Aug 2026, 10:00 AM" in invite, "event date must be stated"
-    assert f"cid:{LOGO_CID}" in invite, "branding logo missing from the invitation"
-
-    # An org-only invitation renders the SAME template with the event rows absent — not
-    # "Event: None".
-    org_only = _invitation_html(
-        org_name="Acme", inviter="Bob", role_label="Viewer",
-        accept_url="https://x/a", decline_url="https://x/d", expires="08 Aug 2026",
-    )
-    assert "Event" not in org_only, "event row must not render for an org-only invitation"
-    assert "None" not in org_only, "missing fields must be dropped, never printed"
+    assert "accept-invite?token=abc" in invite, "invite link missing"
+    asn = _assignment_html("<i>Bob</i>", "<b>Launch</b>", "host", "<u>Acme</u>", "https://x/host/dashboard?event=1")
+    assert "&lt;i&gt;Bob&lt;/i&gt;" in asn and "&lt;b&gt;Launch&lt;/b&gt;" in asn and "&lt;u&gt;Acme&lt;/u&gt;" in asn, "assignment email not escaped"
+    assert "Host" in asn, "role not rendered"
     print("ok")

@@ -36,7 +36,7 @@ from ..models import (
     LiveQuestion,
     User,
 )
-from . import bus, livekit, viewer
+from . import bus, livekit
 
 # How much history a reconnecting console loads. ponytail: a fixed window, not paging —
 # a moderator needs the recent room, and the full chat log is an export concern.
@@ -108,10 +108,6 @@ class Ctx:
     # Broadcast control (go live, end, record, emergency stop) is HOST-only. A moderator
     # runs the audience; they must not be able to end the stream.
     can_host: bool = False
-    # An assigned speaker/panellist. Sits BETWEEN an attendee and a moderator: they publish
-    # media and answer the questions routed to them, but they run nothing. Staff are speakers
-    # too — a host presenting their own slides needs the same tools.
-    can_speak: bool = False
 
     @property
     def actor(self):
@@ -124,57 +120,30 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
     Returns None when the event isn't visible to the user's org -> socket is refused."""
     db = SessionLocal()
     try:
-        ev = db.scalar(select(Event).where(Event.id == event_id, Event.deleted_at.is_(None)))
+        stmt = select(Event).where(Event.id == event_id, Event.deleted_at.is_(None))
+        if user.role != "super_admin":
+            stmt = stmt.where(Event.org_id == user.org_id)
+        ev = db.scalar(stmt)
         if ev is None:
-            return None
-        # Same rule as the attendee landing endpoint (services.viewer.access_for), so an
-        # attendee of a PUBLIC event can't be handed the page and then refused the socket
-        # that carries its viewer count. Org isolation for private events is unchanged —
-        # access_for still requires membership for those.
-        allowed, _, _ = viewer.access_for(ev, user)
-        if not allowed:
             return None
 
         # Org admins and above moderate any event in their org. A moderator/host/speaker
         # must be ASSIGNED to this specific event — an org's moderator is not automatically
         # a moderator of every event in it.
-        can = can_host = can_speak = False
-        # An org admin runs their OWN organization's events. The org_id check is the whole
-        # guard: access_for above admits any signed-in user to a PUBLIC event (and public is
-        # the default visibility), so without it an org_admin of any other tenant arrived here
-        # with can_host=True — a publish token plus every HOST_ONLY action
-        # (broadcast.golive/end/emergency_stop, recording.*) on somebody else's live event, with
-        # ctx.org_id set to the victim's org so the audit rows landed in the wrong tenant.
-        # super_admin is platform-wide by definition and keeps the bypass.
-        if user.role == "super_admin":
-            can = can_host = can_speak = True
-        elif user.role == "org_admin" and user.org_id == ev.org_id:
-            can = can_host = can_speak = True
-        elif user.role in ("moderator", "host", "speaker"):
-            # The Event.org_id == user.org_id join is what makes an assignment confer power
-            # only inside its own tenant. It is not reachable today (every write path to
-            # EventAssignment goes through routers/events._require_org_members, which refuses
-            # a non-member), but it BECOMES load-bearing now that accepting an invitation
-            # creates assignments: without it, a stale assignment plus access_for's "any
-            # signed-in user may open a public event" would hand can_host to an outsider.
+        can = can_host = False
+        if user.role in ("org_admin", "super_admin"):
+            can = can_host = True
+        elif user.role in ("moderator", "host"):
             roles = set(db.scalars(
-                select(EventAssignment.role)
-                .join(Event, Event.id == EventAssignment.event_id)
-                .where(
+                select(EventAssignment.role).where(
                     EventAssignment.event_id == ev.id,
                     EventAssignment.user_id == user.id,
-                    Event.org_id == user.org_id,
                 )
             ).all())
             can = bool(roles & {"moderator", "host"})
             # Only an assigned HOST gets broadcast control — being the org's host role is
             # not enough, and a moderator assignment never grants it.
             can_host = "host" in roles
-            # A speaker or panellist assignment is what puts somebody on stage. `panelist` is
-            # in ASSIGNMENT_ROLES as a credited team role; here it earns the same console,
-            # because a panellist on a panel is a speaker in every way that matters to the
-            # media layer. A host is a speaker too — they present their own slides.
-            can_speak = bool(roles & {"speaker", "panelist", "host"})
 
         return Ctx(
             event_id=ev.id,
@@ -186,7 +155,6 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
             role=user.role,
             can_moderate=can,
             can_host=can_host,
-            can_speak=can_speak,
         )
     finally:
         db.close()
@@ -202,7 +170,7 @@ def _iso(dt):
 def message_out(m: LiveMessage) -> dict:
     return {
         "id": str(m.id), "name": m.author_name, "user_id": str(m.user_id) if m.user_id else None,
-        "text": m.text, "status": m.status, "pinned": m.pinned, "highlighted": m.highlighted,
+        "text": m.text, "status": m.status, "pinned": m.pinned,
         "flags": m.flags or [], "flagged": bool(m.flags), "reactions": m.reactions or {},
         "reply_to": str(m.reply_to) if m.reply_to else None, "note": m.note,
         "created_at": _iso(m.created_at),
@@ -213,8 +181,6 @@ def question_out(q: LiveQuestion) -> dict:
     return {
         "id": str(q.id), "name": q.author_name, "text": q.text, "votes": q.votes,
         "status": q.status, "pinned": q.pinned, "assigned_name": q.assigned_name,
-        "assigned_to": str(q.assigned_to) if q.assigned_to else None,
-        "answer_text": q.answer_text, "answered_at": _iso(q.answered_at),
         "flags": q.flags or [], "created_at": _iso(q.created_at),
     }
 
@@ -385,163 +351,6 @@ async def snapshot(ctx: Ctx) -> dict:
     return snap
 
 
-# ── viewer projection ─────────────────────────────────────────────────────────
-# The socket is shared by the host console, the moderator console and plain attendees, so
-# the snapshot above and every envelope on the bus are built for the most privileged
-# reader. Projecting them down for attendees has to happen on the SERVER: a client that
-# merely declines to render the analytics block has still received it.
-#
-# Both projections are ALLOW-lists. A future snapshot key or bus channel is invisible to
-# attendees until someone deliberately adds it here — the failure mode of forgetting is a
-# missing panel, not a leak.
-
-# Snapshot keys an attendee may see. Everything else (participants roster, activity feed,
-# analytics, broadcast session, recordings, health, publish_token) is dropped.
-VIEWER_SNAPSHOT_KEYS = frozenset({
-    "event", "speakers", "messages", "questions", "polls", "announcements",
-    "can_moderate", "can_host", "livekit_enforced", "countdown_until", "livekit_url",
-    # Attendee additions: my own identity (so the client can tell its own messages, questions and
-    # reactions apart), the room's running reaction tally, and the resources shared with the
-    # audience. All three are either the caller's own or already public to the room.
-    "identity", "reactions", "resources",
-})
-
-# Whole channels an attendee may receive unfiltered — the ones they participate in. `reaction` is
-# ephemeral and carries only an emoji, a display name and the running totals.
-VIEWER_CHANNELS = frozenset({"chat", "qa", "poll", "announcement", "reaction"})
-
-# Individual envelope types from privileged channels that carry something an attendee
-# legitimately needs, narrowed to the exact fields. `viewers` is the count on the player
-# badge; `status`/`live` drive the LIVE indicator; `recording` tells the room it is being
-# recorded, which attendees are entitled to know.
-VIEWER_ENVELOPE_FIELDS = {
-    # A private reply from a moderator. Already narrowed to ONE recipient by routers/live.py
-    # before this projection runs, so what this entry decides is which fields that one person
-    # sees — not who receives it.
-    ("participants", "participant.notice"): ("to_identity", "text", "from_name"),
-    ("moderator", "room.status"): ("live", "recovering"),
-    ("moderator", "recording.status"): ("recording",),
-    ("broadcast", "broadcast.update"): ("status",),
-    ("broadcast", "broadcast.countdown"): ("until",),
-    ("analytics", "analytics.tick"): ("viewers",),
-}
-
-
-def viewer_snapshot(snap: dict) -> dict:
-    """Attendee-safe projection of the opening snapshot. Adds back the one aggregate an
-    attendee is entitled to — the live viewer count — WITHOUT the presence roster or the
-    engagement/health figures it was computed alongside."""
-    out = {k: v for k, v in snap.items() if k in VIEWER_SNAPSHOT_KEYS}
-    analytics = snap.get("analytics") or {}
-    out["audience"] = {"viewers": analytics.get("viewers", 0)}
-    # Broadcast status only — not the session object, which carries the host's settings.
-    out["stream"] = {"status": (snap.get("broadcast") or {}).get("status")}
-    out["can_moderate"] = False
-    out["can_host"] = False
-    return out
-
-
-def viewer_envelope(env: dict) -> dict | None:
-    """Attendee-safe projection of one bus envelope, or None to drop it entirely."""
-    channel, kind = env.get("channel"), env.get("type")
-    if channel in VIEWER_CHANNELS:
-        return env
-    fields = VIEWER_ENVELOPE_FIELDS.get((channel, kind))
-    if fields is None:
-        return None
-    data = env.get("data") or {}
-    return {**env, "data": {k: data[k] for k in fields if k in data}}
-
-
-# ── speaker projection ────────────────────────────────────────────────────────
-# A third tier, between the attendee and the console. A speaker is ON the broadcast, so they
-# legitimately need the stage roster (to see who else is up), their own media grant, the
-# presentation and whiteboard state, and their speaking-time figure. They are NOT running the
-# event, so the moderation queue, the audit timeline, recordings and the full analytics block
-# stay out.
-#
-# Same allow-list discipline as the attendee projection, and for the same reason: a client that
-# merely declines to render a panel has still received its data.
-
-SPEAKER_SNAPSHOT_KEYS = frozenset({
-    "event", "speakers", "messages", "questions", "polls", "announcements",
-    "can_moderate", "can_host", "can_speak", "livekit_enforced", "countdown_until",
-    "livekit_url", "participants",
-    # services/speaker.py's own contribution: my assets, the live presentation, the whiteboard,
-    # my notes and my speaking time. Every key is either mine or already public to the room.
-    "presentation", "whiteboard", "assets", "notes", "stage", "publish_token",
-    "publish_identity", "publish_sources", "speaking", "assigned_questions", "identity",
-    "reactions",
-})
-
-# Channels a speaker receives unfiltered: the ones they take part in, plus the two that carry
-# the presentation and the whiteboard they are collaborating on.
-SPEAKER_CHANNELS = frozenset({"chat", "qa", "poll", "announcement", "presentation", "whiteboard"})
-
-# Individual envelopes from privileged channels. A speaker needs to know the room is live, that
-# it is being recorded, how many people are watching, and when their own grant changes.
-SPEAKER_ENVELOPE_FIELDS = {
-    ("participants", "participant.notice"): ("to_identity", "text", "from_name"),
-    ("moderator", "room.status"): ("live", "recovering"),
-    ("moderator", "recording.status"): ("recording",),
-    ("broadcast", "broadcast.update"): ("status",),
-    ("broadcast", "broadcast.countdown"): ("until",),
-    ("analytics", "analytics.tick"): ("viewers", "participants", "speakers", "hands"),
-    # Stage changes: a speaker must see themselves being invited up or taken down, and who else
-    # is on the stage. The presence record is already visible to them in the snapshot roster.
-    ("participants", "participant.join"): None,
-    ("participants", "participant.update"): None,
-    ("participants", "participant.leave"): None,
-    ("stage", "waiting.admitted"): ("identity",),
-}
-
-# Presence fields a speaker may see about OTHER people. The full record carries a moderator's
-# working notes on somebody — chat mutes, timeouts, ban state, per-person telemetry — which is
-# audience management, not the stage.
-SPEAKER_PRESENCE_KEYS = frozenset({
-    "identity", "name", "role", "on_stage", "speaking", "muted", "hand", "publishing",
-    "camera_allowed", "share_allowed", "joined_at", "quality",
-})
-
-
-def speaker_presence(rec: dict) -> dict:
-    return {k: v for k, v in (rec or {}).items() if k in SPEAKER_PRESENCE_KEYS}
-
-
-def speaker_snapshot(snap: dict) -> dict:
-    """Speaker-safe projection of the opening snapshot."""
-    out = {k: v for k, v in snap.items() if k in SPEAKER_SNAPSHOT_KEYS}
-    out["participants"] = [speaker_presence(p) for p in (snap.get("participants") or [])]
-    analytics = snap.get("analytics") or {}
-    # The audience figures a presenter is entitled to, without the engagement/health block.
-    out["audience"] = {
-        "viewers": analytics.get("viewers", 0),
-        "participants": analytics.get("participants", 0),
-        "speakers": analytics.get("speakers", 0),
-        "hands": analytics.get("hands", 0),
-    }
-    out["stream"] = {"status": (snap.get("broadcast") or {}).get("status")}
-    out["can_moderate"] = False
-    out["can_host"] = False
-    return out
-
-
-def speaker_envelope(env: dict) -> dict | None:
-    """Speaker-safe projection of one bus envelope, or None to drop it."""
-    channel, kind = env.get("channel"), env.get("type")
-    if channel in SPEAKER_CHANNELS:
-        return env
-    if (channel, kind) not in SPEAKER_ENVELOPE_FIELDS:
-        return None
-    fields = SPEAKER_ENVELOPE_FIELDS[(channel, kind)]
-    data = env.get("data") or {}
-    # None means "the whole payload, narrowed by the presence allow-list instead" — used for the
-    # participant.* envelopes, whose shape is a presence record rather than a fixed field set.
-    if fields is None:
-        return {**env, "data": speaker_presence(data)}
-    return {**env, "data": {k: data[k] for k in fields if k in data}}
-
-
 # ── actions ───────────────────────────────────────────────────────────────────
 # Each handler is `async (ctx, payload) -> list[(channel, type, data)]`; the dispatcher
 # publishes whatever comes back. Handlers that touch the DB wrap it in tx().
@@ -550,9 +359,6 @@ def speaker_envelope(env: dict) -> dict | None:
 VIEWER_ACTIONS = frozenset({
     "chat.send", "chat.typing", "chat.react", "qa.ask", "qa.vote", "poll.vote",
     "participant.hand", "participant.state",
-    # Reporting abuse is only useful if the AUDIENCE can do it. It flags for review and never
-    # deletes, and its result goes back on a channel attendees don't receive (see _chat_report).
-    "chat.report",
 })
 
 
@@ -575,41 +381,17 @@ _EMOJI_ONLY = re.compile(
 # toggle that only changes an icon is worse than no toggle, because the host believes chat
 # is off. Staff bypass their own audience controls — a host must keep a voice in their room.
 
-def chat_gate(settings: dict, ctx: Ctx, text: str, presence: dict | None = None) -> str | None:
-    """Reason to reject this message outright, or None to allow it.
-
-    `presence` is the AUTHOR's own presence record, carrying a per-person chat mute. That is
-    deliberately separate from `muted` (which is the microphone): a host mutes a speaker's mic
-    mid-answer all the time and must not silence their chat as a side effect.
-    """
+def chat_gate(settings: dict, ctx: Ctx, text: str) -> str | None:
+    """Reason to reject this message outright, or None to allow it."""
     if ctx.can_moderate:
         return None
     if settings.get("chat_enabled") is False:
         return "Chat is turned off"
-    muted_until = _chat_mute_remaining(presence or {})
-    if muted_until is not None:
-        return ("You've been muted in chat" if muted_until <= 0
-                else f"You've been muted in chat for another {muted_until} min")
     if settings.get("emoji_only") and not _EMOJI_ONLY.match(text):
         return "Emoji-only mode is on"
     if settings.get("subscriber_only") and ctx.role == "viewer":
         return "Chat is limited to members right now"
     return None
-
-
-def _chat_mute_remaining(presence: dict) -> int | None:
-    """Minutes left on this person's chat mute, 0 for an indefinite one, None if not muted.
-
-    The expiry is checked at SEND time rather than by a timer: a scheduled unmute would need a
-    job per mute and would silently keep somebody muted if the worker restarted.
-    """
-    if not presence.get("chat_muted"):
-        return None
-    until = _parse_dt(presence.get("chat_muted_until"))
-    if until is None:
-        return 0
-    left = (until - datetime.now(timezone.utc)).total_seconds()
-    return None if left <= 0 else max(1, int(left // 60) + 1)
 
 
 def slow_mode_error(slow_seconds: int, since_last: float | None) -> str | None:
@@ -635,11 +417,9 @@ async def _chat_send(ctx, payload):
     if not text:
         return []
 
-    # Read from the bus, not the DB — this runs once per message. Presence is only needed for
-    # the chat-mute check, which staff bypass, so it is not fetched on the moderator path.
+    # Read from the bus, not the DB — this runs once per message.
     settings = await bus.state_get(ctx.event_id)
-    presence = None if ctx.can_moderate else await bus.presence_get(ctx.event_id, ctx.identity)
-    blocked_reason = chat_gate(settings, ctx, text, presence)
+    blocked_reason = chat_gate(settings, ctx, text)
     if blocked_reason:
         return blocked_reason
 
@@ -716,7 +496,7 @@ async def _chat_react(ctx, payload):
 
 
 async def _chat_moderate(ctx, payload, op: str):
-    """approve | pin | highlight | delete | note — one body, since they differ only in the
+    """approve | pin | unpin | delete | note — one body, since they differ only in the
     field they set and the sentence they log."""
 
     def work(db):
@@ -726,10 +506,6 @@ async def _chat_moderate(ctx, payload, op: str):
         if op == "approve":
             m.status, m.flags = "approved", []
             text = f"Approved a message from {m.author_name}"
-        elif op == "highlight":
-            # Non-exclusive, unlike pin: several messages can be queued for the host to read.
-            m.highlighted = not m.highlighted
-            text = f"{'Highlighted' if m.highlighted else 'Unhighlighted'} a message from {m.author_name}"
         elif op == "pin":
             pin = not m.pinned
             if pin:  # only one pinned message at a time
@@ -781,81 +557,6 @@ async def _chat_bulk(ctx, payload):
     rows, act = await tx(work)
     kind = "message.delete" if op == "delete" else "message.update"
     return [("chat", kind, r) for r in rows] + [("activity", "activity.new", act)]
-
-
-async def _chat_mute(ctx, payload):
-    """Silence one person in CHAT, optionally for a while. Separate from participant.mute,
-    which is their microphone — the two are different punishments and a moderator needs to be
-    able to apply either without the other.
-
-    Enforced in chat_gate at send time, so it survives a reconnect (the mute lives on the
-    presence record, not on the socket) and expires without a scheduled job.
-    """
-    identity = str(payload.get("identity") or "")
-    if not identity:
-        return []
-    muted = bool(payload.get("muted", True))
-    minutes = payload.get("minutes")
-    current = await bus.presence_get(ctx.event_id, identity)
-    # Staff bypass their own audience controls (chat_gate returns early for can_moderate), so
-    # "muted" would show in the roster while their messages still landed. Refuse instead of
-    # displaying a control that does nothing.
-    if muted and current.get("role") in ("host", "moderator"):
-        return "Hosts and moderators can't be muted in chat"
-
-    patch = {"chat_muted": muted, "chat_muted_until": None}
-    if muted and minutes:
-        try:
-            span = max(1, min(int(minutes), 1440))
-        except (TypeError, ValueError):
-            span = 5
-        patch["chat_muted_until"] = (datetime.now(timezone.utc) + timedelta(minutes=span)).isoformat()
-
-    rec = await bus.presence_upsert(ctx.event_id, identity, patch)
-    name = rec.get("name") or identity
-    window = f" for {minutes} min" if muted and patch["chat_muted_until"] else ""
-    act = await tx(lambda db: record(
-        db, ctx, "mod", f"{name} was {'muted' if muted else 'unmuted'} in chat{window}",
-        audit="live.chat.mute", target_type="participant", target_id=identity,
-        meta={"muted": muted, "until": patch["chat_muted_until"]}))
-    return [("participants", "participant.update", rec), ("activity", "activity.new", act)]
-
-
-async def _chat_report(ctx, payload):
-    """An ATTENDEE reporting a message. Flags it for review — never deletes it, and never
-    tells the reporter whether a moderator acted, so reporting cannot be used to probe the
-    moderation queue.
-
-    A viewer action on purpose: "Participant Reports Abuse" is only useful if the audience can
-    actually raise it. The socket's own rate limiter bounds how fast anyone can report.
-    """
-    reason = _text(payload, "reason", 200)
-
-    def work(db):
-        m = _row(db, LiveMessage, ctx, payload.get("id"))
-        if not m or m.status == "deleted":
-            return None
-        flags = list(m.flags or [])
-        if "reported" not in flags:
-            flags.append("reported")
-            m.flags = flags
-        # Pull it back into the review queue; an already-deleted message is left alone above.
-        if m.status == "approved":
-            m.status = "pending"
-        act = record(db, ctx, "mod", f"{ctx.name} reported a message from {m.author_name}",
-                     audit="live.message.report", target_type="live_message", target_id=m.id,
-                     meta={"reason": reason} if reason else None)
-        return message_out(m), act
-
-    out = await tx(work)
-    if not out:
-        return []
-    msg, act = out
-    # NOT on the `chat` channel: attendees receive that one unfiltered (VIEWER_CHANNELS), so
-    # broadcasting the flagged copy would let anyone report every message and read the room's
-    # moderation state back off their own screen. `moderator` is not in the attendee allow-list,
-    # so this update reaches consoles only.
-    return [("moderator", "message.flagged", msg), ("activity", "activity.new", act)]
 
 
 # Q&A -------------------------------------------------------------------------
@@ -912,22 +613,6 @@ async def _qa_moderate(ctx, payload, op: str):
                     other.pinned = False
             q.pinned = pin
             text = f"{'Pinned' if pin else 'Unpinned'} a question"
-        elif op == "merge":
-            # Fold a duplicate INTO another question: votes move across, the duplicate goes.
-            # `id` is the one being absorbed and `into` is the survivor, so the row the
-            # moderator clicked is the one that disappears — the other order silently deletes
-            # the question they were looking at.
-            target = _row(db, LiveQuestion, ctx, payload.get("into"))
-            if target is None or target.id == q.id:
-                return None
-            qid, author = str(q.id), q.author_name
-            target.votes = max(0, target.votes + q.votes)
-            db.delete(q)
-            act = record(db, ctx, "qa", f"Merged {author}'s duplicate question into another",
-                         audit="live.question.merge", target_type="live_question", target_id=qid,
-                         meta={"into": str(target.id)})
-            # Two frames: the duplicate leaves every console, the survivor's count goes up.
-            return {"id": qid}, act, True, question_out(target)
         elif op == "assign":
             # Org isolation: a speaker_id from the wire must belong to THIS event's org,
             # or the console could route a question to a stranger in another tenant.
@@ -958,82 +643,9 @@ async def _qa_moderate(ctx, payload, op: str):
     out = await tx(work)
     if not out:
         return []
-    # `rest` is only populated by merge, which also has to push the SURVIVOR's new vote count.
-    data, act, deleted, *rest = out
-    frames = [("qa", "question.delete" if deleted else "question.update", data)]
-    if rest and rest[0]:
-        frames.append(("qa", "question.update", rest[0]))
-    frames.append(("activity", "activity.new", act))
-    return frames
-
-
-async def _qa_respond(ctx, payload):
-    """A SPEAKER answering a question routed to them, and marking it done.
-
-    Authorization is per-ROW, not per-role: `can_speak` gets you into this handler, but the
-    question has to be assigned to YOU. Without that, any panellist on the event could answer
-    (and close) every other panellist's questions. A moderator may answer anything — they route
-    the queue, and they already can via qa.answer.
-    """
-    text = _text(payload, "answer", 2000)
-    completed = bool(payload.get("completed", True))
-
-    def work(db):
-        q = _row(db, LiveQuestion, ctx, payload.get("id"))
-        if not q:
-            return None
-        if not ctx.can_moderate and q.assigned_to != ctx.user_id:
-            return "That question isn't assigned to you"
-        if text:
-            q.answer_text = text
-        if completed:
-            q.status = "answered"
-            q.answered_by = ctx.user_id
-            q.answered_at = datetime.now(timezone.utc)
-        verb = "answered" if completed else "replied to"
-        act = record(db, ctx, "qa", f"{ctx.name} {verb} a question from {q.author_name}",
-                     audit="live.question.respond", target_type="live_question", target_id=q.id,
-                     meta={"completed": completed, "has_answer": bool(text)})
-        return question_out(q), act
-
-    out = await tx(work)
-    if out is None:
-        return []
-    if isinstance(out, str):
-        return out
-    return [("qa", "question.update", out[0]), ("activity", "activity.new", out[1])]
-
-
-async def _qa_escalate(ctx, payload):
-    """"Flag for moderator" — a speaker handing a question back rather than answering it.
-
-    A flag, never a delete: the moderator decides what happens to it. Same per-row rule as
-    responding, so escalating is not a way to touch somebody else's queue.
-    """
-    reason = _text(payload, "reason", 200)
-
-    def work(db):
-        q = _row(db, LiveQuestion, ctx, payload.get("id"))
-        if not q:
-            return None
-        if not ctx.can_moderate and q.assigned_to != ctx.user_id:
-            return "That question isn't assigned to you"
-        flags = list(q.flags or [])
-        if "escalated" not in flags:
-            flags.append("escalated")
-            q.flags = flags
-        q.status = "pending"       # back into the moderator's review queue
-        act = record(db, ctx, "qa", f"{ctx.name} flagged a question for a moderator",
-                     audit="live.question.escalate", target_type="live_question", target_id=q.id,
-                     meta={"reason": reason} if reason else None)
-        return question_out(q), act
-
-    out = await tx(work)
-    if out is None:
-        return []
-    if isinstance(out, str):
-        return out
-    return [("qa", "question.update", out[0]), ("activity", "activity.new", out[1])]
+    data, act, deleted = out
+    return [("qa", "question.delete" if deleted else "question.update", data),
+            ("activity", "activity.new", act)]
 
 
 # polls -----------------------------------------------------------------------
@@ -1224,46 +836,9 @@ async def _announce_delete(ctx, payload):
 # The state update + broadcast happen whether or not LiveKit is configured, so the
 # console is never lying about what it was told to do (see snapshot.livekit_enforced).
 
-def allowed_sources(rec: dict) -> tuple[str, ...]:
-    """Which LiveKit track sources this participant may publish, derived from their presence
-    record. One pure function, so staging, the camera/share controls and a speaker's own token
-    grant can never disagree about what somebody is allowed to send.
-
-    Screen share defaults differ BY ROLE deliberately: the host is the one presenting, so they
-    have it; a speaker or panellist needs an explicit grant. That is what stops somebody invited
-    up to answer one question from putting their desktop on the main screen. The camera/mic
-    flags read `is not False` so an absent key means allowed — presence records predate them.
-    """
-    role = rec.get("role") or "viewer"
-    if rec.get("banned") or rec.get("waiting"):
-        return ()
-    # A host or speaker publishes by virtue of their role; anyone else has to be staged.
-    if not (rec.get("on_stage") or role in ("host", "speaker")):
-        return ()
-    out = []
-    if rec.get("camera_allowed") is not False:
-        out.append(livekit.CAMERA)
-    if rec.get("mic_allowed") is not False:
-        out.append(livekit.MICROPHONE)
-    if rec.get("share_allowed", role == "host"):
-        out.extend((livekit.SCREEN_SHARE, livekit.SCREEN_SHARE_AUDIO))
-    return tuple(out)
-
-
-# Alias used inside _participant_action, where `allowed_sources` would read ambiguously next to
-# the local `allowed` variable.
-_sources_for = allowed_sources
-
-
 async def _participant_hand(ctx, payload):
     raised = bool(payload.get("raised", True))
-    # `hand_at` is what gives the moderator's hand queue its ORDER. Stamped here, on a write
-    # that happens anyway, because the alternative — the console remembering the order it first
-    # saw each hand — loses the queue on every reconnect and on a second moderator's screen.
-    rec = await bus.presence_upsert(ctx.event_id, ctx.identity, {
-        "hand": raised,
-        "hand_at": datetime.now(timezone.utc).timestamp() if raised else None,
-    })
+    rec = await bus.presence_upsert(ctx.event_id, ctx.identity, {"hand": raised})
     return [("participants", "participant.update", rec)]
 
 
@@ -1279,36 +854,10 @@ async def _participant_state(ctx, payload):
     patch = {}
     if "muted" in payload:
         patch["muted"] = bool(payload["muted"])
+    if "speaking" in payload:
+        patch["speaking"] = bool(payload["speaking"])
     if payload.get("quality") in _QUALITY:
         patch["quality"] = payload["quality"]
-    # Live encoder telemetry, reported by the publisher because only the browser's peer
-    # connection knows it. Bounded and coerced — these land on a record every console reads.
-    for key, cap in (("bitrate_kbps", 100_000), ("packet_loss", 100), ("rtt_ms", 60_000),
-                     ("fps", 240)):
-        if key in payload:
-            try:
-                patch[key] = max(0, min(int(payload[key]), cap))
-            except (TypeError, ValueError):
-                pass
-
-    if "speaking" in payload:
-        speaking = bool(payload["speaking"])
-        patch["speaking"] = speaking
-        # Speaking TIME, accumulated on the falling edge. The publisher reports edges, not a
-        # duration, so the server owns the arithmetic and a client cannot inflate its own total.
-        # presence_upsert is a read-modify-write (bus.py), but every write for one identity
-        # comes from that identity's single socket task, so there is no concurrent writer to
-        # lose an update to.
-        current = await bus.presence_get(ctx.event_id, ctx.identity)
-        now_ts = datetime.now(timezone.utc).timestamp()
-        if speaking:
-            if not current.get("speaking"):
-                patch["speaking_since"] = now_ts
-        elif current.get("speaking") and current.get("speaking_since"):
-            elapsed = max(0.0, now_ts - float(current["speaking_since"]))
-            patch["speaking_ms"] = int(current.get("speaking_ms") or 0) + int(elapsed * 1000)
-            patch["speaking_since"] = None
-
     if not patch:
         return []
     rec = await bus.presence_upsert(ctx.event_id, ctx.identity, patch)
@@ -1319,25 +868,11 @@ async def _participant_action(ctx, payload, op: str):
     identity = str(payload.get("identity") or "")
     if not identity:
         return []
-    # Self-target refusal on the two ops that GRANT something. Staging somebody is a
-    # moderator's job, but staging YOURSELF is a privilege escalation: livekit.set_stage
-    # issues can_publish=True, which overrides the subscribe-only grant the token carried, and
-    # participant.stage needs only can_moderate (it is not in HOST_ONLY). Same for writing
-    # yourself a "host" presence role. Every other op (mute, timeout, ban, remove) only takes
-    # something away, so self-targeting those is harmless.
-    if op in ("stage", "role") and identity == ctx.identity:
-        return "You can't change your own stage access or role"
     now = datetime.now(timezone.utc)
     patch: dict = {}
     enforced = True
 
-    if op == "hand":
-        # Decline a raised hand. The self-service participant.hand action is scoped to the
-        # sender's own identity, so a moderator clearing the queue needs its own op.
-        patch = {"hand": False, "hand_at": None}
-        enforced = True     # nothing to enforce in LiveKit: a raised hand is our own state
-        text = "{name}'s raised hand was declined"
-    elif op == "mute":
+    if op == "mute":
         muted = bool(payload.get("muted", True))
         patch = {"muted": muted}
         enforced = await livekit.mute_participant(ctx.room, identity, muted)
@@ -1349,16 +884,8 @@ async def _participant_action(ctx, payload, op: str):
         text = "{name} was muted for " + f"{minutes} min"
     elif op == "stage":
         on = bool(payload.get("on_stage", True))
-        patch = {"on_stage": on}
-        # Only relabel an ATTENDEE. The old code wrote role="speaker"/"viewer" unconditionally,
-        # which demoted an assigned speaker or moderator to "viewer" the moment they were taken
-        # off stage — losing their roster grouping and, now, their publish grant.
-        current = await bus.presence_get(ctx.event_id, identity)
-        if (current.get("role") or "viewer") == "viewer" and on:
-            patch["role"] = "speaker"
-        # Staging grants camera + microphone, never screen share: see broadcast.allowed_sources.
-        enforced = await livekit.set_publish_sources(
-            ctx.room, identity, _sources_for({**current, **patch}))
+        patch = {"on_stage": on, "role": "speaker" if on else "viewer"}
+        enforced = await livekit.set_stage(ctx.room, identity, on)
         text = "{name} was " + ("invited to the stage" if on else "removed from the stage")
     elif op == "role":
         role = payload.get("role") if payload.get("role") in ("host", "speaker", "moderator", "viewer") else "viewer"
@@ -1391,31 +918,6 @@ async def _participant_action(ctx, payload, op: str):
             ("moderator", "action.result", {"op": op, "identity": identity, "enforced": enforced})]
 
 
-async def _participant_notify(ctx, payload):
-    """Send ONE participant a private notice — "we'll come to you after this section", the
-    answer to a raised hand.
-
-    Delivery is a normal bus envelope carrying `to_identity`; routers/live.py drops it on every
-    socket whose identity doesn't match. Directing it in the writer rather than adding a
-    per-user transport keeps one bus, one auth check and one audit path — and the check runs
-    before the attendee projection, so other moderators don't see private replies either.
-    """
-    identity = str(payload.get("identity") or "")
-    text = _text(payload, limit=500)
-    if not identity or not text:
-        return []
-    rec = await bus.presence_get(ctx.event_id, identity)
-    if not rec:
-        return "That person is no longer connected"
-    name = rec.get("name") or identity
-    act = await tx(lambda db: record(
-        db, ctx, "mod", f"Replied privately to {name}", audit="live.participant.notify",
-        target_type="participant", target_id=identity, meta={"text": text}))
-    return [("participants", "participant.notice",
-             {"to_identity": identity, "text": text, "from_name": ctx.name}),
-            ("activity", "activity.new", act)]
-
-
 # dispatcher ------------------------------------------------------------------
 
 ACTIONS: dict[str, callable] = {
@@ -1426,10 +928,7 @@ ACTIONS: dict[str, callable] = {
     "chat.pin": lambda c, p: _chat_moderate(c, p, "pin"),
     "chat.delete": lambda c, p: _chat_moderate(c, p, "delete"),
     "chat.note": lambda c, p: _chat_moderate(c, p, "note"),
-    "chat.highlight": lambda c, p: _chat_moderate(c, p, "highlight"),
     "chat.bulk": _chat_bulk,
-    "chat.mute": _chat_mute,
-    "chat.report": _chat_report,
     "qa.ask": _qa_ask,
     "qa.vote": _qa_vote,
     "qa.approve": lambda c, p: _qa_moderate(c, p, "approve"),
@@ -1437,12 +936,7 @@ ACTIONS: dict[str, callable] = {
     "qa.dismiss": lambda c, p: _qa_moderate(c, p, "dismiss"),
     "qa.pin": lambda c, p: _qa_moderate(c, p, "pin"),
     "qa.assign": lambda c, p: _qa_moderate(c, p, "assign"),
-    "qa.merge": lambda c, p: _qa_moderate(c, p, "merge"),
     "qa.delete": lambda c, p: _qa_moderate(c, p, "delete"),
-    # Speaker-tier (registered into SPEAKER_ACTIONS by services/speaker.py): both check that the
-    # question is assigned to the caller, so can_speak alone is not enough.
-    "qa.respond": _qa_respond,
-    "qa.escalate": _qa_escalate,
     "poll.create": _poll_create,
     "poll.update": _poll_update,
     "poll.launch": lambda c, p: _poll_lifecycle(c, p, "launch"),
@@ -1453,8 +947,6 @@ ACTIONS: dict[str, callable] = {
     "announce.delete": _announce_delete,
     "participant.hand": _participant_hand,
     "participant.state": _participant_state,
-    "participant.notify": _participant_notify,
-    "participant.dismiss_hand": lambda c, p: _participant_action(c, p, "hand"),
     "participant.mute": lambda c, p: _participant_action(c, p, "mute"),
     "participant.timeout": lambda c, p: _participant_action(c, p, "timeout"),
     "participant.stage": lambda c, p: _participant_action(c, p, "stage"),
@@ -1469,24 +961,10 @@ ACTIONS: dict[str, callable] = {
 # on can_host, so a moderator cannot end the stream or stop the recording.
 HOST_ONLY: set[str] = set()
 
-# Actions an assigned SPEAKER may perform, filled in by services/speaker.py at import. Same
-# registry again, so the fourth console does not bring a fourth permission model. Moderators and
-# hosts can do all of these too (they are speakers by resolve_ctx), which is what lets a host
-# present their own slides.
-SPEAKER_ACTIONS: set[str] = set()
-
 
 async def dispatch(ctx: Ctx, action: str, payload: dict) -> str | None:
     """Run an action and broadcast its envelopes. Returns an error string for the caller
     to send back on its own socket, or None on success.
-
-    Four tiers, most privileged first — the order matters, because an action in two sets must be
-    judged by the STRICTEST one:
-
-        HOST_ONLY       -> can_host      (go live, end, record)
-        SPEAKER_ACTIONS -> can_speak     (present, whiteboard, answer my questions)
-        VIEWER_ACTIONS  -> anybody       (chat, ask, vote, raise hand, report)
-        everything else -> can_moderate
 
     A handler may also RETURN a string to reject the action (chat controls do this), which
     reaches the sender as an error frame without touching anybody else's console."""
@@ -1496,11 +974,6 @@ async def dispatch(ctx: Ctx, action: str, payload: dict) -> str | None:
     if action in HOST_ONLY:
         if not ctx.can_host:
             return "Only the event host can control the broadcast"
-    elif action in SPEAKER_ACTIONS:
-        # can_moderate is included so a moderator can drive the presentation for a speaker who
-        # is having trouble — the common live save, and they are already trusted with more.
-        if not (ctx.can_speak or ctx.can_moderate):
-            return "Only a speaker on this event can do that"
     elif action not in VIEWER_ACTIONS and not ctx.can_moderate:
         return "You are not a moderator of this event"
 

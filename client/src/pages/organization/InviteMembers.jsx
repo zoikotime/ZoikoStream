@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
-import { FiUserPlus, FiSearch, FiRefreshCw, FiX, FiTrash2, FiUsers, FiMail } from "react-icons/fi";
+import { FiUserPlus, FiSearch, FiRefreshCw, FiX, FiTrash2, FiUsers, FiMail, FiSend } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { useAuth } from "../../auth/AuthContext";
 import { notify } from "../../ui/Toast";
+import Modal from "../../ui/Modal";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import StatCard from "../../components/admin/StatCard";
@@ -12,14 +13,14 @@ import Badge from "../../ui/Badge";
 import DataTable from "../../components/admin/DataTable";
 import SectionCard from "../../components/admin/SectionCard";
 import { cx, focusRing } from "../../ui/tokens";
+import { Label } from "../../ui/forms";
 import { fmtDate } from "../../data/events";
-import { InvitationStatusBadge } from "../../components/organization/InvitationStatusBadge";
-import InviteModal from "./InviteModal";
 
 const ROLES = ["org_admin", "host", "moderator", "speaker", "viewer"];
 const ROLE_LABEL = { org_admin: "Admin", host: "Host", moderator: "Moderator", speaker: "Speaker", viewer: "Viewer" };
 const roleLabel = (r) => ROLE_LABEL[r] || r;
 
+const INVITE_TONE = { pending: "warning", accepted: "success", cancelled: "neutral", expired: "danger", rejected: "danger" };
 
 const control = cx(
   "h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none",
@@ -27,6 +28,71 @@ const control = cx(
   "dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200",
   focusRing
 );
+const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+
+function InviteModal({ open, onClose, onInvited }) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("viewer");
+  const [sending, setSending] = useState(false);
+
+  const close = () => { setEmail(""); setRole("viewer"); onClose(); };
+
+  const send = async () => {
+    setSending(true);
+    try {
+      await api.post("/organization/invitations", { email: email.trim().toLowerCase(), role });
+      notify.success(`Invitation sent to ${email.trim()}`);
+      onInvited?.();
+      close();
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={close}
+      title="Invite a member"
+      className="max-w-md"
+      footer={
+        <>
+          <Button variant="secondary" size="sm" onClick={close} disabled={sending}>Cancel</Button>
+          <Button size="sm" leftIcon={FiSend} onClick={send} loading={sending} disabled={!isEmail(email) || sending}>
+            Send Invitation
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div>
+          <Label>Email address</Label>
+          <div className="relative">
+            <FiMail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="teammate@company.com"
+              className={cx(control, "h-10 w-full pl-9")}
+            />
+          </div>
+        </div>
+        <div>
+          <Label>Role</Label>
+          <select value={role} onChange={(e) => setRole(e.target.value)} className={cx(control, "h-10 w-full")}>
+            {ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
+          </select>
+        </div>
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          They'll receive an email with a secure link to join your organization.
+        </p>
+      </div>
+    </Modal>
+  );
+}
 
 export default function OrganizationMembers() {
   const { user } = useAuth();
@@ -42,8 +108,6 @@ export default function OrganizationMembers() {
   const members = useMemo(() => data?.members || [], [data]);
   const invites = useMemo(() => data?.invites || [], [data]);
   const pending = invites.filter((i) => i.status === "pending");
-  // Actions are driven by the server's can_* booleans (see InvitationOut) so this page
-  // and the invitations console can never disagree about what is permitted.
 
   const filteredMembers = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -150,7 +214,7 @@ export default function OrganizationMembers() {
   const inviteColumns = [
     { key: "email", header: "Email", sortable: true, render: (r) => <span className="font-medium text-slate-800 dark:text-slate-100">{r.email}</span> },
     { key: "role", header: "Role", render: (r) => <Badge tone="brand">{roleLabel(r.role)}</Badge> },
-    { key: "status", header: "Status", sortable: true, render: (r) => <InvitationStatusBadge invitation={r} size="md" /> },
+    { key: "status", header: "Status", sortable: true, render: (r) => <Badge tone={INVITE_TONE[r.status] || "neutral"} dot={r.status === "pending"}>{r.status[0].toUpperCase() + r.status.slice(1)}</Badge> },
     { key: "invited_by", header: "Invited by", render: (r) => r.invited_by || "—" },
     { key: "expires_at", header: "Expires", align: "right", sortable: true, sortValue: (r) => (r.expires_at ? new Date(r.expires_at).getTime() : 0), render: (r) => fmtDate(r.expires_at) },
   ];
@@ -218,10 +282,10 @@ export default function OrganizationMembers() {
               empty={{ icon: FiMail, title: "No invitations", description: "Invite members to see their invitations here.", action: <Button size="sm" leftIcon={FiUserPlus} onClick={() => setInviteOpen(true)}>Invite member</Button> }}
               rowActions={(r) => (
                 <>
-                  {r.can_resend && (
+                  {r.status === "pending" && (
                     <Button variant="ghost" size="sm" iconOnly leftIcon={FiRefreshCw} aria-label={`Resend to ${r.email}`} onClick={() => resendInvite(r)} />
                   )}
-                  {r.can_cancel && (
+                  {r.status !== "accepted" && (
                     <Button variant="ghost" size="sm" iconOnly leftIcon={FiX} aria-label={`Cancel invitation to ${r.email}`} className="text-rose-500 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10" onClick={() => cancelInvite(r)} />
                   )}
                 </>

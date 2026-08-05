@@ -8,7 +8,6 @@ import {
   FiCheck, FiTrash2, FiBookmark, FiCheckCircle, FiChevronUp, FiChevronDown,
   FiSearch, FiCornerUpLeft, FiMicOff, FiClock, FiEdit3, FiX, FiArrowDown,
   FiBarChart2, FiSend, FiMessageSquare, FiHelpCircle, FiSlash, FiDownload,
-  FiStar, FiFlag, FiGitMerge,
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
@@ -16,7 +15,6 @@ import Skeleton from "../../ui/Skeleton";
 import { Input, Select } from "../../ui/forms";
 import EmptyState from "../organization/OrganizationEmptyState";
 import { ActionButton } from "./Panel";
-import { notify } from "../../ui/Toast";
 import { downloadCsv } from "../../utils/export";
 import {
   initials, hhmm, FLAG_LABELS, CHAT_FILTERS, QUICK_REACTIONS,
@@ -32,9 +30,7 @@ const CHAT_MATCHES = {
   all: () => true,
   pending: (m) => m.status === "pending",
   flagged: (m) => (m.flags || []).length > 0,
-  reported: (m) => (m.flags || []).includes("reported"),
   pinned: (m) => m.pinned,
-  highlighted: (m) => m.highlighted,
 };
 
 function FlagChips({ flags }) {
@@ -288,7 +284,6 @@ export function ChatTab({ messages, typing, canModerate, send }) {
               </span>
               <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">{m.name}</span>
               {m.pinned && <Badge status="success">Pinned</Badge>}
-              {m.highlighted && <Badge tone="warning" size="sm">Highlighted</Badge>}
               {m.status === "pending" && <Badge status="warning">Held for review</Badge>}
               <FlagChips flags={m.flags} />
               <span className="ml-auto text-[11px] text-slate-400">{hhmm(m.created_at)}</span>
@@ -333,33 +328,16 @@ export function ChatTab({ messages, typing, canModerate, send }) {
                 </button>
               ))}
               <ActionButton icon={FiCornerUpLeft} title={`Reply to ${m.name}`} onClick={() => setReplyTo(m)} />
-              {/* Report is available to EVERYONE, including a plain attendee (it is in
-                  moderation.VIEWER_ACTIONS): abuse reporting is only useful if the audience
-                  can raise it. It flags for review and never deletes. */}
-              {!canModerate && (
-                <ActionButton
-                  icon={FiFlag}
-                  title="Report this message to the moderators"
-                  tone="rose"
-                  onClick={() => { send("chat.report", { id: m.id }); notify.info("Reported — a moderator will review it."); }}
-                />
-              )}
               {canModerate && (
                 <>
                   {m.status === "pending" && (
                     <ActionButton icon={FiCheck} label="Approve" tone="emerald" onClick={() => send("chat.approve", { id: m.id })} />
                   )}
                   <ActionButton icon={FiBookmark} label={m.pinned ? "Unpin" : "Pin"} tone="amber" active={m.pinned} onClick={() => send("chat.pin", { id: m.id })} />
-                  {/* Highlight is not pin: any number of messages can be queued for the host
-                      to read out, whereas only one can hold the banner above the chat. */}
-                  <ActionButton icon={FiStar} title={m.highlighted ? "Remove highlight" : "Highlight for the host"} tone="amber" active={m.highlighted} onClick={() => send("chat.highlight", { id: m.id })} />
                   <ActionButton icon={FiEdit3} title="Add moderator note" tone="amber" onClick={() => setNoteFor(m)} />
                   {m.user_id && (
                     <>
-                      <ActionButton icon={FiMicOff} title={`Mute ${m.name}'s microphone`} tone="amber" onClick={() => send("participant.mute", { identity: m.user_id, muted: true })} />
-                      {/* Chat mute, distinct from the microphone above — silencing someone's
-                          typing and silencing their voice are different decisions. */}
-                      <ActionButton icon={FiSlash} title={`Mute ${m.name} in chat for 10 min`} tone="amber" onClick={() => send("chat.mute", { identity: m.user_id, muted: true, minutes: 10 })} />
+                      <ActionButton icon={FiMicOff} title={`Mute ${m.name}`} tone="amber" onClick={() => send("participant.mute", { identity: m.user_id, muted: true })} />
                       <ActionButton icon={FiClock} title={`Time out ${m.name} for 5 min`} tone="amber" onClick={() => send("participant.timeout", { identity: m.user_id, minutes: 5 })} />
                     </>
                   )}
@@ -439,9 +417,6 @@ export function ChatTab({ messages, typing, canModerate, send }) {
 export function QATab({ questions, speakers, canModerate, send }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
-  // Identity of the question being merged AWAY. Held here rather than in a modal so the
-  // moderator picks the survivor from the list they are already reading.
-  const [mergeFrom, setMergeFrom] = useState(null);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -479,33 +454,15 @@ export function QATab({ questions, speakers, canModerate, send }) {
         />
       </div>
 
-      {mergeFrom && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-violet-200 bg-violet-50 px-3 py-2 text-xs dark:border-violet-500/30 dark:bg-violet-500/10">
-          <FiGitMerge className="shrink-0 text-violet-600 dark:text-violet-400" aria-hidden="true" />
-          <span className="min-w-0 flex-1 text-slate-700 dark:text-slate-200">
-            Pick the question to merge{" "}
-            <span className="font-semibold">
-              {questions.find((q) => q.id === mergeFrom)?.text?.slice(0, 60) || "it"}
-            </span>{" "}
-            into — its votes move across and the duplicate is deleted.
-          </span>
-          <button type="button" onClick={() => setMergeFrom(null)} className="shrink-0 font-semibold text-slate-500 hover:underline">
-            Cancel
-          </button>
-        </div>
-      )}
-
       <div className="flex-1 space-y-2 overflow-y-auto p-3">
         {shown.map((q) => (
           <div
             key={q.id}
             className={cx(
               "flex gap-3 rounded-xl border p-3 transition motion-safe:animate-[zk-fade-in_.25s]",
-              mergeFrom === q.id
-                ? "border-violet-300 bg-violet-50/60 dark:border-violet-500/40 dark:bg-violet-500/10"
-                : q.pinned
-                  ? "border-emerald-300 bg-emerald-50/60 dark:border-emerald-500/40 dark:bg-emerald-500/10"
-                  : "border-slate-100 hover:border-slate-200 dark:border-slate-800 dark:hover:border-slate-700"
+              q.pinned
+                ? "border-emerald-300 bg-emerald-50/60 dark:border-emerald-500/40 dark:bg-emerald-500/10"
+                : "border-slate-100 hover:border-slate-200 dark:border-slate-800 dark:hover:border-slate-700"
             )}
           >
             {/* Vote control — a moderator can also up/down-weight the running order. */}
@@ -541,18 +498,7 @@ export function QATab({ questions, speakers, canModerate, send }) {
                 <FlagChips flags={q.flags} />
               </div>
 
-              {canModerate && mergeFrom && mergeFrom !== q.id && (
-                <div className="mt-2">
-                  <ActionButton
-                    icon={FiGitMerge}
-                    label="Merge into this one"
-                    tone="blue"
-                    onClick={() => { send("qa.merge", { id: mergeFrom, into: q.id }); setMergeFrom(null); }}
-                  />
-                </div>
-              )}
-
-              {canModerate && !mergeFrom && (
+              {canModerate && (
                 <div className="mt-2 flex flex-wrap items-center gap-1">
                   {q.status === "pending" && (
                     <ActionButton icon={FiCheck} label="Approve" tone="emerald" onClick={() => send("qa.approve", { id: q.id })} />
@@ -578,11 +524,6 @@ export function QATab({ questions, speakers, canModerate, send }) {
                       <option value="">Assign speaker…</option>
                       {speakers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </Select>
-                  )}
-                  {/* Merge is two clicks by design: this arms it, then the moderator picks the
-                      survivor. The row they clicked is the one that disappears. */}
-                  {questions.length > 1 && (
-                    <ActionButton icon={FiGitMerge} title="Merge this duplicate into another question" tone="blue" onClick={() => setMergeFrom(q.id)} />
                   )}
                   <ActionButton icon={FiSlash} label="Dismiss" onClick={() => send("qa.dismiss", { id: q.id })} />
                   <ActionButton icon={FiTrash2} label="Delete" tone="rose" onClick={() => send("qa.delete", { id: q.id })} />

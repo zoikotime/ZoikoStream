@@ -107,12 +107,3 @@ export const NETWORK_TONE = { "4g": "success", "3g": "warning", "2g": "danger", 
 // Thresholds shared by the load/memory meters so both read the same way.
 export const meterTone = (percent) =>
   percent == null ? "neutral" : percent < 60 ? "success" : percent < 85 ? "warning" : "danger";
-
-// Stage compositions. Keep the values in step with services/broadcast.LAYOUTS — the layout is a
-// validated broadcast setting, so an unknown value is dropped server-side rather than stored.
-export const LAYOUTS = [
-  { value: "grid", label: "Grid", hint: "Equal tiles" },
-  { value: "gallery", label: "Gallery", hint: "Everyone, fitted" },
-  { value: "presentation", label: "Presentation", hint: "One large + rail" },
-  { value: "spotlight", label: "Spotlight", hint: "One feed only" },
-];

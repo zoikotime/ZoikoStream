@@ -35,19 +35,6 @@ DEFAULT_SETTINGS = {
     "storage_limits": {"category": "limits", "value": {"default_gb": 50, "max_gb": 5000}},
     "streaming_limits": {"category": "limits", "value": {"default_hours": 20, "max_bitrate_kbps": 8000}},
     "global": {"category": "config", "value": {"signups_enabled": True, "maintenance_mode": False}},
-    # Attendee-facing help + legal links, read by services/viewer.py for the watch page's
-    # "Need help?" card. Editable at /admin/settings. Any key removed here is simply not
-    # rendered — the card drops that row rather than showing a dead link.
-    "support": {"category": "support", "value": {
-        "live_chat_url": "https://zoikostream.com/support/chat",
-        "support_email": "support@zoikostream.com",
-        "help_center_url": "https://zoikostream.com/help",
-        "faq_url": "https://zoikostream.com/help/faq",
-        "contact_url": "https://zoikostream.com/contact",
-        "privacy_url": "https://zoikostream.com/legal/privacy",
-        "terms_url": "https://zoikostream.com/legal/terms",
-        "report_issue_url": "https://zoikostream.com/support/report",
-    }},
 }
 
 
