@@ -164,7 +164,7 @@ def test_socket_loop():
 
     try:
         client = TestClient(app)
-        url = f"/live/events/{event_id}/ws"
+        url = f"/api/live/events/{event_id}/ws"
 
         # An invalid token is refused BEFORE accept, so it never sees an envelope.
         try:

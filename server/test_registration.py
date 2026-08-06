@@ -85,7 +85,7 @@ def test_register_400s_when_not_required():
     ev = _event(db, org, user, registration_required=False)
     db.commit()
     try:
-        resp = client.post(f"/events/{ev.id}/register", json={"name": "Jane", "email": "jane@example.com"})
+        resp = client.post(f"/api/events/{ev.id}/register", json={"name": "Jane", "email": "jane@example.com"})
         assert resp.status_code == 400, resp.text
     finally:
         _cleanup(db, org, user, ev)
@@ -100,20 +100,20 @@ def test_register_then_watch_grants_stream_access():
     ev = _event(db, org, user, registration_required=True)
     db.commit()
     try:
-        watch_before = client.get(f"/events/{ev.id}/watch").json()
+        watch_before = client.get(f"/api/events/{ev.id}/watch").json()
         assert watch_before["registration_required"] is True
         assert watch_before["registered"] is False
 
-        resp = client.post(f"/events/{ev.id}/register", json={"name": "Jane", "email": "jane@example.com"})
+        resp = client.post(f"/api/events/{ev.id}/register", json={"name": "Jane", "email": "jane@example.com"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["email"] == "jane@example.com"
 
-        watch_after = client.get(f"/events/{ev.id}/watch", params={"reg": body["token"]}).json()
+        watch_after = client.get(f"/api/events/{ev.id}/watch", params={"reg": body["token"]}).json()
         assert watch_after["registered"] is True
 
         # Resubmitting the same email is idempotent, not a duplicate-key error.
-        resp2 = client.post(f"/events/{ev.id}/register", json={"name": "Jane", "email": "jane@example.com"})
+        resp2 = client.post(f"/api/events/{ev.id}/register", json={"name": "Jane", "email": "jane@example.com"})
         assert resp2.status_code == 200, resp2.text
         assert resp2.json()["id"] == body["id"]
     finally:
@@ -129,10 +129,10 @@ def test_register_409s_once_capacity_is_reached():
     ev = _event(db, org, user, registration_required=True, registration_limit=1)
     db.commit()
     try:
-        r1 = client.post(f"/events/{ev.id}/register", json={"name": "Jane", "email": "jane2@example.com"})
+        r1 = client.post(f"/api/events/{ev.id}/register", json={"name": "Jane", "email": "jane2@example.com"})
         assert r1.status_code == 200, r1.text
 
-        r2 = client.post(f"/events/{ev.id}/register", json={"name": "Bob", "email": "bob@example.com"})
+        r2 = client.post(f"/api/events/{ev.id}/register", json={"name": "Bob", "email": "bob@example.com"})
         assert r2.status_code == 409, r2.text
     finally:
         _cleanup(db, org, user, ev)

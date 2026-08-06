@@ -57,7 +57,7 @@ def test_before_start_time_is_not_started_not_expired():
     ev = _event(db, org, user, start_time=NOW + timedelta(hours=1), end_time=NOW + timedelta(hours=2))
     db.commit()
     try:
-        body = client.get(f"/events/{ev.id}/watch").json()
+        body = client.get(f"/api/events/{ev.id}/watch").json()
         assert body["not_started"] is True, body
         assert body["expired"] is False, body
         assert body["livekit_token"] is None
@@ -73,7 +73,7 @@ def test_after_end_time_is_expired_even_while_live():
     ev = _event(db, org, user, start_time=NOW - timedelta(hours=2), end_time=NOW - timedelta(hours=1))
     db.commit()
     try:
-        body = client.get(f"/events/{ev.id}/watch").json()
+        body = client.get(f"/api/events/{ev.id}/watch").json()
         assert body["expired"] is True, body
         assert body["not_started"] is False, body
         assert body["livekit_token"] is None
@@ -91,7 +91,7 @@ def test_within_window_is_neither_gated():
     ev = _event(db, org, user, start_time=NOW - timedelta(hours=1), end_time=NOW + timedelta(hours=1))
     db.commit()
     try:
-        body = client.get(f"/events/{ev.id}/watch").json()
+        body = client.get(f"/api/events/{ev.id}/watch").json()
         assert body["not_started"] is False, body
         assert body["expired"] is False, body
     finally:
@@ -106,7 +106,7 @@ def test_no_schedule_set_is_never_time_gated():
     ev = _event(db, org, user, start_time=None, end_time=None)
     db.commit()
     try:
-        body = client.get(f"/events/{ev.id}/watch").json()
+        body = client.get(f"/api/events/{ev.id}/watch").json()
         assert body["not_started"] is False, body
         assert body["expired"] is False, body
     finally:

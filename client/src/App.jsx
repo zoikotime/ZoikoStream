@@ -49,6 +49,19 @@ const Support = lazy(() => import("./pages/admin/Support"));
 const Roles = lazy(() => import("./pages/admin/Roles"));
 const Developers = lazy(() => import("./pages/admin/Developers"));
 
+// Organization console — the eight Build/Operate/Manage pages, code-split for the same reason
+// as the admin console above: only org admins reach /organization/*, so shipping them in the
+// main bundle made every visitor to the public homepage download them. AppShell already
+// provides the Suspense boundary these render inside.
+const DeveloperPlatform = lazy(() => import("./pages/organization/DeveloperPlatform"));
+const Credentials = lazy(() => import("./pages/organization/Credentials"));
+const Webhooks = lazy(() => import("./pages/organization/Webhooks"));
+const LiveInputs = lazy(() => import("./pages/organization/LiveInputs"));
+const StreamingSessions = lazy(() => import("./pages/organization/StreamingSessions"));
+const PlaybackAccess = lazy(() => import("./pages/organization/PlaybackAccess"));
+const AudienceAccess = lazy(() => import("./pages/organization/AudienceAccess"));
+const SupportStatus = lazy(() => import("./pages/organization/SupportStatus"));
+
 // ponytail: one placeholder for routes not built yet — replace each with a real page as it lands
 function Placeholder({ title }) {
   return (
@@ -90,19 +103,6 @@ const adminStubs = [
   ["media", "Media"],
   ["event-readiness", "Event Readiness"],
   ["governance", "Governance"],
-];
-
-// Organization console destinations without a page yet — kept in-layout (Placeholder) so the
-// org nav never 404s. Everything else in that sidebar is a real page below.
-const orgStubs = [
-  ["developers", "Developer Platform"],
-  ["credentials", "Credentials"],
-  ["webhooks", "Webhooks"],
-  ["live-inputs", "Live Inputs"],
-  ["sessions", "Streaming Sessions"],
-  ["playback", "Playback & Access"],
-  ["audience", "Audience Access"],
-  ["support", "Support & Status"],
 ];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
@@ -181,9 +181,17 @@ export default function App() {
                 <Route path="/organization/events/:id" element={<EventDetails />} />
                 <Route path="/organization/users" element={<InviteMembers />} />
                 <Route path="/organization/profile" element={<OrganizationProfile />} />
-                {orgStubs.map(([path, title]) => (
-                  <Route key={path} path={`/organization/${path}`} element={<Placeholder title={title} />} />
-                ))}
+                {/* Build */}
+                <Route path="/organization/developers" element={<DeveloperPlatform />} />
+                <Route path="/organization/credentials" element={<Credentials />} />
+                <Route path="/organization/webhooks" element={<Webhooks />} />
+                <Route path="/organization/live-inputs" element={<LiveInputs />} />
+                {/* Operate */}
+                <Route path="/organization/sessions" element={<StreamingSessions />} />
+                <Route path="/organization/playback" element={<PlaybackAccess />} />
+                <Route path="/organization/audience" element={<AudienceAccess />} />
+                {/* Manage */}
+                <Route path="/organization/support" element={<SupportStatus />} />
               </Route>
             </Route>
 

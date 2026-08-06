@@ -1,0 +1,13 @@
+.git
+.env
+*.env
+**/node_modules
+client/dist
+**/__pycache__
+*.pyc
+server/venv
+server/.venv
+server/test_*.py
+docs
+*.md
+my_changes.patch

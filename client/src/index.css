@@ -141,25 +141,33 @@ p { text-wrap: pretty; }
 @keyframes zk-spin-slow { to { transform: rotate(360deg); } }
 .zk-spin-slow { animation: zk-spin-slow 42s linear infinite; }
 
-/* Thin, self-effacing scrollbar for dense console panes (the admin sidebar nav). The
-   default Windows scrollbar is ~16px of opaque chrome, which on a 256px rail reads as a
-   UI element rather than an affordance. Firefox gets `scrollbar-width`; WebKit/Blink get
-   the pseudo-elements. Track stays transparent so it disappears against either theme. */
+/* Custom scrollbar for dense console panes (both sidebar navs, the playback event list).
+   Still narrower and quieter than the ~16px opaque default, but wide enough to read as a
+   grabbable affordance rather than a hairline. Firefox gets `scrollbar-width` (which only
+   offers auto|thin|none, so `auto` is the thicker of the two); WebKit/Blink get the
+   pseudo-elements. Track stays transparent so it disappears against either theme.
+   Thumb colours are a step darker than the old hairline, since a wider bar that is too
+   faint just looks like a smudge. */
 .zk-scroll-thin {
-  scrollbar-width: thin;
-  scrollbar-color: rgb(203 213 225) transparent; /* slate-300 */
+  scrollbar-width: auto;
+  scrollbar-color: rgb(148 163 184) transparent; /* slate-400 */
 }
 .dark .zk-scroll-thin {
-  scrollbar-color: rgb(64 64 64) transparent; /* neutral-700 */
+  scrollbar-color: rgb(82 82 82) transparent; /* neutral-600 */
 }
-.zk-scroll-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+.zk-scroll-thin::-webkit-scrollbar { width: 11px; height: 11px; }
 .zk-scroll-thin::-webkit-scrollbar-track { background: transparent; }
 .zk-scroll-thin::-webkit-scrollbar-thumb {
-  background-color: rgb(203 213 225);
+  background-color: rgb(148 163 184);
   border-radius: 9999px;
+  /* 2px transparent border clipped to the padding box keeps the thumb off the pane edge,
+     so an 11px gutter reads as a deliberate 7px bar instead of chrome jammed against the
+     border. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
-.zk-scroll-thin::-webkit-scrollbar-thumb:hover { background-color: rgb(148 163 184); }
-.dark .zk-scroll-thin::-webkit-scrollbar-thumb { background-color: rgb(64 64 64); }
+.zk-scroll-thin::-webkit-scrollbar-thumb:hover { background-color: rgb(100 116 139); }
+.dark .zk-scroll-thin::-webkit-scrollbar-thumb { background-color: rgb(82 82 82); }
 .dark .zk-scroll-thin::-webkit-scrollbar-thumb:hover { background-color: rgb(115 115 115); }
 
 /* Skeleton shimmer for loading states. */
