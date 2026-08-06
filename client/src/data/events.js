@@ -46,6 +46,15 @@ export const statusMeta = (s) => EVENT_STATUS[s] || { label: s || "—", tone: "
 export const VISIBILITY_LABEL = { public: "Public", private: "Private", unlisted: "Unlisted" };
 export const visLabel = (v) => VISIBILITY_LABEL[v] || v || "—";
 
+// What each visibility actually permits, for the Playback & Access page. Keyed to the three
+// values models/event.EVENT_VISIBILITY allows — no "invite_only" entry, because this backend
+// cannot produce one and a row for it would advertise a mode the API rejects.
+export const VISIBILITY_HELP = {
+  public: "Any signed-in viewer with the link can watch",
+  unlisted: "Not listed anywhere; any signed-in viewer with the link can watch",
+  private: "Organization members only",
+};
+
 // ── Legacy mock ───────────────────────────────────────────────────────────────
 // Still consumed by the public attendee pages (EventRegistration, watch/EventWatch),
 // which are out of the org-admin scope. The org admin screens now use the /events API.

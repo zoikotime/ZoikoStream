@@ -2,10 +2,12 @@ import asyncio
 import contextlib
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 
 from .routers.auth import router as auth_router
@@ -87,12 +89,13 @@ async def measure_requests(request: Request, call_next):
     return response
 
 
-app.include_router(auth_router)
-app.include_router(dashboard_router)
-app.include_router(admin_router)
-app.include_router(organization_router)
-app.include_router(events_router)
-app.include_router(live_router)
+# Everything lives under /api because the SPA is served from the same origin (see the mount
+# at the bottom) and its client-side routes — /dashboard, /admin/*, /organization/* — are
+# spelled exactly like the router prefixes. Without the namespace a hard refresh on any of
+# those pages hits the API and gets JSON instead of the app.
+for router in (auth_router, dashboard_router, admin_router, organization_router,
+               events_router, live_router):
+    app.include_router(router, prefix="/api")
 
 
 # A DB outage (e.g. Supabase paused, DNS blip) raises OperationalError. Without this,
@@ -110,3 +113,22 @@ def db_unavailable(request: Request, exc: OperationalError):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# Single-container deploy (see Dockerfile): the built SPA is served by this process, so the
+# browser talks to one origin and CORS never enters the picture. Absent in dev (Vite serves
+# it on 5173), which is why this is conditional.
+# ponytail: the catch-all is registered LAST, so every router above wins; the cost is that an
+# unknown /api-ish GET returns index.html instead of a JSON 404. That is standard SPA routing.
+DIST = Path(__file__).resolve().parents[2] / "client" / "dist"
+if DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
+
+    @app.get("/{path:path}")
+    def spa(path: str):
+        # An unmatched /api GET is a bug, not a page: answering it with index.html would hand
+        # axios 200 + HTML and turn a typo'd endpoint into an unreadable parse error.
+        if path.startswith("api/"):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+        file = DIST / path
+        return FileResponse(file if file.is_file() else DIST / "index.html")

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { API_BASE } from "../api";
+
 // ONE WebSocket to a live event, carrying every logical channel (chat, participants,
 // polls, q&a, announcements, activity, moderator). See server/app/services/bus.py.
 //
@@ -20,9 +22,8 @@ const MAX_BACKOFF_MS = 15000;
 const FATAL_CODES = new Set([1008]);
 
 const wsUrl = (eventId, token) => {
-  const base = import.meta.env.VITE_API_URL || "http://localhost:8001";
-  const origin = base.replace(/^http/, "ws").replace(/\/$/, "");
-  return `${origin}/live/events/${eventId}/ws?token=${encodeURIComponent(token)}`;
+  const origin = API_BASE.replace(/^http/, "ws").replace(/\/$/, "");
+  return `${origin}/api/live/events/${eventId}/ws?token=${encodeURIComponent(token)}`;
 };
 
 export default function useEventStream(eventId, onEnvelope) {
