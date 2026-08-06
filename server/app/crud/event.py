@@ -200,16 +200,18 @@ def list_registrations(db, event_id) -> list[EventRegistration]:
     ).all()
 
 
-def get_latest_recording(db, event_id) -> LiveRecording | None:
-    """The most recent finished, actually-captured recording for this event — what a
-    viewer's replay link points at. `enforced=False` rows (LiveKit egress unavailable) are
-    excluded: there is no file behind them."""
-    return db.scalar(
+def list_replay_candidates(db, event_id) -> list[LiveRecording]:
+    """Finished, actually-captured recordings for this event, newest first — what a viewer's
+    replay link points at. `enforced=False` rows (LiveKit egress unavailable) are excluded:
+    there is no file behind them. Returns every candidate, not just the newest, because the
+    caller verifies each against GCS and a "stopped" row can still turn out to have no real
+    file behind it (see services.livekit.object_exists) — the next-newest one is the fallback."""
+    return db.scalars(
         select(LiveRecording)
         .where(LiveRecording.event_id == event_id, LiveRecording.status == "stopped",
                LiveRecording.enforced.is_(True))
         .order_by(LiveRecording.stopped_at.desc())
-    )
+    ).all()
 
 
 def get_org_recording(db, org_id, recording_id) -> LiveRecording | None:

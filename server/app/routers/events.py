@@ -9,7 +9,7 @@ Permissions:
   read (list / get / view assignees)               -> any org member
 """
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -31,6 +31,12 @@ from ..security import (
 from ..services import livekit
 
 router = APIRouter(prefix="/events", tags=["events"])
+
+# How long after a recording stops we tolerate its file not being in GCS yet before treating
+# that as a real failure — LiveKit's own upload finishes asynchronously after the row is
+# already "stopped". Generous on purpose: a false "failed" is permanent, a few extra minutes
+# of "no replay yet" is not.
+RECORDING_UPLOAD_GRACE = timedelta(minutes=3)
 
 
 def _get_event_or_404(db, org_id, event_id) -> Event:
@@ -159,13 +165,31 @@ def watch_event(
     # stays watchable after the scheduled window closes.
     recording_url = recording_duration = None
     if not can_stream and (not ev.registration_required or registered):
-        rec = crud.get_latest_recording(db, ev.id)
-        if rec:
-            recording_url = livekit.signed_url(rec.file_url)
-            if rec.started_at and rec.stopped_at:
-                recording_duration = int(
-                    (rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000
-                )
+        # A "stopped" row only means the host clicked stop — LiveKit's egress can still have
+        # failed to actually produce a file (dropped publisher, network blip, ...) with no
+        # signal reaching us if the egress_ended webhook never arrives. Verify the newest
+        # candidate is really in the bucket before handing a viewer a dead link; a confirmed
+        # miss is marked failed so it's excluded (and this check skipped) from here on, and
+        # we fall back to the next-newest real recording instead of showing nothing.
+        #
+        # LiveKit's own upload can take a while to land after `stopped_at` (observed up to
+        # ~20s for a short clip), so a miss within RECORDING_UPLOAD_GRACE isn't proof of
+        # failure — it stops the search without condemning the row OR falling back to an
+        # older recording, so a still-uploading file doesn't get permanently misdiagnosed
+        # and a viewer doesn't get shown stale content in its place. A later visit re-checks.
+        for rec in crud.list_replay_candidates(db, ev.id):
+            if livekit.object_exists(rec.file_url):
+                recording_url = livekit.signed_url(rec.file_url)
+                if rec.started_at and rec.stopped_at:
+                    recording_duration = int(
+                        (rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000
+                    )
+                break
+            if rec.stopped_at and (now - rec.stopped_at) < RECORDING_UPLOAD_GRACE:
+                break
+            rec.status = "failed"
+            rec.error = "Recording file not found in storage — the egress likely failed silently"
+            db.commit()
 
     org_name = ev.organization.name if ev.organization else None
     hosts = crud.list_assignees(db, ev.id, "host")

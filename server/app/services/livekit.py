@@ -182,6 +182,24 @@ def signed_url(object_key: str, expires_minutes: int = 180) -> str | None:
         return None
 
 
+def object_exists(object_key: str) -> bool:
+    """Whether the recording's file is actually sitting in the bucket. LiveKit accepting an
+    egress request only means it WILL try to write the file — the row goes to "stopped" as
+    soon as the host clicks stop, before the upload (or the egress itself) is confirmed to
+    have succeeded. Without this, a silently-failed egress (network blip, no publisher ever
+    attached, etc.) reads as a normal recording and viewers get a signed URL to nothing."""
+    if not object_key:
+        return False
+    client = _gcs_client()
+    if client is None:
+        return False
+    try:
+        return client.bucket(settings.GCS_BUCKET).blob(object_key).exists()
+    except Exception as exc:  # noqa: BLE001 — a storage hiccup must not break the watch page
+        log.warning("GCS existence check failed for %s: %s", object_key, exc)
+        return False
+
+
 def delete_object(object_key: str) -> bool:
     """Best-effort delete of a recording's file. Returns False (never raises) if GCS isn't
     configured or the object is already gone — the DB row is the source of truth for
