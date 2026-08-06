@@ -2,6 +2,8 @@
 .env
 *.env
 !.env.example
+# GCP service account key (GCS recording credentials)
+zoikostream-*-*.json
 
 # Python
 __pycache__/
