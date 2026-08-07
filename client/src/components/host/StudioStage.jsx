@@ -58,7 +58,7 @@ function Countdown({ until, onDone }) {
 
 export default function StudioStage({
   broadcast, recording, analytics, participants, media, screenShare, camera, mic,
-  countdownUntil, onCountdownDone, publishToken, isPublishing, publishError,
+  countdownUntil, onCountdownDone, publishToken, isPublishing, isReconnecting, publishError,
 }) {
   // Destructured so `videoRef` is a plain binding: passing the whole media bag around makes
   // every `media.*` read look like a ref access to the React hooks lint rules.
@@ -162,13 +162,19 @@ export default function StudioStage({
                 Live — this feed is being published to viewers.
               </p>
             )}
-            {previewActive && !isPublishing && publishError && (
+            {previewActive && !isPublishing && isReconnecting && (
+              <p className="flex items-center gap-1.5 text-[11px] text-amber-300">
+                <FiAlertTriangle aria-hidden="true" />
+                Connection dropped — reconnecting to viewers…
+              </p>
+            )}
+            {previewActive && !isPublishing && !isReconnecting && publishError && (
               <p className="flex items-center gap-1.5 text-[11px] text-rose-300">
                 <FiAlertTriangle aria-hidden="true" />
                 Not publishing — {publishError}
               </p>
             )}
-            {previewActive && !isPublishing && !publishError && (
+            {previewActive && !isPublishing && !isReconnecting && !publishError && (
               <p className="flex items-center gap-1.5 text-[11px] text-amber-300/90">
                 <FiUploadCloud aria-hidden="true" />
                 {live

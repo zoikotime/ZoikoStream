@@ -37,6 +37,7 @@ const Home = lazy(() => import("./pages/Home/Home"));
 const AdminDashboard = lazy(() => import("./pages/admin/Dashboard"));
 const Organizations = lazy(() => import("./pages/admin/Organizations"));
 const LiveEvents = lazy(() => import("./pages/admin/LiveEvents"));
+const AdminEventDetail = lazy(() => import("./pages/admin/EventDetail"));
 const AdminUsers = lazy(() => import("./pages/admin/Users"));
 const Subscriptions = lazy(() => import("./pages/admin/Subscriptions"));
 const Analytics = lazy(() => import("./pages/admin/Analytics"));
@@ -152,6 +153,7 @@ export default function App() {
                 <Route path="/admin/dashboard" element={<AdminDashboard />} />
                 <Route path="/admin/organizations" element={<Organizations />} />
                 <Route path="/admin/live-events" element={<LiveEvents />} />
+                <Route path="/admin/live-events/:eventId" element={<AdminEventDetail />} />
                 <Route path="/admin/users" element={<AdminUsers />} />
                 <Route path="/admin/subscriptions" element={<Subscriptions />} />
                 <Route path="/admin/analytics" element={<Analytics />} />

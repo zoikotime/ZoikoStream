@@ -38,6 +38,8 @@ from ..models import (
     LivePoll,
     LiveQuestion,
     LiveRecording,
+    Organization,
+    Subscription,
 )
 from . import bus, livekit
 from . import moderation as mod
@@ -152,7 +154,14 @@ def record_egress_result(egress_info) -> dict | None:
         r.status = "failed" if egress_info.error else "stopped"
         r.stopped_at = r.stopped_at or datetime.now(timezone.utc)
         if info and info.size:
+            # Delta, not absolute — this webhook can retry with the same final size, and
+            # storage_used_gb is a running total across every recording the org has made.
+            delta_bytes = info.size - (r.size_bytes or 0)
             r.size_bytes = info.size
+            if delta_bytes:
+                org = db.get(Organization, r.org_id)
+                if org is not None:
+                    org.storage_used_gb = round(float(org.storage_used_gb or 0) + delta_bytes / (1024 ** 3), 3)
         if egress_info.error:
             r.error = egress_info.error
         db.commit()
@@ -181,6 +190,24 @@ def _current_recording(db, ctx) -> LiveRecording | None:
                LiveRecording.status.in_(("recording", "paused")))
         .order_by(LiveRecording.created_at.desc())
     )
+
+
+def _storage_over_limit(db, org_id) -> bool:
+    """True once the org's real usage (storage_used_gb, written from actual egress file
+    sizes — see record_egress_result) has reached its plan's max_storage_gb. A plan with no
+    limit (Enterprise: max_storage_gb=None) never blocks."""
+    org = db.get(Organization, org_id)
+    if org is None:
+        return False
+    sub = db.scalar(
+        select(Subscription).where(
+            Subscription.org_id == org_id, Subscription.status.in_(("active", "trial", "past_due")))
+        .order_by(Subscription.started_at.desc())
+    )
+    plan = sub.plan if sub else None
+    if plan is None or plan.max_storage_gb is None:
+        return False
+    return float(org.storage_used_gb or 0) >= plan.max_storage_gb
 
 
 def _seed_settings(ev: Event | None) -> dict:
@@ -432,6 +459,9 @@ async def _recording_start(ctx, payload):
     existing = await mod.tx(lambda db: (lambda r: recording_out(r) if r else None)(_current_recording(db, ctx)))
     if existing:
         return "A recording is already running"
+
+    if await mod.tx(lambda db: _storage_over_limit(db, ctx.org_id)):
+        return "Storage limit reached for your plan — free up space or upgrade to keep recording"
 
     filepath = f"zoikostream/{ctx.org_id}/{ctx.event_id}/{int(now.timestamp())}.mp4"
     egress_id, error = await livekit.start_recording(ctx.room, quality, filepath)

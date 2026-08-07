@@ -17,18 +17,23 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..crud import event as crud
 from ..db import get_db
-from ..email import send_assignment_email, send_event_created_email, send_registration_confirmation_email
+from ..email import (
+    send_assignment_email, send_event_created_email,
+    send_registration_confirmation_email, send_viewer_invite_email,
+)
 from ..models import Event, User
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
     AssignmentUpdate, EventCreate, EventOut, EventUpdate,
-    RegistrantOut, RegistrationCreate, RegistrationOut, WatchOut,
+    RegistrantOut, RegistrationCreate, RegistrationOut, ViewerInviteCreate, WatchOut,
 )
 from ..security import (
     create_registration_token, decode_registration_token,
     get_current_user, get_current_user_optional, require_org_admin,
 )
+from ..services import broadcast as broadcast_svc
 from ..services import livekit
+from ..services import moderation as mod
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -124,10 +129,12 @@ def watch_event(
 ):
     """The public viewer page's one read: thin event info, plus a subscribe-only LiveKit
     token while the event is live. Not org-scoped — a signed-out visitor watching a public
-    event isn't a member of any org — but a private event still requires the caller to
-    belong to the org (or be super_admin). Independently, a registration_required event
-    withholds the stream token until the caller is registered (org members always pass;
-    everyone else needs a valid `reg` token from having registered).
+    event isn't a member of any org — but a private event requires either org membership
+    (or super_admin) OR a valid `reg` token, i.e. the caller was specifically invited via
+    POST /invite-viewers (self-serve POST /register refuses private events, so a token here
+    always traces back to a host's deliberate invite, never a stranger inviting themselves).
+    Independently, a registration_required event withholds the stream token until the caller
+    is registered (org members always pass; everyone else needs a valid `reg` token).
 
     A scheduled start_time/end_time also time-boxes the VIEWER link: before start_time or
     after end_time, no stream token goes out even if the host is live — this is deliberately
@@ -137,12 +144,13 @@ def watch_event(
     ev = crud.get_event_unscoped(db, event_id)
     if ev is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
-    if ev.visibility == "private":
-        if user is None or (user.role != "super_admin" and user.org_id != ev.org_id):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private")
 
     is_org_member = bool(user and (user.role == "super_admin" or user.org_id == ev.org_id))
-    registered = is_org_member or (bool(reg) and decode_registration_token(reg, ev.id) is not None)
+    invited = bool(reg) and decode_registration_token(reg, ev.id) is not None
+    registered = is_org_member or invited
+
+    if ev.visibility == "private" and not is_org_member and not invited:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private")
 
     now = datetime.now(timezone.utc)
     not_started = bool(ev.start_time and now < ev.start_time)
@@ -206,9 +214,10 @@ def watch_event(
     )
 
 
-def _registration_console_url(event_id: uuid.UUID) -> str:
+def _registration_console_url(event_id: uuid.UUID, token: str | None = None) -> str:
     base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
-    return f"{base}/events/{event_id}/watch"
+    url = f"{base}/events/{event_id}/watch"
+    return f"{url}?reg={token}" if token else url
 
 
 @router.post("/{event_id}/register", response_model=RegistrationOut)
@@ -224,6 +233,10 @@ def register_for_event(
     ev = crud.get_event_unscoped(db, event_id)
     if ev is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    if ev.visibility == "private":
+        # Self-serve registration must never become a side-door into a private event — that
+        # access is host-granted only, via invite_viewers below.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private — ask the host for an invite")
     if not ev.registration_required:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event does not require registration")
 
@@ -240,7 +253,8 @@ def register_for_event(
     reg = crud.create_registration(db, event_id, data.name, data.email)
     background.add_task(
         send_registration_confirmation_email,
-        reg.email, reg.name, ev.title or "this event", _registration_console_url(ev.id),
+        reg.email, reg.name, ev.title or "this event",
+        _registration_console_url(ev.id, create_registration_token(reg)),
     )
     return RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=create_registration_token(reg))
 
@@ -272,8 +286,19 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
 
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
+async def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, admin.org_id, event_id)
+    if ev.status in ("live", "paused"):
+        # A soft delete alone would orphan the running broadcast_session at "live" forever —
+        # nothing can ever reach it again to end it once the event is gone. Force-end first.
+        ctx = mod.Ctx(
+            event_id=ev.id, org_id=ev.org_id, room=f"event_{ev.id}",
+            user_id=admin.id, name=admin.full_name or admin.email,
+            identity=f"admin-{admin.id}", role=admin.role,
+            can_moderate=True, can_host=True,
+        )
+        await broadcast_svc._end(ctx, {}, emergency=True)
+        db.refresh(ev)
     crud.soft_delete_event(db, ev)  # soft delete: retained, excluded from listings
 
 
@@ -351,6 +376,43 @@ def set_speakers(event_id: uuid.UUID, data: AssignmentUpdate, background: Backgr
 
 @router.get("/{event_id}/registrations", response_model=list[RegistrantOut])
 def get_registrations(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Who has self-registered for this event. Org-scoped like every other event read."""
+    """Who has registered for this event — self-serve or host-invited (see `invited_by`).
+    Org-scoped like every other event read."""
     _get_event_or_404(db, user.org_id, event_id)
     return crud.list_registrations(db, event_id)
+
+
+@router.post("/{event_id}/invite-viewers", response_model=list[RegistrationOut])
+def invite_viewers(
+    event_id: uuid.UUID,
+    data: ViewerInviteCreate,
+    background: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Host-initiated viewer invites — the access grant for a PRIVATE event (watch_event's
+    visibility gate accepts any valid registration token regardless of org membership), and
+    for a public/unlisted event just a courtesy email of the watch link. Same permission as
+    editing the event: org admin, or the host who owns/is assigned it."""
+    ev = _get_event_or_404(db, user.org_id, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only invite viewers to events you host")
+
+    seen = set()
+    out = []
+    for item in data.invites:
+        email = item.email.lower()
+        if email in seen:
+            continue
+        seen.add(email)
+        reg = crud.get_registration(db, event_id, email)
+        if reg is None:
+            reg = crud.create_registration(db, event_id, item.name, email, invited_by=user.id)
+        token = create_registration_token(reg)
+        background.add_task(
+            send_viewer_invite_email,
+            reg.email, reg.name, ev.title or "this event",
+            _registration_console_url(ev.id, token), user.full_name,
+        )
+        out.append(RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=token))
+    return out

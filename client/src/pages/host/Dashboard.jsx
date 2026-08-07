@@ -54,7 +54,7 @@ export default function HostDashboard() {
   // state and all — into the LiveKit room once the broadcast is actually live. Gated on
   // media.active (not just previewOn) so publishing waits for getUserMedia to have really
   // resolved, rather than racing it.
-  const { connected: isPublishing, publishError } = useLiveKitPublish({
+  const { connected: isPublishing, reconnecting: isReconnecting, publishError } = useLiveKitPublish({
     enabled: live && media.active,
     url: state.livekitUrl,
     token: state.publishToken,
@@ -168,6 +168,7 @@ export default function HostDashboard() {
               onCountdownDone={clearCountdown}
               publishToken={state.publishToken}
               isPublishing={isPublishing}
+              isReconnecting={isReconnecting}
               publishError={publishError}
             />
           </div>

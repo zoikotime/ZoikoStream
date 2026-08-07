@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -14,6 +14,19 @@ from .models import EventRegistration, User
 ALGORITHM = "HS256"
 _bearer = HTTPBearer(auto_error=True)
 _bearer_optional = HTTPBearer(auto_error=False)
+
+
+def client_ip(request: Request) -> str | None:
+    """Deployed behind Cloud Run, whose frontend terminates the connection and sets
+    X-Forwarded-For itself — a caller cannot spoof this hop the way it could with a
+    self-managed reverse proxy. Without reading it, request.client.host is Cloud Run's
+    proxy address for every caller, not the real one."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else None
 
 
 def hash_password(password: str) -> str:

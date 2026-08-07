@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
-  FiArrowLeft, FiCalendar, FiClock, FiEye, FiUsers, FiMic,
+  FiArrowLeft, FiCalendar, FiClock, FiEye, FiUsers, FiMic, FiMail,
   FiUploadCloud, FiLink, FiTrash2, FiVideo, FiBarChart2, FiUserCheck, FiUserPlus, FiX,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
@@ -17,6 +17,7 @@ import Badge from "../../ui/Badge";
 import { cx, focusRing } from "../../ui/tokens";
 import { statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 import AssignPeopleModal, { ROLE_PATH } from "./AssignPeopleModal";
+import InviteViewersModal from "./InviteViewersModal";
 
 const TABS = ["Overview", "Hosts", "Moderators", "Speakers", "Registration", "Recording", "Analytics", "Settings"];
 
@@ -88,6 +89,7 @@ export default function EventDetails() {
   const [tab, setTab] = useState("Overview");
   const [busy, setBusy] = useState(false);
   const [manageRole, setManageRole] = useState(null); // "Host" | "Moderator" | "Speaker" | null
+  const [inviteOpen, setInviteOpen] = useState(false);
 
   const { data, loading, error, reload } = useApi(() =>
     Promise.all([
@@ -95,7 +97,8 @@ export default function EventDetails() {
       api.get(`/events/${id}/hosts`).then((r) => r.data),
       api.get(`/events/${id}/moderators`).then((r) => r.data),
       api.get(`/events/${id}/speakers`).then((r) => r.data),
-    ]).then(([event, hosts, moderators, speakers]) => ({ event, hosts, moderators, speakers }))
+      api.get(`/events/${id}/registrations`).then((r) => r.data),
+    ]).then(([event, hosts, moderators, speakers, viewers]) => ({ event, hosts, moderators, speakers, viewers }))
   );
 
   const back = (
@@ -110,7 +113,7 @@ export default function EventDetails() {
   if (loading) return <div className="space-y-4">{back}<PageSpinner label="Loading event…" /></div>;
   if (error) return <div className="space-y-4">{back}<OrganizationErrorState error={error} onRetry={reload} title="Couldn't load this event" /></div>;
 
-  const { event, hosts, moderators, speakers } = data;
+  const { event, hosts, moderators, speakers, viewers } = data;
   const st = statusMeta(event.status);
 
   const copyLink = () => {
@@ -246,12 +249,43 @@ export default function EventDetails() {
       )}
 
       {tab === "Registration" && (
-        <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50">
-          <OrganizationEmptyState
-            icon={FiUsers}
-            title="No registrations yet"
-            description={event.registration_required ? "Registered attendees will appear here." : "Registration isn't required for this event."}
-          />
+        <div className="space-y-4">
+          <div className="flex justify-end">
+            <Button size="sm" leftIcon={FiMail} onClick={() => setInviteOpen(true)}>
+              Invite viewers
+            </Button>
+          </div>
+          {viewers.length === 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50">
+              <OrganizationEmptyState
+                icon={FiUsers}
+                title="No viewers yet"
+                description={
+                  event.visibility === "private"
+                    ? "Invite people by email to let them into this private event."
+                    : event.registration_required
+                      ? "Registered attendees will appear here."
+                      : "Invite people by email, or share the event link — registration isn't required."
+                }
+                action={<Button size="sm" leftIcon={FiMail} onClick={() => setInviteOpen(true)}>Invite viewers</Button>}
+              />
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {viewers.map((v) => (
+                <div key={v.id} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/50">
+                  <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-violet-100 text-sm font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
+                    {initials(v.name)}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium text-slate-800 dark:text-slate-100">{v.name}</p>
+                    <p className="truncate text-xs text-slate-500 dark:text-slate-400">{v.email}</p>
+                  </div>
+                  {v.invited_by && <Badge status="info" size="sm">Invited</Badge>}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -310,6 +344,14 @@ export default function EventDetails() {
           onSaved={reload}
         />
       )}
+
+      <InviteViewersModal
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        eventId={event.id}
+        eventVisibility={event.visibility}
+        onInvited={reload}
+      />
     </div>
   );
 }

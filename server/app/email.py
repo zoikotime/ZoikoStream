@@ -204,6 +204,27 @@ def _registration_html(name: str, event_title: str, event_url: str) -> str:
     </div>""")
 
 
+def _viewer_invite_html(name: str, event_title: str, watch_url: str, inviter_name: str) -> str:
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title or "an event")
+    safe_inviter = html.escape(inviter_name or "The host")
+    return _shell(f"""
+    {_header("You're invited to watch")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>{safe_inviter} has invited you to watch <strong>{safe_title}</strong> on ZoikoStream.
+         This link is yours — no account or password needed.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{watch_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Watch the event
+        </a>
+      </p>
+      <p style="color:#888;font-size:13px;">If you weren't expecting this, you can ignore this email.</p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
 
@@ -235,6 +256,11 @@ def send_registration_confirmation_email(to: str, name: str, event_title: str, e
     _send(to, f"You're registered for {event_title}", _registration_html(name, event_title, event_url))
 
 
+def send_viewer_invite_email(to: str, name: str, event_title: str, watch_url: str, inviter_name: str) -> None:
+    _send(to, f"You're invited to watch {event_title}",
+          _viewer_invite_html(name, event_title, watch_url, inviter_name))
+
+
 if __name__ == "__main__":
     # Offline self-check: best-effort behavior + HTML escaping + OTP rendering. No network.
     from unittest.mock import patch
@@ -258,4 +284,7 @@ if __name__ == "__main__":
     asn = _assignment_html("<i>Bob</i>", "<b>Launch</b>", "host", "<u>Acme</u>", "https://x/host/dashboard?event=1")
     assert "&lt;i&gt;Bob&lt;/i&gt;" in asn and "&lt;b&gt;Launch&lt;/b&gt;" in asn and "&lt;u&gt;Acme&lt;/u&gt;" in asn, "assignment email not escaped"
     assert "Host" in asn, "role not rendered"
+    vinv = _viewer_invite_html("<i>Bob</i>", "<b>Launch</b>", "https://x/events/1/watch?reg=abc", "<u>Alice</u>")
+    assert "&lt;i&gt;Bob&lt;/i&gt;" in vinv and "&lt;b&gt;Launch&lt;/b&gt;" in vinv and "&lt;u&gt;Alice&lt;/u&gt;" in vinv, "viewer invite not escaped"
+    assert "reg=abc" in vinv, "viewer invite link missing the access token"
     print("ok")

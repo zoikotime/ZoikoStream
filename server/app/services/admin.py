@@ -10,8 +10,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import BroadcastSession, Event, Organization, Plan, Subscription, User
+from ..crud import event as event_crud
+from ..models import BroadcastSession, Event, LiveRecording, Organization, Plan, Subscription, User
 from ..security import _ROLE_RANK
+from . import livekit
 
 # Excluded from customer-facing counts — it only holds the super admin (matches dashboard.py).
 PLATFORM_ORG_NAME = "ZoikoStream Platform"
@@ -210,9 +212,16 @@ def live_events(db: Session, state: str = "live") -> list[dict]:
     out = []
     for s in sessions:
         ev = db.get(Event, s.event_id)
+        # A "live" session whose event was deleted out from under it (old data from before
+        # deletes force-ended the broadcast first) is unreachable and unmanageable — showing
+        # it as live is actively misleading. "recent"/ended sessions keep their historical
+        # row regardless, same as the audit log would.
+        if state != "recent" and (ev is None or ev.deleted_at is not None):
+            continue
         org = ev.organization if ev else None
         out.append({
             "id": str(s.id),
+            "event_id": str(s.event_id),
             "title": ev.title if ev else None,
             "organization": org.name if org else None,
             "region": org.region if org else None,
@@ -224,6 +233,46 @@ def live_events(db: Session, state: str = "live") -> list[dict]:
             "bitrate_kbps": None,   # source: LiveKit track stats (not integrated)
         })
     return out
+
+
+def _member_out(u: User) -> dict:
+    return {"id": str(u.id), "name": u.full_name, "email": u.email}
+
+
+def event_detail(db: Session, event_id) -> dict | None:
+    """Cross-org event detail for the Super Admin console. Unlike /events/{id} (org-scoped
+    to the caller, which 404s a super admin on every event outside their own platform org —
+    see routers/admin.py's event endpoints for the fix), this reads any event directly."""
+    ev = db.get(Event, event_id)
+    if ev is None or ev.deleted_at is not None:
+        return None
+    org = ev.organization
+    session = db.scalar(
+        select(BroadcastSession).where(BroadcastSession.event_id == event_id)
+        .order_by(BroadcastSession.created_at.desc())
+    )
+    recording = db.scalar(
+        select(LiveRecording).where(LiveRecording.event_id == event_id)
+        .order_by(LiveRecording.created_at.desc())
+    )
+    return {
+        "id": str(ev.id), "title": ev.title, "description": ev.description,
+        "status": ev.status, "visibility": ev.visibility, "category": ev.category,
+        "start_time": ev.start_time, "end_time": ev.end_time, "created_at": ev.created_at,
+        "organization": {"id": str(org.id), "name": org.name} if org else None,
+        "broadcast": None if session is None else {
+            "id": str(session.id), "status": session.status,
+            "started_at": session.started_at, "ended_at": session.ended_at,
+            "peak_viewers": session.peak_viewers,
+        },
+        "recording": None if recording is None else {
+            "id": str(recording.id), "status": recording.status,
+            "enforced": recording.enforced, "size_bytes": recording.size_bytes,
+        },
+        "hosts": [_member_out(u) for u in event_crud.list_assignees(db, event_id, "host")],
+        "moderators": [_member_out(u) for u in event_crud.list_assignees(db, event_id, "moderator")],
+        "speakers": [_member_out(u) for u in event_crud.list_assignees(db, event_id, "speaker")],
+    }
 
 
 def platform_health(db: Session) -> dict:
@@ -252,8 +301,8 @@ def platform_health(db: Session) -> dict:
                                "Configured", "LIVEKIT_URL not set"))
     services.append(configured("email", "Email", bool(settings.RESEND_API_KEY),
                                "Resend configured", "RESEND_API_KEY not set"))
-    services.append({"id": "storage", "name": "Storage", "status": "not_configured",
-                     "note": "Google Cloud Storage not yet integrated"})
+    services.append(configured("storage", "Storage", livekit.gcs_configured(),
+                               "Google Cloud Storage configured", "GCS_BUCKET / GCS_CREDENTIALS_PATH not set"))
     services.append({"id": "cdn", "name": "CDN", "status": "not_configured", "note": "Not yet integrated"})
     services.append({"id": "workers", "name": "Background Workers", "status": "not_configured",
                      "note": "Not yet integrated"})

@@ -10,8 +10,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..crud import admin as crud
+from ..crud import event as event_crud
 from ..db import get_db
-from ..models import ElevationSession, Organization, PlatformSetting, Subscription, User
+from ..models import ElevationSession, Event, Organization, PlatformSetting, Subscription, User
 from ..schemas.admin import (
     ApiKeyCreate,
     ApiKeyCreated,
@@ -33,19 +34,18 @@ from ..schemas.admin import (
     SupportTicketUpdate,
     UserUpdate,
 )
+from .. import security
 from ..security import require_super_admin
 from ..services import admin as svc
+from ..services import broadcast as broadcast_svc
+from ..services import moderation as mod
 from ..services import ops as ops_svc
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_super_admin)])
 
 
-def _ip(request: Request) -> str | None:
-    return request.client.host if request.client else None
-
-
 def _audit(db, admin, request, action, **kw):
-    crud.create_audit_log(db, actor=admin, action=action, ip=_ip(request), **kw)
+    crud.create_audit_log(db, actor=admin, action=action, ip=security.client_ip(request), **kw)
 
 
 # ── Dashboard ────────────────────────────────────────────────────────────────
@@ -299,6 +299,47 @@ def live_events(state: str = Query("live", pattern="^(live|recent)$"), db: Sessi
 @router.get("/platform-health")
 def platform_health(db: Session = Depends(get_db)):
     return svc.platform_health(db)
+
+
+@router.get("/events/{event_id}")
+def get_event(event_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Cross-org event detail. /events/{id} (routers/events.py) scopes to the caller's own
+    org_id, which for a super admin is the platform org — it 404s on every other org's
+    event. This is the super-admin-safe read, used by the Live Operations detail view."""
+    detail = svc.event_detail(db, event_id)
+    if detail is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    return detail
+
+
+@router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_event(
+    event_id: uuid.UUID,
+    request: Request,
+    admin: User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """Delete any event, any org. If it's currently live/paused, force-ends the broadcast
+    first (stops the recording, closes the LiveKit room) so nothing is orphaned — a soft
+    delete alone would leave an active broadcast_sessions row with no way to reach it."""
+    ev = db.get(Event, event_id)
+    if ev is None or ev.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+
+    was_live = ev.status in ("live", "paused")
+    if was_live:
+        ctx = mod.Ctx(
+            event_id=ev.id, org_id=ev.org_id, room=f"event_{ev.id}",
+            user_id=admin.id, name=admin.full_name or admin.email,
+            identity=f"admin-{admin.id}", role=admin.role,
+            can_moderate=True, can_host=True,
+        )
+        await broadcast_svc._end(ctx, {}, emergency=True)
+        db.refresh(ev)
+
+    event_crud.soft_delete_event(db, ev)
+    _audit(db, admin, request, "event.delete", target_type="event", target_id=ev.id,
+           org_id=ev.org_id, meta={"title": ev.title, "force_ended": was_live})
 
 
 # ── Audit logs ───────────────────────────────────────────────────────────────

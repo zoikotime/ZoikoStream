@@ -98,9 +98,12 @@ class EventAssignment(Base):
 
 
 class EventRegistration(Base):
-    """A self-serve registration for a `registration_required` event. No User row —
-    registrants are anonymous public visitors, identified only by name/email; access to
-    the watch page's stream is granted via a signed token (see security.py), not login."""
+    """A registrant for an event — self-serve (registration_required, `invited_by` NULL) or
+    host-initiated (`invited_by` set, see routers/events.py invite_viewers). Either way, no
+    User row: registrants are identified only by name/email, and access to the watch page's
+    stream is granted via a signed token (see security.py), not login. A row also doubles as
+    the access grant that lets a specific outside person into a PRIVATE event — see
+    watch_event's visibility gate."""
 
     __tablename__ = "event_registrations"
     __table_args__ = (UniqueConstraint("event_id", "email", name="uq_event_registration_email"),)
@@ -109,6 +112,7 @@ class EventRegistration(Base):
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped["Event"] = relationship()
