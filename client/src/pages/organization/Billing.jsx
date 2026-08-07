@@ -85,9 +85,14 @@ export default function OrganizationBilling() {
         <div className="grid place-items-center py-20"><Spinner /></div>
       ) : (
         <>
-          {/* Current subscription */}
-          <Card padding="lg" className="relative overflow-hidden">
-            <span className="absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b from-violet-600 to-fuchsia-500" />
+          {/* Current subscription. The plan is the one card on this page that should read as
+              "yours", so the whole frame carries the brand instead of a magenta bar down the
+              left edge: a violet border all the way round, over a lavender wash that fades out
+              to the right. overflow-hidden keeps that wash inside the corner radius. */}
+          <Card
+            padding="lg"
+            className="relative overflow-hidden border-violet-400/70 bg-gradient-to-br from-violet-50 via-white to-white shadow-[0_1px_3px_rgba(124,58,237,0.08)] dark:border-violet-500/40 dark:from-violet-500/[0.10] dark:via-slate-900 dark:to-slate-900"
+          >
             <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <div className="flex flex-wrap items-center gap-3">
@@ -99,7 +104,7 @@ export default function OrganizationBilling() {
                 <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2">
                   {currentPlan && (
                     <span>
-                      <span className="text-3xl font-bold text-slate-900 dark:text-white">${currentPlan.price_monthly}</span>
+                      <span className="text-3xl font-bold text-violet-600 dark:text-violet-400">${currentPlan.price_monthly}</span>
                       <span className="text-sm text-slate-400"> /month</span>
                     </span>
                   )}

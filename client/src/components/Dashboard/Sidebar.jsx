@@ -64,8 +64,10 @@ const initials = (name = "") =>
 function WorkspaceHeader({ organization, workspace, count }) {
   const name = organization?.name || "Organization";
   return (
-    <div className="shrink-0 px-3 pt-3">
-      <div className={cx("flex items-center gap-2.5 rounded-lg px-2.5 py-2", CONSOLE.inset)}>
+    // px-3 outer + px-3 inner puts the initials chip on the same 24px left edge as the
+    // brand mark above and the nav icons below.
+    <div className="shrink-0 px-3">
+      <div className={cx("flex items-center gap-2.5 rounded-lg px-3 py-2", CONSOLE.inset)}>
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-gradient-to-br from-violet-600 to-indigo-700 text-[11px] font-bold text-white">
           {initials(name)}
         </span>
@@ -106,20 +108,29 @@ export default function Sidebar({ open, onClose, state }) {
           open ? "translate-x-0" : "-translate-x-full"
         )}
       >
-        {/* Brand. Same row height, wordmark size and eyebrow treatment as the admin console's
+        {/* Brand. Same wordmark size, centring and eyebrow treatment as the admin console's
             rail (components/admin/AdminSidebar) so the two consoles read as one product. The
             workspace identity sits BELOW it — the logo says which product you are in, the chip
-            under it says which workspace, and they answer different questions. */}
-        <div className="flex h-16 shrink-0 items-center justify-between gap-2 px-5">
-          <div className="min-w-0">
-            <Logo height="h-6" />
-            <p className={cx("mt-0.5 text-[9px] font-semibold uppercase tracking-[0.14em]", CONSOLE.faint)}>
-              Organization Console
-            </p>
-          </div>
+            under it says which workspace, and they answer different questions.
+
+            The mark and its eyebrow are centred in the rail rather than sharing the nav's left
+            edge: at 40px the wordmark is a masthead, and a masthead that big set flush left
+            reads as knocked out of position rather than aligned to anything.
+
+            The close button is absolutely positioned instead of being a flex sibling, because
+            a sibling would shift the centred mark off-centre by half the button's width on
+            mobile — and only on mobile, which is exactly the kind of drift nobody spots.
+
+            Height is content-driven instead of a fixed h-16: the wordmark plus its eyebrow no
+            longer fit a 64px row without being crushed against the top edge. */}
+        <div className="relative flex shrink-0 flex-col items-center px-6 pb-4 pt-5">
+          <Logo height="h-10" />
+          <p className={cx("mt-2 text-center text-[10px] font-semibold uppercase tracking-[0.14em]", CONSOLE.faint)}>
+            Organization Console
+          </p>
           <button
             onClick={onClose}
-            className={cx("shrink-0 lg:hidden", CONSOLE.muted)}
+            className={cx("absolute right-4 top-5 shrink-0 lg:hidden", CONSOLE.muted)}
             aria-label="Close menu"
           >
             <FiX className="text-xl" />
@@ -193,7 +204,7 @@ export default function Sidebar({ open, onClose, state }) {
         {/* Identity — the role label comes from the server, so it always matches what the
             API will actually authorize. */}
         <div className={cx("shrink-0 border-t", CONSOLE.divider)}>
-          <div className="flex items-center gap-2.5 px-4 py-3.5">
+          <div className="flex items-center gap-2.5 px-6 py-3.5">
             <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-[11px] font-semibold text-white">
               {initials(person?.name)}
             </span>

@@ -4,6 +4,7 @@
 // Rendered inside OrganizationLayout. No backend: form edits gate behind Save (local
 // state + a dirty flag); immediate actions (integrations, keys, danger) toast on their own.
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   FiUser, FiImage, FiShield, FiBell, FiCode, FiAlertTriangle,
   FiUploadCloud, FiGlobe, FiCheck, FiCopy, FiEye, FiEyeOff, FiTrash2, FiPlus, FiSave,
@@ -156,7 +157,14 @@ const toApi = (s) => ({
 
 export default function OrganizationSettings() {
   const { data, loading, error, reload } = useApi(loadSettings);
-  const [tab, setTab] = useState("general");
+  // ?tab= opens a specific panel, so other screens can link straight to Security or
+  // Developer instead of dropping the reader on General to hunt for it. Unknown values
+  // fall back to General rather than rendering an empty page.
+  const [params] = useSearchParams();
+  const requested = params.get("tab");
+  const [tab, setTab] = useState(() =>
+    TABS.some((t) => t.key === requested) ? requested : "general"
+  );
   const [settings, setSettings] = useState(null);
   const [seededData, setSeededData] = useState(null);
   const [dirty, setDirty] = useState(false);

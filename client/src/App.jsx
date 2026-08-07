@@ -26,7 +26,6 @@ import EventRegistration from "./pages/EventRegistration";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import ModeratorDashboard from "./pages/moderator/Dashboard";
-import OrganizationProfile from "./pages/organization/Profile";
 
 // Public marketing homepage — code-split from the app bundle.
 const Home = lazy(() => import("./pages/Home/Home"));
@@ -54,6 +53,9 @@ const Developers = lazy(() => import("./pages/admin/Developers"));
 // as the admin console above: only org admins reach /organization/*, so shipping them in the
 // main bundle made every visitor to the public homepage download them. AppShell already
 // provides the Suspense boundary these render inside.
+// Organization & Workspaces is split too — it is the only screen carrying framer-motion,
+// and eagerly importing it put that library in the bundle every homepage visitor downloads.
+const OrganizationProfile = lazy(() => import("./pages/organization/Profile"));
 const DeveloperPlatform = lazy(() => import("./pages/organization/DeveloperPlatform"));
 const Credentials = lazy(() => import("./pages/organization/Credentials"));
 const Webhooks = lazy(() => import("./pages/organization/Webhooks"));

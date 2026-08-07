@@ -162,19 +162,17 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
           open ? "translate-x-0" : "-translate-x-full"
         )}
       >
-        {/* Brand */}
-        <div className="flex h-16 shrink-0 items-center justify-between gap-2 px-5">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <Logo height="h-6" />
-            </div>
-            <p className={cx("mt-0.5 text-[9px] font-semibold uppercase tracking-[0.14em]", CONSOLE.faint)}>
-              Super Admin Console
-            </p>
-          </div>
+        {/* Brand. Kept identical to the org console's rail (components/Dashboard/Sidebar) so
+            the two consoles read as one product — see the note there for why the wordmark is
+            centred and why the close button is positioned rather than a flex sibling. */}
+        <div className="relative flex shrink-0 flex-col items-center px-6 pb-4 pt-5">
+          <Logo height="h-10" />
+          <p className={cx("mt-2 text-center text-[10px] font-semibold uppercase tracking-[0.14em]", CONSOLE.faint)}>
+            Super Admin Console
+          </p>
           <button
             onClick={onClose}
-            className={cx("shrink-0 lg:hidden", CONSOLE.muted)}
+            className={cx("absolute right-4 top-5 shrink-0 lg:hidden", CONSOLE.muted)}
             aria-label="Close menu"
           >
             <FiX className="text-xl" />
@@ -265,7 +263,7 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
               )
             }
           />
-          <div className="flex items-center gap-2.5 px-4 pb-4">
+          <div className="flex items-center gap-2.5 px-6 pb-4">
             <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-[11px] font-semibold text-white">
               {initials(person.name)}
             </span>
