@@ -18,7 +18,7 @@ import {
   RESOLUTION_OPTIONS, FRAMERATE_OPTIONS, BITRATE_GUIDE, PROCESSING_TOGGLES,
   BACKGROUND_OPTIONS, CHAT_CONTROLS, SLOW_MODE_OPTIONS, STAGE_CONTROLS, RECORDING_TONE,
 } from "../../data/host";
-
+import InviteViewersModal from "../../pages/organization/InviteViewersModal";
 const section = "text-[11px] font-semibold uppercase tracking-wide text-slate-400";
 
 // One labelled switch bound to a server-enforced setting. Module-level so it isn't
@@ -38,45 +38,6 @@ function ToggleRow({ toggle, settings, disabled, onChange }) {
 // ── invite to stage ───────────────────────────────────────────────────────────
 // Promotes someone already connected. Emailing an outside speaker is the existing
 // org invitation flow (/organization/users) — duplicating it here would be a second
-// invitation system.
-function InviteToStage({ participants, send, onClose }) {
-  const offStage = participants.filter(
-    (p) => !p.waiting && p.role !== "host" && !p.on_stage && p.role !== "speaker"
-  );
-  return (
-    <div className="space-y-3">
-      <p className="text-sm text-slate-600 dark:text-slate-300">
-        Bring someone who's already here onto the stage. To invite a speaker who hasn't
-        joined yet, use your organization's member invitations.
-      </p>
-      {offStage.length === 0 ? (
-        <EmptyState title="Everyone connected is already on stage" description="Attendees appear here as they join." className="py-8" />
-      ) : (
-        <div className="max-h-80 space-y-1 overflow-y-auto">
-          {offStage.map((p) => (
-            <div key={p.identity} className="flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/60">
-              <span className={cx("grid h-9 w-9 shrink-0 place-items-center rounded-full text-sm font-semibold", ACCENT[accentFor(p.identity)].chip)}>
-                {initials(p.name)}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{p.name || p.identity}</p>
-                <p className="text-xs text-slate-400">{p.role || "viewer"}</p>
-              </div>
-              <Button
-                appearance="console"
-                size="sm"
-                onClick={() => { send("participant.stage", { identity: p.identity, on_stage: true }); onClose(); }}
-              >
-                Invite to stage
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── broadcast settings ────────────────────────────────────────────────────────
 
 function SettingsBody({ settings, media, canHost, send }) {
@@ -277,22 +238,46 @@ function RecordingLog({ recordings }) {
 }
 
 const CONFIG = {
-  invite: { title: "Invite to stage", size: "md" },
+  invite: { title: "Invite viewers", size: "md" },
   settings: { title: "Broadcast settings", size: "lg" },
   recordings: { title: "Recording log", size: "lg" },
 };
 
 export default function FeatureModal({ modal, onClose, state, media, send }) {
   const cfg = modal && CONFIG[modal];
+
+  // Host "Invite" should use the same viewer invitation system
+  // already used by Organization Event Details.
+  if (modal === "invite") {
+    return (
+      <InviteViewersModal
+        open={true}
+        onClose={onClose}
+        eventId={state.event?.id}
+        eventVisibility={state.event?.visibility || "public"}
+      />
+    );
+  }
+
   return (
-    <Modal open={!!cfg} onClose={onClose} title={cfg?.title} size={cfg?.size || "md"}>
-      {modal === "invite" && (
-        <InviteToStage participants={state.participants || []} send={send} onClose={onClose} />
-      )}
+    <Modal
+      open={!!cfg}
+      onClose={onClose}
+      title={cfg?.title}
+      size={cfg?.size || "md"}
+    >
       {modal === "settings" && (
-        <SettingsBody settings={state.broadcast?.settings} media={media} canHost={state.canHost} send={send} />
+        <SettingsBody
+          settings={state.broadcast?.settings}
+          media={media}
+          canHost={state.canHost}
+          send={send}
+        />
       )}
-      {modal === "recordings" && <RecordingLog recordings={state.recordings} />}
+
+      {modal === "recordings" && (
+        <RecordingLog recordings={state.recordings || []} />
+      )}
     </Modal>
   );
 }

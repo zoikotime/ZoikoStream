@@ -220,8 +220,19 @@ export default function HostDashboard() {
         />
       </div>
 
-      <FeatureModal modal={modal} onClose={() => setModal(null)} state={state} media={media} send={send} />
-
+      <FeatureModal
+                modal={modal}
+                onClose={() => setModal(null)}
+                state={state}
+                media={media}
+                send={send}
+                eventId={state.event?.id}
+                eventVisibility={state.event?.visibility}
+                onInvited={() => {
+                  // Optional: refresh/reload live state if needed.
+                  // The invitation itself is already handled by the API.
+                }}
+              />
       <StartMeetingPrompt
         open={showStartPrompt}
         eventTitle={state.event?.title}
