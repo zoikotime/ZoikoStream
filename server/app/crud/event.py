@@ -184,8 +184,8 @@ def count_registrations(db, event_id) -> int:
     )
 
 
-def create_registration(db, event_id, name, email) -> EventRegistration:
-    reg = EventRegistration(event_id=event_id, name=name, email=email.lower())
+def create_registration(db, event_id, name, email, invited_by=None) -> EventRegistration:
+    reg = EventRegistration(event_id=event_id, name=name, email=email.lower(), invited_by=invited_by)
     db.add(reg)
     db.commit()
     db.refresh(reg)

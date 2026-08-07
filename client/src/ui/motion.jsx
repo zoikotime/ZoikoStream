@@ -18,6 +18,18 @@ export function useInView(options = { threshold: 0.15, rootMargin: "0px 0px -10%
     if (reduced) return;
     const el = ref.current;
     if (!el) return;
+    // Elements already on-screen at mount (e.g. above-the-fold dashboard KPIs) may sit
+    // there through their first paint without ever crossing a viewport boundary, so the
+    // observer's async first callback can be the only signal — and on some render paths
+    // (tab not yet composited, throttled rAF) that callback never lands. Check geometry
+    // synchronously first so "already visible" doesn't depend on that callback firing.
+    const rect = el.getBoundingClientRect();
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+    if (rect.top < vh && rect.bottom > 0 && rect.left < vw && rect.right > 0) {
+      setInView(true);
+      return undefined;
+    }
     const io = new IntersectionObserver(([e]) => {
       if (e.isIntersecting) {
         setInView(true);

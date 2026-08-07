@@ -67,6 +67,21 @@ _SUPPORT_TICKET_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ",
 ]
 
+# NULL = self-serve registration; set = host-initiated invite (routers/events.py
+# invite_viewers), which also doubles as the access grant into a PRIVATE event.
+_EVENT_REGISTRATION_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS invited_by UUID REFERENCES users(id)",
+]
+
+# Schema drift: the live table carries org_id/user_id/status/bookmarked/watch_seconds/
+# join_count NOT NULL — columns from a richer registration/RSVP design that never made it
+# into models/event.py's EventRegistration (create_all() only adds tables, so a reverted
+# PR's migration outlived the code that used it). The current model never populates them,
+# so every insert — self-serve registration AND host invites — hit a NotNullViolation.
+# Relaxing the constraint is correct here: these columns aren't part of the current design,
+# not values that were merely missing a default.
+_EVENT_REGISTRATION_RELAX_NOT_NULL = ["org_id", "user_id", "status", "bookmarked", "watch_seconds", "join_count"]
+
 
 def ensure_schema():
     """Create any missing tables and add any missing columns. Idempotent — safe to re-run."""
@@ -86,6 +101,10 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE feature_flags {clause}"))
         for clause in _SUPPORT_TICKET_COLUMNS:
             conn.execute(text(f"ALTER TABLE support_tickets {clause}"))
+        for clause in _EVENT_REGISTRATION_COLUMNS:
+            conn.execute(text(f"ALTER TABLE event_registrations {clause}"))
+        for col in _EVENT_REGISTRATION_RELAX_NOT_NULL:
+            conn.execute(text(f"ALTER TABLE event_registrations ALTER COLUMN {col} DROP NOT NULL"))
     print("Schema ready!")
 
 

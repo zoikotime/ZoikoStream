@@ -158,4 +158,14 @@ class RegistrantOut(BaseModel):
     id: uuid.UUID
     name: str
     email: str
+    invited_by: uuid.UUID | None = None
     created_at: datetime | None = None
+
+
+class ViewerInvite(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    email: EmailStr
+
+
+class ViewerInviteCreate(BaseModel):
+    invites: list[ViewerInvite] = Field(..., min_length=1, max_length=100)

@@ -18,6 +18,8 @@ from collections import deque
 
 from fastapi import Depends, HTTPException, Request, status
 
+from . import security
+
 
 class SlidingWindow:
     """Allow at most `limit` hits in any `window` seconds. Not thread-safe: callers are
@@ -71,10 +73,7 @@ def _sweep() -> None:
 
 
 def client_ip(request: Request) -> str:
-    """Direct peer address. ponytail: deliberately NOT reading X-Forwarded-For — trusting
-    that header without a verified proxy allowlist lets a caller spoof its way past the
-    limit. Add the allowlist and read the header when a real proxy is in front."""
-    return request.client.host if request.client else "unknown"
+    return security.client_ip(request) or "unknown"
 
 
 def rate_limit(scope: str, limit: int, window: float = 60.0):

@@ -12,12 +12,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..crud import admin as admin_crud
 from ..crud import event as event_crud
 from ..crud import organization as crud
 from ..db import get_db
 from ..email import send_invitation_email
 from ..models import Organization, User
-from ..schemas.admin import AdminUserOut, Page, UserUpdate
+from ..schemas.admin import AdminUserOut, Page, PlanOut, UserUpdate
 from ..schemas.auth import TokenOut, UserOut
 from ..schemas.organization import (
     InvitationAccept,
@@ -88,6 +89,25 @@ def overview(
     return org_svc.overview(db, org, user, range_=range_, include_test=include_test)
 
 
+@router.get("/plans", response_model=list[PlanOut])
+def list_plans(db: Session = Depends(get_db)):
+    """Public pricing tiers for the Billing page's plan comparison. Read-only: there is no
+    self-serve plan switch (no payment provider integrated yet) — changing a subscription's
+    plan is still a super-admin action via /admin/organizations/{id}/subscription."""
+    return [p for p in admin_crud.list_plans(db) if p.is_active]
+
+
+@router.get("/analytics")
+def analytics(
+    range_: str = Query("30d", alias="range", pattern="^(7d|30d|90d|12m)$"),
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """Historical analytics for /organization/analytics, scoped to the caller's own org.
+    Readable by any member — same posture as /overview."""
+    return org_svc.analytics(db, org, range_key=range_)
+
+
 @router.get("/recordings", response_model=list[RecordingOut])
 def list_recordings(
     org: Organization = Depends(get_my_org),
@@ -114,6 +134,7 @@ def list_recordings(
 def delete_recording(
     recording_id: uuid.UUID,
     admin: User = Depends(require_org_admin),
+    org: Organization = Depends(get_my_org),
     db: Session = Depends(get_db),
 ):
     """Removes both the file (best-effort — see livekit.delete_object) and the DB row.
@@ -122,6 +143,8 @@ def delete_recording(
     if rec is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
     livekit.delete_object(rec.file_url)
+    if rec.size_bytes:
+        org.storage_used_gb = round(max(0.0, float(org.storage_used_gb or 0) - rec.size_bytes / (1024 ** 3)), 3)
     db.delete(rec)
     db.commit()
 
@@ -334,7 +357,8 @@ def list_invitations(
 
 @router.post("/invitations", response_model=InvitationOut, status_code=status.HTTP_201_CREATED)
 def create_invitation(data: InvitationCreate, background: BackgroundTasks,
-                      admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
+                      admin: User = Depends(require_org_admin), org: Organization = Depends(get_my_org),
+                      db: Session = Depends(get_db)):
     email = data.email.lower()
     if data.role not in ORG_ASSIGNABLE_ROLES:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid role")
@@ -342,6 +366,10 @@ def create_invitation(data: InvitationCreate, background: BackgroundTasks,
         raise HTTPException(status.HTTP_409_CONFLICT, "A user with that email already exists")
     if crud.pending_invite_exists(db, admin.org_id, email):
         raise HTTPException(status.HTTP_409_CONFLICT, "A pending invitation for that email already exists")
+    members_bar = next((i for i in org_svc.entitlements(db, org)["items"] if i["label"] == "Members"), None)
+    if members_bar and members_bar["limit"] is not None and members_bar["used"] >= members_bar["limit"]:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                             "Member seat limit reached for your plan — upgrade to invite more people")
     inv, raw = crud.create_invitation(db, admin.org_id, email, data.role, admin.id)
     url = _invite_url(raw)
     org_name = admin.organization.name if admin.organization else "your organization"

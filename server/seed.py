@@ -7,6 +7,8 @@ Usage:
   python seed.py
 """
 
+import os
+import secrets
 import sys
 from sqlalchemy import func, select
 from app.models import Organization, User, Plan, PlatformSetting
@@ -103,23 +105,31 @@ def seed_database():
             username = f"{original_username}{counter}"
             counter += 1
         
+        # SUPER_ADMIN_PASSWORD lets ops set a known password (e.g. from a secret manager);
+        # otherwise generate one so nothing predictable ever lands in source control.
+        password = os.environ.get("SUPER_ADMIN_PASSWORD") or secrets.token_urlsafe(18)
+        generated = "SUPER_ADMIN_PASSWORD" not in os.environ
+
         admin_user = User(
             org_id=platform_org.id,
             full_name="ZoikoStream Admin",
             email=super_admin_email,
             username=username,
-            password_hash=hash_password("NoxxMC26070%!LGM"),  # Use provided password
+            password_hash=hash_password(password),
             role="super_admin",
             is_active=True,
         )
-        
+
         db.add(admin_user)
         db.commit()
-        
+
         print(f"✓ Super admin created successfully!")
         print(f"  Email: {super_admin_email}")
         print(f"  Username: {username}")
-        print(f"  Password: NoxxMC26070%!LGM")
+        if generated:
+            print(f"  Password (save this now, shown once): {password}")
+        else:
+            print("  Password: set from SUPER_ADMIN_PASSWORD env var")
         print(f"\n✓ Database seeding completed successfully!")
         return True
         

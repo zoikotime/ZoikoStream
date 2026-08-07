@@ -114,7 +114,12 @@ export default function EventWatch() {
   const [loading, setLoading] = useState(true);
 
   const fetchWatch = () => {
-    const reg = localStorage.getItem(`zk_reg_${eventId}`);
+    // A host-invited or self-registered link carries the access token in the URL
+    // (?reg=...) — save it locally so a refresh (or a later visit with no query string)
+    // keeps working without the visitor needing to click the emailed link again.
+    const urlReg = new URLSearchParams(window.location.search).get("reg");
+    if (urlReg) localStorage.setItem(`zk_reg_${eventId}`, urlReg);
+    const reg = urlReg || localStorage.getItem(`zk_reg_${eventId}`);
     api
       .get(`/events/${eventId}/watch`, { params: reg ? { reg } : undefined })
       .then(({ data }) => setWatch(data))

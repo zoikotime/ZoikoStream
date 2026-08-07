@@ -49,10 +49,16 @@ from ..models import (
 )
 from . import admin as admin_svc
 from . import ops as ops_svc
+from .broadcast import engagement_score
 
 # Ranges the overview toolbar offers. Mirrors the console's vocabulary.
 RANGES = {"1h": timedelta(hours=1), "24h": timedelta(hours=24),
           "7d": timedelta(days=7), "30d": timedelta(days=30)}
+
+# Ranges the Analytics page offers. A separate vocabulary from RANGES above (that one
+# drives the Overview toolbar's operational window; this one drives historical reporting).
+ANALYTICS_RANGES = {"7d": timedelta(days=7), "30d": timedelta(days=30),
+                     "90d": timedelta(days=90), "12m": timedelta(days=365)}
 
 # Threshold at which an entitlement becomes an "attention required" item.
 USAGE_WARN_RATIO = 0.8
@@ -249,6 +255,102 @@ def entitlements(db: Session, org: Organization) -> dict:
         "delivery_gb_total": round(float(org.bandwidth_gb or 0), 1),
         "delivery_windowed": None,
         "delivery_note": "Windowed delivery volume needs a metering pipeline (not integrated).",
+    }
+
+
+def _bucket_label(dt: datetime, range_key: str) -> str:
+    return dt.strftime("%b %Y") if range_key == "12m" else dt.strftime("%b %d")
+
+
+def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
+    """Real per-org historical analytics for /organization/analytics, from Event +
+    BroadcastSession + AnalyticsSnapshot — the same tables the live console's own
+    analytics_now() trusts, just rolled up across events instead of live-only.
+
+    Device/location/traffic-source breakdowns are NOT included: those come from the
+    WebSocket handshake's User-Agent and are only ever held in-memory presence for a
+    currently-live event (see broadcast.classify_ua / _distribution) — nothing persists
+    them historically, so a cross-event breakdown would have to be invented. Honest None
+    + note, same convention as GeoIP elsewhere in this stack.
+    """
+    since = _now() - ANALYTICS_RANGES.get(range_key, ANALYTICS_RANGES["30d"])
+
+    events = db.scalars(
+        select(Event).where(Event.org_id == org.id, Event.deleted_at.is_(None),
+                             Event.start_time.isnot(None), Event.start_time >= since)
+        .order_by(Event.start_time)
+    ).all()
+    event_ids = [e.id for e in events]
+
+    sessions_by_event: dict = {}
+    if event_ids:
+        for s in db.scalars(select(BroadcastSession).where(BroadcastSession.event_id.in_(event_ids))):
+            sessions_by_event.setdefault(s.event_id, []).append(s)
+
+    snapshots_by_event: dict = {}
+    if event_ids:
+        for snap in db.scalars(select(AnalyticsSnapshot).where(AnalyticsSnapshot.event_id.in_(event_ids))):
+            snapshots_by_event.setdefault(snap.event_id, []).append(snap)
+
+    # Concurrent viewers integrated over the sampler's 15s interval = a real watch-hours
+    # measurement (area under the viewer-count curve), not a per-user estimate.
+    SAMPLE_HOURS = 15 / 3600
+    per_event: dict = {}
+    for e in events:
+        peak = max((s.peak_viewers for s in sessions_by_event.get(e.id, [])), default=0)
+        snaps = snapshots_by_event.get(e.id, [])
+        per_event[e.id] = {
+            "title": e.title,
+            "start": _aware(e.start_time),
+            "peak": peak,
+            "watch_hours": round(sum(s.viewers for s in snaps) * SAMPLE_HOURS, 1),
+            "messages": sum(s.messages for s in snaps),
+            "questions": sum(s.questions for s in snaps),
+            "reactions": sum(s.reactions for s in snaps),
+        }
+
+    buckets: dict[str, dict] = {}
+    bucket_order: list[str] = []
+    for e in events:
+        label = _bucket_label(per_event[e.id]["start"], range_key)
+        if label not in buckets:
+            buckets[label] = {"viewers": 0, "watch_hours": 0.0}
+            bucket_order.append(label)
+        buckets[label]["viewers"] += per_event[e.id]["peak"]
+        buckets[label]["watch_hours"] += per_event[e.id]["watch_hours"]
+
+    def event_engagement(info: dict) -> int:
+        return engagement_score(
+            {"messages": info["messages"], "questions": info["questions"],
+             "poll_votes": 0, "reactions": info["reactions"]}, info["peak"])
+
+    engaged = [event_engagement(i) for i in per_event.values() if i["peak"] > 0]
+    ranked = sorted(per_event.items(), key=lambda kv: -kv[1]["peak"])
+
+    return {
+        "range": range_key,
+        "since": since,
+        "summary": {
+            "viewers": sum(i["peak"] for i in per_event.values()),
+            "watch_hours": round(sum(i["watch_hours"] for i in per_event.values()), 1),
+            "peak": max((i["peak"] for i in per_event.values()), default=0),
+            "engagement": round(sum(engaged) / len(engaged)) if engaged else 0,
+        },
+        "trends": {
+            "viewership": [{"label": l, "value": buckets[l]["viewers"]} for l in bucket_order],
+            "watch_time": [{"label": l, "value": round(buckets[l]["watch_hours"], 1)} for l in bucket_order],
+        },
+        "top_events": [{"label": i["title"], "value": i["peak"]} for _, i in ranked[:5] if i["peak"] > 0],
+        "reports": [
+            {"id": str(eid), "event": i["title"],
+             "date": i["start"].date().isoformat() if i["start"] else None,
+             "viewers": i["peak"], "watch_hours": i["watch_hours"],
+             "engagement": event_engagement(i)}
+            for eid, i in ranked
+        ],
+        "devices": None, "locations": None, "traffic_sources": None,
+        "breakdowns_note": "Device, location and traffic-source breakdowns need a metering/"
+                            "GeoIP pipeline that isn't integrated yet.",
     }
 
 

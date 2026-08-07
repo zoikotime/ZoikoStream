@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { FiSearch, FiRadio, FiGrid, FiClock } from "react-icons/fi";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
@@ -40,6 +41,7 @@ function useLiveEventsData() {
 // viewers/bitrate/recording state; fields the platform doesn't measure yet (LiveKit room
 // stats) render as "—", not a number.
 export default function LiveEvents() {
+  const navigate = useNavigate();
   const { data, loading, error } = useLiveEventsData();
   const [tab, setTab] = useState("live");
   const [q, setQ] = useState("");
@@ -159,6 +161,7 @@ export default function LiveEvents() {
               rowKey={(e) => e.id}
               loading={loading}
               minWidth={900}
+              onRowClick={(e) => e.event_id && navigate(`/admin/live-events/${e.event_id}`)}
               empty={{ title: `No ${tab === "live" ? "live" : "recently ended"} events${q ? " match your search" : ""}.` }}
             />
           </Card>
