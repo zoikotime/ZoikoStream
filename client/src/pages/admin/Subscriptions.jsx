@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { FiCreditCard, FiEdit2, FiSearch } from "react-icons/fi";
-import { Badge, Button, DataTable, Panel, StatCard, money } from "../../components/admin";
+import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, money } from "../../components/admin";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
 import SubscriptionModal from "./SubscriptionModal";
@@ -8,10 +8,10 @@ import SubscriptionModal from "./SubscriptionModal";
 const STATUS_TONE = { active: "success", trial: "warning", past_due: "danger", cancelled: "neutral" };
 const statusLabel = (s) => s.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 
-const inputCls =
-  "h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-800 placeholder:text-slate-400 focus-visible:border-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100";
-const selectCls =
-  "h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 focus-visible:border-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200";
+// Field skins come from the console tokens so a hover or focus change lands on every filter
+// row at once, instead of being re-typed per page.
+const inputCls = CONSOLE.search;
+const selectCls = CONSOLE.select;
 
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—");
 

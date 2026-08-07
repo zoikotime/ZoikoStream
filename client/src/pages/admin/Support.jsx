@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import { FiLifeBuoy, FiPlus, FiTrash2 } from "react-icons/fi";
-import { Badge, Button, DataTable, Panel, StatCard } from "../../components/admin";
+import { Badge, Button, CONSOLE, DataTable, Panel, StatCard } from "../../components/admin";
 import { Select } from "../../ui/forms";
 import { timeAgo } from "../../components/admin/format";
 import api, { errMsg } from "../../api";
@@ -11,8 +11,9 @@ import SupportTicketModal from "./SupportTicketModal";
 const PRIORITY_TONE = { urgent: "danger", high: "warning", normal: "info", low: "neutral" };
 const label = (s) => s.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 
-const selectCls =
-  "h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700 focus-visible:border-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200";
+// Field skins come from the console tokens so a hover or focus change lands on every filter
+// row at once, instead of being re-typed per page.
+const selectCls = CONSOLE.select;
 
 function useSupportData() {
   return useApi(() =>

@@ -6,6 +6,7 @@ import { CONSOLE, cx } from "../../ui/tokens";
 //
 //   <Panel eyebrow="Billing" title="Revenue & Growth" action={<Link/>}>…</Panel>
 //   <Panel title="Services" flush> <table/> </Panel>   // flush = table draws edge-to-edge
+// `static` opts out of the hover response — use it for a panel that is purely decorative.
 export default function Panel({
   eyebrow,
   title,
@@ -13,13 +14,23 @@ export default function Panel({
   action,
   count,
   flush = false,
+  static: isStatic = false,
   className = "",
   bodyClass = "",
   children,
 }) {
   const hasHeader = eyebrow || title || action;
   return (
-    <section className={cx(CONSOLE.panel, className)}>
+    // A border that answers the pointer is what makes a wall of sections read as a live surface
+    // rather than a printed report. It is a border-only change — never a fill or a lift — so a
+    // panel still never looks clickable, which most of them are not.
+    <section
+      className={cx(
+        CONSOLE.panel,
+        !isStatic && cx(CONSOLE.panelHover, "transition-colors duration-150 motion-reduce:transition-none"),
+        className
+      )}
+    >
       {hasHeader && (
         <header className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">

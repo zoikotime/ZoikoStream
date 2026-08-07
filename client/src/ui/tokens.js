@@ -144,6 +144,20 @@ export const TONE = {
 // Scoped to the console on purpose: the org dashboard, marketing site and watch pages
 // keep the slate palette they were designed against.
 // ─────────────────────────────────────────────────────────────────────────────
+// Shared skin for every console filter-bar field (input, select, textarea).
+//
+// Hover is a BORDER lift with a barely-there wash, never a solid fill: a filled field reads as
+// selected or disabled, and these are inputs that happen to be idle. The transition is
+// colors-only so a native select chevron never shifts, and `motion-reduce` opts out.
+const FIELD_BASE = [
+  "rounded-lg border border-slate-200 bg-white text-sm text-slate-800 placeholder:text-slate-400",
+  "transition-colors duration-150 motion-reduce:transition-none",
+  "hover:border-slate-300 hover:bg-slate-50/60",
+  "focus-visible:border-violet-500 focus-visible:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500",
+  "dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100",
+  "dark:hover:border-slate-600 dark:hover:bg-slate-800/60 dark:focus-visible:bg-slate-900",
+].join(" ");
+
 export const CONSOLE = {
   // Shell
   page: "bg-slate-50 dark:bg-black",
@@ -165,8 +179,29 @@ export const CONSOLE = {
     "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.03] dark:text-neutral-200 dark:hover:bg-white/[0.07]",
   segment: "bg-slate-100 dark:bg-white/[0.05]",
   segmentOn: "bg-violet-600 text-white shadow-sm",
-  segmentOff: "text-slate-600 hover:text-slate-900 dark:text-neutral-400 dark:hover:text-white",
+  // An inactive segment/tab now lifts on hover instead of only darkening its text. In light mode
+  // a text-only change on a grey track is nearly invisible, which made every tab strip read as
+  // static labels rather than as controls.
+  segmentOff:
+    "text-slate-600 hover:bg-white hover:text-slate-900 hover:shadow-sm dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white",
   link: "text-violet-600 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300",
+
+  // ── Filter-bar fields ──────────────────────────────────────────────────────
+  // Ready-made shapes built from FIELD_BASE (defined above). Thirteen admin pages were each
+  // declaring their own copy of these strings, so adding a hover state meant editing it thirteen
+  // times to see it once.
+  field: `h-9 w-full px-3 ${FIELD_BASE}`,
+  // Search input with a leading icon — the icon occupies the left padding.
+  search: `h-9 w-full pl-9 pr-3 ${FIELD_BASE}`,
+  // Width is left to the caller so a filter row can size selects to their content.
+  select: `h-9 cursor-pointer px-3 text-slate-700 dark:text-slate-200 ${FIELD_BASE}`,
+  textarea: `w-full px-3 py-2 ${FIELD_BASE}`,
+  // Checkbox with a hover ring, so a toggle in a filter row is discoverable before it is clicked.
+  checkbox:
+    "h-4 w-4 shrink-0 cursor-pointer rounded border-slate-300 accent-violet-600 transition-shadow duration-150 hover:ring-2 hover:ring-violet-500/25 motion-reduce:transition-none dark:border-slate-600",
+  // Wrapper for a checkbox + its label, so the whole pair is one hoverable target.
+  checkboxRow:
+    "inline-flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 transition-colors duration-150 hover:bg-slate-100 motion-reduce:transition-none dark:hover:bg-white/[0.06]",
 
   // Sidebar navigation states. Three levels have to stay tellable apart at a glance:
   //   rest  — quiet, recedes
