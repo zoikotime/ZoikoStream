@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { FiChevronDown, FiChevronLeft, FiChevronRight, FiChevronUp, FiSearch } from "react-icons/fi";
-import { cx, focusRing } from "../../ui/tokens";
+import { CONSOLE, cx, focusRing } from "../../ui/tokens";
 
 // Reusable data grid for every table (Organizations, Users, Events, Billing, …).
 // Features: client-side sortable columns with clear indicators, optional pagination
@@ -20,8 +20,16 @@ import { cx, focusRing } from "../../ui/tokens";
 // selection: selectable + rowKey + onSelectionChange?(Set) + bulkActions?({selected, clear})
 const alignCls = (a) => (a === "right" ? "text-right" : "text-left");
 
+// At rest the chevron is a faint hint; on hover of its header it darkens, so a sortable column
+// announces itself before it is clicked. An active sort is full-contrast and directional.
 function SortIcon({ active, dir }) {
-  if (!active) return <FiChevronDown className="text-slate-300 dark:text-slate-600" aria-hidden="true" />;
+  if (!active)
+    return (
+      <FiChevronDown
+        className="text-slate-300 transition-colors duration-150 group-hover/sort:text-slate-500 motion-reduce:transition-none dark:text-slate-600 dark:group-hover/sort:text-slate-400"
+        aria-hidden="true"
+      />
+    );
   return dir === "asc" ? <FiChevronUp aria-hidden="true" /> : <FiChevronDown aria-hidden="true" />;
 }
 
@@ -32,11 +40,15 @@ function PageBtn({ disabled, active, onClick, children }) {
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "grid h-8 min-w-8 place-items-center rounded-md px-2 text-sm font-medium transition-colors duration-150",
+        "grid h-8 min-w-8 place-items-center rounded-md px-2 text-sm font-medium transition duration-150 motion-reduce:transition-none",
         focusRing,
         active
-          ? "bg-violet-600 text-white"
-          : "text-slate-600 hover:bg-slate-100 disabled:pointer-events-none disabled:opacity-40 dark:text-neutral-300 dark:hover:bg-white/[0.06]"
+          ? "bg-violet-600 text-white shadow-sm"
+          : cx(
+              "text-slate-600 hover:bg-slate-200/80 hover:text-slate-900 active:scale-95 motion-reduce:active:scale-100",
+              "disabled:pointer-events-none disabled:opacity-40",
+              "dark:text-neutral-300 dark:hover:bg-white/10 dark:hover:text-white"
+            )
       )}
     >
       {children}
@@ -54,10 +66,7 @@ function CheckBox({ checked, indeterminate = false, onChange, label }) {
       ref={(el) => el && (el.indeterminate = indeterminate)}
       onChange={onChange}
       onClick={(e) => e.stopPropagation()}
-      className={cx(
-        "h-4 w-4 shrink-0 cursor-pointer rounded border-slate-300 accent-violet-600 dark:border-slate-600",
-        focusRing
-      )}
+      className={cx(CONSOLE.checkbox, focusRing)}
     />
   );
 }
@@ -164,10 +173,7 @@ export default function DataTable({
               onChange={(e) => setQuery(e.target.value)}
               placeholder={searchPlaceholder}
               aria-label="Search table"
-              className={cx(
-                "h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-700 outline-none placeholder:text-slate-400 dark:border-white/10 dark:bg-white/[0.03] dark:text-neutral-200",
-                focusRing
-              )}
+              className={cx(CONSOLE.search, focusRing)}
             />
           </div>
         </div>
@@ -213,8 +219,14 @@ export default function DataTable({
                     <button
                       type="button"
                       onClick={() => toggleSort(c.key)}
+                      title={`Sort by ${typeof c.header === "string" ? c.header : c.key}`}
                       className={cx(
-                        "inline-flex items-center gap-1 rounded transition-colors duration-150 hover:text-slate-600 dark:hover:text-slate-200",
+                        // The header itself becomes the hover target: a tinted, rounded hit area
+                        // rather than a text-colour nudge that nobody notices in light mode.
+                        "group/sort -mx-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5",
+                        "transition-colors duration-150 motion-reduce:transition-none",
+                        "hover:bg-slate-200/70 hover:text-slate-700 dark:hover:bg-white/10 dark:hover:text-slate-100",
+                        sort?.key === c.key && "text-violet-700 dark:text-violet-300",
                         focusRing,
                         c.align === "right" && "flex-row-reverse"
                       )}
@@ -259,9 +271,16 @@ export default function DataTable({
                     key={key}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
                     className={cx(
-                      "group transition-colors duration-150 hover:bg-slate-50 dark:hover:bg-white/[0.06]/40",
+                      // `dark:hover:bg-white/[0.06]/40` was here — two opacity modifiers on one
+                      // utility, which Tailwind drops, so dark rows had no hover at all.
+                      "group transition-colors duration-150 motion-reduce:transition-none",
+                      "hover:bg-slate-100/80 dark:hover:bg-white/[0.05]",
                       isSelected && "bg-violet-50/60 dark:bg-violet-500/10",
-                      onRowClick && "cursor-pointer"
+                      // A clickable row says so: pointer plus a violet leading edge on hover, which
+                      // reads even for an operator who cannot distinguish the background tint. The
+                      // edge is transparent at rest, so hovering never shifts the row.
+                      onRowClick &&
+                        "cursor-pointer border-l-[3px] border-l-transparent hover:border-l-violet-500 dark:hover:border-l-violet-400"
                     )}
                   >
                     {selectable && (

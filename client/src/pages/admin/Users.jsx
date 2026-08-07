@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import { FiCheckCircle, FiEdit2, FiSlash, FiTrash2, FiUsers, FiSearch } from "react-icons/fi";
-import { Badge, Button, DataTable, Panel, StatCard, initials, timeAgo } from "../../components/admin";
+import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, initials, timeAgo } from "../../components/admin";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import UserModal from "./UserModal";
@@ -9,10 +9,10 @@ import { ROLES, roleLabel } from "./roleInfo";
 
 const ROLE_TONE = { super_admin: "brand", org_admin: "info", host: "info", moderator: "warning", speaker: "neutral", viewer: "neutral" };
 
-const inputCls =
-  "h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-800 placeholder:text-slate-400 focus-visible:border-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100";
-const selectCls =
-  "h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 focus-visible:border-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200";
+// Field skins come from the console tokens so a hover or focus change lands on every filter
+// row at once, instead of being re-typed per page.
+const inputCls = CONSOLE.search;
+const selectCls = CONSOLE.select;
 
 function useUsersData() {
   return useApi(() => api.get("/admin/users", { params: { page_size: 100 } }).then((r) => r.data.items));

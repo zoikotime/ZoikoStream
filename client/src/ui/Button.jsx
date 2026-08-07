@@ -29,12 +29,15 @@ const C_BASE = cx(
   "motion-reduce:transition-none motion-reduce:active:scale-100"
 );
 const C_SIZES = { sm: "h-8 px-3 text-[13px]", md: "h-9 px-3.5 text-sm", lg: "h-10 px-4 text-sm" };
+// Every variant gains a hover shadow so a console button reads as a raised control rather than a
+// bordered label — the secondary variant in particular was near-invisible on a white filter row.
 const C_VARIANTS = {
-  primary: "bg-violet-600 text-white hover:bg-violet-700 active:bg-violet-800",
+  primary: "bg-violet-600 text-white shadow-sm hover:bg-violet-700 hover:shadow-md active:bg-violet-800 active:shadow-sm",
   secondary:
-    "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800",
-  ghost: "text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white",
-  danger: "bg-rose-600 text-white hover:bg-rose-700 active:bg-rose-800",
+    "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800",
+  ghost:
+    "text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white",
+  danger: "bg-rose-600 text-white shadow-sm hover:bg-rose-700 hover:shadow-md active:bg-rose-800 active:shadow-sm",
 };
 
 function ConsoleSpinner() {

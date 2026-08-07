@@ -48,6 +48,10 @@ const ReleaseCenter = lazy(() => import("./pages/admin/ReleaseCenter"));
 const Support = lazy(() => import("./pages/admin/Support"));
 const Roles = lazy(() => import("./pages/admin/Roles"));
 const Developers = lazy(() => import("./pages/admin/Developers"));
+const EventReadiness = lazy(() => import("./pages/admin/EventReadiness"));
+const AdminMedia = lazy(() => import("./pages/admin/Media"));
+const TrustSafety = lazy(() => import("./pages/admin/Security"));
+const AdminGovernance = lazy(() => import("./pages/admin/Governance"));
 
 // Organization console — the eight Build/Operate/Manage pages, code-split for the same reason
 // as the admin console above: only org admins reach /organization/*, so shipping them in the
@@ -100,13 +104,7 @@ function LandingOrDashboard() {
 
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
 // so the console nav never 404s. Everything else in the sidebar is a real page below.
-const adminStubs = [
-  ["infrastructure", "Media Infrastructure"],
-  ["security", "Trust & Safety"],
-  ["media", "Media"],
-  ["event-readiness", "Event Readiness"],
-  ["governance", "Governance"],
-];
+const adminStubs = [["infrastructure", "Media Infrastructure"]];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
 const legacyStubs = [
@@ -167,6 +165,10 @@ export default function App() {
                 <Route path="/admin/support" element={<Support />} />
                 <Route path="/admin/roles" element={<Roles />} />
                 <Route path="/admin/developers" element={<Developers />} />
+                <Route path="/admin/event-readiness" element={<EventReadiness />} />
+                <Route path="/admin/media" element={<AdminMedia />} />
+                <Route path="/admin/security" element={<TrustSafety />} />
+                <Route path="/admin/governance" element={<AdminGovernance />} />
                 {adminStubs.map(([path, title]) => (
                   <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
                 ))}

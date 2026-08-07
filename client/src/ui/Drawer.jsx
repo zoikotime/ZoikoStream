@@ -9,7 +9,10 @@ const SIDE = {
 };
 
 // Sliding panel from a screen edge. `side`: right (default) | left | bottom.
-export default function Drawer({ open, onClose, side = "right", title, className = "", children }) {
+// `width` REPLACES the default size classes rather than being appended — two competing width
+// utilities in one class list resolve by stylesheet order, not by string order, so overriding
+// through className would be a coin toss. Omit it and every existing caller is unchanged.
+export default function Drawer({ open, onClose, side = "right", title, width, className = "", children }) {
   const s = SIDE[side];
   return (
     <Overlay open={open} onClose={onClose}>
@@ -21,7 +24,7 @@ export default function Drawer({ open, onClose, side = "right", title, className
         className={cx(
           "absolute flex flex-col border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900",
           side === "bottom" ? "rounded-t-2xl border-t" : side === "right" ? "border-l" : "border-r",
-          s.pos, s.size, s.anim, className
+          s.pos, width || s.size, s.anim, className
         )}
       >
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
