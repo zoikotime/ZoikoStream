@@ -65,7 +65,7 @@ def _shell(inner: str) -> str:
 
 
 def _base_url() -> str:
-    return (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    return settings.APP_URL.rstrip("/")
 
 
 def _header(title: str) -> str:

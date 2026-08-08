@@ -330,7 +330,7 @@ def delete_org_user(user_id: uuid.UUID, admin: User = Depends(require_org_admin)
 # ── Invitations (admin management) ───────────────────────────────────────────────
 
 def _invite_url(token: str) -> str:
-    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    base = settings.APP_URL.rstrip("/")
     return f"{base}/accept-invite?token={token}"
 
 
