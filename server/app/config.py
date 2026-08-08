@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     REMEMBER_TOKEN_DAYS: int = 30            # "Remember for 30 days"
     # 5173 is Vite's default; 5174 is its fallback when 5173 is taken. 4173 = vite preview.
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:5174,http://localhost:4173"
-
+    APP_URL: str = "http://localhost:5173"
     # LiveKit — ponytail: default "" so the app still boots without them; streaming
     # (services/livekit.py, /streams) needs real values, so set these in .env before using it.
     LIVEKIT_URL: str = ""

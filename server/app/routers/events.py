@@ -215,7 +215,7 @@ def watch_event(
 
 
 def _registration_console_url(event_id: uuid.UUID, token: str | None = None) -> str:
-    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    base = settings.APP_URL.rstrip("/")
     url = f"{base}/events/{event_id}/watch"
     return f"{url}?reg={token}" if token else url
 
@@ -312,7 +312,7 @@ def _list_role(db, org_id, event_id, role):
 
 
 def _console_url(role: str, event_id: uuid.UUID) -> str:
-    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    base = settings.APP_URL.rstrip("/")
     if role == "host":
         return f"{base}/host/dashboard?event={event_id}"
     if role == "moderator":
