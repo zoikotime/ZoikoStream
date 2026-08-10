@@ -200,6 +200,33 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
     actual,
     error,
     active,
+    flipCamera: async () => {
+  const stream = streamRef.current;
+  const currentTrack = stream?.getVideoTracks?.()[0];
+
+  if (!currentTrack) return;
+
+    const currentDeviceId = currentTrack.getSettings?.().deviceId;
+
+    // Mobile browsers normally expose front/back cameras as separate videoinput devices.
+    const cameras = devices.cameras || [];
+
+    if (cameras.length < 2) {
+      setError("No second camera is available on this device.");
+      return;
+    }
+
+    const currentIndex = cameras.findIndex(
+      (device) => device.deviceId === currentDeviceId
+    );
+
+    const nextCamera =
+      cameras[(currentIndex >= 0 ? currentIndex + 1 : 0) % cameras.length];
+
+    if (!nextCamera?.deviceId) return;
+
+    setPicked((p) => ({ ...p, camera: nextCamera.deviceId }));
+  },
     selectCamera: (deviceId) => setPicked((p) => ({ ...p, camera: deviceId || null })),
     selectMic: (deviceId) => setPicked((p) => ({ ...p, mic: deviceId || null })),
   };

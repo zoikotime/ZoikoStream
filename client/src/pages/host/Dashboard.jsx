@@ -184,6 +184,7 @@ export default function HostDashboard() {
             media={media}
             onTogglePreview={togglePreview}
             onToggleCamera={() => setCamera((v) => !v)}
+            onFlipCamera={media.flipCamera}
             onToggleMic={() => setMic((v) => !v)}
             onToggleScreen={toggleScreen}
             onGoLive={() => {
