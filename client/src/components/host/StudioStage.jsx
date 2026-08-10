@@ -57,7 +57,7 @@ function Countdown({ until, onDone }) {
 }
 
 export default function StudioStage({
-  broadcast, recording, analytics, participants, media, screenShare, camera, mic,
+  broadcast, recording, analytics, participants, media, screenShare, screenVideoRef, camera, mic,
   countdownUntil, onCountdownDone, publishToken, isPublishing, isReconnecting, publishError,
 }) {
   // Destructured so `videoRef` is a plain binding: passing the whole media bag around makes
@@ -90,6 +90,20 @@ export default function StudioStage({
           )}
         />
 
+        {/* Real screen-share feed (hooks/useLiveKitPublish swaps this in for the camera
+            track once live). object-contain, not -cover: cropping a shared screen can cut
+            off exactly the content the host meant to show. */}
+        <video
+          ref={screenVideoRef}
+          autoPlay
+          playsInline
+          muted
+          className={cx(
+            "absolute inset-0 h-full w-full bg-black object-contain transition-opacity duration-300",
+            screenShare ? "opacity-100" : "opacity-0"
+          )}
+        />
+
         {countdownUntil && <Countdown until={countdownUntil} onDone={onCountdownDone} />}
 
         {/* Top overlays */}
@@ -107,6 +121,9 @@ export default function StudioStage({
           </span>
 
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {screenShare && (
+              <span className={chip}><FiMonitor className="text-emerald-400" /> Sharing screen</span>
+            )}
             {recording && (
               <span className={chip} title={recording.enforced ? "Capturing to file" : "Timer only — LiveKit egress isn't capturing"}>
                 <span className={cx("h-2 w-2 rounded-full bg-rose-500", recording.status === "recording" && "animate-pulse motion-reduce:animate-none")} />
@@ -118,17 +135,10 @@ export default function StudioStage({
           </div>
         </div>
 
-        {/* Center: screen share > live camera > reason it's dark */}
+        {/* Center: reason the feed is dark — never shown while screen share has a real
+            video on screen above. */}
         <div className="absolute inset-0 grid place-items-center p-6 text-center">
-          {screenShare ? (
-            <div className="flex flex-col items-center gap-3 text-slate-300">
-              <FiMonitor className="text-5xl text-emerald-400" />
-              <p className="text-sm font-medium">You're sharing your screen</p>
-              <p className="max-w-sm text-xs text-slate-400">
-                Screen capture is controlled from the deck below; the shared surface is chosen by the browser.
-              </p>
-            </div>
-          ) : mediaError ? (
+          {screenShare ? null : mediaError ? (
             <div className="flex flex-col items-center gap-2 text-slate-300">
               <FiCameraOff className="text-4xl text-rose-400" />
               <p className="max-w-sm text-sm font-medium">{mediaError}</p>

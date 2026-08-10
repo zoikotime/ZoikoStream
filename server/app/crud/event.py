@@ -1,13 +1,14 @@
 """DB access + validation helpers for the Events API. Pure queries and partial updates,
 no HTTP. Mirrors crud/organization.py."""
 
+import hashlib
 import re
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import asc, desc, func, or_, select
-from sqlalchemy.orm import Session
 
-from ..models import Event, EventAssignment, EventRegistration, LiveRecording, User
+from ..models import Event, EventAccessLink, EventAssignment, EventRegistration, LiveRecording, User
 
 _EVENT_SORTS = {
     "created_at": Event.created_at,
@@ -212,6 +213,90 @@ def list_replay_candidates(db, event_id) -> list[LiveRecording]:
                LiveRecording.enforced.is_(True))
         .order_by(LiveRecording.stopped_at.desc())
     ).all()
+
+
+# ── Access links (revocable, shareable — the link-based counterpart to registrations) ─────
+# Mirrors crud/organization.py's invitation tokens: the raw token is returned once by
+# create/rotate and never stored, only its sha256 hash (_hash_link_token).
+
+def _hash_link_token(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def list_access_links(db, event_id) -> list[EventAccessLink]:
+    return db.scalars(
+        select(EventAccessLink)
+        .where(EventAccessLink.event_id == event_id)
+        .order_by(EventAccessLink.created_at.desc())
+    ).all()
+
+
+def get_access_link(db, event_id, link_id) -> EventAccessLink | None:
+    return db.scalar(
+        select(EventAccessLink).where(EventAccessLink.id == link_id, EventAccessLink.event_id == event_id)
+    )
+
+
+def create_access_link(db, event_id, org_id, created_by, label, expires_in_days) -> tuple[EventAccessLink, str]:
+    raw = secrets.token_urlsafe(32)
+    link = EventAccessLink(
+        event_id=event_id, org_id=org_id, label=label, token_hash=_hash_link_token(raw), created_by=created_by,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=expires_in_days) if expires_in_days else None,
+    )
+    db.add(link)
+    db.commit()
+    db.refresh(link)
+    return link, raw
+
+
+def rotate_access_link(db, link: EventAccessLink, expires_in_days) -> tuple[EventAccessLink, str]:
+    """Re-secrets the same row for a lost or revoked link: fresh token, fresh usage stats,
+    and — deliberately — un-revokes it, since regenerating a revoked link is how the UI lets
+    an admin bring an audience back without recreating the row's label/history."""
+    raw = secrets.token_urlsafe(32)
+    link.token_hash = _hash_link_token(raw)
+    link.revoked_at = None
+    link.uses = 0
+    link.last_used_at = None
+    link.expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days) if expires_in_days else None
+    db.commit()
+    db.refresh(link)
+    return link, raw
+
+
+def revoke_access_link(db, link: EventAccessLink) -> EventAccessLink:
+    link.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(link)
+    return link
+
+
+def delete_access_link(db, link: EventAccessLink) -> None:
+    db.delete(link)
+    db.commit()
+
+
+def find_access_link(db, event_id, raw: str) -> EventAccessLink | None:
+    """The three rules a link must pass to admit a viewer: belongs to this event, not
+    revoked, not expired. Recording a use is a side effect of a successful lookup here —
+    the only place usage is counted, since the raw token only ever reaches this check via a
+    link someone actually opened."""
+    if not raw:
+        return None
+    link = db.scalar(
+        select(EventAccessLink).where(
+            EventAccessLink.event_id == event_id,
+            EventAccessLink.token_hash == _hash_link_token(raw),
+        )
+    )
+    if link is None or link.revoked_at is not None:
+        return None
+    if link.expires_at and link.expires_at < datetime.now(timezone.utc):
+        return None
+    link.uses += 1
+    link.last_used_at = datetime.now(timezone.utc)
+    db.commit()
+    return link
 
 
 def get_org_recording(db, org_id, recording_id) -> LiveRecording | None:

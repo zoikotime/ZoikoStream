@@ -61,10 +61,9 @@ function watchToMockEvent(watch) {
 const POLL_MS = 10000; // how often a not-yet-live page checks whether the event went live
 
 // Real chat/Q&A/polls over the same live socket the host/moderator consoles use (see
-// live.py — any authenticated attendee may chat.send, qa.ask, qa.vote or poll.vote, no
-// moderator role needed). Anonymous public visitors have no JWT to open that socket with,
-// so all three are gated on being signed in; the video itself has no such gate (see the
-// /watch endpoint's anonymous LiveKit token).
+// live.py — any authenticated attendee, OR a name+email self-registration (mustIdentify
+// below), may chat.send, qa.ask, qa.vote or poll.vote — no moderator role, and no login,
+// needed.
 const LIVE_EMPTY = { messages: [], typing: {}, questions: [], polls: [] };
 function liveReducer(state, env) {
   const { channel, type, data } = env;
@@ -108,9 +107,20 @@ export default function EventWatch() {
   const { theme, toggle } = useTheme();
   const { user } = useAuth();
 
+  // The anonymous-viewer counterpart to `user`: a self-serve name+email registration
+  // (RegistrationGate for a registration_required event, or IdentifyForm for chat/Q&A/polls
+  // on any other event — both call the same POST /events/:id/register). Lifted to state
+  // (not read fresh from localStorage each render) so identifying mid-visit reconnects the
+  // live socket with the new identity instead of waiting for a refresh.
+  const [regToken, setRegTokenState] = useState(() => localStorage.getItem(`zk_reg_${eventId}`));
+  const setRegToken = useCallback((token) => {
+    localStorage.setItem(`zk_reg_${eventId}`, token);
+    setRegTokenState(token);
+  }, [eventId]);
+
   const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
   const onLiveEnvelope = useCallback((env) => dispatchPanel(env), []);
-  const { status: liveStatus, send: sendLive } = useEventStream(eventId, onLiveEnvelope);
+  const { status: liveStatus, send: sendLive } = useEventStream(eventId, onLiveEnvelope, regToken);
 
   const [watch, setWatch] = useState(null);
   const [notFound, setNotFound] = useState(false);
@@ -121,8 +131,8 @@ export default function EventWatch() {
     // (?reg=...) — save it locally so a refresh (or a later visit with no query string)
     // keeps working without the visitor needing to click the emailed link again.
     const urlReg = new URLSearchParams(window.location.search).get("reg");
-    if (urlReg) localStorage.setItem(`zk_reg_${eventId}`, urlReg);
-    const reg = urlReg || localStorage.getItem(`zk_reg_${eventId}`);
+    if (urlReg) setRegToken(urlReg);
+    const reg = urlReg || regToken;
     api
       .get(`/events/${eventId}/watch`, { params: reg ? { reg } : undefined })
       .then(({ data }) => setWatch(data))
@@ -144,13 +154,21 @@ export default function EventWatch() {
   const event = watch ? watchToMockEvent(watch) : null;
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
+  const identified = !!(user || regToken);
+  // Every public/unlisted visitor identifies with name+email before seeing any video —
+  // not just when the host turned on "registration required". Private events are exempt:
+  // reaching this page with real watch data already means the visitor passed a
+  // host-controlled check (org membership, an invite's `reg` token, or an access `link`),
+  // and register_for_event refuses self-serve registration on a private event outright
+  // (doc-level anti-side-door rule), so routing them through this same gate would just 403.
+  const mustIdentify = Boolean(watch && watch.visibility !== "private" && !identified);
   // watch.expired means "the scheduled window lapsed before the host ever went live" —
   // it does NOT mean "there's nothing left to show". Ending a broadcast backfills
   // Event.end_time to that moment (services/broadcast.py `ev.end_time = ev.end_time or
   // now`), so `expired` flips true within milliseconds of any normal "End Event" click.
   // Checked here so a real ended-with-replay event is never mistaken for an event that
   // simply expired unwatched.
-  const timeGated = Boolean((watch?.expired && !ended) || watch?.not_started);
+  const timeGated = Boolean(mustIdentify || (watch?.expired && !ended) || watch?.not_started);
 
   // Live viewer count that gently drifts (setState only in the interval callback).
   const [viewers, setViewers] = useState(startingViewers);
@@ -219,12 +237,15 @@ export default function EventWatch() {
             notice. The host's own broadcast/console is unaffected by this (see watch_event). */}
         <div className={`grid grid-cols-1 items-start gap-6 ${timeGated ? "" : "lg:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]"}`}>
           <div className="min-w-0 space-y-4 lg:col-start-1 lg:row-start-1">
-            {ended ? (
+            {mustIdentify ? (
+              <RegistrationGate
+                eventId={eventId} eventTitle={event.name}
+                onRegistered={(token) => { setRegToken(token); fetchWatch(); }}
+              />
+            ) : ended ? (
               <VideoPlayer event={event} viewers={viewers} watch={watch} />
             ) : watch.expired ? (
               <AccessWindowNotice variant="expired" />
-            ) : watch.registration_required && !watch.registered ? (
-              <RegistrationGate eventId={eventId} eventTitle={event.name} onRegistered={fetchWatch} />
             ) : watch.not_started ? (
               <AccessWindowNotice variant="not_started" startTime={watch.start_time} />
             ) : (
@@ -243,7 +264,9 @@ export default function EventWatch() {
               questions={panel.questions}
               polls={panel.polls}
               send={sendLive}
-              authed={!!user}
+              identified={identified}
+              eventId={eventId}
+              onIdentified={setRegToken}
               connected={liveStatus === "open"}
             />
           )}

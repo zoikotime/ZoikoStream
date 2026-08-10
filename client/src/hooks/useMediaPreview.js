@@ -50,6 +50,12 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
   const [devices, setDevices] = useState({ cameras: [], mics: [], speakers: [] });
   const [picked, setPicked] = useState({ camera: null, mic: null });
   const [actual, setActual] = useState(null);   // what the hardware really gave us
+  // Identity of the currently-acquired video track. Changes on every re-acquire (device
+  // switch via flipCamera/selectCamera) — unlike mute (which flips `.enabled` on the SAME
+  // track), a flip tears down and reacquires a whole new MediaStream/track. Exposed as
+  // state (not just read off streamRef) so useLiveKitPublish can detect the swap and
+  // republish; a ref wouldn't trigger its effect.
+  const [videoTrack, setVideoTrack] = useState(null);
   // Unsupported is knowable at init, so start in that state instead of setting it from an
   // effect (which would render once claiming everything is fine).
   const [error, setError] = useState(() =>
@@ -87,6 +93,7 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
     if (videoRef.current) videoRef.current.srcObject = null;
     setActive(false);
     setActual(null);
+    setVideoTrack(null);
   }, []);
 
   // Every acquisition attempt chains onto the previous one instead of firing independently.
@@ -123,6 +130,7 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
         if (videoRef.current) videoRef.current.srcObject = stream;
         setError(null);
         setActive(true);
+        setVideoTrack(stream.getVideoTracks()[0] || null);
         readActual();
         // Labels are only exposed after permission is granted, so enumerate now.
         const all = await navigator.mediaDevices.enumerateDevices();
@@ -195,6 +203,7 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
     // acquiring a second, competing getUserMedia stream just to broadcast. A ref (not the
     // MediaStream itself) so reading it doesn't force this hook's consumers to re-render.
     streamRef,
+    videoTrack,
     devices,
     picked,
     actual,

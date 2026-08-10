@@ -12,6 +12,7 @@ export default function StartMeetingPrompt({ open, eventTitle, onConfirm, onDism
     <Modal
       open={open}
       onClose={onDismiss}
+      
       title="Start the meeting?"
       size="sm"
       footer={

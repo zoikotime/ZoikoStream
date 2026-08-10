@@ -157,6 +157,19 @@ class LiveRecording(_EventScoped):
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
+    # ── Commercial recording fields (ZST-LE-COM-001 Section 14/J) ──────────────────────
+    # R2/R3 service profiles require independent dual recording (doc J1) — two LiveRecording
+    # rows, one per role, both against the same event. `role` is nullable because most
+    # events (R0/R1, or events created before the commercial layer) run a single recording
+    # with no primary/secondary distinction at all.
+    role: Mapped[str | None] = mapped_column(String(16))              # primary | secondary
+    validation_status: Mapped[str | None] = mapped_column(String(16))  # captured|validating|valid|degraded|failed
+    retention_policy_version: Mapped[str | None] = mapped_column(String(60))
+    retention_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Overrides normal retention expiry for this specific asset (doc R6) — distinct from a
+    # paid extended-retention add-on, which is an EventOrderLine, not this flag.
+    legal_hold: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
 
 class AnalyticsSnapshot(_EventScoped):
     """Periodic sample of the live counters — this IS the retention graph. Written by the

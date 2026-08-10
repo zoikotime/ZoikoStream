@@ -162,6 +162,31 @@ class RegistrantOut(BaseModel):
     created_at: datetime | None = None
 
 
+class AccessLinkCreate(BaseModel):
+    label: str | None = Field(None, max_length=120)
+    expires_in_days: int | None = Field(None, ge=1, le=3650)
+
+
+class AccessLinkOut(BaseModel):
+    """List/row view — no token or URL, since the raw value is never recoverable after
+    the one-time reveal (see AccessLinkIssued)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    label: str | None = None
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    uses: int
+    last_used_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class AccessLinkIssued(AccessLinkOut):
+    """Returned only from create/rotate — the one moment the raw link exists outside the
+    recipient's hands."""
+    url: str
+
+
 class ViewerInvite(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     email: EmailStr

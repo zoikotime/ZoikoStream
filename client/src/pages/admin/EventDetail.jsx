@@ -14,6 +14,7 @@ import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { PageSpinner } from "../../ui/Spinner";
 import { fmtDateTime } from "../../data/events";
+import EventCommerceAdmin from "./EventCommerceAdmin";
 
 const STATUS_TONE = { draft: "neutral", scheduled: "info", published: "info", live: "success", ended: "neutral", cancelled: "danger" };
 const BROADCAST_STATUS_TONE = { live: "success", paused: "warning", ended: "neutral", preview: "info" };
@@ -177,6 +178,8 @@ export default function AdminEventDetail() {
         <PeopleList title="Moderators" people={ev.moderators} />
         <PeopleList title="Speakers" people={ev.speakers} />
       </div>
+
+      <EventCommerceAdmin eventId={eventId} />
     </div>
   );
 }

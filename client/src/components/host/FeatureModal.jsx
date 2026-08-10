@@ -12,8 +12,7 @@ import Badge from "../../ui/Badge";
 import EmptyState from "../organization/OrganizationEmptyState";
 import { Input, Select, Switch, Label } from "../../ui/forms";
 import { downloadCsv } from "../../utils/export";
-import { hhmm, initials, accentFor } from "../../data/host";
-import { cx, ACCENT } from "../../ui/tokens";
+import { hhmm } from "../../data/host";
 import {
   RESOLUTION_OPTIONS, FRAMERATE_OPTIONS, BITRATE_GUIDE, PROCESSING_TOGGLES,
   BACKGROUND_OPTIONS, CHAT_CONTROLS, SLOW_MODE_OPTIONS, STAGE_CONTROLS, RECORDING_TONE,

@@ -18,8 +18,9 @@ import { cx, focusRing } from "../../ui/tokens";
 import { statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 import AssignPeopleModal, { ROLE_PATH } from "./AssignPeopleModal";
 import InviteViewersModal from "./InviteViewersModal";
+import EventCommercial from "../../components/organization/EventCommercial";
 
-const TABS = ["Overview", "Hosts", "Moderators", "Speakers", "Registration", "Recording", "Analytics", "Settings"];
+const TABS = ["Overview", "Hosts", "Moderators", "Speakers", "Registration", "Billing", "Recording", "Analytics", "Settings"];
 
 function Meta({ icon: Icon, label, children }) {
   return (
@@ -288,6 +289,8 @@ export default function EventDetails() {
           )}
         </div>
       )}
+
+      {tab === "Billing" && <EventCommercial event={event} />}
 
       {tab === "Recording" && (
         <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50">

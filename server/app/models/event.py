@@ -70,6 +70,18 @@ class Event(Base):
     # high-impact list. "unrepeatable" = cannot be re-run (memorial, results broadcast).
     impact: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
 
+    # ── Commercial classification (ZST-LE-COM-001 Section 27) ──────────────────────────
+    # Every event is billing-classified from creation, defaulting to "internal" so existing
+    # rows and every event created before the commercial layer existed do NOT silently
+    # become billable (doc S1: "Prevents old demos or pilots from accidentally becoming
+    # billable"). risk_tier/service_profile_id govern readiness gates in crud/commercial.py;
+    # they do not affect streaming/moderation behavior built elsewhere in this file.
+    billing_classification: Mapped[str] = mapped_column(String(20), default="internal", nullable=False)
+    billing_source: Mapped[str] = mapped_column(String(30), default="direct_zoikostream", nullable=False)
+    risk_tier: Mapped[str] = mapped_column(String(4), default="r0", nullable=False)
+    service_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("service_profiles.id"))
+    commercial_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("commercial_accounts.id"))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -95,6 +107,30 @@ class EventAssignment(Base):
 
     event: Mapped["Event"] = relationship(back_populates="assignments")
     user: Mapped["User"] = relationship()
+
+
+class EventAccessLink(Base):
+    """A revocable, shareable link that admits someone outside the org to a PRIVATE event —
+    the link-based counterpart to EventRegistration's email-invite grant. The raw token is
+    generated once (create/rotate) and only its sha256 hash is stored; see
+    crud.event._hash_link_token. `uses`/`last_used_at` are updated by crud.event.find_access_link,
+    the same lookup watch_event uses to accept a `link` query param."""
+
+    __tablename__ = "event_access_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    label: Mapped[str | None] = mapped_column(String(120))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    uses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    event: Mapped["Event"] = relationship()
 
 
 class EventRegistration(Base):

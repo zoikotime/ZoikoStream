@@ -16,6 +16,7 @@ from .routers.admin import router as admin_router
 from .routers.organization import router as organization_router
 from .routers.events import router as events_router
 from .routers.live import router as live_router
+from .routers.commercial import router as commercial_router
 from .services import bus
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
@@ -94,7 +95,7 @@ async def measure_requests(request: Request, call_next):
 # spelled exactly like the router prefixes. Without the namespace a hard refresh on any of
 # those pages hits the API and gets JSON instead of the app.
 for router in (auth_router, dashboard_router, admin_router, organization_router,
-               events_router, live_router):
+               events_router, live_router, commercial_router):
     app.include_router(router, prefix="/api")
 
 

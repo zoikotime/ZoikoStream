@@ -29,6 +29,7 @@ from ..db import SessionLocal
 from ..models import (
     Event,
     EventAssignment,
+    EventRegistration,
     LiveActivity,
     LiveAnnouncement,
     LiveMessage,
@@ -155,6 +156,35 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
             role=user.role,
             can_moderate=can,
             can_host=can_host,
+        )
+    finally:
+        db.close()
+
+
+def resolve_ctx_from_registration(event_id: uuid.UUID, registration: EventRegistration) -> Ctx | None:
+    """The anonymous-viewer counterpart to resolve_ctx: a self-serve name+email
+    registration (routers/events.py register_for_event) takes the place of a User login for
+    chat/Q&A/polls, so a public visitor never has to sign in to say something.
+
+    `user_id` borrows the registration's own id rather than staying None — LiveMessage.
+    user_id and friends (models/live.py) are bare UUID columns with no FK to `users`, so this
+    is safe, and it means per-author scoping (slow mode, duplicate detection in
+    _chat_send) still works per guest instead of every anonymous visitor sharing one bucket."""
+    db = SessionLocal()
+    try:
+        ev = db.scalar(select(Event).where(Event.id == event_id, Event.deleted_at.is_(None)))
+        if ev is None:
+            return None
+        return Ctx(
+            event_id=ev.id,
+            org_id=ev.org_id,
+            room=f"event_{ev.id}",
+            user_id=registration.id,
+            name=registration.name,
+            identity=f"guest-{registration.id}",
+            role="viewer",
+            can_moderate=False,
+            can_host=False,
         )
     finally:
         db.close()

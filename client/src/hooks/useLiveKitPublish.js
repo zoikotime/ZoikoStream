@@ -7,6 +7,15 @@ import { Room, RoomEvent, Track } from "livekit-client";
 // camera/mic (useMediaPreview's `t.enabled = false`) is instantly reflected to viewers too,
 // with no separate mute plumbing.
 //
+// Because the tracks are shared with the local preview, LiveKit must never be the one to
+// .stop() them — every disconnect()/unpublishTrack() call below passes stopTracks/
+// stopOnUnpublish=false. livekit-client's default is to stop the underlying
+// MediaStreamTrack on unpublish/disconnect (it assumes it owns whatever it's given); left
+// at that default, any reconnect (a network blip, or React StrictMode's dev-only double-
+// invoke of this effect) silently kills the host's own camera preview with no recovery —
+// useMediaPreview never learns the track died. useMediaPreview/Dashboard own stop(), not
+// LiveKit.
+//
 // `url`/`token` come straight from the socket snapshot (services/broadcast.snapshot_extra):
 // the backend already mints a publish token for any host, unconditionally, specifically so
 // this wiring could be a drop-in later. This is that drop-in.
@@ -20,11 +29,23 @@ import { Room, RoomEvent, Track } from "livekit-client";
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_RECONNECT_DELAY_MS = 1500;
 
-export default function useLiveKitPublish({ enabled, url, token, streamRef }) {
+export default function useLiveKitPublish({ enabled, url, token, streamRef, screenTrack, videoTrack }) {
   const roomRef = useRef(null);
+  // The published video track's publication, so screen share can unpublish/republish it
+  // by reference instead of guessing what's currently live.
+  const cameraPubRef = useRef(null);
+  const screenPubRef = useRef(null);
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [publishError, setPublishError] = useState(null);
+
+  // Latest screenTrack without making the connect effect below re-run on every toggle —
+  // that effect only needs to know what's active the moment it (re)connects; the swap
+  // effect further down handles a toggle while already connected.
+  const screenTrackRef = useRef(screenTrack);
+  useEffect(() => {
+    screenTrackRef.current = screenTrack;
+  });
 
   useEffect(() => {
     if (!enabled || !url || !token || !streamRef.current) return undefined;
@@ -37,7 +58,15 @@ export default function useLiveKitPublish({ enabled, url, token, streamRef }) {
       const stream = streamRef.current;
       const video = stream?.getVideoTracks()[0];
       const audio = stream?.getAudioTracks()[0];
-      if (video) await room.localParticipant.publishTrack(video, { source: Track.Source.Camera });
+      // Screen share may already be running by the time (re)connect happens — e.g. a
+      // reconnect mid-share — so publish whichever video source is actually active rather
+      // than always defaulting back to the camera.
+      const activeScreen = screenTrackRef.current;
+      if (activeScreen) {
+        screenPubRef.current = await room.localParticipant.publishTrack(activeScreen, { source: Track.Source.ScreenShare });
+      } else if (video) {
+        cameraPubRef.current = await room.localParticipant.publishTrack(video, { source: Track.Source.Camera });
+      }
       if (audio) await room.localParticipant.publishTrack(audio, { source: Track.Source.Microphone });
     };
 
@@ -63,7 +92,7 @@ export default function useLiveKitPublish({ enabled, url, token, streamRef }) {
 
       await room.connect(url, token);
       if (cancelled) {
-        room.disconnect();
+        room.disconnect(false);
         return;
       }
       await publishCurrentTracks(room);
@@ -102,10 +131,72 @@ export default function useLiveKitPublish({ enabled, url, token, streamRef }) {
       if (retryTimer) clearTimeout(retryTimer);
       setConnected(false);
       setReconnecting(false);
-      roomRef.current?.disconnect();
+      roomRef.current?.disconnect(false);
       roomRef.current = null;
+      cameraPubRef.current = null;
+      screenPubRef.current = null;
     };
   }, [enabled, url, token, streamRef]);
+
+  // Swaps the published video track when screen share toggles WHILE already connected —
+  // the block above only decides what to publish at connect time. Camera and screen share
+  // are mutually exclusive here (one video track live at a time), matching the viewer side
+  // (useLiveKitViewer attaches every subscribed track to one <video> element, so two
+  // simultaneous video tracks would fight over it rather than showing both).
+  useEffect(() => {
+    const room = roomRef.current;
+    if (!room || !connected) return undefined;
+
+    let cancelled = false;
+    (async () => {
+      if (screenTrack && !screenPubRef.current) {
+        if (cameraPubRef.current) {
+          await room.localParticipant.unpublishTrack(cameraPubRef.current.track, false);
+          cameraPubRef.current = null;
+        }
+        if (!cancelled) {
+          screenPubRef.current = await room.localParticipant.publishTrack(screenTrack, { source: Track.Source.ScreenShare });
+        }
+      } else if (!screenTrack && screenPubRef.current) {
+        await room.localParticipant.unpublishTrack(screenPubRef.current.track, false);
+        screenPubRef.current = null;
+        const video = streamRef.current?.getVideoTracks()[0];
+        if (video && !cancelled) {
+          cameraPubRef.current = await room.localParticipant.publishTrack(video, { source: Track.Source.Camera });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [screenTrack, connected, streamRef]);
+
+  // Swaps the published camera track when it changes identity WHILE already connected —
+  // e.g. useMediaPreview's flipCamera, which tears down and reacquires a whole new
+  // MediaStream/track rather than just muting the current one. Without this, the old
+  // (by-then-stopped) track stays "published" and viewers freeze on its last frame.
+  // Skipped while screen sharing owns the video slot — the block above already restores
+  // the (by-then-current) camera track from streamRef once sharing ends.
+  useEffect(() => {
+    const room = roomRef.current;
+    if (!room || !connected) return undefined;
+    if (screenTrackRef.current || screenPubRef.current) return undefined;
+    if (!videoTrack) return undefined;
+    if (cameraPubRef.current?.track === videoTrack) return undefined;
+
+    let cancelled = false;
+    (async () => {
+      const prevPub = cameraPubRef.current;
+      cameraPubRef.current = null;
+      if (prevPub) await room.localParticipant.unpublishTrack(prevPub.track, false);
+      if (!cancelled) {
+        cameraPubRef.current = await room.localParticipant.publishTrack(videoTrack, { source: Track.Source.Camera });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [videoTrack, connected]);
 
   return { connected, reconnecting, publishError };
 }
