@@ -24,6 +24,14 @@ const STAGE = {
   rose: "from-rose-900 via-slate-900 to-black",
 };
 
+// Overlay badge skin, shared by the LIVE/REPLAY chip and the viewer counter so they always
+// match. Solid-dark in both themes on purpose — these sit on video, not on the page.
+const BADGE = "rounded-lg bg-black/55 px-2.5 py-1 text-xs font-semibold text-white shadow-sm ring-1 ring-white/10 backdrop-blur-md";
+
+// Control-bar icon button: 44px hit area for touch, quiet hover wash, brand tint on hover.
+const CTRL =
+  "grid h-11 w-11 place-items-center rounded-lg transition duration-150 hover:bg-white/15 hover:text-emerald-400 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100";
+
 function VolumeIcon({ muted, volume }) {
   if (muted || volume === 0) return <FiVolumeX />;
   return volume < 50 ? <FiVolume1 /> : <FiVolume2 />;
@@ -120,7 +128,7 @@ export default function VideoPlayer({ event, viewers, watch }) {
     <div
       ref={wrapRef}
       className={cx(
-        "group relative aspect-video w-full overflow-hidden rounded-2xl bg-gradient-to-br ring-1 ring-slate-200 dark:ring-slate-800",
+        "group relative aspect-video w-full overflow-hidden rounded-2xl bg-gradient-to-br shadow-xl shadow-slate-900/10 ring-1 ring-slate-200 dark:shadow-black/40 dark:ring-white/10",
         STAGE[event.accent] || STAGE.emerald
       )}
     >
@@ -157,20 +165,16 @@ export default function VideoPlayer({ event, viewers, watch }) {
       )}
 
       {/* Live indicator + viewer count */}
-      <div className="absolute inset-x-0 top-0 z-10 flex items-start justify-between p-4">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between bg-gradient-to-b from-black/45 to-transparent p-3 sm:p-4">
         {isLive ? (
-          <span className="inline-flex items-center gap-1.5 rounded-md bg-rose-600 px-2.5 py-1 text-xs font-bold tracking-wide text-white">
+          <span className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-2.5 py-1 text-xs font-bold tracking-wide text-white shadow-lg shadow-rose-900/40 ring-1 ring-white/20">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" /> LIVE
           </span>
         ) : (
-          <span className="rounded-md bg-black/40 px-2.5 py-1 text-xs font-semibold text-white backdrop-blur">
-            {isEnded ? "REPLAY" : "PREVIEW"}
-          </span>
+          <span className={BADGE}>{isEnded ? "REPLAY" : "PREVIEW"}</span>
         )}
         {isLive && (
-          <span className="rounded-md bg-black/40 px-2.5 py-1 text-xs font-semibold text-white backdrop-blur">
-            {viewers.toLocaleString()} watching
-          </span>
+          <span className={cx(BADGE, "zk-tnum")}>{viewers.toLocaleString()} watching</span>
         )}
       </div>
 
@@ -247,7 +251,8 @@ export default function VideoPlayer({ event, viewers, watch }) {
       )}
 
       {/* Control bar */}
-      <div className="absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-3 opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">
+      {/* focus-within keeps the bar visible for keyboard users, who never trigger :hover. */}
+      <div className="absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 via-black/45 to-transparent p-2 opacity-100 transition duration-200 motion-reduce:transition-none sm:p-3 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
         {/* Replay scrubber — only seekable once there's a real recording under it */}
         {!isLive && (
           <input
@@ -262,14 +267,14 @@ export default function VideoPlayer({ event, viewers, watch }) {
           />
         )}
 
-        <div className="flex items-center gap-3 text-white">
-          <button onClick={() => setPlaying((p) => !p)} aria-label={playing ? "Pause" : "Play"} className="transition hover:text-emerald-400">
+        <div className="flex items-center gap-2 text-white sm:gap-3">
+          <button onClick={() => setPlaying((p) => !p)} aria-label={playing ? "Pause" : "Play"} className={CTRL}>
             {playing ? <FiPause className="text-xl" /> : <FiPlay className="text-xl" />}
           </button>
 
           {/* Volume */}
-          <div className="flex items-center gap-2">
-            <button onClick={() => setMuted((m) => !m)} aria-label={muted ? "Unmute" : "Mute"} className="transition hover:text-emerald-400">
+          <div className="flex items-center gap-1 sm:gap-2">
+            <button onClick={() => setMuted((m) => !m)} aria-label={muted ? "Unmute" : "Mute"} className={CTRL}>
               <VolumeIcon muted={muted} volume={volume} />
             </button>
             <input
@@ -293,9 +298,9 @@ export default function VideoPlayer({ event, viewers, watch }) {
             </span>
           )}
 
-          <div className="ml-auto flex items-center gap-3">
-            <button aria-label="Settings" className="transition hover:text-emerald-400"><FiSettings className="text-lg" /></button>
-            <button onClick={toggleFs} aria-label={fs ? "Exit fullscreen" : "Fullscreen"} className="transition hover:text-emerald-400">
+          <div className="ml-auto flex items-center gap-1 sm:gap-2">
+            <button aria-label="Settings" title="Settings" className={CTRL}><FiSettings className="text-lg" /></button>
+            <button onClick={toggleFs} aria-label={fs ? "Exit fullscreen" : "Fullscreen"} title={fs ? "Exit fullscreen" : "Fullscreen"} className={CTRL}>
               {fs ? <FiMinimize className="text-lg" /> : <FiMaximize className="text-lg" />}
             </button>
           </div>
