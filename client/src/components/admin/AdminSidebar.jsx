@@ -3,7 +3,7 @@ import { NavLink } from "react-router-dom";
 import toast from "react-hot-toast";
 import {
   FiX, FiActivity, FiCheckSquare, FiGrid, FiFilm, FiShield, FiUser, FiCode,
-  FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget,
+  FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget, FiDollarSign,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
@@ -40,6 +40,7 @@ const GROUPS = [
     items: [
       { to: "/admin/developers", label: "Developer Platform", icon: FiCode },
       { to: "/admin/subscriptions", label: "Usage & Entitlements", icon: FiBarChart2 },
+      { to: "/admin/commerce", label: "Live Events Commerce", icon: FiDollarSign },
       { to: "/admin/support", label: "Support Operations", icon: FiClock },
       { to: "/admin/settings", label: "Platform Configuration", icon: FiSliders },
       { to: "/admin/governance", label: "Governance", icon: FiGlobe },

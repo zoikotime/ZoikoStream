@@ -31,7 +31,7 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
         email: form.email.trim().toLowerCase(),
       });
       localStorage.setItem(`zk_reg_${eventId}`, data.token);
-      onRegistered?.();
+      onRegistered?.(data.token);
     } catch (err) {
       if (err?.response?.status === 409) setFull(true);
       else setError(errMsg(err, "Couldn't register — please try again."));

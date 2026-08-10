@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..crud import admin as crud
 from ..crud import event as event_crud
 from ..db import get_db
-from ..models import ElevationSession, Event, Organization, PlatformSetting, Subscription, User
+from ..models import ElevationSession, Event, Organization, PlatformSetting, User
 from ..schemas.admin import (
     ApiKeyCreate,
     ApiKeyCreated,

@@ -24,6 +24,7 @@ from ..email import (
 from ..models import Event, User
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
+    AccessLinkCreate, AccessLinkIssued, AccessLinkOut,
     AssignmentUpdate, EventCreate, EventOut, EventUpdate,
     RegistrantOut, RegistrationCreate, RegistrationOut, ViewerInviteCreate, WatchOut,
 )
@@ -124,6 +125,7 @@ def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: S
 def watch_event(
     event_id: uuid.UUID,
     reg: str | None = Query(None, description="Registration access token from POST /register"),
+    link: str | None = Query(None, description="Access-link token from POST /access-links"),
     user: User | None = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
@@ -132,9 +134,12 @@ def watch_event(
     event isn't a member of any org — but a private event requires either org membership
     (or super_admin) OR a valid `reg` token, i.e. the caller was specifically invited via
     POST /invite-viewers (self-serve POST /register refuses private events, so a token here
-    always traces back to a host's deliberate invite, never a stranger inviting themselves).
+    always traces back to a host's deliberate invite, never a stranger inviting themselves),
+    OR a valid `link` token from a host-generated access link (POST /access-links) — the
+    revocable counterpart to a `reg` invite. A valid `link` also counts as a use on that row
+    (crud.find_access_link).
     Independently, a registration_required event withholds the stream token until the caller
-    is registered (org members always pass; everyone else needs a valid `reg` token).
+    is registered (org members always pass; everyone else needs a valid `reg` or `link` token).
 
     A scheduled start_time/end_time also time-boxes the VIEWER link: before start_time or
     after end_time, no stream token goes out even if the host is live — this is deliberately
@@ -147,9 +152,10 @@ def watch_event(
 
     is_org_member = bool(user and (user.role == "super_admin" or user.org_id == ev.org_id))
     invited = bool(reg) and decode_registration_token(reg, ev.id) is not None
-    registered = is_org_member or invited
+    link_admitted = bool(link) and crud.find_access_link(db, ev.id, link) is not None
+    registered = is_org_member or invited or link_admitted
 
-    if ev.visibility == "private" and not is_org_member and not invited:
+    if ev.visibility == "private" and not is_org_member and not invited and not link_admitted:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private")
 
     now = datetime.now(timezone.utc)
@@ -227,9 +233,12 @@ def register_for_event(
     background: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """Self-serve, anonymous registration for a registration_required event — no auth,
-    mirrors watch_event's public reach. Idempotent on email: resubmitting the same
-    address never errors, it just re-issues a fresh access token."""
+    """Self-serve, anonymous registration — no auth, mirrors watch_event's public reach.
+    Two callers use this: the registration_required video gate (RegistrationGate.jsx), and
+    an anonymous viewer identifying themselves with name+email to use chat/Q&A/polls on an
+    event that doesn't require registration at all (see routers/live.py's `reg` fallback for
+    the live socket, which needs one of these rows to exist). Idempotent on email:
+    resubmitting the same address never errors, it just re-issues a fresh access token."""
     ev = crud.get_event_unscoped(db, event_id)
     if ev is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
@@ -237,8 +246,6 @@ def register_for_event(
         # Self-serve registration must never become a side-door into a private event — that
         # access is host-granted only, via invite_viewers below.
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private — ask the host for an invite")
-    if not ev.registration_required:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event does not require registration")
 
     existing = crud.get_registration(db, event_id, data.email)
     if existing is not None:
@@ -416,3 +423,71 @@ def invite_viewers(
         )
         out.append(RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=token))
     return out
+
+
+# ── Access links (revocable, shareable — link-based counterpart to invite-viewers) ────────
+
+def _access_link_url(event_id: uuid.UUID, token: str) -> str:
+    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    return f"{base}/events/{event_id}/watch?link={token}"
+
+
+@router.get("/{event_id}/access-links", response_model=list[AccessLinkOut])
+def list_access_links(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _get_event_or_404(db, user.org_id, event_id)
+    return crud.list_access_links(db, event_id)
+
+
+@router.post("/{event_id}/access-links", response_model=AccessLinkIssued, status_code=status.HTTP_201_CREATED)
+def create_access_link(
+    event_id: uuid.UUID, data: AccessLinkCreate,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    ev = _get_event_or_404(db, user.org_id, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
+    link, raw = crud.create_access_link(db, event_id, ev.org_id, user.id, data.label, data.expires_in_days)
+    return AccessLinkIssued(**AccessLinkOut.model_validate(link).model_dump(), url=_access_link_url(event_id, raw))
+
+
+@router.post("/{event_id}/access-links/{link_id}/rotate", response_model=AccessLinkIssued)
+def rotate_access_link(
+    event_id: uuid.UUID, link_id: uuid.UUID, data: AccessLinkCreate,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    ev = _get_event_or_404(db, user.org_id, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
+    link = crud.get_access_link(db, event_id, link_id)
+    if link is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
+    link, raw = crud.rotate_access_link(db, link, data.expires_in_days)
+    return AccessLinkIssued(**AccessLinkOut.model_validate(link).model_dump(), url=_access_link_url(event_id, raw))
+
+
+@router.post("/{event_id}/access-links/{link_id}/revoke", response_model=AccessLinkOut)
+def revoke_access_link(
+    event_id: uuid.UUID, link_id: uuid.UUID,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    ev = _get_event_or_404(db, user.org_id, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
+    link = crud.get_access_link(db, event_id, link_id)
+    if link is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
+    return crud.revoke_access_link(db, link)
+
+
+@router.delete("/{event_id}/access-links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_access_link(
+    event_id: uuid.UUID, link_id: uuid.UUID,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    ev = _get_event_or_404(db, user.org_id, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
+    link = crud.get_access_link(db, event_id, link_id)
+    if link is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
+    crud.delete_access_link(db, link)

@@ -52,6 +52,7 @@ const EventReadiness = lazy(() => import("./pages/admin/EventReadiness"));
 const AdminMedia = lazy(() => import("./pages/admin/Media"));
 const TrustSafety = lazy(() => import("./pages/admin/Security"));
 const AdminGovernance = lazy(() => import("./pages/admin/Governance"));
+const Commerce = lazy(() => import("./pages/admin/Commerce"));
 
 // Organization console — the eight Build/Operate/Manage pages, code-split for the same reason
 // as the admin console above: only org admins reach /organization/*, so shipping them in the
@@ -169,6 +170,7 @@ export default function App() {
                 <Route path="/admin/media" element={<AdminMedia />} />
                 <Route path="/admin/security" element={<TrustSafety />} />
                 <Route path="/admin/governance" element={<AdminGovernance />} />
+                <Route path="/admin/commerce" element={<Commerce />} />
                 {adminStubs.map(([path, title]) => (
                   <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
                 ))}

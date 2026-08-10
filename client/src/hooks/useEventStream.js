@@ -21,16 +21,24 @@ const MAX_BACKOFF_MS = 15000;
 // just loops, so we stop and surface it.
 const FATAL_CODES = new Set([1008]);
 
-const wsUrl = (eventId, token) => {
+const wsUrl = (eventId, token, reg) => {
   const origin = API_BASE.replace(/^http/, "ws").replace(/\/$/, "");
-  return `${origin}/api/live/events/${eventId}/ws?token=${encodeURIComponent(token)}`;
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (reg) params.set("reg", reg);
+  return `${origin}/api/live/events/${eventId}/ws?${params.toString()}`;
 };
 
-export default function useEventStream(eventId, onEnvelope) {
+// `regToken` is the anonymous-viewer counterpart to a login: the access token issued by
+// POST /events/:id/register (self-serve name+email — see RegistrationGate / IdentifyForm).
+// Either one is enough to open the socket; the server resolves whichever it gets into a
+// Ctx (routers/live.py, moderation.resolve_ctx / resolve_ctx_from_registration).
+export default function useEventStream(eventId, onEnvelope, regToken) {
   // Read the session once at init: with no token there is nothing to connect to, and
   // starting in "unauthorized" avoids a pointless "connecting" flash.
   const [token] = useState(() => localStorage.getItem("token"));
-  const [status, setStatus] = useState(token ? "connecting" : "unauthorized"); // connecting | open | reconnecting | offline | unauthorized
+  const authKey = token || regToken;
+  const [status, setStatus] = useState(authKey ? "connecting" : "unauthorized"); // connecting | open | reconnecting | offline | unauthorized
   const [latency, setLatency] = useState(null);
   const [attempt, setAttempt] = useState(0);          // surfaces "retrying…" in the header
 
@@ -43,7 +51,7 @@ export default function useEventStream(eventId, onEnvelope) {
   });
 
   useEffect(() => {
-    if (!eventId || !token) return undefined;
+    if (!eventId || !authKey) return undefined;
 
     let closed = false;     // component unmounted / deps changed — stop reconnecting
     let retries = 0;
@@ -51,7 +59,7 @@ export default function useEventStream(eventId, onEnvelope) {
     let pingTimer;
 
     const connect = () => {
-      const ws = new WebSocket(wsUrl(eventId, token));
+      const ws = new WebSocket(wsUrl(eventId, token, regToken));
       socket.current = ws;
 
       ws.onopen = () => {
@@ -103,7 +111,7 @@ export default function useEventStream(eventId, onEnvelope) {
       socket.current?.close();
       socket.current = null;
     };
-  }, [eventId, token]);
+  }, [eventId, token, regToken, authKey]);
 
   const send = useCallback((action, payload = {}) => {
     const ws = socket.current;

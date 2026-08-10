@@ -24,10 +24,11 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..crud import event as event_crud
 from ..db import get_db
-from ..models import User
+from ..models import EventRegistration, User
 from ..ratelimit import SlidingWindow
-from ..security import ALGORITHM
+from ..security import ALGORITHM, decode_registration_token
 from ..services import bus, livekit
 from ..services import moderation as mod
 # Importing this registers the host/producer actions into mod.ACTIONS, the host-only
@@ -60,6 +61,19 @@ def _user_from_token(token: str | None, db: Session) -> User | None:
     return user if user and user.is_active else None
 
 
+def _registration_from_reg_token(reg: str | None, event_id: uuid.UUID, db: Session) -> EventRegistration | None:
+    """The anonymous-viewer counterpart to _user_from_token: a self-serve name+email
+    registration (routers/events.py register_for_event) stands in for a login. Same token
+    the /watch HTTP endpoint already accepts as `?reg=`, reused here so one registration
+    covers both video access and chat/Q&A/polls."""
+    if not reg:
+        return None
+    email = decode_registration_token(reg, event_id)
+    if not email:
+        return None
+    return event_crud.get_registration(db, event_id, email)
+
+
 async def _accept(websocket: WebSocket, event_id: uuid.UUID) -> bool:
     """accept(), swallowing the one specific race that isn't a bug: resolve_ctx/ensure_state
     await a thread/Redis round-trip, and a client that navigates away or closes the tab
@@ -79,13 +93,17 @@ async def _accept(websocket: WebSocket, event_id: uuid.UUID) -> bool:
 
 
 @router.websocket("/events/{event_id}/ws")
-async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | None = None):
+async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | None = None, reg: str | None = None):
     # Real device/platform mix for the host's analytics panel, straight off the handshake.
     # Nothing is inferred beyond what the UA states; unknowns stay "Unknown".
     agent = broadcast.classify_ua(websocket.headers.get("user-agent"))
     db = next(get_db())
     try:
         user = _user_from_token(token, db)
+        # No login? An anonymous visitor who self-identified with name+email (the
+        # registration_required video gate, or the chat/Q&A/polls identify prompt on any
+        # other event) gets a socket too — see mod.resolve_ctx_from_registration.
+        registration = None if user else _registration_from_reg_token(reg, event_id, db)
     finally:
         db.close()
     # Org isolation + per-event moderator check happen BEFORE any envelope is sent, so an
@@ -95,13 +113,17 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     # the browser's CloseEvent.code comes back as 1006 (spec-mandated for a failed handshake),
     # which silently defeats the client's FATAL_CODES-based reconnect-suppression
     # (useEventStream.js) and makes it retry an expired/invalid token forever.
-    if user is None:
+    if user is None and registration is None:
         if not await _accept(websocket, event_id):
             return
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired token")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired session")
         return
 
-    ctx = await asyncio.to_thread(mod.resolve_ctx, event_id, user)
+    ctx = (
+        await asyncio.to_thread(mod.resolve_ctx, event_id, user)
+        if user is not None
+        else await asyncio.to_thread(mod.resolve_ctx_from_registration, event_id, registration)
+    )
     if ctx is None:
         if not await _accept(websocket, event_id):
             return

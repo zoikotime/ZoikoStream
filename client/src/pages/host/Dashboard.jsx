@@ -29,6 +29,12 @@ export default function HostDashboard() {
   const [camera, setCamera] = useState(true);
   const [mic, setMic] = useState(true);
   const [screenShare, setScreenShare] = useState(false);
+  // The live capture itself. `screenTrack` (state, not just the ref) is what actually
+  // drives publishing — useLiveKitPublish swaps it in for the camera video track while
+  // sharing (see that hook). `screenShare` above stays purely a UI flag.
+  const screenStreamRef = useRef(null);
+  const screenVideoRef = useRef(null);
+  const [screenTrack, setScreenTrack] = useState(null);
   const [tab, setTab] = useState("participants");
   const [modal, setModal] = useState(null);
 
@@ -59,6 +65,7 @@ export default function HostDashboard() {
     url: state.livekitUrl,
     token: state.publishToken,
     streamRef: media.streamRef,
+    screenTrack,
   });
 
   // Once, the first time this host lands on a console they're allowed to run: ask whether
@@ -74,21 +81,41 @@ export default function HostDashboard() {
   }, [canHost, previewOn, live, ended]);
 
   // Screen share uses the native picker. getDisplayMedia is the whole feature — no library.
+  // The captured track is kept (not discarded) so it can actually be published — see
+  // screenTrack -> useLiveKitPublish above — and shown in the host's own preview below.
+  const stopScreenShare = () => {
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current = null;
+    if (screenVideoRef.current) screenVideoRef.current.srcObject = null;
+    setScreenTrack(null);
+    setScreenShare(false);
+  };
+
   const toggleScreen = async () => {
     if (screenShare) {
-      setScreenShare(false);
+      stopScreenShare();
       return;
     }
     if (!navigator.mediaDevices?.getDisplayMedia) return;
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      screenStreamRef.current = stream;
+      if (screenVideoRef.current) screenVideoRef.current.srcObject = stream;
+      setScreenTrack(stream.getVideoTracks()[0] || null);
       setScreenShare(true);
-      // The browser's own "Stop sharing" button ends the track, so mirror that back.
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => setScreenShare(false));
+      // The browser's own "Stop sharing" button ends the track directly, bypassing our
+      // button — mirror that back into state so the deck and preview stay honest.
+      stream.getVideoTracks()[0]?.addEventListener("ended", stopScreenShare);
     } catch {
       setScreenShare(false);   // the host cancelled the picker
     }
   };
+
+  // Belt-and-suspenders: release the capture if the host navigates away mid-share, so the
+  // browser's "sharing this tab/screen" indicator doesn't outlive the console.
+  useEffect(() => () => {
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+  }, []);
 
   const clearCountdown = useCallback(() => {
     if (canHost && state.broadcast?.status !== "live") send("broadcast.golive", {});
@@ -164,6 +191,7 @@ export default function HostDashboard() {
               camera={camera}
               mic={mic}
               screenShare={screenShare}
+              screenVideoRef={screenVideoRef}
               countdownUntil={state.countdownUntil}
               onCountdownDone={clearCountdown}
               publishToken={state.publishToken}

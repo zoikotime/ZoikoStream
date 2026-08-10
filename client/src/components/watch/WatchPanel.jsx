@@ -1,26 +1,14 @@
 // client/src/components/watch/WatchPanel.jsx
 // Viewer Portal right column — tabbed Chat / Q&A / Polls. All three are real, over the
 // live socket EventWatch opens (see its `liveReducer`) — same backend the host/moderator
-// consoles use. Signed-out visitors get a sign-in prompt instead of dead controls.
+// consoles use. An unidentified visitor (no login, no self-serve registration) sees the
+// IdentifyForm instead of dead controls — never a "sign in" prompt; a name+email is enough.
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import { FiSend, FiChevronUp, FiCheckCircle } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import { initials } from "../../data/watch";
 import { hhmm } from "../../data/moderation";
-
-// Shared by Q&A and Polls: an anonymous public visitor has no account to open the live
-// socket with, so there's no real data to show them either — same sign-in prompt as Chat.
-function SignInGate({ label }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
-      <p className="text-sm text-slate-500 dark:text-slate-400">{label}</p>
-      <Link to="/login" className="text-sm font-semibold text-emerald-600 hover:text-emerald-500 dark:text-emerald-400">
-        Sign in
-      </Link>
-    </div>
-  );
-}
+import IdentifyForm from "./IdentifyForm";
 
 const TABS = [
   { key: "chat", label: "Chat" },
@@ -28,10 +16,10 @@ const TABS = [
   { key: "polls", label: "Polls" },
 ];
 
-// Real chat, wired to the same live socket the host/moderator consoles use. `authed` gates
-// sending: an anonymous public visitor has no account to open that socket with, so they see
-// a sign-in prompt instead of a composer that would silently do nothing.
-function Chat({ messages = [], typing = {}, send, authed, connected }) {
+// Real chat, wired to the same live socket the host/moderator consoles use. Reaching this
+// component at all means the caller (WatchPanel) has already confirmed the visitor is
+// identified — logged in or self-registered — so there's no gate to check here.
+function Chat({ messages = [], typing = {}, send, connected }) {
   const [text, setText] = useState("");
   const scroller = useRef(null);
 
@@ -39,8 +27,6 @@ function Chat({ messages = [], typing = {}, send, authed, connected }) {
     const el = scroller.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length]);
-
-  if (!authed) return <SignInGate label="Sign in to join the chat." />;
 
   const submit = (e) => {
     e.preventDefault();
@@ -100,11 +86,9 @@ function Chat({ messages = [], typing = {}, send, authed, connected }) {
 // Real Q&A. No per-user vote ledger on the server (see moderation._qa_vote), so the "voted"
 // highlight is purely local — it survives this tab session, not a reload, same as the mock
 // it replaced.
-function QA({ questions = [], send, authed, connected }) {
+function QA({ questions = [], send, connected }) {
   const [voted, setVoted] = useState({});
   const [text, setText] = useState("");
-
-  if (!authed) return <SignInGate label="Sign in to ask a question." />;
 
   const toggleVote = (id) => {
     const on = !voted[id];
@@ -221,9 +205,7 @@ function Poll({ poll, send }) {
   );
 }
 
-function Polls({ polls = [], send, authed }) {
-  if (!authed) return <SignInGate label="Sign in to vote in polls." />;
-
+function Polls({ polls = [], send }) {
   const visible = polls.filter((p) => p.status === "live" || p.status === "closed");
 
   if (!visible.length) {
@@ -239,7 +221,16 @@ function Polls({ polls = [], send, authed }) {
   );
 }
 
-export default function WatchPanel({ className = "", messages, typing, questions, polls, send, authed, connected }) {
+const IDENTIFY_LABEL = {
+  chat: "Enter your name and email to join the chat.",
+  qa: "Enter your name and email to ask a question.",
+  polls: "Enter your name and email to vote in polls.",
+};
+
+export default function WatchPanel({
+  className = "", messages, typing, questions, polls, send, connected,
+  identified, eventId, onIdentified,
+}) {
   const [tab, setTab] = useState("chat");
 
   return (
@@ -261,9 +252,15 @@ export default function WatchPanel({ className = "", messages, typing, questions
         ))}
       </div>
       <div className="flex min-h-0 flex-1 flex-col p-3">
-        {tab === "chat" && <Chat messages={messages} typing={typing} send={send} authed={authed} connected={connected} />}
-        {tab === "qa" && <QA questions={questions} send={send} authed={authed} connected={connected} />}
-        {tab === "polls" && <Polls polls={polls} send={send} authed={authed} />}
+        {!identified ? (
+          <IdentifyForm eventId={eventId} label={IDENTIFY_LABEL[tab]} onIdentified={onIdentified} />
+        ) : (
+          <>
+            {tab === "chat" && <Chat messages={messages} typing={typing} send={send} connected={connected} />}
+            {tab === "qa" && <QA questions={questions} send={send} connected={connected} />}
+            {tab === "polls" && <Polls polls={polls} send={send} />}
+          </>
+        )}
       </div>
     </div>
   );

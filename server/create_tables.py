@@ -52,8 +52,27 @@ _USER_COLUMNS = [
 
 # Blast-radius class for an event. Drives which readiness gates are mandatory and which
 # events surface on the Command Center's high-impact list.
+#
+# The billing_* / risk_tier / service_profile_id / commercial_account_id columns are the
+# commercial layer (ZST-LE-COM-001, models/commercial.py). Every existing event defaults to
+# billing_classification='internal' so nothing already in the database silently becomes
+# billable the moment this migration runs (doc S1).
 _EVENT_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS impact VARCHAR(20) NOT NULL DEFAULT 'standard'",
+    "ADD COLUMN IF NOT EXISTS billing_classification VARCHAR(20) NOT NULL DEFAULT 'internal'",
+    "ADD COLUMN IF NOT EXISTS billing_source VARCHAR(30) NOT NULL DEFAULT 'direct_zoikostream'",
+    "ADD COLUMN IF NOT EXISTS risk_tier VARCHAR(4) NOT NULL DEFAULT 'r0'",
+    "ADD COLUMN IF NOT EXISTS service_profile_id UUID REFERENCES service_profiles(id)",
+    "ADD COLUMN IF NOT EXISTS commercial_account_id UUID REFERENCES commercial_accounts(id)",
+]
+
+# Commercial recording fields (doc Section 14/J — R2/R3 independent dual recording).
+_LIVE_RECORDING_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS role VARCHAR(16)",
+    "ADD COLUMN IF NOT EXISTS validation_status VARCHAR(16)",
+    "ADD COLUMN IF NOT EXISTS retention_policy_version VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS retention_expires_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT FALSE",
 ]
 
 # Columns whose models gained fields after the table already existed. Without these the
@@ -97,6 +116,8 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE users {clause}"))
         for clause in _EVENT_COLUMNS:
             conn.execute(text(f"ALTER TABLE events {clause}"))
+        for clause in _LIVE_RECORDING_COLUMNS:
+            conn.execute(text(f"ALTER TABLE live_recordings {clause}"))
         for clause in _FEATURE_FLAG_COLUMNS:
             conn.execute(text(f"ALTER TABLE feature_flags {clause}"))
         for clause in _SUPPORT_TICKET_COLUMNS:

@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from bisect import bisect_left
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
