@@ -22,9 +22,11 @@ import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
 import EventInfo from "../../components/watch/EventInfo";
+import ReactionBar from "../../components/watch/ReactionBar";
 import RegistrationGate from "../../components/watch/RegistrationGate";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import Spinner from "../../ui/Spinner";
+import Logo from "../../ui/Logo";
 
 const STATUS_LABEL = { live: "Live", ended: "Completed" }; // anything else -> "Upcoming"
 
@@ -37,6 +39,7 @@ function watchToMockEvent(watch) {
   return {
     id: watch.id,
     name: watch.title || "Untitled event",
+    startISO: watch.start_time || null, // raw, for the .ics the banner builds client-side
     status: STATUS_LABEL[watch.status] || "Upcoming",
     date: start ? start.toISOString().slice(0, 10) : "",
     start: hhmm(start),
@@ -175,22 +178,26 @@ export default function EventWatch() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
-      {/* Brand bar */}
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/80 backdrop-blur dark:border-slate-800 dark:bg-slate-900/80">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6">
-          <Link to="/" className="text-lg font-bold tracking-tight text-slate-900 dark:text-white">
-            Zoiko<span className="text-emerald-500">Stream</span>
+      {/* Brand bar — the real wordmark asset (ui/Logo), not a text stand-in. */}
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/75 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/75">
+        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
+          <Link
+            to="/"
+            aria-label="ZoikoStream home"
+            className="shrink-0 rounded-xl transition duration-150 hover:opacity-85 motion-reduce:transition-none"
+          >
+            <Logo height="h-6 sm:h-7" />
           </Link>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             {live && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-600 dark:text-rose-400">
-                <FiRadio className="animate-pulse" /> Live now
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-600 ring-1 ring-rose-500/20 dark:text-rose-400">
+                <FiRadio className="animate-pulse" aria-hidden /> <span className="hidden sm:inline">Live now</span><span className="sm:hidden">Live</span>
               </span>
             )}
             <button
               onClick={toggle}
-              className="grid h-9 w-9 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
-              aria-label="Toggle theme"
+              className="grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition duration-150 hover:bg-slate-100 hover:text-slate-900 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
+              aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
               title={theme === "dark" ? "Switch to light" : "Switch to dark"}
             >
               {theme === "dark" ? <FiSun className="text-lg" /> : <FiMoon className="text-lg" />}
@@ -202,12 +209,16 @@ export default function EventWatch() {
       {/* Top section: banner */}
       <WatchHeader event={event} viewers={viewers} />
 
-      {/* Main layout: player + info (70%) / chat panel (30%) */}
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+      {/* Main layout: player + info (70%) / chat panel (30%).
+          Explicit row/column placement rather than nesting the info card inside the left
+          column: on mobile that ordering put the whole About/Speakers/Schedule card between
+          the video and the chat. Here the stack reads player → reactions → chat → info on
+          small screens, and stays two-column from lg up. */}
+      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         {/* Outside the scheduled start_time/end_time window: no video, no chat — just the
             notice. The host's own broadcast/console is unaffected by this (see watch_event). */}
-        <div className={`grid grid-cols-1 gap-6 ${timeGated ? "" : "lg:grid-cols-[minmax(0,1fr)_360px]"}`}>
-          <div className="space-y-6">
+        <div className={`grid grid-cols-1 items-start gap-6 ${timeGated ? "" : "lg:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]"}`}>
+          <div className="min-w-0 space-y-4 lg:col-start-1 lg:row-start-1">
             {ended ? (
               <VideoPlayer event={event} viewers={viewers} watch={watch} />
             ) : watch.expired ? (
@@ -219,12 +230,14 @@ export default function EventWatch() {
             ) : (
               <VideoPlayer event={event} viewers={viewers} watch={watch} />
             )}
-            <EventInfo event={event} />
+            {!timeGated && <ReactionBar eventId={eventId} />}
           </div>
 
+          {/* row-span-2 so the panel's grid area covers the player AND the info card —
+              without it `sticky` has no travel and the info card scrolls past dead space. */}
           {!timeGated && (
             <WatchPanel
-              className="h-[70vh] self-start lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]"
+              className="h-[70vh] min-w-0 lg:col-start-2 lg:row-start-1 lg:row-span-2 lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]"
               messages={panel.messages}
               typing={panel.typing}
               questions={panel.questions}
@@ -234,10 +247,14 @@ export default function EventWatch() {
               connected={liveStatus === "open"}
             />
           )}
+
+          <div className="min-w-0 lg:col-start-1 lg:row-start-2">
+            <EventInfo event={event} />
+          </div>
         </div>
       </main>
 
-      <footer className="border-t border-slate-200 py-6 text-center text-xs text-slate-400 dark:border-slate-800">
+      <footer className="border-t border-slate-200 py-6 text-center text-xs text-slate-400 dark:border-white/10">
         © 2024 ZoikoStream. All rights reserved.
       </footer>
     </div>
