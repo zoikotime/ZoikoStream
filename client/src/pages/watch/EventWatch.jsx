@@ -155,7 +155,11 @@ export default function EventWatch() {
       !participant.waiting
   ).length;
   const onLiveEnvelope = useCallback((env) => dispatchPanel(env), []);
-  const { status: liveStatus, send: sendLive } = useEventStream(eventId, onLiveEnvelope, regToken);
+  const {
+    status: liveStatus,
+    send: sendLive,
+    disconnect: disconnectLive,
+  } = useEventStream(eventId, onLiveEnvelope, regToken);
 
   const [watch, setWatch] = useState(null);
   const [notFound, setNotFound] = useState(false);
@@ -190,6 +194,14 @@ export default function EventWatch() {
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
   const identified = !!(user || regToken);
+  const handleLeaveEvent = useCallback(() => {
+    disconnectLive();
+
+    localStorage.removeItem(`zk_reg_${eventId}`);
+    setRegTokenState(null);
+
+    window.location.href = "/";
+  }, [disconnectLive, eventId]);
   // Every public/unlisted visitor identifies with name+email before seeing any video —
   // not just when the host turned on "registration required". Private events are exempt:
   // reaching this page with real watch data already means the visitor passed a
@@ -244,6 +256,13 @@ export default function EventWatch() {
                 <FiRadio className="animate-pulse" aria-hidden /> <span className="hidden sm:inline">Live now</span><span className="sm:hidden">Live</span>
               </span>
             )}
+            <button
+              type="button"
+              onClick={handleLeaveEvent}
+              className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+            >
+              Leave Event
+            </button>
             <button
               onClick={toggle}
               className="grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition duration-150 hover:bg-slate-100 hover:text-slate-900 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
