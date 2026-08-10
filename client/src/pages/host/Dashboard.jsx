@@ -66,6 +66,7 @@ export default function HostDashboard() {
     token: state.publishToken,
     streamRef: media.streamRef,
     screenTrack,
+    videoTrack: media.videoTrack,
   });
 
   // Once, the first time this host lands on a console they're allowed to run: ask whether
