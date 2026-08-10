@@ -9,7 +9,7 @@
 //     enforces the same rule, so a moderator sees why instead of getting a silent rejection.
 import { useEffect, useState } from "react";
 import {
-  FiMic, FiMicOff, FiVideo, FiVideoOff, FiMonitor, FiUserPlus, FiUsers,
+  FiMic, FiMicOff, FiVideo, FiVideoOff, FiMonitor, FiRefreshCw, FiUserPlus, FiUsers,
   FiMessageSquare, FiBarChart2, FiHelpCircle, FiRadio, FiPhoneOff, FiCircle,
   FiPause, FiPlay, FiSettings, FiAlertOctagon, FiSquare, FiEye,
 } from "react-icons/fi";
@@ -75,7 +75,7 @@ function DangerButton({ icon: Icon, label, armedLabel, title, disabled, onConfir
 
 export default function ControlBar({
   broadcast, recording, canHost, previewOn, camera, mic, screenShare, media,
-  onTogglePreview, onToggleCamera, onToggleMic, onToggleScreen,
+  onTogglePreview, onToggleCamera, onFlipCamera, onToggleMic, onToggleScreen,
   onGoLive, onPause, onResume, onEnd, onEmergencyStop, onCountdown,
   onRecord, onPauseRecord, onStopRecord,
   onChat, onParticipants, onInvite, onPolls, onQA, onSettings,
@@ -115,6 +115,20 @@ export default function ControlBar({
         disabled={!previewOn}
         onClick={onToggleCamera}
         title={previewOn ? (camera ? "Turn your camera off" : "Turn your camera on") : "Start the preview first"}
+      />
+      <ControlButton
+        icon={FiRefreshCw}
+        label="Flip"
+        tone="blue"
+        disabled={!previewOn || !camera || (media?.devices?.cameras?.length || 0) < 2}
+        onClick={onFlipCamera}
+        title={
+          !previewOn
+            ? "Start the preview first"
+            : !camera
+              ? "Turn the camera on first"
+              : "Switch between available cameras"
+        }
       />
       <ControlButton
         icon={FiMonitor}

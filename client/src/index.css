@@ -128,6 +128,13 @@ p { text-wrap: pretty; }
   0%, 100% { transform: translate(0, 0); }
   50% { transform: translate(20px, -18px); }
 }
+/* Reaction tap feedback — one bounce, re-triggered by keying the element on the count. */
+@keyframes zk-pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.3); }
+  100% { transform: scale(1); }
+}
+.zk-pop { animation: zk-pop .32s cubic-bezier(0.22, 1, 0.36, 1); }
 
 .zk-flow-dot { animation: zk-flow 2.4s linear infinite; }
 .zk-float { animation: zk-float 6s ease-in-out infinite; }
@@ -184,5 +191,5 @@ p { text-wrap: pretty; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift,
-  .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow { animation: none; }
+  .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow, .zk-pop { animation: none; }
 }
