@@ -8,8 +8,18 @@
 // honest "no recording available" placeholder, never a fake scrubber.
 import { useEffect, useRef, useState } from "react";
 import {
-  FiPlay, FiPause, FiVolume2, FiVolume1, FiVolumeX,
-  FiMaximize, FiMinimize, FiSettings, FiRotateCcw,
+  FiPlay,
+  FiPause,
+  FiVolume2,
+  FiVolume1,
+  FiVolumeX,
+  FiMaximize,
+  FiMinimize,
+  FiSettings,
+  FiRotateCcw,
+  FiChevronRight,
+  FiCheck,
+  FiMonitor,
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import { initials } from "../../data/watch";
@@ -74,13 +84,55 @@ export default function VideoPlayer({ event, viewers, watch }) {
   const [muted, setMuted] = useState(true);
   const [volume, setVolume] = useState(80);
   const [fs, setFs] = useState(false);
-  const progress = canReplay && replayDuration ? (replayTime / replayDuration) * 100 : 0;
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsPage, setSettingsPage] = useState("main");
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+
+  const progress =
+    canReplay && replayDuration
+      ? (replayTime / replayDuration) * 100
+      : 0;
 
   useEffect(() => {
     const onFs = () => setFs(Boolean(document.fullscreenElement));
+
     document.addEventListener("fullscreenchange", onFs);
-    return () => document.removeEventListener("fullscreenchange", onFs);
+
+    return () => {
+      document.removeEventListener("fullscreenchange", onFs);
+    };
   }, []);
+
+  useEffect(() => {
+    const video = canStream ? mediaRef.current : replayRef.current;
+
+    if (!video) return undefined;
+
+    const onWebkitBeginFullscreen = () => setFs(true);
+    const onWebkitEndFullscreen = () => setFs(false);
+
+    video.addEventListener(
+      "webkitbeginfullscreen",
+      onWebkitBeginFullscreen
+    );
+
+    video.addEventListener(
+      "webkitendfullscreen",
+      onWebkitEndFullscreen
+    );
+
+    return () => {
+      video.removeEventListener(
+        "webkitbeginfullscreen",
+        onWebkitBeginFullscreen
+      );
+
+      video.removeEventListener(
+        "webkitendfullscreen",
+        onWebkitEndFullscreen
+      );
+    };
+  }, [canStream, mediaRef, replayStarted]);
 
   // Real playback: mirror play/pause/volume state onto the actual <video> element —
   // whichever one is live right now (the LiveKit stream, or the recorded replay).
@@ -107,10 +159,48 @@ export default function VideoPlayer({ event, viewers, watch }) {
     replayRef.current.muted = muted;
     replayRef.current.volume = Math.min(1, Math.max(0, volume / 100));
   }, [canReplay, muted, volume]);
+  useEffect(() => {
+    if (!canReplay || !replayRef.current) return;
 
+    replayRef.current.playbackRate = playbackSpeed;
+  }, [canReplay, playbackSpeed]);
+
+  const togglePictureInPicture = async () => {
+    const video = canStream ? mediaRef.current : replayRef.current;
+
+    if (!video) return;
+
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        return;
+      }
+
+      if (document.pictureInPictureEnabled && video.requestPictureInPicture) {
+        await video.requestPictureInPicture();
+      }
+    } catch (error) {
+      console.error("Picture-in-Picture failed:", error);
+    }
+  };
   const toggleFs = () => {
-    if (document.fullscreenElement) document.exitFullscreen?.();
-    else wrapRef.current?.requestFullscreen?.();
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.();
+      return;
+    }
+
+    const video = canStream ? mediaRef.current : replayRef.current;
+
+    // iPhone / iPad Safari native fullscreen fallback
+    if (video?.webkitEnterFullscreen) {
+      video.webkitEnterFullscreen();
+      return;
+    }
+
+    // Standard fullscreen for desktop/Android browsers
+    if (wrapRef.current?.requestFullscreen) {
+      wrapRef.current.requestFullscreen().catch(() => {});
+    }
   };
 
   const onSeek = (pct) => {
@@ -299,7 +389,157 @@ export default function VideoPlayer({ event, viewers, watch }) {
           )}
 
           <div className="ml-auto flex items-center gap-1 sm:gap-2">
-            <button aria-label="Settings" title="Settings" className={CTRL}><FiSettings className="text-lg" /></button>
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setShowSettings((v) => !v);
+                  setSettingsPage("main");
+                }}
+                aria-label="Settings"
+                title="Settings"
+                className={CTRL}
+              >
+                <FiSettings className="text-lg" />
+              </button>
+
+              {showSettings && (
+                <div className="absolute bottom-12 right-0 z-50 w-56 overflow-hidden rounded-xl bg-slate-900 p-2 text-sm text-white shadow-2xl ring-1 ring-white/10">
+                  {settingsPage === "main" ? (
+                    <>
+                      {/* Settings header */}
+                      <div className="border-b border-white/10 px-3 py-2">
+                        <p className="font-semibold">Settings</p>
+                      </div>
+
+                      {/* Quality */}
+                      <button
+                        type="button"
+                        onClick={() => setSettingsPage("quality")}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10"
+                      >
+                        <div className="flex items-center gap-3">
+                          <FiMonitor className="text-base text-white/80" />
+                          <div>
+                            <p className="font-medium">Quality</p>
+                            <p className="text-xs text-white/50">Auto</p>
+                          </div>
+                        </div>
+
+                        <FiChevronRight className="text-white/50" />
+                      </button>
+
+                      {/* Playback speed */}
+                      <button
+                        type="button"
+                        onClick={() => setSettingsPage("speed")}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10"
+                      >
+                        <div>
+                          <p className="font-medium">Playback speed</p>
+                          <p className="text-xs text-white/50">
+                            {playbackSpeed === 1 ? "Normal" : `${playbackSpeed}x`}
+                          </p>
+                        </div>
+
+                        <FiChevronRight className="text-white/50" />
+                      </button>
+
+                      {/* Picture in Picture */}
+                      <button
+                        type="button"
+                        onClick={togglePictureInPicture}
+                        disabled={
+                          !(canStream ? mediaRef.current : replayRef.current)
+                        }
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <div>
+                          <p className="font-medium">Picture-in-Picture</p>
+                          <p className="text-xs text-white/50">
+                            Watch while using other apps
+                          </p>
+                        </div>
+                      </button>
+                    </>
+                  ) : settingsPage === "quality" ? (
+                    <>
+                      {/* Quality page */}
+                      <div className="flex items-center gap-2 border-b border-white/10 px-2 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setSettingsPage("main")}
+                          className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10 hover:text-white"
+                          aria-label="Back to settings"
+                        >
+                          ←
+                        </button>
+
+                        <p className="font-semibold">Quality</p>
+                      </div>
+
+                      {["Auto", "1080p", "720p", "480p", "360p"].map((quality) => (
+                        <button
+                          key={quality}
+                          type="button"
+                          disabled={quality !== "Auto"}
+                          onClick={() => {
+                            if (quality === "Auto") {
+                              setSettingsPage("main");
+                            }
+                          }}
+                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <span>{quality}</span>
+
+                          {quality === "Auto" && (
+                            <FiCheck className="text-emerald-400" />
+                          )}
+                        </button>
+                      ))}
+
+                      <p className="px-3 pb-2 pt-2 text-[11px] leading-4 text-white/40">
+                        Manual quality selection will be available when multiple
+                        video renditions are provided.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      {/* Playback speed page */}
+                      <div className="flex items-center gap-2 border-b border-white/10 px-2 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setSettingsPage("main")}
+                          className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10 hover:text-white"
+                          aria-label="Back to settings"
+                        >
+                          ←
+                        </button>
+
+                        <p className="font-semibold">Playback speed</p>
+                      </div>
+
+                      {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                        <button
+                          key={speed}
+                          type="button"
+                          onClick={() => {
+                            setPlaybackSpeed(speed);
+                            setSettingsPage("main");
+                          }}
+                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                        >
+                          <span>{speed === 1 ? "Normal" : `${speed}x`}</span>
+
+                          {playbackSpeed === speed && (
+                            <FiCheck className="text-emerald-400" />
+                          )}
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
             <button onClick={toggleFs} aria-label={fs ? "Exit fullscreen" : "Fullscreen"} title={fs ? "Exit fullscreen" : "Fullscreen"} className={CTRL}>
               {fs ? <FiMinimize className="text-lg" /> : <FiMaximize className="text-lg" />}
             </button>

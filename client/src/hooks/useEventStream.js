@@ -43,6 +43,9 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
   const [attempt, setAttempt] = useState(0);          // surfaces "retrying…" in the header
 
   const socket = useRef(null);
+  const manuallyClosed = useRef(false);
+  const retryTimer = useRef(null);
+  const pingTimer = useRef(null);
   const handler = useRef(onEnvelope);
   // Keep the latest callback without re-running the connect effect (which would drop
   // and re-open the socket on every parent render).
@@ -54,9 +57,8 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
     if (!eventId || !authKey) return undefined;
 
     let closed = false;     // component unmounted / deps changed — stop reconnecting
+    manuallyClosed.current = false;
     let retries = 0;
-    let retryTimer;
-    let pingTimer;
 
     const connect = () => {
       const ws = new WebSocket(wsUrl(eventId, token, regToken));
@@ -66,8 +68,10 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
         retries = 0;
         setAttempt(0);
         setStatus("open");
-        pingTimer = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ action: "ping", t: Date.now() }));
+        pingTimer.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "ping", t: Date.now() }));
+          }
         }, PING_MS);
       };
 
@@ -86,9 +90,10 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
       };
 
       ws.onclose = (e) => {
-        clearInterval(pingTimer);
+        clearInterval(pingTimer.current);
+        pingTimer.current = null;
         setLatency(null);
-        if (closed) return;
+        if (closed || manuallyClosed.current) return;
         if (FATAL_CODES.has(e.code)) {
           setStatus("unauthorized");
           return;
@@ -99,15 +104,20 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
         // Jitter matters at scale: without it every console that dropped on the same
         // server blip reconnects in the same millisecond and knocks it over again.
         const wait = Math.min(1000 * 2 ** (retries - 1), MAX_BACKOFF_MS) * (0.7 + Math.random() * 0.6);
-        retryTimer = setTimeout(connect, wait);
+        retryTimer.current = setTimeout(connect, wait);
       };
     };
 
     connect();
     return () => {
       closed = true;
-      clearTimeout(retryTimer);
-      clearInterval(pingTimer);
+
+      clearTimeout(retryTimer.current);
+      clearInterval(pingTimer.current);
+
+      retryTimer.current = null;
+      pingTimer.current = null;
+
       socket.current?.close();
       socket.current = null;
     };
@@ -120,5 +130,21 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
     return true;
   }, []);
 
-  return { status, latency, attempt, send };
+  const disconnect = useCallback(() => {
+    manuallyClosed.current = true;
+
+    clearTimeout(retryTimer.current);
+    clearInterval(pingTimer.current);
+
+    retryTimer.current = null;
+    pingTimer.current = null;
+
+    socket.current?.close(1000, "Viewer left event");
+    socket.current = null;
+
+    setLatency(null);
+    setStatus("offline");
+  }, []);
+
+  return { status, latency, attempt, send, disconnect };
 }

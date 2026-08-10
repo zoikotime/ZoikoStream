@@ -17,7 +17,6 @@ import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
 import { useAuth } from "../../auth/AuthContext";
 import api from "../../api";
-import { startingViewers } from "../../data/watch";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
@@ -64,15 +63,48 @@ const POLL_MS = 10000; // how often a not-yet-live page checks whether the event
 // live.py — any authenticated attendee, OR a name+email self-registration (mustIdentify
 // below), may chat.send, qa.ask, qa.vote or poll.vote — no moderator role, and no login,
 // needed.
-const LIVE_EMPTY = { messages: [], typing: {}, questions: [], polls: [] };
+const LIVE_EMPTY = {
+  messages: [],
+  typing: {},
+  questions: [],
+  polls: [],
+  participants: {},
+};
+
 function liveReducer(state, env) {
   const { channel, type, data } = env;
+
   switch (`${channel}/${type}`) {
     case "moderator/snapshot":
       return {
-        messages: data.messages || [], typing: {},
-        questions: data.questions || [], polls: data.polls || [],
+        messages: data.messages || [],
+        typing: {},
+        questions: data.questions || [],
+        polls: data.polls || [],
+        participants: Object.fromEntries(
+          (data.participants || []).map((p) => [p.identity, p])
+        ),
       };
+
+    case "participants/participant.join":
+    case "participants/participant.update":
+      return {
+        ...state,
+        participants: {
+          ...state.participants,
+          [data.identity]: data,
+        },
+      };
+
+    case "participants/participant.leave": {
+      const participants = { ...state.participants };
+      delete participants[data.identity];
+
+      return {
+        ...state,
+        participants,
+      };
+    }
     case "chat/message.new":
       return { ...state, messages: [...state.messages, data] };
     case "chat/message.update":
@@ -101,12 +133,10 @@ function liveReducer(state, env) {
       return state;
   }
 }
-
 export default function EventWatch() {
   const { eventId } = useParams();
   const { theme, toggle } = useTheme();
   const { user } = useAuth();
-
   // The anonymous-viewer counterpart to `user`: a self-serve name+email registration
   // (RegistrationGate for a registration_required event, or IdentifyForm for chat/Q&A/polls
   // on any other event — both call the same POST /events/:id/register). Lifted to state
@@ -119,8 +149,17 @@ export default function EventWatch() {
   }, [eventId]);
 
   const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
+  const viewers = Object.values(panel.participants || {}).filter(
+    (participant) =>
+      participant.role === "viewer" &&
+      !participant.waiting
+  ).length;
   const onLiveEnvelope = useCallback((env) => dispatchPanel(env), []);
-  const { status: liveStatus, send: sendLive } = useEventStream(eventId, onLiveEnvelope, regToken);
+  const {
+    status: liveStatus,
+    send: sendLive,
+    disconnect: disconnectLive,
+  } = useEventStream(eventId, onLiveEnvelope, regToken);
 
   const [watch, setWatch] = useState(null);
   const [notFound, setNotFound] = useState(false);
@@ -155,6 +194,14 @@ export default function EventWatch() {
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
   const identified = !!(user || regToken);
+  const handleLeaveEvent = useCallback(() => {
+    disconnectLive();
+
+    localStorage.removeItem(`zk_reg_${eventId}`);
+    setRegTokenState(null);
+
+    window.location.href = "/";
+  }, [disconnectLive, eventId]);
   // Every public/unlisted visitor identifies with name+email before seeing any video —
   // not just when the host turned on "registration required". Private events are exempt:
   // reaching this page with real watch data already means the visitor passed a
@@ -170,9 +217,6 @@ export default function EventWatch() {
   // simply expired unwatched.
   const timeGated = Boolean(mustIdentify || (watch?.expired && !ended) || watch?.not_started);
 
-  // Live viewer count that gently drifts (setState only in the interval callback).
-  const [viewers, setViewers] = useState(startingViewers);
-  useInterval(() => setViewers((v) => Math.max(0, v + Math.floor(Math.random() * 15) - 6)), 3000, live);
 
   if (loading) {
     return (
@@ -212,6 +256,13 @@ export default function EventWatch() {
                 <FiRadio className="animate-pulse" aria-hidden /> <span className="hidden sm:inline">Live now</span><span className="sm:hidden">Live</span>
               </span>
             )}
+            <button
+              type="button"
+              onClick={handleLeaveEvent}
+              className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+            >
+              Leave Event
+            </button>
             <button
               onClick={toggle}
               className="grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition duration-150 hover:bg-slate-100 hover:text-slate-900 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
