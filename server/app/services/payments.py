@@ -20,8 +20,22 @@ import hmac
 import secrets
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+
+
+@dataclass
+class DisputeResult:
+    """A chargeback opened at the provider (doc P4) — deliberately its own shape, not
+    PaymentResult: 'a chargeback is not the same as a refund' (doc P4). Real providers push
+    this via webhook; MockPaymentProvider exposes it as a direct call since there is no
+    webhook source until a real merchant account exists (services.payments module
+    docstring)."""
+
+    provider_dispute_ref: str
+    status: str  # one of models.commercial.DISPUTE_STATES
+    reserve_amount: Decimal
+    evidence_due_by: datetime | None = None
 
 
 @dataclass
@@ -55,6 +69,11 @@ class PaymentProvider(ABC):
     def refund(self, provider_payment_ref: str, amount: Decimal) -> PaymentResult:
         ...
 
+    @abstractmethod
+    def open_dispute(self, provider_payment_ref: str, *, amount: Decimal, reason_code: str) -> DisputeResult:
+        """Provider-initiated chargeback (doc P4). Real providers reach this via webhook,
+        not a direct call — see module docstring."""
+
 
 class MockPaymentProvider(PaymentProvider):
     """Deterministic, in-process simulation. `simulate_failure` on authorize() is the only
@@ -78,6 +97,15 @@ class MockPaymentProvider(PaymentProvider):
     def refund(self, provider_payment_ref: str, amount: Decimal) -> PaymentResult:
         return PaymentResult(provider_payment_ref=provider_payment_ref, state="refunded",
                               settled_at=datetime.now(timezone.utc))
+
+    def open_dispute(self, provider_payment_ref: str, *, amount: Decimal, reason_code: str) -> DisputeResult:
+        # 7-day evidence window is a plausible mock default, not a real processor's actual
+        # deadline — production providers state their own window in the webhook payload.
+        return DisputeResult(
+            provider_dispute_ref=f"mock_dp_{secrets.token_hex(8)}",
+            status="opened", reserve_amount=amount,
+            evidence_due_by=datetime.now(timezone.utc) + timedelta(days=7),
+        )
 
 
 _PROVIDERS: dict[str, PaymentProvider] = {"mock": MockPaymentProvider()}

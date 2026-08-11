@@ -73,12 +73,18 @@ class AdminUserOut(BaseModel):
     org_id: uuid.UUID
     organization_name: str | None = None
     created_at: datetime | None = None
+    # Commercial RBAC (ZST-LE-COM-001 Section 25) — meaningful only when role=='super_admin'.
+    staff_commercial_role: str | None = None
 
 
 class UserUpdate(BaseModel):
     role: str | None = None
     is_active: bool | None = None
     full_name: str | None = Field(None, min_length=1, max_length=120)
+    # One of models.user.STAFF_COMMERCIAL_ROLES, or "" to clear it back to unscoped
+    # full-access super_admin. Validated against role in routers/admin.update_user (needs
+    # the target user's row, not just this payload, to check "role is/stays super_admin").
+    staff_commercial_role: str | None = None
 
 
 # ── Plans & Subscriptions ────────────────────────────────────────────────────

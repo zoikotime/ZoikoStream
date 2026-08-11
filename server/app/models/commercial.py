@@ -14,17 +14,16 @@ service commitments" — Section 33). Every monetary/policy value lives in a ver
 registry row (CatalogLine, ServiceProfile, CancellationPolicy) that must be populated by
 Commercial/Finance before it can be used — the engine reads policy, it does not decide it.
 
-RBAC note (doc Section 25): the app's existing role ladder (models.user.ROLES) has no
-concept of Zoiko-internal staff roles (Sales, Finance/Billing Ops, Live Events Operations,
-Support, Security/Privacy) — it only distinguishes customer-org roles from the platform
-super_admin. Rather than bolt on a second parallel role system, commercial endpoints map:
-  * customer-side "commercial acceptance" (doc A3/A4)      -> require_org_admin
-  * Zoiko-side financial/catalog authority (doc T1-T3)      -> require_super_admin
-  * maker-checker (doc "Maker-checker rule")                -> approver_id column, code
-    enforces requested_by != approved_by wherever both exist on a row
-This is a real simplification versus the doc's full matrix — every approval is still
-attributed to a named actor and audited (AuditLog via crud.commercial), just not gated by
-a Sales/Finance/Ops sub-role that doesn't otherwise exist in this app.
+RBAC note (doc Section 25): models.user.ROLES now carries billing_admin (customer-side)
+and User.staff_commercial_role (nullable — sales/finance_ops/live_ops/support/security,
+meaningful only on a super_admin row). security.commercial_can/require_commercial
+implement the doc's actual per-action matrix (accept/change/refund_approve/write_off/
+media_access); routers/commercial.py's module docstring has the full endpoint mapping.
+An unscoped super_admin (staff_commercial_role NULL) still has full access — every
+existing account's behavior is unchanged unless a role is explicitly assigned.
+Maker-checker (doc "Maker-checker rule") is separate from the RBAC matrix: it's the
+approver_id column, enforced in crud.commercial as requested_by != approved_by wherever
+both exist on a row, regardless of which role either actor holds.
 
 Payments are processor-neutral (doc P1): see services/payments.py for the adapter
 interface. No real processor is wired up — MockPaymentProvider is the only implementation
@@ -86,6 +85,11 @@ CAUSE_DOMAINS = (
 REMEDY_TYPES = ("credit", "refund", "fee_waiver")
 REMEDY_STATUSES = ("pending", "approved", "executed", "declined")
 CHANGE_ORDER_STATUSES = ("draft", "pending_acceptance", "accepted", "rejected")
+# doc P4: "a distinct dispute state with evidence package, financial reserve/adjustment and
+# case ownership... not the same as a refund." won/lost map onto Payment.state's existing
+# "paid"/"reversed" (see PAYMENT_STATES above) — this table is the case record; Payment
+# just reflects the current money state.
+DISPUTE_STATES = ("opened", "evidence_required", "evidence_submitted", "won", "lost", "withdrawn")
 EXCEPTION_TYPES = (
     "price_override", "waiver", "exceptional_cancellation",
     "financial_hold_override", "risk_tier_reduction", "complimentary_event",
@@ -435,6 +439,36 @@ class RefundCredit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PaymentDispute(Base):
+    """A chargeback case (doc P4/Section 20). Deliberately separate from RefundCredit: "a
+    chargeback is not the same as a refund" and "disputed payment does not silently rewrite
+    the original invoice or delivered event record" — this row is pure case evidence/
+    tracking; the underlying Payment/Invoice amounts are never edited by anything here.
+    `provider_dispute_ref` is the provider's own case ID (services.payments.DisputeResult);
+    `case_owner_id` is doc P4's "case ownership" (typically Finance/Billing Ops)."""
+
+    __tablename__ = "payment_disputes"
+
+    id: Mapped[uuid.UUID] = _id_col()
+    payment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("payments.id"), nullable=False, index=True)
+    event_order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_orders.id"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    provider_dispute_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(60), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    # doc P4 "financial reserve/adjustment" — what the provider holds back while the case is
+    # open. Distinct from `amount` so a partial-reserve provider policy can be represented.
+    reserve_amount: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="opened", nullable=False)
+    evidence: Mapped[dict | None] = mapped_column(JSON)
+    evidence_due_by: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    case_owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # ── G. Change orders (doc Section 11) ────────────────────────────────────────────────────
 
 class ChangeOrder(Base):
@@ -548,6 +582,62 @@ class CommercialException(Base):
     expiry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     evidence: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── Financial period-close & reconciliation (doc Section 29) ────────────────────────────
+
+PERIOD_STATUSES = ("open", "closed")
+RECONCILIATION_CATEGORIES = (
+    "capacity_without_order",       # doc 29 "Capacity-to-order": confirmed/high-risk event, no hard reservation
+    "order_without_capacity",       # ... or a hard reservation with no active commercial order
+    "order_without_invoice",        # doc 29 "Order-to-invoice": billable accepted order/change order, no invoice
+    "event_without_classification", # doc 29 "Event-to-order": no billing_classification/source + no order/waiver
+    "unmatched_settlement",         # doc 29 "Daily payment": provider settlement with no matching invoice/order
+)
+RECONCILIATION_STATUSES = ("open", "investigating", "resolved", "accepted_risk")
+
+
+class FinancialPeriod(Base):
+    """Freeze/materialize a period's commercial snapshot for accounting export (doc 29
+    "Period close"). `snapshot` is computed once at close time and never recomputed live —
+    "subsequent corrections are separately dated" (doc 29): a correction after close
+    becomes a NEW period's activity, it never mutates a closed period's numbers."""
+
+    __tablename__ = "financial_periods"
+    __table_args__ = (UniqueConstraint("label", name="uq_financial_period_label"),)
+
+    id: Mapped[uuid.UUID] = _id_col()
+    label: Mapped[str] = mapped_column(String(20), nullable=False)  # e.g. "2026-08"
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(10), default="open", nullable=False)
+    snapshot: Mapped[dict | None] = mapped_column(JSON)
+    closed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReconciliationException(Base):
+    """One entry in doc 29's "exception queue with an owner and resolution record" —
+    "none [evidence source] is allowed to silently replace the ZoikoStream Live Events
+    commercial ledger. Differences enter an exception queue..." `reference_type` +
+    `reference_id` point at whatever object the mismatch concerns (an Event, EventOrder,
+    CapacityReservation, Payment, ...) without a hard FK, since the category set spans
+    several unrelated tables."""
+
+    __tablename__ = "reconciliation_exceptions"
+
+    id: Mapped[uuid.UUID] = _id_col()
+    period_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("financial_periods.id"), index=True)
+    category: Mapped[str] = mapped_column(String(40), nullable=False)
+    reference_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    reference_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="open", nullable=False)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    resolution_notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 # ── O. Partner attribution (doc Section 19) ──────────────────────────────────────────────

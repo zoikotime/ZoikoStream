@@ -4,19 +4,22 @@ import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Select, Label, Switch } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
-import { ROLES, roleLabel } from "./roleInfo";
+import { ROLES, roleLabel, STAFF_COMMERCIAL_ROLES } from "./roleInfo";
 
 // Edit an existing platform user's role/name/active state. The admin API has no user
 // creation route (accounts are created through org signup/invitations), so this is
 // edit-only — no create mode.
 export default function UserModal({ open, onClose, user, onSaved }) {
-  const [form, setForm] = useState({ full_name: "", role: "viewer", is_active: true });
+  const [form, setForm] = useState({ full_name: "", role: "viewer", is_active: true, staff_commercial_role: "" });
   const [saving, setSaving] = useState(false);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
 
   useEffect(() => {
     if (!open || !user) return;
-    setForm({ full_name: user.full_name || "", role: user.role || "viewer", is_active: !!user.is_active });
+    setForm({
+      full_name: user.full_name || "", role: user.role || "viewer", is_active: !!user.is_active,
+      staff_commercial_role: user.staff_commercial_role || "",
+    });
   }, [open, user]);
 
   const close = () => !saving && onClose();
@@ -31,6 +34,9 @@ export default function UserModal({ open, onClose, user, onSaved }) {
         full_name: form.full_name.trim(),
         role: form.role,
         is_active: form.is_active,
+        // "" clears it; only sent meaningfully when role stays/becomes super_admin — the
+        // backend rejects a non-empty value otherwise (schemas.admin.UserUpdate).
+        staff_commercial_role: form.role === "super_admin" ? form.staff_commercial_role : "",
       });
       notify.success(`${form.full_name} updated`);
       onSaved?.();
@@ -78,6 +84,18 @@ export default function UserModal({ open, onClose, user, onSaved }) {
             {ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
           </Select>
         </div>
+        {form.role === "super_admin" && (
+          <div>
+            <Label>Commercial staff scope</Label>
+            <Select variant="console" value={form.staff_commercial_role} onChange={(e) => set("staff_commercial_role", e.target.value)}>
+              <option value="">Unscoped — full commercial access</option>
+              {STAFF_COMMERCIAL_ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
+            </Select>
+            <p className="mt-1 text-xs text-slate-400">
+              Narrows this account to one commercial role (ZST-LE-COM-001 §25) instead of full access — e.g. Finance/Billing Ops can approve refunds but not accept orders.
+            </p>
+          </div>
+        )}
         <Switch
           checked={form.is_active}
           onChange={(v) => set("is_active", v)}

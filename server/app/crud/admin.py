@@ -16,6 +16,7 @@ from ..models import (
     Organization,
     Plan,
     Release,
+    STAFF_COMMERCIAL_ROLES,
     Subscription,
     SupportTicket,
     User,
@@ -198,6 +199,19 @@ def update_user(db, user: User, data) -> AdminUserOut:
         val = getattr(data, field, None)
         if val is not None:
             setattr(user, field, val)
+    # "" clears it back to unscoped full-access super_admin (see schemas.admin.UserUpdate);
+    # None means "not included in this PATCH", matching every other field's convention here.
+    staff_role = getattr(data, "staff_commercial_role", None)
+    if staff_role is not None:
+        target_role = data.role if data.role is not None else user.role
+        if staff_role == "":
+            user.staff_commercial_role = None
+        elif target_role != "super_admin":
+            raise ValueError("staff_commercial_role only applies to super_admin users")
+        elif staff_role not in STAFF_COMMERCIAL_ROLES:
+            raise ValueError(f"staff_commercial_role must be one of {STAFF_COMMERCIAL_ROLES}")
+        else:
+            user.staff_commercial_role = staff_role
     db.commit()
     db.refresh(user)
     return _user_out(user)
