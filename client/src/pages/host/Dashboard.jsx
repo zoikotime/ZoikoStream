@@ -4,14 +4,21 @@
 //
 // Live state comes from hooks/useLiveEvent — the same socket and reducer the moderator
 // console uses. Local camera/mic come from hooks/useMediaPreview (native getUserMedia).
-// The layout is unchanged: header, KPI row + stage above a pinned control deck, right sidebar.
+//
+// LAYOUT: three fixed bands (header / workspace / control deck) with the workspace split
+// into a scrolling main column and a fixed-width panel rail. Only the main column and the
+// panel body scroll — the header and the deck are always reachable, which is the whole
+// point of a control room. `min-w-0` on every flex child is what keeps a long event title
+// or a wide filmstrip from forcing the page to scroll sideways.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiRadio } from "react-icons/fi";
 import useLiveEvent from "../../hooks/useLiveEvent";
 import useMediaPreview from "../../hooks/useMediaPreview";
 import useLiveKitPublish from "../../hooks/useLiveKitPublish";
 import Skeleton from "../../ui/Skeleton";
+import { cx } from "../../ui/tokens";
 import EmptyState from "../../components/organization/OrganizationEmptyState";
+import { STUDIO } from "../../components/host/studio";
 import HostHeader from "../../components/host/HostHeader";
 import SummaryCards from "../../components/host/SummaryCards";
 import StudioStage from "../../components/host/StudioStage";
@@ -147,8 +154,8 @@ export default function HostDashboard() {
   if (loading) return <StudioSkeleton />;
   if (error || !resolved) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6 dark:bg-slate-950">
-        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+      <div className={cx("flex min-h-screen items-center justify-center p-6", STUDIO.page)}>
+        <div className={cx("w-full max-w-md", STUDIO.card)}>
           <EmptyState
             icon={FiRadio}
             title={error ? "Couldn't load your events" : "No event to broadcast"}
@@ -164,7 +171,7 @@ export default function HostDashboard() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-50 text-slate-800 lg:h-screen lg:overflow-hidden dark:bg-slate-950 dark:text-slate-200">
+    <div className={cx("flex min-h-screen flex-col lg:h-screen lg:overflow-hidden", STUDIO.page, STUDIO.body)}>
       <HostHeader
         event={state.event}
         broadcast={state.broadcast}
@@ -180,14 +187,18 @@ export default function HostDashboard() {
       />
 
       <div className="flex flex-1 flex-col lg:min-h-0 lg:flex-row">
-        <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex-1 space-y-6 p-4 sm:p-6 lg:overflow-auto">
+        <main className="flex min-w-0 flex-1 flex-col lg:min-h-0">
+          {/* A flex COLUMN, not a spaced block: StudioStage's monitor is the flex-1 item
+              that soaks up leftover height, so the workspace fits any viewport without the
+              stage needing to guess at vh. overflow-y-auto stays as the safety valve for
+              viewports too short even for the monitor's min-height floor. */}
+          <div className="flex flex-1 flex-col gap-2 p-3 sm:px-4 sm:py-3 lg:min-h-0 lg:overflow-y-auto">
             <SummaryCards analytics={state.analytics} live={live} />
             <StudioStage
+              onTogglePreview={togglePreview}
               broadcast={state.broadcast}
               recording={state.recording}
               analytics={state.analytics}
-              participants={state.participants}
               media={media}
               camera={camera}
               mic={mic}
@@ -231,22 +242,23 @@ export default function HostDashboard() {
             onPauseRecord={() =>
               send(state.recording?.status === "paused" ? "recording.resume" : "recording.pause", {})}
             onStopRecord={() => send("recording.stop", {})}
-            onChat={() => setTab("chat")}
-            onParticipants={() => setTab("participants")}
             onInvite={() => setModal("invite")}
-            onPolls={() => setTab("polls")}
-            onQA={() => setTab("qa")}
             onSettings={() => setModal("settings")}
           />
         </main>
 
+        {/* Panel rail: full width below lg (stacks under the stage), then a fixed column
+            that widens with the viewport instead of stealing space from the monitor. */}
         <HostPanel
           tab={tab}
           setTab={setTab}
           state={state}
           canModerate={state.canModerate}
           send={send}
-          className="min-h-[70vh] w-full border-t border-slate-200 lg:min-h-0 lg:w-[380px] lg:border-l lg:border-t-0 dark:border-slate-800"
+          className={cx(
+            "min-h-[70vh] w-full shrink-0 border-t lg:min-h-0 lg:w-[340px] lg:border-l lg:border-t-0 xl:w-[380px] 2xl:w-[420px]",
+            STUDIO.divider
+          )}
         />
       </div>
 
@@ -274,29 +286,43 @@ export default function HostDashboard() {
       />
 
       {status === "unauthorized" && (
-        <p role="alert" className="border-t border-rose-200 bg-rose-50 px-6 py-2 text-center text-sm text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
-          You're not signed in as a host of this event, so broadcast controls are disabled.
+        <p
+          role="alert"
+          className="shrink-0 border-t border-rose-200 bg-rose-50 px-4 py-1.5 text-center text-[12px] font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
+        >
+          You&apos;re not signed in as a host of this event, so broadcast controls are disabled.
         </p>
       )}
     </div>
   );
 }
 
+// Mirrors the real layout's bands and radii so the page doesn't reflow when data lands.
 function StudioSkeleton() {
   return (
-    <div className="flex min-h-screen flex-col gap-4 bg-slate-50 p-4 sm:p-6 dark:bg-slate-950">
-      <Skeleton variant="title" className="w-full" />
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
-        {[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-24 rounded-2xl" />)}
+    <div className={cx("flex min-h-screen flex-col", STUDIO.page)}>
+      <div className={cx("shrink-0 border-b px-3 py-2 sm:px-4", STUDIO.chrome)}>
+        <Skeleton className="h-9 w-full rounded-lg" />
       </div>
-      <div className="flex flex-1 flex-col gap-4 lg:flex-row">
-        <div className="flex-1 space-y-4">
-          <Skeleton className="aspect-video w-full rounded-2xl" />
-          <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
-            {[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="aspect-video rounded-xl" />)}
+      <div className="flex flex-1 flex-col lg:min-h-0 lg:flex-row">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 space-y-3 p-3 sm:p-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6 xl:gap-3">
+              {[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-[92px] rounded-xl" />)}
+            </div>
+            <Skeleton className="aspect-video max-h-[54vh] w-full rounded-xl" />
+            <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+              {[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="aspect-video rounded-lg" />)}
+            </div>
+          </div>
+          <div className={cx("shrink-0 border-t px-3 py-2 sm:px-4", STUDIO.chrome)}>
+            <Skeleton className="h-14 w-full rounded-lg" />
           </div>
         </div>
-        <Skeleton variant="block" className="h-full min-h-[420px] lg:w-[380px]" />
+        <Skeleton
+          variant="block"
+          className={cx("h-full min-h-[420px] shrink-0 border-t lg:w-[340px] lg:border-l lg:border-t-0 xl:w-[380px] 2xl:w-[420px]", STUDIO.divider)}
+        />
       </div>
     </div>
   );

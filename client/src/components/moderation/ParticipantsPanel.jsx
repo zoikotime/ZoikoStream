@@ -5,16 +5,18 @@
 // profile drawer, with mute/remove inline on hover as before.
 import { useMemo, useState } from "react";
 import {
-  FiMic, FiMicOff, FiUserX, FiSearch, FiSlash, FiClock,
+  FiMic, FiMicOff, FiUserX, FiSlash, FiClock,
   FiArrowUpCircle, FiArrowDownCircle, FiMoreVertical, FiUsers,
 } from "react-icons/fi";
-import { cx, ACCENT } from "../../ui/tokens";
+import { cx, ACCENT, focusRing } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
 import Drawer from "../../ui/Drawer";
 import Skeleton from "../../ui/Skeleton";
-import { Input, Select } from "../../ui/forms";
+import { Select } from "../../ui/forms";
 import EmptyState from "../organization/OrganizationEmptyState";
 import Panel, { ActionButton } from "./Panel";
+import { PANEL } from "./panelTokens";
+import SearchField from "./SearchField";
 import {
   initials, accentFor, hhmm, ROLE_TONE, ROLE_ORDER,
   PARTICIPANT_FILTERS, PARTICIPANT_SORTS, QUALITY, TIMEOUT_OPTIONS,
@@ -99,7 +101,7 @@ function ProfileDrawer({ p, open, onClose, canModerate, send }) {
           {initials(p.name)}
         </span>
         <div className="min-w-0">
-          <p className="truncate font-semibold text-slate-900 dark:text-white">{p.name || p.identity}</p>
+          <span className="block truncate font-semibold text-slate-900 dark:text-white">{p.name || p.identity}</span>
           <div className="mt-1 flex items-center gap-2">
             <Badge tone={ROLE_TONE[role]} size="sm">{role}</Badge>
             {p.hand && <Badge tone="warning" size="sm">Hand raised</Badge>}
@@ -183,22 +185,17 @@ export default function ParticipantsPanel({ participants, canModerate, loading, 
       className={className}
       toolbar={
         <>
-          <div className="relative">
-            <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-            <Input
-              variant="console"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search participants…"
-              aria-label="Search participants"
-              className="pl-9"
-            />
-          </div>
+          <SearchField
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search participants…"
+            label="Search participants"
+          />
           <div className="flex items-center gap-2">
-            <Select variant="console" className="flex-1" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter participants">
+            <Select variant="console" className="h-8 flex-1 py-0 text-[13px]" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter participants">
               {PARTICIPANT_FILTERS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
             </Select>
-            <Select variant="console" className="flex-1" value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort participants">
+            <Select variant="console" className="h-8 flex-1 py-0 text-[13px]" value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort participants">
               {PARTICIPANT_SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
             </Select>
           </div>
@@ -212,53 +209,98 @@ export default function ParticipantsPanel({ participants, canModerate, loading, 
       )}
 
       {!loading && (
-        <div className="space-y-1">
-          {shown.map((p) => {
+        <div className="space-y-0.5">
+          {shown.map((p, i) => {
             const role = roleOf(p);
+            const isSelected = selected === p.identity;
             return (
+              // Sequential index comes from the RENDERED order, so it renumbers with the
+              // active sort and filter rather than pretending to be a stable participant id.
               <div
                 key={p.identity}
                 className={cx(
-                  "group flex items-center gap-2.5 rounded-xl px-2 py-2 transition motion-safe:animate-[zk-fade-in_.25s]",
-                  p.speaking ? "bg-emerald-50 dark:bg-emerald-500/10" : "hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                  "group relative flex items-center gap-2 px-2 py-1.5 motion-safe:animate-[zk-fade-in_.25s]",
+                  PANEL.row,
+                  PANEL.t150,
+                  isSelected ? cx(PANEL.rowActive, PANEL.rowAccent) : PANEL.rowHover
                 )}
               >
+                <span
+                  className={cx("w-4 shrink-0 text-right text-[10px] font-semibold tabular-nums", PANEL.faint)}
+                  aria-hidden="true"
+                >
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+
                 <span className="relative shrink-0">
-                  <span className={cx("grid h-9 w-9 place-items-center rounded-full text-sm font-semibold", ACCENT[accentFor(p.identity)].chip)}>
+                  <span className={cx("grid h-8 w-8 place-items-center rounded-full text-[11px] font-semibold", ACCENT[accentFor(p.identity)].chip)}>
                     {initials(p.name)}
                   </span>
-                  {/* Speaking ring — the fastest read in a long roster. */}
-                  {p.speaking && <span className="absolute inset-0 rounded-full ring-2 ring-emerald-500 motion-safe:animate-pulse" aria-hidden="true" />}
+                  {/* Speaking ring — the fastest read in a long roster. Green, not the
+                      remapped emerald, so "this person is talking" reads as a live state. */}
+                  {p.speaking && (
+                    <span className="absolute inset-0 rounded-full ring-2 ring-green-500 motion-safe:animate-pulse" aria-hidden="true" />
+                  )}
                 </span>
 
                 <button
                   type="button"
                   onClick={() => setSelected(p.identity)}
-                  className="min-w-0 flex-1 text-left"
+                  className={cx("min-w-0 flex-1 rounded-md text-left", focusRing)}
                   aria-label={`Open ${p.name || p.identity}'s profile`}
                 >
-                  <p className="flex items-center gap-1.5 truncate text-sm font-medium text-slate-800 dark:text-slate-100">
+                  {/* <span>, not <p>: index.css's unlayered `p { text-wrap: pretty }`
+                      outranks Tailwind's @layer utilities and strips `truncate`'s
+                      white-space:nowrap, so a <p class="truncate"> wraps and is then clipped
+                      mid-line. See the note in Panel.jsx. */}
+                  <span className={cx("flex items-center gap-1.5 text-[13px] font-medium leading-tight", PANEL.body)}>
                     <QualityDot quality={p.quality} />
                     <span className="truncate">{p.name || p.identity}</span>
                     {p.hand && <span title="Hand raised" aria-label="Hand raised">✋</span>}
-                  </p>
-                  <p className="truncate text-xs text-slate-400">
-                    {role} · joined {joinedLabel(p)}
-                  </p>
+                  </span>
+                  {/* Role lives in the badge on the right, so it is NOT repeated here —
+                      carrying it twice was squeezing the join time into an ellipsis in a
+                      380px rail. This line is the detail the badge can't show. */}
+                  <span className={cx("block truncate text-[11px] leading-tight", PANEL.faint)}>
+                    joined {joinedLabel(p)}
+                  </span>
                 </button>
 
+                {/* Role first (what they are), then transient state (what they're doing).
+                    Gated on the PANEL's width (@xs = 20rem), not the viewport: this roster is
+                    380px in the host rail (badge fits) but 300px in the moderator column,
+                    where the badge stole enough room to crush names to "na…".
+                    The gate lives on a WRAPPER, not on the Badge: Badge sets `inline-flex` in
+                    its own base classes, and between two unprefixed display utilities the
+                    stylesheet order decides — `inline-flex` wins, so `hidden` passed to Badge
+                    is silently dead. On a plain span the container-query variant wins. */}
+                <span className="hidden shrink-0 @xs:inline-flex">
+                  <Badge tone={ROLE_TONE[role]} size="sm">{role}</Badge>
+                </span>
                 {p.muted && <Badge tone="danger" size="sm">Muted</Badge>}
                 {!p.muted && p.speaking && <Badge tone="success" size="sm">Speaking</Badge>}
 
                 {canModerate && (
-                  <div className="flex items-center gap-0.5 opacity-100 sm:opacity-0 sm:transition sm:group-focus-within:opacity-100 sm:group-hover:opacity-100">
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    {/* Mute reveals on hover/focus — it's the frequent action but putting a
+                        live mic control under every name at rest is visual noise. The overflow
+                        menu stays PERSISTENT: it is the row's documented way in to the full
+                        action set, and a menu you have to discover by hovering is not one.
+                        focus-within keeps it keyboard-reachable, and it stays visible on
+                        touch (no hover) below sm. */}
+                    <span className="opacity-100 sm:opacity-0 sm:transition-opacity sm:group-focus-within:opacity-100 sm:group-hover:opacity-100 motion-reduce:sm:transition-none">
+                      <ActionButton
+                        icon={p.muted ? FiMic : FiMicOff}
+                        title={p.muted ? `Unmute ${p.name || p.identity}` : `Mute ${p.name || p.identity}`}
+                        tone="amber"
+                        onClick={() => send("participant.mute", { identity: p.identity, muted: !p.muted })}
+                      />
+                    </span>
                     <ActionButton
-                      icon={p.muted ? FiMic : FiMicOff}
-                      title={p.muted ? `Unmute ${p.name}` : `Mute ${p.name}`}
-                      tone="amber"
-                      onClick={() => send("participant.mute", { identity: p.identity, muted: !p.muted })}
+                      icon={FiMoreVertical}
+                      title={`More actions for ${p.name || p.identity}`}
+                      onClick={() => setSelected(p.identity)}
                     />
-                    <ActionButton icon={FiMoreVertical} title={`More actions for ${p.name}`} onClick={() => setSelected(p.identity)} />
                   </div>
                 )}
               </div>
@@ -268,10 +310,10 @@ export default function ParticipantsPanel({ participants, canModerate, loading, 
           {shown.length === 0 && (
             <EmptyState
               icon={FiUsers}
-              title={participants.length === 0 ? "Nobody here yet" : "No matches"}
+              title={participants.length === 0 ? "No participants yet" : "No matches"}
               description={
                 participants.length === 0
-                  ? "Participants appear the moment they join the event."
+                  ? "Participants will appear here when they join."
                   : "Try a different search or filter."
               }
               className="py-10"
