@@ -18,6 +18,7 @@ execute_* helpers below reject an approver who is also the requester.
 """
 
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -37,11 +38,14 @@ from ..models import (
     EventIncident,
     EventOrder,
     EventOrderLine,
+    FinancialPeriod,
     Invoice,
     Payment,
+    PaymentDispute,
     PaymentSchedule,
     Quote,
     ReadinessCheck,
+    ReconciliationException,
     RefundCredit,
     ReplayEntitlement,
     ServiceProfile,
@@ -763,6 +767,75 @@ def execute_refund_credit(db: Session, refund_credit: RefundCredit) -> RefundCre
     return refund_credit
 
 
+# ── Disputes / chargebacks (doc Section 20/P4) ───────────────────────────────────────────
+# Deliberately NOT built on RefundCredit's maker-checker flow: "a chargeback is not the
+# same as a refund" (doc P4) — money movement here is provider-driven (the cardholder's
+# bank decides, not Zoiko staff approving a request), so the workflow is case tracking
+# (open -> evidence -> won/lost) rather than an internal approve/execute gate. The original
+# Payment/Invoice amounts are never edited by any function below (doc P4).
+
+def open_dispute(db: Session, payment: Payment, actor: User, *, reason_code: str,
+                  amount: Decimal | None = None) -> PaymentDispute:
+    """Records a chargeback case. In production this is triggered by a provider webhook;
+    MockPaymentProvider exposes it as a direct call since there is no webhook source until
+    a real merchant account exists (services.payments module docstring) — the router gates
+    this action to Finance/Billing Ops staff (security.commercial_can 'refund_approve')
+    rather than accepting it unauthenticated, unlike a real webhook would be."""
+    if payment.state not in ("paid", "part_refunded"):
+        raise ValueError(f"Cannot open a dispute on a payment in state '{payment.state}'")
+    dispute_amount = amount if amount is not None else payment.amount
+    provider = payment_svc.get_provider(payment.provider)
+    result = provider.open_dispute(payment.provider_payment_ref, amount=dispute_amount, reason_code=reason_code)
+    dispute = PaymentDispute(
+        id=uuid.uuid4(), payment_id=payment.id, event_order_id=payment.event_order_id,
+        provider=payment.provider, provider_dispute_ref=result.provider_dispute_ref,
+        reason_code=reason_code, amount=dispute_amount, currency=payment.currency,
+        reserve_amount=result.reserve_amount, status=result.status,
+        evidence_due_by=result.evidence_due_by, case_owner_id=actor.id,
+    )
+    db.add(dispute)
+    payment.state = "disputed"
+    audit(db, actor=actor, action="commercial.dispute.open", target_type="payment_dispute",
+          target_id=dispute.id, amount=str(dispute_amount), reason_code=reason_code)
+    db.commit()
+    db.refresh(dispute)
+    return dispute
+
+
+def submit_dispute_evidence(db: Session, dispute: PaymentDispute, actor: User, *, evidence: dict) -> PaymentDispute:
+    """doc P4 'evidence package'. Submitting evidence doesn't resolve the case — the
+    provider/card network decides won/lost, reflected later via resolve_dispute (in
+    production, from another webhook)."""
+    if dispute.status not in ("opened", "evidence_required"):
+        raise ValueError(f"Cannot submit evidence for a dispute in status '{dispute.status}'")
+    dispute.evidence = {**(dispute.evidence or {}), **evidence}
+    dispute.status = "evidence_submitted"
+    audit(db, actor=actor, action="commercial.dispute.evidence_submitted",
+          target_type="payment_dispute", target_id=dispute.id)
+    db.commit()
+    db.refresh(dispute)
+    return dispute
+
+
+def resolve_dispute(db: Session, dispute: PaymentDispute, actor: User, *, won: bool) -> PaymentDispute:
+    """won: the case is closed with funds retained — Payment reverts to 'paid' (the reserve
+    doc P4 describes is released). lost: Zoiko loses the funds to the chargeback — Payment
+    moves to 'reversed' (PAYMENT_STATES already anticipates this exact case). Either way
+    this never touches the original Invoice/Payment amount fields (doc P4)."""
+    if dispute.status not in ("opened", "evidence_required", "evidence_submitted"):
+        raise ValueError(f"Cannot resolve a dispute in status '{dispute.status}'")
+    dispute.status = "won" if won else "lost"
+    dispute.resolved_at = datetime.now(timezone.utc)
+    payment = db.get(Payment, dispute.payment_id)
+    if payment:
+        payment.state = "paid" if won else "reversed"
+    audit(db, actor=actor, action="commercial.dispute.resolve", target_type="payment_dispute",
+          target_id=dispute.id, outcome="won" if won else "lost")
+    db.commit()
+    db.refresh(dispute)
+    return dispute
+
+
 # ── Incidents (doc Section 15/K) ─────────────────────────────────────────────────────────
 
 def open_incident(db: Session, event: Event, actor: User, *, severity: str, cause_domain: str,
@@ -918,3 +991,132 @@ def list_orders_missing_invoice(db: Session):
     ).all()
     invoiced_order_ids = {i.event_order_id for i in db.scalars(select(Invoice)).all()}
     return [o for o in accepted if o.id not in invoiced_order_ids]
+
+
+def list_events_missing_classification(db: Session):
+    """doc 'event-to-order reconciliation': every event marked billing_classification=
+    'commercial' must have an accepted order or an approved noncommercial reclassification
+    — this is the case where it has neither."""
+    commercial_events = db.scalars(select(Event).where(Event.billing_classification == "commercial")).all()
+    accepted_order_event_ids = {
+        o.event_id for o in db.scalars(select(EventOrder).where(EventOrder.status.in_(("accepted", "active", "completed")))).all()
+    }
+    return [e for e in commercial_events if e.id not in accepted_order_event_ids]
+
+
+# ── Financial period-close (doc Section 29) ──────────────────────────────────────────────
+
+def get_or_create_period(db: Session, *, label: str, period_start: datetime, period_end: datetime) -> FinancialPeriod:
+    period = db.scalar(select(FinancialPeriod).where(FinancialPeriod.label == label))
+    if period is None:
+        period = FinancialPeriod(id=uuid.uuid4(), label=label, period_start=period_start, period_end=period_end)
+        db.add(period)
+        db.commit()
+        db.refresh(period)
+    return period
+
+
+def _period_snapshot(db: Session, period: FinancialPeriod) -> dict:
+    """The doc 29 'freeze/materialize' snapshot — event-order, invoice, payment, refund,
+    dispute and deferred/outstanding totals for the period window, computed once at close
+    and stored verbatim from then on (never recomputed live against a closed period)."""
+    window = (EventOrder.created_at >= period.period_start, EventOrder.created_at < period.period_end)
+    orders = db.scalars(select(EventOrder).where(*window)).all()
+    invoices = db.scalars(
+        select(Invoice).where(Invoice.issue_date >= period.period_start, Invoice.issue_date < period.period_end)
+    ).all()
+    payments = db.scalars(
+        select(Payment).where(Payment.created_at >= period.period_start, Payment.created_at < period.period_end)
+    ).all()
+    refunds = db.scalars(
+        select(RefundCredit).where(RefundCredit.created_at >= period.period_start, RefundCredit.created_at < period.period_end)
+    ).all()
+    disputes = db.scalars(
+        select(PaymentDispute).where(PaymentDispute.opened_at >= period.period_start, PaymentDispute.opened_at < period.period_end)
+    ).all()
+    paid = [p for p in payments if p.state in ("paid", "part_refunded")]
+    outstanding_schedules = db.scalars(
+        select(PaymentSchedule).where(PaymentSchedule.status.in_(("due", "not_due")))
+    ).all()
+    return {
+        "orders": {"count": len(orders), "total_amount": str(sum((o.total_amount or Decimal(0)) for o in orders))},
+        "invoices": {"count": len(invoices), "total_amount": str(sum((i.total_amount or Decimal(0)) for i in invoices))},
+        "payments": {"count": len(payments), "collected_amount": str(sum((p.amount or Decimal(0)) for p in paid))},
+        "refunds_credits": {"count": len(refunds), "total_amount": str(sum((r.amount or Decimal(0)) for r in refunds))},
+        "disputes": {"count": len(disputes), "total_amount": str(sum((d.amount or Decimal(0)) for d in disputes))},
+        # Not period-windowed — an outstanding milestone is a point-in-time fact as of close,
+        # not something that happened "during" the period.
+        "deferred_outstanding": {
+            "count": len(outstanding_schedules),
+            "total_amount": str(sum((s.amount or Decimal(0)) for s in outstanding_schedules)),
+        },
+    }
+
+
+def _file_exceptions(db: Session, period: FinancialPeriod) -> list[ReconciliationException]:
+    """Runs every doc-29 detection control and files an open exception for each finding —
+    the persistence + ownership the read-only /commercial/reconciliation report doesn't
+    have on its own (doc: 'Differences enter an exception queue with an owner and
+    resolution record')."""
+    filed = []
+
+    def file(category: str, reference_type: str, reference_id, description: str):
+        exc = ReconciliationException(
+            id=uuid.uuid4(), period_id=period.id, category=category, reference_type=reference_type,
+            reference_id=reference_id, description=description, status="open",
+        )
+        db.add(exc)
+        filed.append(exc)
+
+    orphans = list_capacity_orphans(db)
+    for r in orphans["reservations_without_order"]:
+        file("capacity_without_order", "capacity_reservation", r.id,
+             f"Hard-reserved capacity for event {r.event_id} has no linked order")
+    for r in orphans["reservations_with_missing_order"]:
+        file("order_without_capacity", "capacity_reservation", r.id,
+             f"Capacity reservation {r.id} references an order that no longer exists")
+    for order in list_orders_missing_invoice(db):
+        file("order_without_invoice", "event_order", order.id,
+             f"Accepted commercial order {order.id} has no invoice")
+    for event in list_events_missing_classification(db):
+        file("event_without_classification", "event", event.id,
+             f"Event {event.id} is billing_classification=commercial with no accepted order")
+    for payment in list_unmatched_settlements(db):
+        file("unmatched_settlement", "payment", payment.id,
+             f"Payment {payment.id} settled unmatched to any order/invoice")
+    return filed
+
+
+def close_period(db: Session, period: FinancialPeriod, actor: User) -> FinancialPeriod:
+    """doc 29 'Period close': freeze the snapshot, file every open reconciliation exception,
+    lock the period. 'Subsequent corrections are separately dated' — there is deliberately
+    no reopen/edit path here; a correction after close belongs to a later period."""
+    if period.status != "open":
+        raise ValueError(f"Period '{period.label}' is already {period.status}")
+    exceptions = _file_exceptions(db, period)
+    period.snapshot = _period_snapshot(db, period)
+    period.status = "closed"
+    period.closed_by = actor.id
+    period.closed_at = datetime.now(timezone.utc)
+    audit(db, actor=actor, action="commercial.period.close", target_type="financial_period",
+          target_id=period.id, exceptions_filed=len(exceptions))
+    db.commit()
+    db.refresh(period)
+    return period
+
+
+def resolve_exception(db: Session, exception: ReconciliationException, actor: User, *,
+                       status: str, resolution_notes: str | None = None) -> ReconciliationException:
+    if status not in ("resolved", "accepted_risk", "investigating"):
+        raise ValueError(f"Invalid exception resolution status: '{status}'")
+    exception.status = status
+    exception.owner_id = actor.id
+    if resolution_notes:
+        exception.resolution_notes = resolution_notes
+    if status in ("resolved", "accepted_risk"):
+        exception.resolved_at = datetime.now(timezone.utc)
+    audit(db, actor=actor, action="commercial.reconciliation_exception.resolve",
+          target_type="reconciliation_exception", target_id=exception.id, status=status)
+    db.commit()
+    db.refresh(exception)
+    return exception

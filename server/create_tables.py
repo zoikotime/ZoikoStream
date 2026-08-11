@@ -48,6 +48,10 @@ _USER_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
     # Operating team an actor belongs to — shown against privileged activity in the console.
     "ADD COLUMN IF NOT EXISTS department VARCHAR(80)",
+    # Commercial RBAC (ZST-LE-COM-001 Section 25) — scopes a super_admin down to one staff
+    # sub-role for commercial actions; NULL keeps every existing account's unrestricted
+    # behavior unchanged. See models/user.py STAFF_COMMERCIAL_ROLES, security.commercial_can.
+    "ADD COLUMN IF NOT EXISTS staff_commercial_role VARCHAR(20)",
 ]
 
 # Blast-radius class for an event. Drives which readiness gates are mandatory and which

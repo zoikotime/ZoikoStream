@@ -420,6 +420,81 @@ class RefundCreditOut(BaseModel):
     created_at: datetime | None = None
 
 
+# ── Disputes / chargebacks (doc Section 20/P4) ────────────────────────────────────────
+
+class DisputeOpenCreate(BaseModel):
+    reason_code: str = Field(..., max_length=60)
+    amount: Decimal | None = Field(None, gt=0)  # None = full payment amount
+
+
+class DisputeEvidenceCreate(BaseModel):
+    evidence: dict = Field(..., min_length=1)
+
+
+class DisputeResolveCreate(BaseModel):
+    won: bool
+
+
+class PaymentDisputeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    payment_id: uuid.UUID
+    event_order_id: uuid.UUID
+    provider: str
+    provider_dispute_ref: str
+    reason_code: str
+    amount: Decimal
+    currency: str
+    reserve_amount: Decimal
+    status: str
+    evidence: dict | None = None
+    evidence_due_by: datetime | None = None
+    case_owner_id: uuid.UUID | None = None
+    opened_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+# ── Financial period-close (doc Section 29) ───────────────────────────────────────────
+
+class PeriodCreate(BaseModel):
+    label: str = Field(..., max_length=20)
+    period_start: datetime
+    period_end: datetime
+
+
+class FinancialPeriodOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    label: str
+    period_start: datetime
+    period_end: datetime
+    status: str
+    snapshot: dict | None = None
+    closed_by: uuid.UUID | None = None
+    closed_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class ReconciliationExceptionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    period_id: uuid.UUID | None = None
+    category: str
+    reference_type: str
+    reference_id: uuid.UUID
+    description: str
+    status: str
+    owner_id: uuid.UUID | None = None
+    resolution_notes: str | None = None
+    created_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class ExceptionResolveCreate(BaseModel):
+    status: Literal["resolved", "accepted_risk", "investigating"]
+    resolution_notes: str | None = None
+
+
 # ── Incidents & remedies ──────────────────────────────────────────────────────────────
 
 class IncidentCreate(BaseModel):

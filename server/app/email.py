@@ -225,6 +225,137 @@ def _viewer_invite_html(name: str, event_title: str, watch_url: str, inviter_nam
     </div>""")
 
 
+# ── Commercial/order lifecycle (ZST-LE-COM-001 Section 21/Q2) ───────────────────────────
+# "What confirmations are required?" doc Q2's list, one function per line item (readiness
+# actions excepted — an operational status update, not a customer-facing commercial
+# confirmation). Idempotency (doc Q2: "duplicate events must not duplicate customer
+# emails") is inherited from the caller: every trigger point below is a crud.commercial
+# state transition that its own state-machine guard only allows once (accept_order raises
+# on an already-accepted order, capture_payment raises outside 'pending', etc.) — so a
+# retried request can't re-trigger the same email without also re-succeeding a transition
+# that's specifically guarded against re-succeeding. A real duplicate provider webhook is
+# separately deduplicated by Payment.idempotency_key before it ever reaches here.
+
+def _commercial_html(title: str, name: str, lines: list[str], rows: list[tuple[str, str]] | None = None,
+                      cta_label: str | None = None, cta_url: str | None = None) -> str:
+    safe_name = html.escape(name or "there")
+    body = "".join(f"<p>{line}</p>" for line in lines)
+    table = ""
+    if rows:
+        row_html = "".join(
+            f'<tr><td style="padding:10px 0;color:#888;">{html.escape(k)}</td>'
+            f'<td style="padding:10px 0;text-align:right;">{html.escape(v)}</td></tr>'
+            for k, v in rows
+        )
+        table = f'<table style="width:100%;border-collapse:collapse;margin:24px 0;font-size:14px;">{row_html}</table>'
+    cta = ""
+    if cta_label and cta_url:
+        cta = f"""
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{cta_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          {html.escape(cta_label)}
+        </a>
+      </p>"""
+    return _shell(f"""
+    {_header(title)}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      {body}
+      {table}
+      {cta}
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
+def send_order_accepted_email(to: str, name: str, event_title: str, total_amount: str, currency: str,
+                               order_url: str) -> None:
+    """doc Q2 'Quote/order acceptance' + 'booking confirmation' — this app's order
+    acceptance is the booking commitment (crud.commercial.accept_order)."""
+    safe_title = html.escape(event_title or "your event")
+    _send(to, f"Booking confirmed: {event_title}", _commercial_html(
+        "Booking confirmed", name,
+        [f"Your order for <strong>{safe_title}</strong> has been accepted — this event is now booked."],
+        rows=[("Total", f"{currency} {total_amount}")],
+        cta_label="View order", cta_url=order_url,
+    ))
+
+
+def send_payment_receipt_email(to: str, name: str, event_title: str, amount: str, currency: str,
+                                order_url: str) -> None:
+    """doc Q2 'payment receipt' (crud.commercial.capture_payment success)."""
+    safe_title = html.escape(event_title or "your event")
+    _send(to, f"Payment received: {event_title}", _commercial_html(
+        "Payment received", name,
+        [f"We've received your payment for <strong>{safe_title}</strong>. Thank you."],
+        rows=[("Amount paid", f"{currency} {amount}")],
+        cta_label="View order", cta_url=order_url,
+    ))
+
+
+def send_payment_failed_email(to: str, name: str, event_title: str, amount: str, currency: str,
+                               reason: str | None, order_url: str) -> None:
+    """doc Q2 'payment failure' (crud.commercial.authorize_payment failure path)."""
+    safe_title = html.escape(event_title or "your event")
+    lines = [f"A payment attempt for <strong>{safe_title}</strong> was not successful."]
+    if reason:
+        lines.append(f"Reason: {html.escape(reason)}")
+    lines.append("No charge was made. Please try again or contact us for help.")
+    _send(to, f"Payment issue: {event_title}", _commercial_html(
+        "Payment couldn't be completed", name, lines,
+        rows=[("Amount", f"{currency} {amount}")],
+        cta_label="Review order", cta_url=order_url,
+    ))
+
+
+def send_change_order_accepted_email(to: str, name: str, event_title: str, price_delta: str, currency: str,
+                                      order_url: str) -> None:
+    """doc Q2 'material change order' (crud.commercial.accept_change_order)."""
+    safe_title = html.escape(event_title or "your event")
+    delta_label = f"+{currency} {price_delta}" if not price_delta.startswith("-") else f"{currency} {price_delta}"
+    _send(to, f"Order change confirmed: {event_title}", _commercial_html(
+        "Change order confirmed", name,
+        [f"A change to your order for <strong>{safe_title}</strong> has been accepted."],
+        rows=[("Price change", delta_label)],
+        cta_label="View order", cta_url=order_url,
+    ))
+
+
+def send_cancellation_email(to: str, name: str, event_title: str, refund_amount: str | None, currency: str,
+                             order_url: str) -> None:
+    """doc Q2 'cancellation/reschedule' (crud.commercial.cancel_order)."""
+    safe_title = html.escape(event_title or "your event")
+    lines = [f"Your booking for <strong>{safe_title}</strong> has been canceled, as requested."]
+    rows = [("Refund", f"{currency} {refund_amount}")] if refund_amount and refund_amount != "0" else None
+    if not rows:
+        lines.append("No refund applies under the cancellation policy for this booking.")
+    _send(to, f"Booking canceled: {event_title}", _commercial_html(
+        "Booking canceled", name, lines, rows=rows, cta_label="View order", cta_url=order_url,
+    ))
+
+
+def send_replay_available_email(to: str, name: str, event_title: str, watch_url: str) -> None:
+    """doc Q2 'event completion/replay availability' (crud.commercial.publish_replay)."""
+    safe_title = html.escape(event_title or "your event")
+    _send(to, f"Replay available: {event_title}", _commercial_html(
+        "Your replay is ready", name,
+        [f"The recording for <strong>{safe_title}</strong> is now available to watch."],
+        cta_label="Watch replay", cta_url=watch_url,
+    ))
+
+
+def send_refund_credit_email(to: str, name: str, event_title: str, amount: str, currency: str,
+                              credit_type: str, order_url: str) -> None:
+    """doc Q2 'refund/credit' (crud.commercial.execute_refund_credit)."""
+    safe_title = html.escape(event_title or "your event")
+    verb = "credited" if credit_type == "credit" else "waived" if credit_type == "fee_waiver" else "refunded"
+    _send(to, f"{credit_type.replace('_', ' ').title()} processed: {event_title}", _commercial_html(
+        f"Your {credit_type.replace('_', ' ')} has been processed", name,
+        [f"A {currency} {amount} {credit_type.replace('_', ' ')} for <strong>{safe_title}</strong> has been {verb}."],
+        cta_label="View order", cta_url=order_url,
+    ))
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
 
@@ -287,4 +418,26 @@ if __name__ == "__main__":
     vinv = _viewer_invite_html("<i>Bob</i>", "<b>Launch</b>", "https://x/events/1/watch?reg=abc", "<u>Alice</u>")
     assert "&lt;i&gt;Bob&lt;/i&gt;" in vinv and "&lt;b&gt;Launch&lt;/b&gt;" in vinv and "&lt;u&gt;Alice&lt;/u&gt;" in vinv, "viewer invite not escaped"
     assert "reg=abc" in vinv, "viewer invite link missing the access token"
+
+    # Commercial lifecycle (doc Q2) — _commercial_html escaping/rendering, then every
+    # send_*_email wrapper with RESEND_API_KEY patched blank so _send stays a no-op
+    # (same technique as send_welcome_email/send_reset_otp_email above — never a real call).
+    ch = _commercial_html("<b>Title</b>", "<i>Name</i>", ["<u>line</u>"], rows=[("<s>Key</s>", "<s>Val</s>")],
+                           cta_label="<em>Go</em>", cta_url="https://x/y")
+    assert "&lt;i&gt;Name&lt;/i&gt;" in ch, "commercial_html name not escaped"
+    assert "&lt;s&gt;Key&lt;/s&gt;" in ch and "&lt;s&gt;Val&lt;/s&gt;" in ch, "commercial_html row not escaped"
+    assert "&lt;em&gt;Go&lt;/em&gt;" in ch, "commercial_html cta label not escaped"
+    assert "https://x/y" in ch, "commercial_html cta url missing"
+    assert _commercial_html("T", "N", ["line"]) and "margin:32px 0" not in _commercial_html("T", "N", ["line"]), \
+        "commercial_html must omit the CTA block entirely when no cta_url is given"
+
+    with patch.object(settings, "RESEND_API_KEY", ""):
+        send_order_accepted_email("nobody@example.com", "<script>", "<b>Ev</b>", "100.00", "USD", "https://x/o")
+        send_payment_receipt_email("nobody@example.com", "<script>", "<b>Ev</b>", "100.00", "USD", "https://x/o")
+        send_payment_failed_email("nobody@example.com", "<script>", "<b>Ev</b>", "100.00", "USD", "declined", "https://x/o")
+        send_change_order_accepted_email("nobody@example.com", "<script>", "<b>Ev</b>", "50.00", "USD", "https://x/o")
+        send_cancellation_email("nobody@example.com", "<script>", "<b>Ev</b>", "80.00", "USD", "https://x/o")
+        send_cancellation_email("nobody@example.com", "<script>", "<b>Ev</b>", None, "USD", "https://x/o")
+        send_replay_available_email("nobody@example.com", "<script>", "<b>Ev</b>", "https://x/watch")
+        send_refund_credit_email("nobody@example.com", "<script>", "<b>Ev</b>", "20.00", "USD", "fee_waiver", "https://x/o")
     print("ok")

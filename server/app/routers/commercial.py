@@ -1,14 +1,24 @@
 """Commercial/billing API for Live Events (ZST-LE-COM-001) — /commercial/*.
 
-RBAC mapping (see crud/commercial.py module docstring for the full rationale — this app's
-role ladder has no Zoiko-internal staff sub-roles, so):
-  * require_super_admin gates Zoiko-side commercial/financial authority: catalog, service
-    profiles, cancellation policy, quote issuance, order construction, capacity, payment
-    schedule/invoice issuance, readiness checks, incidents, remedy propose/approve/execute,
-    reconciliation. All doc T1-T3 "who owns X" authority.
-  * require_org_admin gates customer-side commercial acceptance: accepting a quote,
-    accepting an order, accepting a change order, requesting cancellation, authorizing
-    payment. Doc A3/A4: "who may act as purchaser" / accept price-changing terms.
+RBAC mapping (doc Section 25 "Commercial & Event RBAC — Canonical Access Matrix";
+security.commercial_can/require_commercial implement the actual per-action matrix):
+  * require_commercial("accept") gates customer-side commercial acceptance: accepting a
+    quote, accepting an order, accepting a change order, authorizing payment. Both
+    org_admin (Organization Owner) and billing_admin (Billing Admin) pass this.
+  * require_commercial("change") gates change-order creation/cancellation-request —
+    customer roles plus Zoiko sales/finance_ops/live_ops staff, per the doc's "Change
+    authority" column.
+  * require_commercial("refund_approve") gates refund/credit approve+execute — Zoiko
+    finance_ops only (plus an unscoped super_admin, see security.py). Maker-checker
+    (approver != requester) is still enforced separately in crud.commercial.
+  * require_commercial("media_access") gates replay publication — customer host role
+    plus Zoiko live_ops staff.
+  * require_super_admin still gates the remaining Zoiko-side authority the doc's Section-25
+    table doesn't break out to a specific staff row: catalog, service profiles,
+    cancellation policy, quote issuance, order construction, capacity, payment
+    schedule/invoice issuance, readiness checks, incidents, reconciliation (doc T1-T3
+    "who owns X"). An unscoped super_admin (staff_commercial_role is NULL) also passes
+    every require_commercial() gate — see security.commercial_can.
   * Plain get_current_user (any org member) gates read-only views scoped to their org's
     events, same as routers/events.py.
   * POST /commercial/webhooks/payments has NO user auth — a payment provider calls it
@@ -21,28 +31,37 @@ belonging to another org must 404, not leak existence.
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..crud import commercial as crud
 from ..db import get_db
+from ..email import (
+    send_cancellation_email, send_change_order_accepted_email, send_order_accepted_email,
+    send_payment_failed_email, send_payment_receipt_email, send_refund_credit_email,
+    send_replay_available_email,
+)
 from ..models import (
-    CancellationPolicy, CapacityReservation, CatalogLine, CatalogVersion, ChangeOrder, Event,
-    EventIncident, EventOrder, Invoice, Payment, Quote, ReadinessCheck, RefundCredit,
+    CancellationPolicy, CapacityReservation, CatalogLine, CatalogVersion, ChangeOrder,
+    CommercialAccount, Event, EventIncident, EventOrder, FinancialPeriod, Invoice, Payment,
+    PaymentDispute, Quote, ReadinessCheck, ReconciliationException, RefundCredit,
     ReplayEntitlement, ServiceProfile, User,
 )
 from ..schemas.commercial import (
     CancelOrderRequest, CancellationPolicyCreate, CancellationPolicyOut, CancellationResult,
     CapacityHoldCreate, CapacityOut, CatalogLineCreate, CatalogLineOut, CatalogVersionCreate,
-    CatalogVersionOut, ChangeOrderCreate, ChangeOrderOut, CommercialAccountOut, IncidentCreate,
+    CatalogVersionOut, ChangeOrderCreate, ChangeOrderOut, CommercialAccountOut, DisputeEvidenceCreate,
+    DisputeOpenCreate, DisputeResolveCreate, ExceptionResolveCreate, FinancialPeriodOut, IncidentCreate,
     IncidentOut, InvoiceCreate, InvoiceOut, OrderAccept, OrderCreate, OrderLineCreate, OrderLineOut,
-    OrderOut, PaymentAuthorizeCreate, PaymentOut, PaymentScheduleCreate, PaymentScheduleOut,
-    PaymentWebhookIn, QuoteCreate, QuoteOut, ReadinessCheckCreate, ReadinessCheckOut,
-    ReadinessEvaluation, ReconciliationReport, RefundCreditOut, RemedyProposeCreate,
-    ReplayEntitlementCreate, ReplayEntitlementOut, ServiceProfileCreate, ServiceProfileOut,
+    OrderOut, PaymentAuthorizeCreate, PaymentDisputeOut, PaymentOut, PaymentScheduleCreate,
+    PaymentScheduleOut, PaymentWebhookIn, PeriodCreate, QuoteCreate, QuoteOut,
+    ReadinessCheckCreate, ReadinessCheckOut, ReadinessEvaluation, ReconciliationExceptionOut,
+    ReconciliationReport, RefundCreditOut, RemedyProposeCreate, ReplayEntitlementCreate,
+    ReplayEntitlementOut, ServiceProfileCreate, ServiceProfileOut,
 )
-from ..security import get_current_user, org_scoped, require_org_admin, require_super_admin
+from ..security import get_current_user, org_scoped, require_commercial, require_org_admin, require_super_admin
 
 router = APIRouter(prefix="/commercial", tags=["commercial"])
 
@@ -65,6 +84,24 @@ def _get_order_or_404(db: Session, user: User, order_id: uuid.UUID) -> EventOrde
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     _get_event_or_404(db, user, order.event_id)  # org-scopes the lookup
     return order
+
+
+def _order_contact(db: Session, order: EventOrder) -> tuple[str, str] | None:
+    """Who to send a doc Q2 lifecycle email to for this order: the purchaser user if one is
+    on the order, else the commercial account's billing contact. None if neither is set —
+    callers must skip sending rather than fail the request over a missing contact."""
+    if order.purchaser_id:
+        purchaser = db.get(User, order.purchaser_id)
+        if purchaser and purchaser.email:
+            return purchaser.email, purchaser.full_name
+    account = db.get(CommercialAccount, order.commercial_account_id)
+    if account and account.billing_contact_email:
+        return account.billing_contact_email, account.billing_contact_name or "there"
+    return None
+
+
+def _order_url(order: EventOrder) -> str:
+    return f"{settings.APP_URL.rstrip('/')}/organization/events/{order.event_id}?tab=commercial"
 
 
 # ── Catalog (Zoiko-side authority — doc T1) ──────────────────────────────────────────────
@@ -197,7 +234,7 @@ def issue_quote(event_id: uuid.UUID, quote_id: uuid.UUID, admin: User = Depends(
 
 
 @router.post("/events/{event_id}/quotes/{quote_id}/accept", response_model=QuoteOut)
-def accept_quote(event_id: uuid.UUID, quote_id: uuid.UUID, user: User = Depends(require_org_admin),
+def accept_quote(event_id: uuid.UUID, quote_id: uuid.UUID, user: User = Depends(require_commercial("accept")),
                   db: Session = Depends(get_db)):
     _get_event_or_404(db, user, event_id)
     quote = db.get(Quote, quote_id)
@@ -276,16 +313,21 @@ def submit_order(event_id: uuid.UUID, order_id: uuid.UUID, admin: User = Depends
 
 
 @router.post("/events/{event_id}/orders/{order_id}/accept", response_model=OrderOut)
-def accept_order(event_id: uuid.UUID, order_id: uuid.UUID, data: OrderAccept,
-                  user: User = Depends(require_org_admin), db: Session = Depends(get_db)):
-    _get_event_or_404(db, user, event_id)
+def accept_order(event_id: uuid.UUID, order_id: uuid.UUID, data: OrderAccept, background: BackgroundTasks,
+                  user: User = Depends(require_commercial("accept")), db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
     order = db.get(EventOrder, order_id)
     if order is None or order.event_id != event_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     try:
-        return crud.accept_order(db, order, user, terms_version=data.terms_version)
+        order = crud.accept_order(db, order, user, terms_version=data.terms_version)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    contact = _order_contact(db, order)
+    if contact:
+        background.add_task(send_order_accepted_email, contact[0], contact[1], ev.title,
+                             str(order.total_amount), order.currency, _order_url(order))
+    return order
 
 
 @router.post("/events/{event_id}/orders/{order_id}/activate", response_model=OrderOut)
@@ -302,8 +344,8 @@ def activate_order(event_id: uuid.UUID, order_id: uuid.UUID, admin: User = Depen
 
 
 @router.post("/events/{event_id}/orders/{order_id}/cancel", response_model=CancellationResult)
-def cancel_order(event_id: uuid.UUID, order_id: uuid.UUID, data: CancelOrderRequest,
-                  user: User = Depends(require_org_admin), db: Session = Depends(get_db)):
+def cancel_order(event_id: uuid.UUID, order_id: uuid.UUID, data: CancelOrderRequest, background: BackgroundTasks,
+                  user: User = Depends(require_commercial("change")), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, user, event_id)
     order = db.get(EventOrder, order_id)
     if order is None or order.event_id != event_id:
@@ -312,6 +354,10 @@ def cancel_order(event_id: uuid.UUID, order_id: uuid.UUID, data: CancelOrderRequ
         result = crud.cancel_order(db, ev, order, user, reason=data.reason)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    contact = _order_contact(db, result["order"])
+    if contact:
+        background.add_task(send_cancellation_email, contact[0], contact[1], ev.title,
+                             str(result["refund_amount"]), result["order"].currency, _order_url(result["order"]))
     return CancellationResult(
         order=result["order"], policy_version=result["policy"].version_label,
         refund_amount=result["refund_amount"],
@@ -380,23 +426,85 @@ def list_payments(order_id: uuid.UUID, user: User = Depends(get_current_user), d
 
 
 @router.post("/orders/{order_id}/payments/authorize", response_model=PaymentOut, status_code=status.HTTP_201_CREATED)
-def authorize_payment(order_id: uuid.UUID, data: PaymentAuthorizeCreate, user: User = Depends(require_org_admin),
-                       db: Session = Depends(get_db)):
+def authorize_payment(order_id: uuid.UUID, data: PaymentAuthorizeCreate, background: BackgroundTasks,
+                       user: User = Depends(require_commercial("accept")), db: Session = Depends(get_db)):
     order = _get_order_or_404(db, user, order_id)
-    return crud.authorize_payment(
+    payment = crud.authorize_payment(
         db, order, amount=data.amount, idempotency_key=data.idempotency_key,
         provider_name=data.provider_name, simulate_failure=data.simulate_failure,
     )
+    if payment.state == "failed":
+        ev = db.get(Event, order.event_id)
+        contact = _order_contact(db, order)
+        if contact and ev:
+            background.add_task(send_payment_failed_email, contact[0], contact[1], ev.title,
+                                 str(payment.amount), payment.currency, payment.failure_reason, _order_url(order))
+    return payment
 
 
 @router.post("/payments/{payment_id}/capture", response_model=PaymentOut)
-def capture_payment(payment_id: uuid.UUID, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def capture_payment(payment_id: uuid.UUID, background: BackgroundTasks,
+                     admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+    payment = db.get(Payment, payment_id)
+    if payment is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
+    order = _get_order_or_404(db, admin, payment.event_order_id)
+    try:
+        payment = crud.capture_payment(db, payment)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    if payment.state == "paid":
+        ev = db.get(Event, order.event_id)
+        contact = _order_contact(db, order)
+        if contact and ev:
+            background.add_task(send_payment_receipt_email, contact[0], contact[1], ev.title,
+                                 str(payment.amount), payment.currency, _order_url(order))
+    return payment
+
+
+def _get_dispute_or_404(db: Session, user: User, dispute_id: uuid.UUID) -> PaymentDispute:
+    dispute = db.get(PaymentDispute, dispute_id)
+    if dispute is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Dispute not found")
+    _get_order_or_404(db, user, dispute.event_order_id)  # org-scopes the lookup
+    return dispute
+
+
+@router.get("/orders/{order_id}/disputes", response_model=list[PaymentDisputeOut])
+def list_disputes(order_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    order = _get_order_or_404(db, user, order_id)
+    return db.query(PaymentDispute).filter(PaymentDispute.event_order_id == order.id).all()
+
+
+@router.post("/payments/{payment_id}/disputes", response_model=PaymentDisputeOut, status_code=status.HTTP_201_CREATED)
+def open_dispute(payment_id: uuid.UUID, data: DisputeOpenCreate,
+                  admin: User = Depends(require_commercial("refund_approve")), db: Session = Depends(get_db)):
     payment = db.get(Payment, payment_id)
     if payment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
     _get_order_or_404(db, admin, payment.event_order_id)
     try:
-        return crud.capture_payment(db, payment)
+        return crud.open_dispute(db, payment, admin, reason_code=data.reason_code, amount=data.amount)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.post("/disputes/{dispute_id}/evidence", response_model=PaymentDisputeOut)
+def submit_dispute_evidence(dispute_id: uuid.UUID, data: DisputeEvidenceCreate,
+                             admin: User = Depends(require_commercial("refund_approve")), db: Session = Depends(get_db)):
+    dispute = _get_dispute_or_404(db, admin, dispute_id)
+    try:
+        return crud.submit_dispute_evidence(db, dispute, admin, evidence=data.evidence)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.post("/disputes/{dispute_id}/resolve", response_model=PaymentDisputeOut)
+def resolve_dispute(dispute_id: uuid.UUID, data: DisputeResolveCreate,
+                     admin: User = Depends(require_commercial("refund_approve")), db: Session = Depends(get_db)):
+    dispute = _get_dispute_or_404(db, admin, dispute_id)
+    try:
+        return crud.resolve_dispute(db, dispute, admin, won=data.won)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
@@ -423,22 +531,29 @@ def list_change_orders(order_id: uuid.UUID, user: User = Depends(get_current_use
 
 
 @router.post("/orders/{order_id}/change-orders", response_model=ChangeOrderOut, status_code=status.HTTP_201_CREATED)
-def create_change_order(order_id: uuid.UUID, data: ChangeOrderCreate, admin: User = Depends(require_super_admin),
+def create_change_order(order_id: uuid.UUID, data: ChangeOrderCreate, admin: User = Depends(require_commercial("change")),
                          db: Session = Depends(get_db)):
     order = _get_order_or_404(db, admin, order_id)
     return crud.create_change_order(db, order, **data.model_dump())
 
 
 @router.post("/change-orders/{change_order_id}/accept", response_model=ChangeOrderOut)
-def accept_change_order(change_order_id: uuid.UUID, user: User = Depends(require_org_admin), db: Session = Depends(get_db)):
+def accept_change_order(change_order_id: uuid.UUID, background: BackgroundTasks,
+                         user: User = Depends(require_commercial("accept")), db: Session = Depends(get_db)):
     co = db.get(ChangeOrder, change_order_id)
     if co is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Change order not found")
-    _get_order_or_404(db, user, co.event_order_id)
+    order = _get_order_or_404(db, user, co.event_order_id)
     try:
-        return crud.accept_change_order(db, co, user)
+        co = crud.accept_change_order(db, co, user)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    ev = db.get(Event, order.event_id)
+    contact = _order_contact(db, order)
+    if contact and ev:
+        background.add_task(send_change_order_accepted_email, contact[0], contact[1], ev.title,
+                             str(co.price_delta), order.currency, _order_url(order))
+    return co
 
 
 # ── Readiness (doc Section 13/I) ─────────────────────────────────────────────────────────
@@ -497,7 +612,7 @@ def propose_remedy(incident_id: uuid.UUID, data: RemedyProposeCreate, admin: Use
 
 
 @router.post("/refund-credits/{refund_credit_id}/approve", response_model=RefundCreditOut)
-def approve_refund_credit(refund_credit_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def approve_refund_credit(refund_credit_id: uuid.UUID, admin: User = Depends(require_commercial("refund_approve")),
                            db: Session = Depends(get_db)):
     rc = db.get(RefundCredit, refund_credit_id)
     if rc is None:
@@ -509,15 +624,23 @@ def approve_refund_credit(refund_credit_id: uuid.UUID, admin: User = Depends(req
 
 
 @router.post("/refund-credits/{refund_credit_id}/execute", response_model=RefundCreditOut)
-def execute_refund_credit(refund_credit_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def execute_refund_credit(refund_credit_id: uuid.UUID, background: BackgroundTasks,
+                           admin: User = Depends(require_commercial("refund_approve")),
                            db: Session = Depends(get_db)):
     rc = db.get(RefundCredit, refund_credit_id)
     if rc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Refund/credit not found")
     try:
-        return crud.execute_refund_credit(db, rc)
+        rc = crud.execute_refund_credit(db, rc)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    order = db.get(EventOrder, rc.event_order_id)
+    ev = db.get(Event, order.event_id) if order else None
+    contact = _order_contact(db, order) if order else None
+    if contact and ev:
+        background.add_task(send_refund_credit_email, contact[0], contact[1], ev.title,
+                             str(rc.amount), order.currency, rc.type, _order_url(order))
+    return rc
 
 
 # ── Replay entitlement (doc Section 14/J) ────────────────────────────────────────────────
@@ -536,14 +659,25 @@ def create_replay_entitlement(event_id: uuid.UUID, data: ReplayEntitlementCreate
 
 
 @router.post("/replay-entitlements/{entitlement_id}/publish", response_model=ReplayEntitlementOut)
-def publish_replay(entitlement_id: uuid.UUID, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def publish_replay(entitlement_id: uuid.UUID, background: BackgroundTasks,
+                    admin: User = Depends(require_commercial("media_access")), db: Session = Depends(get_db)):
     ent = db.get(ReplayEntitlement, entitlement_id)
     if ent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Replay entitlement not found")
     try:
-        return crud.publish_replay(db, ent)
+        ent = crud.publish_replay(db, ent)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    # "customer" scope = notify the purchaser (doc Q2). "audience" scope would mean every
+    # attendee, a broadcast-email concern this module doesn't own — not sent here.
+    if ent.scope == "customer":
+        ev = db.get(Event, ent.event_id)
+        order = crud.get_current_order(db, ent.event_id)
+        contact = _order_contact(db, order) if order else None
+        if contact and ev:
+            watch_url = f"{settings.APP_URL.rstrip('/')}/events/{ent.event_id}/watch"
+            background.add_task(send_replay_available_email, contact[0], contact[1], ev.title, watch_url)
+    return ent
 
 
 # ── Reconciliation (doc Section 29) ──────────────────────────────────────────────────────
@@ -557,6 +691,48 @@ def reconciliation_report(admin: User = Depends(require_super_admin), db: Sessio
         unmatched_settlements=crud.list_unmatched_settlements(db),
         orders_missing_invoice=crud.list_orders_missing_invoice(db),
     )
+
+
+# ── Financial period-close (doc Section 29 "Period close") — Finance ownership, not one of
+# Section 25's five RBAC-matrix actions, so gated to require_super_admin like the other
+# Zoiko-side registries (catalog, service profiles, ...) rather than require_commercial().
+
+@router.get("/periods", response_model=list[FinancialPeriodOut])
+def list_periods(admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+    return db.query(FinancialPeriod).order_by(FinancialPeriod.period_start.desc()).all()
+
+
+@router.post("/periods", response_model=FinancialPeriodOut, status_code=status.HTTP_201_CREATED)
+def create_period(data: PeriodCreate, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+    return crud.get_or_create_period(db, label=data.label, period_start=data.period_start, period_end=data.period_end)
+
+
+@router.post("/periods/{period_id}/close", response_model=FinancialPeriodOut)
+def close_period(period_id: uuid.UUID, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+    period = db.get(FinancialPeriod, period_id)
+    if period is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Period not found")
+    try:
+        return crud.close_period(db, period, admin)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.get("/periods/{period_id}/exceptions", response_model=list[ReconciliationExceptionOut])
+def list_period_exceptions(period_id: uuid.UUID, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+    return db.query(ReconciliationException).filter(ReconciliationException.period_id == period_id).all()
+
+
+@router.patch("/exceptions/{exception_id}", response_model=ReconciliationExceptionOut)
+def resolve_exception(exception_id: uuid.UUID, data: ExceptionResolveCreate,
+                       admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+    exception = db.get(ReconciliationException, exception_id)
+    if exception is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reconciliation exception not found")
+    try:
+        return crud.resolve_exception(db, exception, admin, status=data.status, resolution_notes=data.resolution_notes)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
 
 # ── Payment webhook (public — provider calls this directly, no user JWT) ────────────────

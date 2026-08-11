@@ -147,6 +147,59 @@ require_host = require_min_role("host")
 require_moderator = require_min_role("moderator")
 
 
+# ── Commercial RBAC (doc ZST-LE-COM-001 Section 25, "Canonical Access Matrix") ──────────
+# Five columns from the doc's table, collapsed to plain yes/no per action. The doc
+# qualifies some cells as "within threshold" / "within policy" — that assumes a
+# dollar-threshold registry which doesn't exist yet (see commercial.py module docstring's
+# "no invented values" doctrine): a future threshold table would REFINE these gates, not
+# replace them, so collapsing to yes/no here is honest rather than a guessed number.
+COMMERCIAL_ACTIONS = ("accept", "change", "refund_approve", "write_off", "media_access")
+
+# Customer-side rows (Organization Owner == org_admin, Billing Admin, Event Producer/
+# Operator == host). Event Organizer/moderator get no commercial authority in the doc.
+_CUSTOMER_COMMERCIAL = {
+    "org_admin":     {"accept": True,  "change": True,  "refund_approve": False, "write_off": False, "media_access": False},
+    "billing_admin": {"accept": True,  "change": True,  "refund_approve": False, "write_off": False, "media_access": False},
+    "host":          {"accept": False, "change": False, "refund_approve": False, "write_off": False, "media_access": True},
+}
+
+# Zoiko-staff rows. Only reached when a super_admin has staff_commercial_role SET —
+# unset means full access (see commercial_can below).
+_STAFF_COMMERCIAL = {
+    "sales":       {"accept": False, "change": True,  "refund_approve": False, "write_off": False, "media_access": False},
+    "finance_ops": {"accept": False, "change": True,  "refund_approve": True,  "write_off": True,  "media_access": False},
+    "live_ops":    {"accept": False, "change": True,  "refund_approve": False, "write_off": False, "media_access": True},
+    "support":     {"accept": False, "change": False, "refund_approve": False, "write_off": False, "media_access": False},
+    "security":    {"accept": False, "change": False, "refund_approve": False, "write_off": False, "media_access": False},
+}
+
+
+def commercial_can(user: User, action: str) -> bool:
+    """Whether `user` may perform a Section-25 commercial action. A super_admin with no
+    staff_commercial_role assigned gets full access — today's actual behavior for every
+    existing account, unchanged. Assigning a role narrows that one staff member down to
+    exactly what the doc's matrix grants it."""
+    if action not in COMMERCIAL_ACTIONS:
+        raise ValueError(f"unknown commercial action: {action!r}")
+    if user.role == "super_admin":
+        if user.staff_commercial_role is None:
+            return True
+        return _STAFF_COMMERCIAL.get(user.staff_commercial_role, {}).get(action, False)
+    return _CUSTOMER_COMMERCIAL.get(user.role, {}).get(action, False)
+
+
+def require_commercial(action: str):
+    """Build a reusable dependency gating one Section-25 commercial action.
+    Usage: Depends(require_commercial("refund_approve"))."""
+
+    def _dep(user: User = Depends(get_current_user)) -> User:
+        if not commercial_can(user, action):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Not authorized for commercial action: {action}")
+        return user
+
+    return _dep
+
+
 def org_scoped(stmt, model, user: User):
     """Constrain a select() to the caller's organization. super_admin sees every org.
     The single place org isolation lives — modules call this instead of hand-writing

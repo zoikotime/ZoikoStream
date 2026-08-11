@@ -234,7 +234,10 @@ def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
     # Guard against self-lockout: can't deactivate or demote your own account.
     if user.id == admin.id and (data.is_active is False or (data.role and data.role != "super_admin")):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot deactivate or demote yourself")
-    out = crud.update_user(db, user, data)
+    try:
+        out = crud.update_user(db, user, data)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     _audit(db, admin, request, "user.update", target_type="user", target_id=user.id,
            org_id=user.org_id, meta=data.model_dump(exclude_none=True))
     return out
