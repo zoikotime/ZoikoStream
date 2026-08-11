@@ -140,28 +140,63 @@ _ADVANCED = {
 def _gcs_credentials_json() -> str | None:
     """Raw contents of the service account key file, read once per process. LiveKit's
     GCPUpload wants the JSON as a string, not a path — the egress worker talks to GCS
-    directly, this process never touches the uploaded bytes."""
+    directly, this process never touches the uploaded bytes.
+
+    This one is NOT optional in production even though _gcs_client() below can fall back
+    to ambient credentials: LiveKit Cloud's egress workers run on LiveKit's own
+    infrastructure, outside this project entirely, so they have no access to Cloud Run's
+    attached service account (the "just use ADC" trick only works for code running
+    *inside* this GCP project). A portable key is the only thing egress can authenticate
+    with. In Cloud Run, mount it from Secret Manager as a file (Cloud Run -> Edit & Deploy
+    -> Secrets -> "Mount as volume") and point this at the mount path — never bake the key
+    into the image or commit it."""
     if not settings.GCS_CREDENTIALS_PATH:
         return None
     try:
-        return Path(settings.GCS_CREDENTIALS_PATH).read_text()
+        raw = Path(settings.GCS_CREDENTIALS_PATH).read_text()
     except OSError as exc:
-        log.warning("Couldn't read GCS_CREDENTIALS_PATH: %s", exc)
+        log.error("Couldn't read GCS_CREDENTIALS_PATH (%s): %s — recording uploads will be "
+                  "rejected by LiveKit Cloud until this is fixed", settings.GCS_CREDENTIALS_PATH, exc)
         return None
+    try:
+        json.loads(raw)  # validate now so a bad key fails loudly here, not deep in an egress call
+    except json.JSONDecodeError as exc:
+        log.error("GCS_CREDENTIALS_PATH (%s) is set but isn't valid JSON — it must be a "
+                  "downloaded service-account key file, not e.g. a console URL: %s",
+                  settings.GCS_CREDENTIALS_PATH, exc)
+        return None
+    return raw
 
 
 def gcs_configured() -> bool:
+    """Whether recording uploads (the thing that actually needs the portable JSON key,
+    not just this process's own reads) will work."""
     return bool(settings.GCS_BUCKET and _gcs_credentials_json())
 
 
 @lru_cache(maxsize=1)
 def _gcs_client() -> gcs_storage.Client | None:
-    creds_json = _gcs_credentials_json()
-    if not creds_json:
+    """This process's own client for reading back what egress already uploaded (signed
+    URLs, existence checks, deletes) — separate from the credential egress itself needs
+    (see _gcs_credentials_json). Prefers the same explicit key so behavior matches egress;
+    falls back to Application Default Credentials so this still works on Cloud Run purely
+    from the service's own attached identity (grant it Storage Object Admin on the bucket)
+    even before a key file exists, and locally via `gcloud auth application-default login`."""
+    if not settings.GCS_BUCKET:
         return None
-    info = json.loads(creds_json)
-    creds = service_account.Credentials.from_service_account_info(info)
-    return gcs_storage.Client(credentials=creds, project=info.get("project_id"))
+    creds_json = _gcs_credentials_json()
+    if creds_json:
+        try:
+            info = json.loads(creds_json)
+            creds = service_account.Credentials.from_service_account_info(info)
+            return gcs_storage.Client(credentials=creds, project=info.get("project_id"))
+        except Exception as exc:  # noqa: BLE001 — fall through to ADC rather than go dark
+            log.warning("Explicit GCS credentials failed to load, trying ADC instead: %s", exc)
+    try:
+        return gcs_storage.Client()  # auto-discovers ADC; raises DefaultCredentialsError if none
+    except Exception as exc:  # noqa: BLE001 — no credentials available anywhere is not fatal
+        log.warning("No usable GCS credentials (explicit key or ADC): %s", exc)
+        return None
 
 
 def signed_url(object_key: str, expires_minutes: int = 180) -> str | None:
