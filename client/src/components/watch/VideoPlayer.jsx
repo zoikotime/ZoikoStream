@@ -263,7 +263,7 @@ export default function VideoPlayer({ event, viewers, watch }) {
         ) : (
           <span className={BADGE}>{isEnded ? "REPLAY" : "PREVIEW"}</span>
         )}
-        {isLive && (
+        {isLive && viewers != null && (
           <span className={cx(BADGE, "zk-tnum")}>{viewers.toLocaleString()} watching</span>
         )}
       </div>
@@ -314,13 +314,21 @@ export default function VideoPlayer({ event, viewers, watch }) {
 
       {/* Unmute nudge — the stream is genuinely silent right now purely because the browser
           blocked unmuted autoplay, not because anything's broken. A real click here is a
-          user gesture, so the unmute it triggers is guaranteed to succeed. */}
+          user gesture, so the unmute it triggers is guaranteed to succeed. Dead-center and
+          pulsing rather than a small bottom pill: a muted stream with no visible sound
+          control reads as "the audio is broken" to a viewer who never notices a quiet
+          corner button — this has to be impossible to miss. */}
       {showUnmutePrompt && (
         <button
           onClick={() => setMuted(false)}
-          className="absolute bottom-16 left-1/2 z-20 -translate-x-1/2 inline-flex items-center gap-2 rounded-full bg-black/70 px-4 py-2 text-sm font-semibold text-white backdrop-blur transition hover:bg-black/85"
+          className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/45 text-white transition hover:bg-black/55"
         >
-          <FiVolumeX /> Tap for sound
+          <span className="grid h-16 w-16 place-items-center rounded-full bg-white/15 ring-4 ring-white/30 backdrop-blur motion-safe:animate-pulse motion-reduce:animate-none">
+            <FiVolumeX className="text-3xl" />
+          </span>
+          <span className="rounded-full bg-black/70 px-4 py-1.5 text-sm font-semibold backdrop-blur">
+            Click anywhere to unmute
+          </span>
         </button>
       )}
 

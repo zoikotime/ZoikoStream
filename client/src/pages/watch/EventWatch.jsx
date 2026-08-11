@@ -26,6 +26,7 @@ import RegistrationGate from "../../components/watch/RegistrationGate";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import Spinner from "../../ui/Spinner";
 import Logo from "../../ui/Logo";
+import { notify } from "../../ui/Toast";
 
 const STATUS_LABEL = { live: "Live", ended: "Completed" }; // anything else -> "Upcoming"
 
@@ -149,12 +150,24 @@ export default function EventWatch() {
   }, [eventId]);
 
   const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
+  // Real viewers only — staff and waiting-room entries never count as "watching".
   const viewers = Object.values(panel.participants || {}).filter(
     (participant) =>
       participant.role === "viewer" &&
       !participant.waiting
   ).length;
-  const onLiveEnvelope = useCallback((env) => dispatchPanel(env), []);
+  // A rejected chat.send/qa.ask/poll.vote (chat turned off, slow mode, emoji-only mode,
+  // banned, …) comes back as a moderator/error envelope addressed only to this socket — the
+  // reducer above doesn't have a case for it (nothing to store), so without this the
+  // message just silently vanishes and "chat isn't working" is the only symptom a viewer
+  // ever sees. Surfacing the server's actual reason instead.
+  const onLiveEnvelope = useCallback((env) => {
+    if (env.channel === "moderator" && env.type === "error") {
+      notify.error(env.data.message);
+      return;
+    }
+    dispatchPanel(env);
+  }, []);
   const {
     status: liveStatus,
     send: sendLive,
@@ -216,7 +229,6 @@ export default function EventWatch() {
   // Checked here so a real ended-with-replay event is never mistaken for an event that
   // simply expired unwatched.
   const timeGated = Boolean(mustIdentify || (watch?.expired && !ended) || watch?.not_started);
-
 
   if (loading) {
     return (
