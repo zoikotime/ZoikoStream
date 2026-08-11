@@ -456,9 +456,14 @@ export default function VideoPlayer({ event, viewers, watch }) {
                       <button
                         type="button"
                         onClick={togglePictureInPicture}
-                        disabled={
-                          !(canStream ? mediaRef.current : replayRef.current)
-                        }
+                        // Same condition that mounts <video ref={mediaRef}>/<video
+                        // ref={replayRef}> below — refs can't be read during render (React
+                        // doesn't know to re-render when a ref's .current changes, so a
+                        // disabled-state derived from it can go stale), and this is the
+                        // render-safe equivalent: the ref is populated exactly when one of
+                        // these is true. togglePictureInPicture itself still no-ops safely
+                        // on a null ref for the brief window before the element mounts.
+                        disabled={!(canStream || canReplay)}
                         className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         <div>

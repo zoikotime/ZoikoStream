@@ -178,6 +178,20 @@ export default function EventWatch() {
   const [notFound, setNotFound] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Reset for a new eventId synchronously during render, not inside an effect — this is
+  // React's own documented pattern for "adjusting state when a prop changes"
+  // (react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes).
+  // Setting state mid-render like this is safe (React restarts the render immediately,
+  // no extra commit) and avoids a wasted first paint of the previous event's data/loading
+  // state before the effect below even runs.
+  const [loadedEventId, setLoadedEventId] = useState(eventId);
+  if (eventId !== loadedEventId) {
+    setLoadedEventId(eventId);
+    setWatch(null);
+    setNotFound(false);
+    setLoading(true);
+  }
+
   const fetchWatch = () => {
     // A host-invited or self-registered link carries the access token in the URL
     // (?reg=...) — save it locally so a refresh (or a later visit with no query string)
@@ -193,8 +207,11 @@ export default function EventWatch() {
   };
 
   useEffect(() => {
-    setLoading(true);
-    setNotFound(false);
+    // fetchWatch only sets state inside its own .then/.catch/.finally (an async
+    // continuation, exactly what this rule asks for) — the lint rule's static analysis
+    // just can't see through that indirection to tell this apart from a synchronous
+    // setState call, which is the actual anti-pattern it exists to catch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchWatch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventId]);

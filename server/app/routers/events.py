@@ -1,7 +1,9 @@
 """Events API (/events/*). Management layer only — no streaming/chat/recording.
 
-Isolation: every query is scoped to the caller's `user.org_id` from the JWT; org_id is
-never read from the request. An event_id from another org resolves to None -> 404.
+Isolation: every query is scoped to the caller's `user.org_id` from the JWT (never read
+from the request) via security.org_scoped(), which super_admin bypasses — matching
+_can_edit's and watch_event's own super_admin carve-outs elsewhere in this file. An
+event_id from another org resolves to None -> 404 for everyone else.
 
 Permissions:
   create / delete / assign host|moderator|speaker  -> org admin only
@@ -12,6 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -30,7 +33,7 @@ from ..schemas.event import (
 )
 from ..security import (
     create_registration_token, decode_registration_token,
-    get_current_user, get_current_user_optional, require_org_admin,
+    get_current_user, get_current_user_optional, org_scoped, require_org_admin,
 )
 from ..services import broadcast as broadcast_svc
 from ..services import livekit
@@ -45,8 +48,13 @@ router = APIRouter(prefix="/events", tags=["events"])
 RECORDING_UPLOAD_GRACE = timedelta(minutes=3)
 
 
-def _get_event_or_404(db, org_id, event_id) -> Event:
-    ev = crud.get_event(db, org_id, event_id)
+def _get_event_or_404(db, user: User, event_id) -> Event:
+    # org_scoped(), not crud.get_event()'s hard org_id filter: a super_admin managing
+    # events from outside their own org (see _can_edit and watch_event's is_org_member,
+    # which already assume this) would otherwise 404 before the permission check below
+    # ever runs — the same bug this fixed in commercial.py's version of this helper.
+    stmt = select(Event).where(Event.id == event_id, Event.deleted_at.is_(None))
+    ev = db.scalar(org_scoped(stmt, Event, user))
     if ev is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
     return ev
@@ -118,7 +126,7 @@ def create_event(data: EventCreate, background: BackgroundTasks, admin: User = D
 
 @router.get("/{event_id}", response_model=EventOut)
 def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _get_event_or_404(db, user.org_id, event_id)
+    return _get_event_or_404(db, user, event_id)
 
 
 @router.get("/{event_id}/watch", response_model=WatchOut)
@@ -269,7 +277,7 @@ def register_for_event(
 @router.patch("/{event_id}", response_model=EventOut)
 def update_event(event_id: uuid.UUID, data: EventUpdate,
                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    ev = _get_event_or_404(db, user.org_id, event_id)
+    ev = _get_event_or_404(db, user, event_id)
     if not _can_edit(db, ev, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only edit events you host")
 
@@ -294,7 +302,7 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
-    ev = _get_event_or_404(db, admin.org_id, event_id)
+    ev = _get_event_or_404(db, admin, event_id)
     if ev.status in ("live", "paused"):
         # A soft delete alone would orphan the running broadcast_session at "live" forever —
         # nothing can ever reach it again to end it once the event is gone. Force-end first.
@@ -313,8 +321,8 @@ async def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_ad
 # Reads: any member. Writes: org admin. Assignees must be live members of the same org.
 # Newly-added assignees (not already holding the role) get a best-effort notification email.
 
-def _list_role(db, org_id, event_id, role):
-    _get_event_or_404(db, org_id, event_id)  # 404s if the event isn't in the caller's org
+def _list_role(db, user, event_id, role):
+    _get_event_or_404(db, user, event_id)  # 404s if the event isn't visible to the caller
     return [_user_out(u) for u in crud.list_assignees(db, event_id, role)]
 
 
@@ -328,7 +336,7 @@ def _console_url(role: str, event_id: uuid.UUID) -> str:
 
 
 def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
-    ev = _get_event_or_404(db, admin.org_id, event_id)
+    ev = _get_event_or_404(db, admin, event_id)
     valid = crud.valid_member_ids(db, admin.org_id, user_ids)
     invalid = [str(u) for u in user_ids if u not in valid]
     if invalid:
@@ -350,7 +358,7 @@ def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
 
 @router.get("/{event_id}/hosts", response_model=list[AdminUserOut])
 def get_hosts(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _list_role(db, user.org_id, event_id, "host")
+    return _list_role(db, user, event_id, "host")
 
 
 @router.patch("/{event_id}/hosts", response_model=list[AdminUserOut])
@@ -361,7 +369,7 @@ def set_hosts(event_id: uuid.UUID, data: AssignmentUpdate, background: Backgroun
 
 @router.get("/{event_id}/moderators", response_model=list[AdminUserOut])
 def get_moderators(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _list_role(db, user.org_id, event_id, "moderator")
+    return _list_role(db, user, event_id, "moderator")
 
 
 @router.patch("/{event_id}/moderators", response_model=list[AdminUserOut])
@@ -372,7 +380,7 @@ def set_moderators(event_id: uuid.UUID, data: AssignmentUpdate, background: Back
 
 @router.get("/{event_id}/speakers", response_model=list[AdminUserOut])
 def get_speakers(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _list_role(db, user.org_id, event_id, "speaker")
+    return _list_role(db, user, event_id, "speaker")
 
 
 @router.patch("/{event_id}/speakers", response_model=list[AdminUserOut])
@@ -385,7 +393,7 @@ def set_speakers(event_id: uuid.UUID, data: AssignmentUpdate, background: Backgr
 def get_registrations(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Who has registered for this event — self-serve or host-invited (see `invited_by`).
     Org-scoped like every other event read."""
-    _get_event_or_404(db, user.org_id, event_id)
+    _get_event_or_404(db, user, event_id)
     return crud.list_registrations(db, event_id)
 
 
@@ -401,7 +409,7 @@ def invite_viewers(
     visibility gate accepts any valid registration token regardless of org membership), and
     for a public/unlisted event just a courtesy email of the watch link. Same permission as
     editing the event: org admin, or the host who owns/is assigned it."""
-    ev = _get_event_or_404(db, user.org_id, event_id)
+    ev = _get_event_or_404(db, user, event_id)
     if not _can_edit(db, ev, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only invite viewers to events you host")
 
@@ -434,7 +442,7 @@ def _access_link_url(event_id: uuid.UUID, token: str) -> str:
 
 @router.get("/{event_id}/access-links", response_model=list[AccessLinkOut])
 def list_access_links(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    _get_event_or_404(db, user.org_id, event_id)
+    _get_event_or_404(db, user, event_id)
     return crud.list_access_links(db, event_id)
 
 
@@ -443,7 +451,7 @@ def create_access_link(
     event_id: uuid.UUID, data: AccessLinkCreate,
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    ev = _get_event_or_404(db, user.org_id, event_id)
+    ev = _get_event_or_404(db, user, event_id)
     if not _can_edit(db, ev, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
     link, raw = crud.create_access_link(db, event_id, ev.org_id, user.id, data.label, data.expires_in_days)
@@ -455,7 +463,7 @@ def rotate_access_link(
     event_id: uuid.UUID, link_id: uuid.UUID, data: AccessLinkCreate,
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    ev = _get_event_or_404(db, user.org_id, event_id)
+    ev = _get_event_or_404(db, user, event_id)
     if not _can_edit(db, ev, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
     link = crud.get_access_link(db, event_id, link_id)
@@ -470,7 +478,7 @@ def revoke_access_link(
     event_id: uuid.UUID, link_id: uuid.UUID,
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    ev = _get_event_or_404(db, user.org_id, event_id)
+    ev = _get_event_or_404(db, user, event_id)
     if not _can_edit(db, ev, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
     link = crud.get_access_link(db, event_id, link_id)
@@ -484,7 +492,7 @@ def delete_access_link(
     event_id: uuid.UUID, link_id: uuid.UUID,
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    ev = _get_event_or_404(db, user.org_id, event_id)
+    ev = _get_event_or_404(db, user, event_id)
     if not _can_edit(db, ev, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
     link = crud.get_access_link(db, event_id, link_id)

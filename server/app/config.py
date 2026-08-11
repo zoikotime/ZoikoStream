@@ -38,7 +38,13 @@ class Settings(BaseSettings):
     # GCS — recording storage. Blank = egress has no destination, so LiveKit Cloud rejects
     # the request outright (services/livekit.py surfaces that as an "unenforced" recording
     # rather than failing the host's click). GCS_CREDENTIALS_PATH points at a service
-    # account JSON key file (kept outside the repo) with Storage Object Admin on the bucket.
+    # account JSON key file (kept outside the repo, Storage Object Admin on the bucket) —
+    # this app's own reads (signed URLs, existence checks, deletes) will fall back to
+    # Application Default Credentials if it's unset, but recording uploads themselves
+    # always need this: LiveKit Cloud's egress workers run outside this GCP project and
+    # can't use Cloud Run's attached identity. In production, mount the key from Secret
+    # Manager as a file (Cloud Run -> Edit & Deploy -> Secrets -> mount as volume) and
+    # point this at the mount path — never bake it into the image or commit it.
     GCS_BUCKET: str = ""
     GCS_CREDENTIALS_PATH: str = ""
 
