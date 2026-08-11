@@ -13,11 +13,10 @@ import { useCallback, useEffect, useReducer, useState } from "react";
 import useInterval from "../../hooks/useInterval";
 import useEventStream from "../../hooks/useEventStream";
 import { Link, useParams } from "react-router-dom";
-import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
+import { FiRadio, FiSun, FiMoon, FiLogOut } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
 import { useAuth } from "../../auth/AuthContext";
 import api from "../../api";
-import { startingViewers } from "../../data/watch";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
@@ -27,6 +26,7 @@ import RegistrationGate from "../../components/watch/RegistrationGate";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import Spinner from "../../ui/Spinner";
 import Logo from "../../ui/Logo";
+import { notify } from "../../ui/Toast";
 
 const STATUS_LABEL = { live: "Live", ended: "Completed" }; // anything else -> "Upcoming"
 
@@ -64,7 +64,7 @@ const POLL_MS = 10000; // how often a not-yet-live page checks whether the event
 // live.py — any authenticated attendee, OR a name+email self-registration (mustIdentify
 // below), may chat.send, qa.ask, qa.vote or poll.vote — no moderator role, and no login,
 // needed.
-const LIVE_EMPTY = { messages: [], typing: {}, questions: [], polls: [] };
+const LIVE_EMPTY = { messages: [], typing: {}, questions: [], polls: [], viewers: null };
 function liveReducer(state, env) {
   const { channel, type, data } = env;
   switch (`${channel}/${type}`) {
@@ -72,7 +72,12 @@ function liveReducer(state, env) {
       return {
         messages: data.messages || [], typing: {},
         questions: data.questions || [], polls: data.polls || [],
+        // The same real count the host's own console shows — sent to every connection on
+        // this socket regardless of role, not just staff (see snapshot_extra/analytics_now).
+        viewers: data.analytics?.viewers ?? null,
       };
+    case "analytics/analytics.tick":
+      return { ...state, viewers: data.viewers ?? state.viewers };
     case "chat/message.new":
       return { ...state, messages: [...state.messages, data] };
     case "chat/message.update":
@@ -119,7 +124,18 @@ export default function EventWatch() {
   }, [eventId]);
 
   const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
-  const onLiveEnvelope = useCallback((env) => dispatchPanel(env), []);
+  // A rejected chat.send/qa.ask/poll.vote (chat turned off, slow mode, emoji-only mode,
+  // banned, …) comes back as a moderator/error envelope addressed only to this socket — the
+  // reducer below doesn't have a case for it (nothing to store), so without this the
+  // message just silently vanishes and "chat isn't working" is the only symptom a viewer
+  // ever sees. Surfacing the server's actual reason instead.
+  const onLiveEnvelope = useCallback((env) => {
+    if (env.channel === "moderator" && env.type === "error") {
+      notify.error(env.data.message);
+      return;
+    }
+    dispatchPanel(env);
+  }, []);
   const { status: liveStatus, send: sendLive } = useEventStream(eventId, onLiveEnvelope, regToken);
 
   const [watch, setWatch] = useState(null);
@@ -170,9 +186,10 @@ export default function EventWatch() {
   // simply expired unwatched.
   const timeGated = Boolean(mustIdentify || (watch?.expired && !ended) || watch?.not_started);
 
-  // Live viewer count that gently drifts (setState only in the interval callback).
-  const [viewers, setViewers] = useState(startingViewers);
-  useInterval(() => setViewers((v) => Math.max(0, v + Math.floor(Math.random() * 15) - 6)), 3000, live);
+  // Real count off the live socket (same analytics.viewers the host console shows) — null
+  // until the first snapshot arrives, so the header/player hide the badge rather than
+  // flashing a fake number.
+  const viewers = panel.viewers;
 
   if (loading) {
     return (
@@ -220,6 +237,16 @@ export default function EventWatch() {
             >
               {theme === "dark" ? <FiSun className="text-lg" /> : <FiMoon className="text-lg" />}
             </button>
+            {/* Explicit exit, same idea as the host/moderator consoles' "Exit studio" — a
+                viewer shouldn't have to know that closing the tab is the only way out. */}
+            <Link
+              to="/"
+              className="grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition duration-150 hover:bg-rose-50 hover:text-rose-600 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-slate-400 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
+              aria-label="Leave event"
+              title="Leave event"
+            >
+              <FiLogOut className="text-lg" />
+            </Link>
           </div>
         </div>
       </header>

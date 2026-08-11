@@ -100,7 +100,7 @@ export default function WatchHeader({ event, viewers }) {
           {event.category && (
             <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold text-white backdrop-blur">{event.category}</span>
           )}
-          {(live || event.viewers != null) && (
+          {viewers != null && (live || event.viewers != null) && (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-black/30 px-3 py-1 text-xs font-semibold text-white backdrop-blur">
               <FiUsers aria-hidden /> <span className="zk-tnum">{viewers.toLocaleString()}</span> {live ? "watching" : "views"}
             </span>
