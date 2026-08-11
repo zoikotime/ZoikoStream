@@ -372,12 +372,12 @@ export default function Security() {
   return (
     <ConsoleScreen
       title="Trust & Safety"
+      demoData
       subtitle="Policy-governed review and enforcement for tenant-originated broadcast content. Signals prioritize review; they never become findings on their own."
       ageSeconds={ageSeconds}
       hasData
       actions={
         <>
-          <Badge tone="brand">Wireframe · static data</Badge>
           <Button variant="secondary" leftIcon={FiRefreshCw} onClick={() => setAgeSeconds(0)}>
             Refresh
           </Button>

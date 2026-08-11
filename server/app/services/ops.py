@@ -67,6 +67,22 @@ STAGES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("platform", "Platform", ("api", "database")),
 )
 
+# Services that are permanently "not_configured" by design — roadmap features nobody has
+# built yet (see services/admin.platform_health), not something an org's own configuration
+# could ever turn green. Kept out of stage severity so a real, fixable gap (e.g. storage)
+# doesn't get diluted by a stage that also happens to include one of these, and kept out of
+# the org headline (service_health, below) entirely so a permanently-unbuilt feature can't
+# pin every active org at "Not configured" forever regardless of actual health.
+INFORMATIONAL_SERVICES = frozenset({"cdn", "workers"})
+
+# Stages carried ENTIRELY by informational services (currently just "produce" <- "workers")
+# — there is no real member left to report on, so the stage keeps reading "not_configured"
+# itself (honest, matches the per-service list), but must never gate the one-line verdict.
+INFORMATIONAL_STAGES = frozenset(
+    code for code, _label, service_ids in STAGES
+    if set(service_ids) <= INFORMATIONAL_SERVICES
+)
+
 REGIONS = (("na", "NA"), ("eu", "EU"), ("apac", "APAC"), ("sa", "SA"))
 
 # Organization.region is free text ("US East", "EU West (Ireland)", "AP South (Mumbai)").
@@ -527,7 +543,12 @@ def stage_health(db: Session, health: dict, since: datetime, stages: tuple[str, 
         if code not in stages:
             continue
         members = [services[i] for i in service_ids if i in services]
-        statuses = [m["status"] for m in members] or ["not_configured"]
+        # A stage with at least one real (non-informational) member is judged only by that
+        # member — e.g. Deliver reads by Streaming's actual status, not dragged down by CDN
+        # simply never having been built. A stage carried entirely by informational members
+        # (Produce <- Workers) has nothing else to report, so it falls back to them.
+        gating = [m for m in members if m["id"] not in INFORMATIONAL_SERVICES]
+        statuses = [m["status"] for m in (gating or members)] or ["not_configured"]
         # An unintegrated dependency must not read as healthy, and must not read as an
         # outage either — it ranks between ok and warn.
         status = _WORST[max(_RANK.get(s, 1) for s in statuses)]

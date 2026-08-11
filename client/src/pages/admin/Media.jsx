@@ -350,13 +350,12 @@ export default function Media() {
   return (
     <ConsoleScreen
       title="Media"
+      demoData
       subtitle="Cross-Organization media operations, processing, preservation, integrity and governance visibility. Metadata inspection never implies permission to view customer content."
       ageSeconds={ageSeconds}
       hasData
       actions={
         <>
-          {/* Stated, not implied — no authoritative media service is wired to this console yet. */}
-          <Badge tone="brand">Wireframe · static data</Badge>
           <Button variant="secondary" leftIcon={FiRefreshCw} onClick={() => setAgeSeconds(0)}>
             Refresh
           </Button>

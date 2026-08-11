@@ -280,14 +280,12 @@ export default function EventReadiness() {
   return (
     <ConsoleScreen
       title="Event Readiness"
+      demoData
       subtitle="Evidence-backed operational gate for managed ZoikoStream Live Events. A gate state is derived by the readiness policy engine — it is never a score, and never edited by hand."
       ageSeconds={ageSeconds}
       hasData
       actions={
         <>
-          {/* Stated, not implied. No readiness policy engine is wired to this console yet, and
-              an operator has to be able to tell that at a glance. */}
-          <Badge tone="brand">Wireframe · static data</Badge>
           <Button variant="secondary" leftIcon={FiRefreshCw} onClick={() => setAgeSeconds(0)}>
             Refresh
           </Button>

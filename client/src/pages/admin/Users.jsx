@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { FiCheckCircle, FiEdit2, FiSlash, FiTrash2, FiUsers, FiSearch } from "react-icons/fi";
 import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, initials, timeAgo } from "../../components/admin";
@@ -14,20 +14,76 @@ const ROLE_TONE = { super_admin: "brand", org_admin: "info", host: "info", moder
 const inputCls = CONSOLE.search;
 const selectCls = CONSOLE.select;
 
-function useUsersData() {
-  return useApi(() => api.get("/admin/users", { params: { page_size: 100 } }).then((r) => r.data.items));
+// The account table can run into the thousands, so a flat page_size:100 fetch silently
+// hides anything outside the newest 100 rows (search included, since useUsersData used to
+// filter client-side over that same capped set). Filters go to the backend instead; only
+// the current filtered slice is paginated/sorted client-side by DataTable.
+function useUsersData({ q, role, isActive }) {
+  return useApi(() =>
+    api
+      .get("/admin/users", {
+        params: {
+          page_size: 100,
+          q: q || undefined,
+          role: role === "all" ? undefined : role,
+          is_active: isActive === "all" ? undefined : isActive === "active",
+        },
+      })
+      .then((r) => r.data.items)
+  );
+}
+
+// Dataset-wide counts for the KPI cards — independent of whatever filters are active, so
+// they don't collapse to the size of the current search result.
+function useUserStats() {
+  const [stats, setStats] = useState(null);
+  const load = () => {
+    Promise.all([
+      api.get("/admin/users", { params: { page_size: 1 } }),
+      api.get("/admin/users", { params: { page_size: 1, is_active: true } }),
+      api.get("/admin/users", { params: { page_size: 1, is_active: false } }),
+      api.get("/admin/users", { params: { page_size: 1, role: "super_admin" } }),
+    ]).then(([total, active, inactive, superAdmins]) => {
+      setStats({
+        total: total.data.total,
+        active: active.data.total,
+        inactive: inactive.data.total,
+        superAdmins: superAdmins.data.total,
+      });
+    });
+  };
+  useEffect(load, []);
+  return { stats, reload: load };
 }
 
 // Every platform user, real GET/PATCH/DELETE against /admin/users. Creation isn't offered
 // here — accounts come from org signup/invitations, not a super-admin form.
 export default function Users() {
-  const { data: users, loading, error, reload } = useUsersData();
+  const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
   const [role, setRole] = useState("all");
   const [org, setOrg] = useState("all");
   const [active, setActive] = useState("all");
   const [modalOpen, setModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
+
+  // Debounce the search box so we're not firing a request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setQ(qInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [qInput]);
+
+  const { data: users, loading, error, reload } = useUsersData({ q, role, isActive: active });
+  const { stats, reload: reloadStats } = useUserStats();
+  const reloadAll = () => { reload(); reloadStats(); };
+
+  // Re-fetch from the server whenever a server-side filter changes (skip the redundant
+  // fetch useApi already does on mount).
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) { mounted.current = true; return; }
+    reload();
+  }, [q, role, active]);
 
   const rows = users || [];
 
@@ -36,29 +92,14 @@ export default function Users() {
     [rows]
   );
 
-  const kpis = useMemo(
-    () => ({
-      total: rows.length,
-      active: rows.filter((u) => u.is_active).length,
-      inactive: rows.filter((u) => !u.is_active).length,
-      superAdmins: rows.filter((u) => u.role === "super_admin").length,
-    }),
-    [rows]
-  );
+  const kpis = stats || { total: rows.length, active: 0, inactive: 0, superAdmins: 0 };
 
-  const filtered = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    return rows.filter(
-      (u) =>
-        (!query ||
-          u.full_name.toLowerCase().includes(query) ||
-          u.email.toLowerCase().includes(query) ||
-          u.username.toLowerCase().includes(query)) &&
-        (role === "all" || u.role === role) &&
-        (org === "all" || u.organization_name === org) &&
-        (active === "all" || (active === "active" ? u.is_active : !u.is_active))
-    );
-  }, [rows, q, role, org, active]);
+  // Org has no server-side filter (the API takes org_id, not a name) — applied client-side
+  // on top of the already-server-filtered rows, which is a small enough set for this to be fine.
+  const filtered = useMemo(
+    () => rows.filter((u) => org === "all" || u.organization_name === org),
+    [rows, org]
+  );
 
   const openEdit = (u) => { setEditingUser(u); setModalOpen(true); };
 
@@ -66,7 +107,7 @@ export default function Users() {
     try {
       await api.patch(`/admin/users/${u.id}`, { is_active: !u.is_active });
       toast.success(`${u.full_name} ${u.is_active ? "deactivated" : "activated"}`);
-      reload();
+      reloadAll();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -77,7 +118,7 @@ export default function Users() {
     try {
       await api.delete(`/admin/users/${u.id}`);
       toast.success(`${u.full_name} deleted`);
-      reload();
+      reloadAll();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -149,7 +190,7 @@ export default function Users() {
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           <div className="relative min-w-0 flex-1">
             <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by name, email, or username…" className={inputCls} />
+            <input value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Search by name, email, or username…" className={inputCls} />
           </div>
           <select value={role} onChange={(e) => setRole(e.target.value)} className={selectCls} aria-label="Filter by role">
             <option value="all">All roles</option>
@@ -180,7 +221,7 @@ export default function Users() {
             title: "No users match your filters",
             description: "Try clearing the search or switching the role, organization, and status filters.",
             action: (
-              <Button variant="secondary" size="sm" onClick={() => { setQ(""); setRole("all"); setOrg("all"); setActive("all"); }}>
+              <Button variant="secondary" size="sm" onClick={() => { setQInput(""); setRole("all"); setOrg("all"); setActive("all"); }}>
                 Clear filters
               </Button>
             ),
@@ -188,7 +229,7 @@ export default function Users() {
         />
       </Panel>
 
-      <UserModal open={modalOpen} onClose={() => setModalOpen(false)} user={editingUser} onSaved={reload} />
+      <UserModal open={modalOpen} onClose={() => setModalOpen(false)} user={editingUser} onSaved={reloadAll} />
     </div>
   );
 }
