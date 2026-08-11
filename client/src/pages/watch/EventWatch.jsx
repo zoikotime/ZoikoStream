@@ -13,7 +13,7 @@ import { useCallback, useEffect, useReducer, useState } from "react";
 import useInterval from "../../hooks/useInterval";
 import useEventStream from "../../hooks/useEventStream";
 import { Link, useParams } from "react-router-dom";
-import { FiRadio, FiSun, FiMoon, FiLogOut } from "react-icons/fi";
+import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
 import { useAuth } from "../../auth/AuthContext";
 import api from "../../api";
@@ -64,20 +64,48 @@ const POLL_MS = 10000; // how often a not-yet-live page checks whether the event
 // live.py — any authenticated attendee, OR a name+email self-registration (mustIdentify
 // below), may chat.send, qa.ask, qa.vote or poll.vote — no moderator role, and no login,
 // needed.
-const LIVE_EMPTY = { messages: [], typing: {}, questions: [], polls: [], viewers: null };
+const LIVE_EMPTY = {
+  messages: [],
+  typing: {},
+  questions: [],
+  polls: [],
+  participants: {},
+};
+
 function liveReducer(state, env) {
   const { channel, type, data } = env;
+
   switch (`${channel}/${type}`) {
     case "moderator/snapshot":
       return {
-        messages: data.messages || [], typing: {},
-        questions: data.questions || [], polls: data.polls || [],
-        // The same real count the host's own console shows — sent to every connection on
-        // this socket regardless of role, not just staff (see snapshot_extra/analytics_now).
-        viewers: data.analytics?.viewers ?? null,
+        messages: data.messages || [],
+        typing: {},
+        questions: data.questions || [],
+        polls: data.polls || [],
+        participants: Object.fromEntries(
+          (data.participants || []).map((p) => [p.identity, p])
+        ),
       };
-    case "analytics/analytics.tick":
-      return { ...state, viewers: data.viewers ?? state.viewers };
+
+    case "participants/participant.join":
+    case "participants/participant.update":
+      return {
+        ...state,
+        participants: {
+          ...state.participants,
+          [data.identity]: data,
+        },
+      };
+
+    case "participants/participant.leave": {
+      const participants = { ...state.participants };
+      delete participants[data.identity];
+
+      return {
+        ...state,
+        participants,
+      };
+    }
     case "chat/message.new":
       return { ...state, messages: [...state.messages, data] };
     case "chat/message.update":
@@ -106,12 +134,10 @@ function liveReducer(state, env) {
       return state;
   }
 }
-
 export default function EventWatch() {
   const { eventId } = useParams();
   const { theme, toggle } = useTheme();
   const { user } = useAuth();
-
   // The anonymous-viewer counterpart to `user`: a self-serve name+email registration
   // (RegistrationGate for a registration_required event, or IdentifyForm for chat/Q&A/polls
   // on any other event — both call the same POST /events/:id/register). Lifted to state
@@ -124,9 +150,15 @@ export default function EventWatch() {
   }, [eventId]);
 
   const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
+  // Real viewers only — staff and waiting-room entries never count as "watching".
+  const viewers = Object.values(panel.participants || {}).filter(
+    (participant) =>
+      participant.role === "viewer" &&
+      !participant.waiting
+  ).length;
   // A rejected chat.send/qa.ask/poll.vote (chat turned off, slow mode, emoji-only mode,
   // banned, …) comes back as a moderator/error envelope addressed only to this socket — the
-  // reducer below doesn't have a case for it (nothing to store), so without this the
+  // reducer above doesn't have a case for it (nothing to store), so without this the
   // message just silently vanishes and "chat isn't working" is the only symptom a viewer
   // ever sees. Surfacing the server's actual reason instead.
   const onLiveEnvelope = useCallback((env) => {
@@ -136,7 +168,11 @@ export default function EventWatch() {
     }
     dispatchPanel(env);
   }, []);
-  const { status: liveStatus, send: sendLive } = useEventStream(eventId, onLiveEnvelope, regToken);
+  const {
+    status: liveStatus,
+    send: sendLive,
+    disconnect: disconnectLive,
+  } = useEventStream(eventId, onLiveEnvelope, regToken);
 
   const [watch, setWatch] = useState(null);
   const [notFound, setNotFound] = useState(false);
@@ -171,6 +207,14 @@ export default function EventWatch() {
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
   const identified = !!(user || regToken);
+  const handleLeaveEvent = useCallback(() => {
+    disconnectLive();
+
+    localStorage.removeItem(`zk_reg_${eventId}`);
+    setRegTokenState(null);
+
+    window.location.href = "/";
+  }, [disconnectLive, eventId]);
   // Every public/unlisted visitor identifies with name+email before seeing any video —
   // not just when the host turned on "registration required". Private events are exempt:
   // reaching this page with real watch data already means the visitor passed a
@@ -185,11 +229,6 @@ export default function EventWatch() {
   // Checked here so a real ended-with-replay event is never mistaken for an event that
   // simply expired unwatched.
   const timeGated = Boolean(mustIdentify || (watch?.expired && !ended) || watch?.not_started);
-
-  // Real count off the live socket (same analytics.viewers the host console shows) — null
-  // until the first snapshot arrives, so the header/player hide the badge rather than
-  // flashing a fake number.
-  const viewers = panel.viewers;
 
   if (loading) {
     return (
@@ -230,6 +269,13 @@ export default function EventWatch() {
               </span>
             )}
             <button
+              type="button"
+              onClick={handleLeaveEvent}
+              className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+            >
+              Leave Event
+            </button>
+            <button
               onClick={toggle}
               className="grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition duration-150 hover:bg-slate-100 hover:text-slate-900 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
               aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
@@ -237,16 +283,6 @@ export default function EventWatch() {
             >
               {theme === "dark" ? <FiSun className="text-lg" /> : <FiMoon className="text-lg" />}
             </button>
-            {/* Explicit exit, same idea as the host/moderator consoles' "Exit studio" — a
-                viewer shouldn't have to know that closing the tab is the only way out. */}
-            <Link
-              to="/"
-              className="grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition duration-150 hover:bg-rose-50 hover:text-rose-600 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-slate-400 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
-              aria-label="Leave event"
-              title="Leave event"
-            >
-              <FiLogOut className="text-lg" />
-            </Link>
           </div>
         </div>
       </header>
