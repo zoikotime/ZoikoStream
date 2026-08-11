@@ -1,6 +1,7 @@
 import { CONSOLE, cx, type } from "../../ui/tokens";
 import Skeleton from "../../ui/Skeleton";
 import { ConsoleButton } from "../../ui/Button";
+import Badge from "../../ui/Badge";
 import { errMsg } from "../../api";
 
 // Shell for a Command Center section page: title block, freshness receipt, error diagnosis,
@@ -27,6 +28,9 @@ export default function ConsoleScreen({
   title,
   subtitle,
   actions,
+  // This section runs entirely on fixture data (see the page's own *Data.js import) —
+  // nothing here is read from or written to the platform database yet.
+  demoData = false,
   // Freshness: seconds since the payload arrived. Omit to hide the receipt.
   ageSeconds,
   loading = false,
@@ -47,14 +51,21 @@ export default function ConsoleScreen({
     <div className="mx-auto max-w-[1500px] space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1
-            className={cx(
-              "text-[24px] font-bold leading-tight tracking-tight sm:text-[28px]",
-              CONSOLE.heading
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1
+              className={cx(
+                "text-[24px] font-bold leading-tight tracking-tight sm:text-[28px]",
+                CONSOLE.heading
+              )}
+            >
+              {title}
+            </h1>
+            {demoData && (
+              <Badge tone="warning" dot title="This section runs on fixture data — nothing here reads from or writes to the platform database yet">
+                Preview · demo data
+              </Badge>
             )}
-          >
-            {title}
-          </h1>
+          </div>
           {subtitle && <p className={cx("mt-1 max-w-3xl text-[13px]", CONSOLE.muted)}>{subtitle}</p>}
           {ageSeconds != null && hasData && (
             <p className={cx("mt-2 flex items-center gap-1.5 text-[12px]", type.mono)}>

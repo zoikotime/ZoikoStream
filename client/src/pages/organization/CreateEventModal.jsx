@@ -61,7 +61,7 @@ const toISO = (date, time) => {
 export default function CreateEventModal({ open, onClose, onCreated }) {
   const [form, setForm] = useState(EMPTY);
   const [hostIds, setHostIds] = useState(() => new Set());
-  const [saving, setSaving] = useState(null); // "draft" | "published" | null
+  const [saving, setSaving] = useState(null); // "draft" | "scheduled" | null
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
   const toggleHost = (id) => {
     setHostIds((s) => {
@@ -72,7 +72,7 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
     });
   };
 
-  const canPublish = form.title.trim().length > 0;
+  const canSchedule = form.title.trim().length > 0;
 
   const close = () => {
     setForm(EMPTY);
@@ -110,7 +110,7 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
       if (hostIds.size) {
         await api.patch(`/events/${data.id}/hosts`, { user_ids: [...hostIds] });
       }
-      notify.success(status === "draft" ? "Draft saved" : `"${data.title}" published`);
+      notify.success(status === "draft" ? "Draft saved" : `"${data.title}" scheduled`);
       onCreated?.();
       close();
     } catch (e) {
@@ -134,12 +134,12 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
           </Button>
           <Button
             size="sm"
-            onClick={() => submit("published")}
-            loading={saving === "published"}
-            disabled={!canPublish || !!saving}
-            title={canPublish ? undefined : "Add a title first"}
+            onClick={() => submit("scheduled")}
+            loading={saving === "scheduled"}
+            disabled={!canSchedule || !!saving}
+            title={canSchedule ? undefined : "Add a title first"}
           >
-            Publish Event
+            Schedule Event
           </Button>
         </>
       }

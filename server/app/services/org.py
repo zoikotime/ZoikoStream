@@ -178,8 +178,12 @@ def stage_health(db: Session, org_id, since: datetime) -> list[dict]:
 
 
 def service_health(stages: list[dict]) -> dict:
-    """One headline verdict, computed only from the stages this org actually uses."""
-    used = [s for s in stages if s["in_use"]]
+    """One headline verdict, computed only from the stages this org actually uses —
+    excluding stages that are entirely informational (see ops.INFORMATIONAL_STAGES), so a
+    roadmap feature nobody has built yet (e.g. Produce <- background workers) can't pin an
+    otherwise-healthy org at "Not configured" forever. Those stages still show up honestly
+    in the per-stage breakdown; they just don't get to speak for the whole org."""
+    used = [s for s in stages if s["in_use"] and s["stage"] not in ops_svc.INFORMATIONAL_STAGES]
     if not used:
         return {"status": "ok", "label": "No services in use", "cause": None}
     worst = max(used, key=lambda s: ops_svc._RANK.get(s["status"], 1))

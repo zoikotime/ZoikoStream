@@ -279,12 +279,12 @@ export default function Governance() {
   return (
     <ConsoleScreen
       title="Governance"
+      demoData
       subtitle="Evidence-backed accountability across policy, privacy, residency, retention and assurance. There is no single compliance score — a percentage would hide exactly what matters."
       ageSeconds={ageSeconds}
       hasData
       actions={
         <>
-          <Badge tone="brand">Wireframe · static data</Badge>
           <Button variant="secondary" leftIcon={FiRefreshCw} onClick={() => setAgeSeconds(0)}>
             Refresh
           </Button>
