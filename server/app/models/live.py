@@ -16,7 +16,7 @@ chat log intact for compliance export.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -74,6 +74,22 @@ class LiveQuestion(_EventScoped):
     flags: Mapped[list | None] = mapped_column(JSON, default=list)
 
 
+class LiveQuestionVote(_EventScoped):
+    """One row per (question, voter) — the ledger moderation._qa_vote checks so a page
+    refresh can't add another upvote on top of one already cast. `user_id` is ctx.user_id,
+    same identity concept as everywhere else in live.py's sibling module (a real User.id,
+    an EventRegistration.id, or an EventAccessLink.id — see moderation.resolve_ctx*); a
+    shared access link means every visitor on it is one collective voter, matching how
+    chat slow-mode already treats them. This was flagged as deferred, not forgotten — see
+    the ponytail note this table replaces in moderation._qa_vote's old single-column version."""
+
+    __tablename__ = "live_question_votes"
+    __table_args__ = (UniqueConstraint("question_id", "user_id", name="uq_live_question_vote"),)
+
+    question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("live_questions.id"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+
+
 class LivePoll(_EventScoped):
     """`options` is [{label, votes}] — the exact shape the console already renders, so
     no per-option table and no mapping layer. `closes_at` drives the countdown; the
@@ -89,6 +105,22 @@ class LivePoll(_EventScoped):
     launched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+
+class LivePollVote(_EventScoped):
+    """One row per (poll, voter) — the ledger moderation._poll_vote checks so a page
+    refresh (or a second tab) can't cast a second vote. Same user_id identity concept as
+    LiveQuestionVote above. A poll vote is final by design (the console never offers
+    "change your vote" — see components/watch/WatchPanel.jsx's Poll), so unlike Q&A's
+    up/down toggle, this table only ever gets one insert per voter; a repeat attempt is
+    rejected outright rather than updated."""
+
+    __tablename__ = "live_poll_votes"
+    __table_args__ = (UniqueConstraint("poll_id", "user_id", name="uq_live_poll_vote"),)
+
+    poll_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("live_polls.id"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    option: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class LiveAnnouncement(_EventScoped):
