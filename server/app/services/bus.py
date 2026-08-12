@@ -74,7 +74,13 @@ async def redis():
     if _redis is None:
         from redis import asyncio as aioredis  # imported lazily: unused without REDIS_URL
 
-        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        # Upstash (and most managed Redis) closes idle TCP connections; without
+        # retry_on_timeout + a health check, the pool keeps handing out a dead socket
+        # until it hard-fails (WinError 10054 / TimeoutError) instead of replacing it.
+        _redis = aioredis.from_url(
+            settings.REDIS_URL, decode_responses=True,
+            retry_on_timeout=True, health_check_interval=30,
+        )
     return _redis
 
 
