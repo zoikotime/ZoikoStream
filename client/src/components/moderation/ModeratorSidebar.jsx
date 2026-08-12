@@ -12,14 +12,16 @@ import { useMemo, useState } from "react";
 import {
   FiPlay, FiXCircle, FiPlus, FiSend, FiVolume2, FiEdit3, FiTrash2, FiClock,
   FiUserPlus, FiUserMinus, FiMessageSquare, FiHelpCircle, FiBarChart2, FiShield,
-  FiActivity, FiSearch, FiDownload, FiVideo, FiX, FiCheck,
+  FiActivity, FiDownload, FiVideo, FiX, FiCheck, FiUsers,
 } from "react-icons/fi";
-import { cx } from "../../ui/tokens";
+import { cx, focusRing } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
 import Skeleton from "../../ui/Skeleton";
 import { Input, Select } from "../../ui/forms";
 import EmptyState from "../organization/OrganizationEmptyState";
 import Panel, { ActionButton } from "./Panel";
+import { PANEL, PANEL_PRIMARY, PANEL_SECONDARY } from "./panelTokens";
+import SearchField from "./SearchField";
 import useInterval from "../../hooks/useInterval";
 import { downloadCsv } from "../../utils/export";
 import {
@@ -36,9 +38,9 @@ function PollResults({ options }) {
       {options.map((o, i) => {
         const pct = total ? Math.round((o.votes / total) * 100) : 0;
         return (
-          <div key={i} className="relative overflow-hidden rounded-lg border border-slate-200 px-2.5 py-1.5 dark:border-slate-700">
+          <div key={i} className={cx("relative overflow-hidden px-2.5 py-1.5", PANEL.inset)}>
             {/* Width transition = the bar visibly grows as votes land. */}
-            <div className="absolute inset-y-0 left-0 bg-emerald-500/15 transition-[width] duration-500 motion-reduce:transition-none" style={{ width: `${pct}%` }} />
+            <div className="absolute inset-y-0 left-0 bg-violet-500/20 transition-[width] duration-500 motion-reduce:transition-none" style={{ width: `${pct}%` }} />
             <div className="relative flex items-center justify-between text-xs">
               <span className="font-medium text-slate-700 dark:text-slate-200">{o.label}</span>
               <span className="tabular-nums text-slate-500 dark:text-slate-400">
@@ -88,7 +90,7 @@ function PollForm({ poll, onSubmit, onCancel }) {
   };
 
   return (
-    <form onSubmit={submit} className="mb-3 space-y-2 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+    <form onSubmit={submit} className={cx("mb-2.5 space-y-2 p-2.5", PANEL.card)}>
       <Input variant="console" value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Poll question" aria-label="Poll question" autoFocus />
       {opts.map((o, i) => (
         <div key={i} className="flex items-center gap-1.5">
@@ -103,7 +105,7 @@ function PollForm({ poll, onSubmit, onCancel }) {
       {/* Capped at the server's own limit (services/moderation._clean_options) so extra
           options are refused here, not silently dropped on save. */}
       {opts.length < 10 && (
-        <button type="button" onClick={() => setOpts((o) => [...o, ""])} className="text-xs font-medium text-emerald-600 hover:underline dark:text-emerald-400">
+        <button type="button" onClick={() => setOpts((o) => [...o, ""])} className={cx("rounded text-[11px] font-semibold text-violet-600 hover:underline dark:text-violet-400", focusRing)}>
           + Add option
         </button>
       )}
@@ -124,10 +126,10 @@ function PollForm({ poll, onSubmit, onCancel }) {
       </div>
 
       <div className="flex items-center justify-end gap-2">
-        <button type="button" onClick={onCancel} className="rounded-lg px-2.5 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">
+        <button type="button" onClick={onCancel} className={PANEL_SECONDARY}>
           Cancel
         </button>
-        <button type="submit" className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-500">
+        <button type="submit" className={PANEL_PRIMARY}>
           {poll ? "Save" : scheduledAt ? "Schedule" : "Launch"}
         </button>
       </div>
@@ -165,10 +167,13 @@ export function PollManagement({ polls, canModerate, send }) {
           />
           {canModerate && (
             <button
+              type="button"
               onClick={() => { setOpen((v) => !v); setEditing(null); }}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              aria-expanded={open}
+              className={PANEL_PRIMARY}
+              title={open ? "Close the new-poll form" : "Create a poll"}
             >
-              <FiPlus /> New
+              <FiPlus aria-hidden="true" /> New
             </button>
           )}
         </div>
@@ -181,24 +186,46 @@ export function PollManagement({ polls, canModerate, send }) {
           editing?.id === p.id ? (
             <PollForm key={p.id} poll={p} onSubmit={update} onCancel={() => setEditing(null)} />
           ) : (
-            <div key={p.id} className="rounded-xl border border-slate-100 p-3 transition motion-safe:animate-[zk-fade-in_.25s] dark:border-slate-800">
+            <div key={p.id} className={cx("p-2.5 motion-safe:animate-[zk-fade-in_.25s]", PANEL.card, PANEL.cardHover, PANEL.t150)}>
               <div className="flex items-start justify-between gap-2">
-                <p className="min-w-0 break-words text-sm font-medium text-slate-800 dark:text-slate-100">{p.question}</p>
+                <p className={cx("min-w-0 break-words text-[13px] font-semibold leading-snug", PANEL.heading)}>{p.question}</p>
                 <div className="flex shrink-0 flex-col items-end gap-1">
                   <Badge status={POLL_STATUS_TONE[p.status]} live={p.status === "live"}>{cap(p.status)}</Badge>
                   {p.status === "live" && p.closes_at && <Countdown closesAt={p.closes_at} />}
                 </div>
               </div>
 
+              {/* Options count and total responses, both read off the poll's own options
+                  array. A "completion rate" would need the concurrent audience size, which
+                  this component is never passed — so it is omitted rather than estimated. */}
+              <dl className={cx("mt-1.5 flex items-center gap-3 text-[11px]", PANEL.muted)}>
+                <div className="flex items-center gap-1">
+                  <dt>Options</dt>
+                  <dd className={cx("font-semibold tabular-nums", PANEL.body)}>{(p.options || []).length}</dd>
+                </div>
+                <div className="flex items-center gap-1">
+                  <dt className="flex items-center gap-1"><FiUsers aria-hidden="true" /> Responses</dt>
+                  <dd className={cx("font-semibold tabular-nums", PANEL.body)}>
+                    {(p.options || []).reduce((t, o) => t + (o.votes || 0), 0).toLocaleString()}
+                  </dd>
+                </div>
+                {p.created_at && (
+                  <div className="ml-auto flex items-center gap-1">
+                    <dt className="sr-only">Created</dt>
+                    <dd className={PANEL.faint}>{hhmm(p.created_at)}</dd>
+                  </div>
+                )}
+              </dl>
+
               {p.status === "scheduled" && p.scheduled_at && (
-                <p className="mt-1 text-[11px] text-slate-400">Launches at {hhmm(p.scheduled_at)}</p>
+                <p className={cx("mt-1 text-[11px]", PANEL.faint)}>Launches at {hhmm(p.scheduled_at)}</p>
               )}
               {(p.status === "live" || p.status === "closed") && <PollResults options={p.options || []} />}
 
               {canModerate && (
                 <div className="mt-2 flex flex-wrap gap-1">
                   {p.status !== "live" && p.status !== "closed" && (
-                    <ActionButton icon={FiPlay} label="Launch" tone="emerald" onClick={() => send("poll.launch", { id: p.id })} />
+                    <ActionButton icon={FiPlay} label="Launch" tone="violet" onClick={() => send("poll.launch", { id: p.id })} />
                   )}
                   {p.status === "live" && (
                     <ActionButton icon={FiXCircle} label="Close poll" tone="rose" onClick={() => send("poll.close", { id: p.id })} />
@@ -250,7 +277,12 @@ export function Announcements({ announcements, canModerate, send }) {
                 key={t.label}
                 type="button"
                 onClick={() => setText(t.text)}
-                className="rounded-full border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-600 transition hover:border-emerald-300 hover:text-emerald-600 dark:border-slate-700 dark:text-slate-300 dark:hover:border-emerald-500/40 dark:hover:text-emerald-400"
+                className={cx(
+                  "rounded-full border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-600",
+                  "hover:border-violet-300 hover:bg-violet-50 hover:text-violet-700",
+                  "dark:border-slate-700 dark:text-slate-300 dark:hover:border-violet-500/40 dark:hover:bg-violet-500/10 dark:hover:text-violet-300",
+                  PANEL.t150, focusRing
+                )}
               >
                 {t.label}
               </button>
@@ -258,7 +290,7 @@ export function Announcements({ announcements, canModerate, send }) {
           </div>
           <Input variant="console" value={text} onChange={(e) => setText(e.target.value)} placeholder="Broadcast to all viewers…" aria-label="Announcement message" />
           <div className="flex items-center gap-2">
-            <Select variant="console" className="w-32" value={priority} onChange={(e) => setPriority(e.target.value)} aria-label="Announcement priority">
+            <Select variant="console" className="h-9 w-28 py-0 text-[13px]" value={priority} onChange={(e) => setPriority(e.target.value)} aria-label="Announcement priority">
               {ANNOUNCEMENT_PRIORITIES.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
             </Select>
             <Input
@@ -270,8 +302,14 @@ export function Announcements({ announcements, canModerate, send }) {
               title="Leave empty to send now"
               className="flex-1"
             />
-            <button type="submit" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-emerald-600 text-white transition hover:bg-emerald-500" aria-label={scheduledAt ? "Schedule announcement" : "Send announcement"}>
-              {scheduledAt ? <FiClock className="text-sm" /> : <FiSend className="text-sm" />}
+            <button
+              type="submit"
+              disabled={!text.trim()}
+              className={cx(PANEL_PRIMARY, "h-9 w-9 justify-center px-0")}
+              aria-label={scheduledAt ? "Schedule announcement" : "Send announcement"}
+              title={scheduledAt ? "Schedule announcement" : "Send announcement"}
+            >
+              {scheduledAt ? <FiClock className="text-sm" aria-hidden="true" /> : <FiSend className="text-sm" aria-hidden="true" />}
             </button>
           </div>
         </form>
@@ -281,8 +319,8 @@ export function Announcements({ announcements, canModerate, send }) {
         {announcements.map((a) => {
           const tone = ANNOUNCEMENT_PRIORITIES.find((p) => p.key === a.priority);
           return (
-            <div key={a.id} className="flex items-start gap-2 rounded-xl border border-slate-100 px-3 py-2 transition motion-safe:animate-[zk-fade-in_.25s] dark:border-slate-800">
-              <FiVolume2 className="mt-0.5 shrink-0 text-emerald-500" aria-hidden="true" />
+            <div key={a.id} className={cx("flex items-start gap-2 px-2.5 py-2 motion-safe:animate-[zk-fade-in_.25s]", PANEL.card, PANEL.t150)}>
+              <FiVolume2 className="mt-0.5 shrink-0 text-violet-500 dark:text-violet-400" aria-hidden="true" />
               <div className="min-w-0 flex-1">
                 <p className="break-words text-sm text-slate-700 dark:text-slate-200">{a.text}</p>
                 <div className="mt-1 flex flex-wrap items-center gap-1.5">
@@ -351,24 +389,46 @@ export function ActivityFeed({ activity }) {
       }
     >
       <div className="mb-2 flex items-center gap-2">
-        <div className="relative flex-1">
-          <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-          <Input variant="console" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search activity…" aria-label="Search activity" className="pl-9" />
-        </div>
-        <Select variant="console" className="w-32" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter activity">
+        <SearchField
+          className="flex-1"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search activity…"
+          label="Search activity"
+        />
+        <Select variant="console" className="h-8 w-28 py-0 text-[13px]" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter activity">
           {ACTIVITY_FILTERS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
         </Select>
       </div>
 
-      <ol className="space-y-3">
-        {shown.map((a) => {
+      {/* Vertical timeline: one hairline rail behind the icon column, drawn per-item as a
+          ::before so it stops cleanly at the last entry instead of trailing into empty space.
+          The newest entry sits at the top and is the only one at full text contrast. */}
+      <ol className="relative">
+        {shown.map((a, i) => {
           const { icon: Icon, tone } = ACT_ICON[a.kind] || ACT_ICON.system;
+          const newest = i === 0;
           return (
-            <li key={a.id} className="flex items-start gap-2.5 motion-safe:animate-[zk-fade-in_.25s]">
-              <Icon className={cx("mt-0.5 shrink-0", tone)} aria-hidden="true" />
+            <li
+              key={a.id}
+              className={cx(
+                "relative flex items-start gap-2.5 pb-2.5 pl-0 last:pb-0 motion-safe:animate-[zk-fade-in_.25s]",
+                "before:absolute before:left-[9px] before:top-5 before:h-full before:w-px before:bg-slate-200 last:before:hidden dark:before:bg-slate-700"
+              )}
+            >
+              <span
+                className={cx(
+                  "relative z-[1] grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full border bg-white dark:bg-slate-900",
+                  newest ? "border-violet-300 dark:border-violet-500/40" : "border-slate-200 dark:border-slate-700"
+                )}
+              >
+                <Icon className={cx("h-2.5 w-2.5", tone)} aria-hidden="true" />
+              </span>
               <div className="min-w-0 flex-1">
-                <p className="break-words text-sm text-slate-600 dark:text-slate-300">{a.text}</p>
-                <p className="text-[11px] text-slate-400">
+                <p className={cx("break-words text-[13px] leading-snug", newest ? PANEL.body : PANEL.muted)}>
+                  {a.text}
+                </p>
+                <p className={cx("mt-0.5 text-[11px] tabular-nums", PANEL.faint)}>
                   {hhmm(a.created_at)}{a.actor ? ` · ${a.actor}` : ""}
                 </p>
               </div>

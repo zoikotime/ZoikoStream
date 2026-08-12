@@ -6,15 +6,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   FiCheck, FiTrash2, FiBookmark, FiCheckCircle, FiChevronUp, FiChevronDown,
-  FiSearch, FiCornerUpLeft, FiMicOff, FiClock, FiEdit3, FiX, FiArrowDown,
+  FiCornerUpLeft, FiMicOff, FiClock, FiEdit3, FiX, FiArrowDown,
   FiBarChart2, FiSend, FiMessageSquare, FiHelpCircle, FiSlash, FiDownload,
 } from "react-icons/fi";
-import { cx } from "../../ui/tokens";
+import { cx, focusRing } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
 import Skeleton from "../../ui/Skeleton";
 import { Input, Select } from "../../ui/forms";
 import EmptyState from "../organization/OrganizationEmptyState";
 import { ActionButton } from "./Panel";
+import { PANEL, PANEL_PRIMARY } from "./panelTokens";
+import SearchField from "./SearchField";
 import { downloadCsv } from "../../utils/export";
 import {
   initials, hhmm, FLAG_LABELS, CHAT_FILTERS, QUICK_REACTIONS,
@@ -181,22 +183,18 @@ export function ChatTab({ messages, typing, canModerate, send }) {
 
   return (
     <>
-      <div className="shrink-0 space-y-2 border-b border-slate-100 p-3 dark:border-slate-800">
+      <div className="shrink-0 space-y-2 border-b border-slate-100 px-3 py-2 dark:border-slate-800">
         <div className="flex items-center gap-2">
-          <div className="relative flex-1">
-            <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-            <Input
-              ref={searchBox}
-              variant="console"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search chat…  (/)"
-              aria-label="Search chat"
-              title="Press / to search, j to jump to latest, m to write a message"
-              className="pl-9"
-            />
-          </div>
-          <Select variant="console" className="w-36" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter chat">
+          <SearchField
+            ref={searchBox}
+            className="flex-1"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search chat…  (/)"
+            label="Search chat"
+            title="Press / to search, j to jump to latest, m to write a message"
+          />
+          <Select variant="console" className="h-8 w-28 py-0 text-[13px]" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter chat">
             {CHAT_FILTERS.map((f) => (
               <option key={f.key} value={f.key}>
                 {f.label}{f.key === "pending" && pendingCount ? ` (${pendingCount})` : ""}
@@ -233,8 +231,8 @@ export function ChatTab({ messages, typing, canModerate, send }) {
         )}
 
         {pinned && (
-          <div className="flex items-start gap-2 rounded-xl border border-emerald-300 bg-emerald-50/60 px-3 py-2 dark:border-emerald-500/40 dark:bg-emerald-500/10">
-            <FiBookmark className="mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+          <div className="flex items-start gap-2 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-2 dark:border-violet-500/30 dark:bg-violet-500/10">
+            <FiBookmark className="mt-0.5 shrink-0 text-violet-600 dark:text-violet-400" aria-hidden="true" />
             <p className="min-w-0 flex-1 break-words text-xs text-slate-700 dark:text-slate-200">
               <span className="font-semibold">{pinned.name}: </span>{pinned.text}
             </p>
@@ -259,14 +257,15 @@ export function ChatTab({ messages, typing, canModerate, send }) {
           <div
             key={m.id}
             className={cx(
-              "rounded-xl border p-3 transition motion-safe:animate-[zk-fade-in_.25s]",
+              "rounded-lg border p-2.5 motion-safe:animate-[zk-fade-in_.25s]",
+              PANEL.t150,
               picked.has(m.id)
-                ? "border-violet-300 bg-violet-50/60 dark:border-violet-500/40 dark:bg-violet-500/10"
+                ? "border-violet-300 bg-violet-50 dark:border-violet-500/40 dark:bg-violet-500/10"
                 : m.pinned
-                  ? "border-emerald-300 bg-emerald-50/60 dark:border-emerald-500/40 dark:bg-emerald-500/10"
+                  ? "border-violet-200 bg-violet-50/60 dark:border-violet-500/30 dark:bg-violet-500/[0.07]"
                   : (m.flags || []).length
                     ? "border-rose-200 bg-rose-50/50 dark:border-rose-500/30 dark:bg-rose-500/5"
-                    : "border-slate-100 hover:border-slate-200 dark:border-slate-800 dark:hover:border-slate-700"
+                    : cx("border-slate-200 dark:border-slate-800", PANEL.cardHover)
             )}
           >
             <div className="flex flex-wrap items-center gap-2">
@@ -320,7 +319,7 @@ export function ChatTab({ messages, typing, canModerate, send }) {
                   key={emoji}
                   type="button"
                   onClick={() => send("chat.react", { id: m.id, emoji })}
-                  className="rounded-lg px-1.5 py-1 text-xs transition hover:bg-slate-100 dark:hover:bg-slate-800"
+                  className={cx("rounded-md px-1 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800", PANEL.t150, focusRing)}
                   aria-label={`React ${emoji}`}
                   title={`React ${emoji}`}
                 >
@@ -349,7 +348,7 @@ export function ChatTab({ messages, typing, canModerate, send }) {
             {noteFor?.id === m.id && (
               <form onSubmit={saveNote} className="ml-8 mt-2 flex items-center gap-2">
                 <Input variant="console" name="note" defaultValue={m.note || ""} placeholder="Moderator-only note…" aria-label="Moderator note" autoFocus />
-                <button type="submit" className="rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500">Save</button>
+                <button type="submit" className={cx(PANEL_PRIMARY, "h-8")}>Save</button>
                 <button type="button" onClick={() => setNoteFor(null)} className="rounded-lg px-2 py-1.5 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Cancel</button>
               </form>
             )}
@@ -403,8 +402,16 @@ export function ChatTab({ messages, typing, canModerate, send }) {
             placeholder="Message the room…  (m)"
             aria-label="Send a chat message"
           />
-          <button type="submit" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-emerald-600 text-white transition hover:bg-emerald-500" aria-label="Send message">
-            <FiSend className="text-sm" />
+          {/* Disabled until there is something to send, so the primary action can never
+              fire a no-op frame at the socket. `submit` already guards the same condition. */}
+          <button
+            type="submit"
+            disabled={!draft.trim()}
+            className={cx(PANEL_PRIMARY, "h-9 w-9 justify-center px-0")}
+            aria-label="Send message"
+            title="Send message"
+          >
+            <FiSend className="text-sm" aria-hidden="true" />
           </button>
         </form>
       </div>
@@ -429,19 +436,15 @@ export function QATab({ questions, speakers, canModerate, send }) {
 
   return (
     <>
-      <div className="flex shrink-0 items-center gap-2 border-b border-slate-100 p-3 dark:border-slate-800">
-        <div className="relative flex-1">
-          <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-          <Input
-            variant="console"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search questions…"
-            aria-label="Search questions"
-            className="pl-9"
-          />
-        </div>
-        <Select variant="console" className="w-36" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter questions">
+      <div className="flex shrink-0 items-center gap-2 border-b border-slate-100 px-3 py-2 dark:border-slate-800">
+        <SearchField
+          className="flex-1"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search questions…"
+          label="Search questions"
+        />
+        <Select variant="console" className="h-8 w-28 py-0 text-[13px]" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter questions">
           {QA_FILTERS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
         </Select>
         <ActionButton
@@ -455,23 +458,30 @@ export function QATab({ questions, speakers, canModerate, send }) {
       </div>
 
       <div className="flex-1 space-y-2 overflow-y-auto p-3">
-        {shown.map((q) => (
+        {shown.map((q, i) => (
           <div
             key={q.id}
             className={cx(
-              "flex gap-3 rounded-xl border p-3 transition motion-safe:animate-[zk-fade-in_.25s]",
+              "flex gap-2.5 rounded-lg border p-2.5 motion-safe:animate-[zk-fade-in_.25s]",
+              PANEL.t150,
               q.pinned
-                ? "border-emerald-300 bg-emerald-50/60 dark:border-emerald-500/40 dark:bg-emerald-500/10"
-                : "border-slate-100 hover:border-slate-200 dark:border-slate-800 dark:hover:border-slate-700"
+                ? "border-green-300 bg-green-50/70 dark:border-green-500/30 dark:bg-green-500/10"
+                : cx("border-slate-200 dark:border-slate-800", PANEL.cardHover)
             )}
           >
             {/* Vote control — a moderator can also up/down-weight the running order. */}
-            <div className="flex shrink-0 flex-col items-center">
+            <div className="flex shrink-0 flex-col items-center gap-0.5">
+              {/* Position in the running order (pinned first, then most-voted), so a
+                  moderator reading questions aloud can say "number three". Derived from
+                  render order — it is not a field on the question. */}
+              <span className={cx("text-[10px] font-semibold tabular-nums", PANEL.faint)} aria-hidden="true">
+                #{String(i + 1).padStart(2, "0")}
+              </span>
               <button
                 type="button"
                 onClick={() => send("qa.vote", { id: q.id })}
-                className="rounded text-slate-400 transition hover:text-emerald-600 dark:hover:text-emerald-400"
-                aria-label="Upvote question"
+                className={cx("rounded text-slate-400 hover:text-violet-600 dark:hover:text-violet-400", PANEL.t150, focusRing)}
+                aria-label={`Upvote question from ${q.name}`}
               >
                 <FiChevronUp className="text-base" />
               </button>
@@ -480,8 +490,8 @@ export function QATab({ questions, speakers, canModerate, send }) {
                 <button
                   type="button"
                   onClick={() => send("qa.vote", { id: q.id, down: true })}
-                  className="rounded text-slate-400 transition hover:text-rose-600 dark:hover:text-rose-400"
-                  aria-label="Downvote question"
+                  className={cx("rounded text-slate-400 hover:text-rose-600 dark:hover:text-rose-400", PANEL.t150, focusRing)}
+                  aria-label={`Downvote question from ${q.name}`}
                 >
                   <FiChevronDown className="text-base" />
                 </button>
@@ -516,7 +526,7 @@ export function QATab({ questions, speakers, canModerate, send }) {
                   {speakers.length > 0 && (
                     <Select
                       variant="console"
-                      className="w-40"
+                      className="h-7 min-w-0 flex-1 py-0 text-[11px] @lg:flex-none @lg:w-40"
                       value={q.assigned_name ? speakers.find((s) => s.name === q.assigned_name)?.id || "" : ""}
                       onChange={(e) => send("qa.assign", { id: q.id, speaker_id: e.target.value || null })}
                       aria-label="Assign to speaker"
@@ -557,7 +567,7 @@ export default function ChatQAPanel({
   ];
 
   return (
-    <div className={cx("flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900", className)}>
+    <div className={cx("@container flex min-h-0 flex-col overflow-hidden", PANEL.surface, className)}>
       <div role="tablist" className="flex shrink-0 border-b border-slate-200 dark:border-slate-800">
         {tabs.map((t) => (
           <button
@@ -566,10 +576,12 @@ export default function ChatQAPanel({
             aria-selected={tab === t.key}
             onClick={() => setTab(t.key)}
             className={cx(
-              "flex flex-1 items-center justify-center gap-2 border-b-2 px-3 py-3 text-sm font-medium transition",
+              "flex flex-1 items-center justify-center gap-2 border-b-2 px-3 py-2.5 text-[13px] font-medium",
+              PANEL.t150,
+              focusRing,
               tab === t.key
-                ? "border-emerald-500 text-emerald-600 dark:text-emerald-400"
-                : "border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+                ? "border-violet-600 text-violet-700 dark:border-violet-400 dark:text-violet-300"
+                : "border-transparent text-slate-500 hover:bg-violet-50/60 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-violet-500/[0.07] dark:hover:text-white"
             )}
           >
             {t.label}

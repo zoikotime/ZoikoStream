@@ -5,6 +5,13 @@
 // Every number here has a real source. The ones this stack cannot measure from a browser
 // (OS CPU, encoder bitrate) render "—" with a tooltip saying why, because a broadcast
 // console that invents telemetry is worse than one that admits the gap.
+//
+// LAYOUT: the readouts are grouped into four CLUSTERS — audience, room, signal,
+// diagnostics — each a single bordered track with internal dividers. Ten individually
+// pilled numbers read as ten competing objects; four tracks read as one instrument panel,
+// which is the difference between a dashboard an operator scans and one they have to parse.
+// Clusters drop out right-to-left as width tightens (diagnostics first, audience last), so
+// what survives on a laptop is what an operator actually needs.
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -18,6 +25,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import { cx } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
 import Logo from "../../ui/Logo";
+import { STUDIO, SIGNAL, focus, t150 } from "./studio";
 import {
   BROADCAST_TONE, BROADCAST_LABEL, HEALTH_TONE, HEALTH_LABEL, NETWORK_TONE, meterTone,
 } from "../../data/host";
@@ -26,39 +34,68 @@ const pad = (n) => String(n).padStart(2, "0");
 const fmtElapsed = (s) =>
   `${Math.floor(s / 3600) > 0 ? `${Math.floor(s / 3600)}:` : ""}${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
 
+// Connection state carries a LABEL as well as a colour — status must never be conveyed by
+// hue alone (a red and a green wifi glyph are the same glyph to a colourblind operator).
 const CONNECTION = {
-  open: { icon: FiWifi, label: "Connected", tone: "text-emerald-600 dark:text-emerald-400" },
-  connecting: { icon: FiRefreshCw, label: "Connecting", tone: "text-amber-600 dark:text-amber-400", spin: true },
-  reconnecting: { icon: FiRefreshCw, label: "Reconnecting", tone: "text-amber-600 dark:text-amber-400", spin: true },
-  offline: { icon: FiWifiOff, label: "Offline", tone: "text-rose-600 dark:text-rose-400" },
-  unauthorized: { icon: FiWifiOff, label: "Not authorized", tone: "text-rose-600 dark:text-rose-400" },
+  open: { icon: FiWifi, label: "Connected", tone: SIGNAL.good },
+  connecting: { icon: FiRefreshCw, label: "Connecting", tone: SIGNAL.warn, spin: true },
+  reconnecting: { icon: FiRefreshCw, label: "Reconnecting", tone: SIGNAL.warn, spin: true },
+  offline: { icon: FiWifiOff, label: "Offline", tone: SIGNAL.bad },
+  unauthorized: { icon: FiWifiOff, label: "Not authorized", tone: SIGNAL.bad },
 };
 
 const latencyTone = (ms) =>
-  ms == null ? "text-slate-400" : ms < 200 ? "text-emerald-500" : ms < 600 ? "text-amber-500" : "text-rose-500";
+  ms == null ? SIGNAL.neutral : ms < 200 ? SIGNAL.good : ms < 600 ? SIGNAL.warn : SIGNAL.bad;
 
 const TONE_TEXT = {
-  success: "text-emerald-600 dark:text-emerald-400",
-  warning: "text-amber-600 dark:text-amber-400",
-  danger: "text-rose-600 dark:text-rose-400",
-  neutral: "text-slate-500 dark:text-slate-400",
+  success: SIGNAL.good,
+  warning: SIGNAL.warn,
+  danger: SIGNAL.bad,
+  neutral: SIGNAL.neutral,
 };
 
-// One pill shape for the whole cluster, so it reads as a single instrument panel.
-function Pill({ icon: Icon, title, tone, children, className = "" }) {
+// ── instrument cluster primitives ─────────────────────────────────────────────
+// One bordered track holding N readouts, split by hairlines. `items-stretch` + `divide-x`
+// means the dividers run the full height of the track with no per-item padding maths.
+function Cluster({ className = "", children }) {
   return (
     <div
-      title={title}
-      className={cx("flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1.5 dark:bg-slate-800", className)}
+      className={cx(
+        "flex items-stretch divide-x overflow-hidden",
+        STUDIO.inset,
+        STUDIO.divideX,
+        className
+      )}
     >
-      <Icon className={cx("shrink-0 text-sm", tone || "text-slate-500 dark:text-slate-400")} aria-hidden="true" />
       {children}
     </div>
   );
 }
 
-const num = "text-sm font-semibold tabular-nums text-slate-900 dark:text-white";
-const small = "text-xs font-semibold tabular-nums";
+// One readout. `title` is the honest explanation of the number (and of the "—" when there
+// isn't one); `srLabel` names it for a screen reader, since the visual label is an icon.
+function Readout({ icon: Icon, title, srLabel, tone, spin = false, children, className = "" }) {
+  return (
+    <div
+      title={title}
+      className={cx("flex shrink-0 items-center gap-1.5 px-2.5 py-1.5", className)}
+    >
+      <Icon
+        aria-hidden="true"
+        className={cx(
+          "shrink-0 text-[13px]",
+          tone || STUDIO.faint,
+          spin && "animate-spin motion-reduce:animate-none"
+        )}
+      />
+      <span className="sr-only">{srLabel}: </span>
+      {children}
+    </div>
+  );
+}
+
+const val = cx("text-[13px] font-semibold leading-none tabular-nums", STUDIO.heading);
+const valSm = "text-[13px] font-semibold leading-none tabular-nums";
 
 export default function HostHeader({
   event,
@@ -99,173 +136,241 @@ export default function HostHeader({
   const resolution = media?.actual?.width ? `${media.actual.width}×${media.actual.height}` : null;
 
   return (
-    <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-200 bg-white px-4 py-3 sm:px-6 dark:border-slate-800 dark:bg-slate-900">
-      <Link to="/organization/dashboard">
-        <Logo height="h-7">
-          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Producer Console</span>
+    <header
+      className={cx(
+        "flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-3 py-2 sm:px-4",
+        STUDIO.chrome
+      )}
+    >
+      {/* ── identity ─────────────────────────────────────────────────────────── */}
+      <Link
+        to="/organization/dashboard"
+        className={cx("shrink-0 rounded-lg", focus)}
+        title="Back to the organization dashboard"
+      >
+        <Logo height="h-6">
+          <span className={cx("hidden sm:block", STUDIO.eyebrow, STUDIO.muted)}>
+            Producer&nbsp;Console
+          </span>
         </Logo>
       </Link>
 
-      <div className="min-w-0 dark:border-slate-700 md:border-l md:border-slate-200 md:pl-3">
-        <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">{event?.name || "Live event"}</p>
-        <p className="hidden truncate text-xs text-slate-500 md:block dark:text-slate-400">
+      <div className={cx("min-w-0 border-l pl-3", STUDIO.divider)}>
+        <p className={cx("truncate text-[15px] font-semibold leading-tight", STUDIO.heading)}>
+          {event?.name || "Live event"}
+        </p>
+        <p className={cx("truncate text-[11px] leading-tight", STUDIO.muted)}>
           {event?.host ? `Hosted by ${event.host}` : "No host assigned"}
         </p>
       </div>
 
-      {live ? (
-        <Badge status="error" live>LIVE</Badge>
-      ) : (
-        <Badge tone={BROADCAST_TONE[status]} dot>{BROADCAST_LABEL[status] || status}</Badge>
-      )}
-
-      {recording && (
-        <Badge
-          status={recording.status === "paused" ? "warning" : "error"}
-          dot
-          title={recording.enforced
-            ? `Recording ${recording.status} · ${recording.quality || ""}`
-            : "Recording state is tracked, but LiveKit egress isn't capturing a file"}
-        >
-          <FiVideo aria-hidden="true" /> {recording.status === "paused" ? "REC PAUSED" : "REC"}
-          {!recording.enforced && " (not captured)"}
-        </Badge>
-      )}
-
-      {recovering && (
-        <Badge tone="danger" dot title="The media room dropped. The broadcast is held open for the publisher to reconnect.">
-          Auto-recovery
-        </Badge>
-      )}
-
-      {health && (
-        <Badge
-          tone={HEALTH_TONE[health.level]}
-          dot
-          className="hidden lg:inline-flex"
-          title={health.issues?.length ? health.issues.join(" · ") : "All broadcast signals normal"}
-        >
-          <FiHeart aria-hidden="true" /> {HEALTH_LABEL[health.level] || health.level}
-        </Badge>
-      )}
-
-      {!canHost && (
-        <Badge tone="warning" dot className="hidden lg:inline-flex" title="You aren't assigned as host, so broadcast controls are disabled">
-          <FiShield aria-hidden="true" /> View only
-        </Badge>
-      )}
-
-      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-        <Pill icon={FiClock} title="Live time, excluding paused periods">
-          <span className={num}>{startedAt ? fmtElapsed(elapsed) : "—"}</span>
-        </Pill>
-
-        <Pill icon={FiEye} title="Viewers watching now">
-          <span className={num}>{(a.viewers ?? 0).toLocaleString()}</span>
-        </Pill>
-
-        <Pill icon={FiTrendingUp} title="Peak concurrent viewers this broadcast" className="hidden sm:flex">
-          <span className={num}>{(a.peak_viewers ?? 0).toLocaleString()}</span>
-        </Pill>
-
-        {/* Roster split — speakers / moderators / everyone connected. */}
-        <Pill icon={FiUsers} title="On stage · moderators · total connected" className="hidden md:flex">
-          <span className={small}>
-            <span className="text-emerald-600 dark:text-emerald-400">{a.speakers ?? 0}</span>
-            <span className="text-slate-400"> / </span>
-            <span className="text-blue-600 dark:text-blue-400">{a.moderators ?? 0}</span>
-            <span className="text-slate-400"> / </span>
-            <span className="text-slate-900 dark:text-white">{a.participants ?? 0}</span>
-          </span>
-        </Pill>
-
-        {a.hands > 0 && (
-          <Pill icon={FiMic} title={`${a.hands} raised hand(s)`} tone="text-amber-500">
-            <span className={cx(small, "text-amber-600 dark:text-amber-400")}>{a.hands} ✋</span>
-          </Pill>
+      {/* ── broadcast state ──────────────────────────────────────────────────── */}
+      {/* No on-air badge here: the monitor carries its own saturated ON AIR chip
+          (StudioStage's STATE_CHIP), and two of them in one viewport is one signal too many.
+          The non-live states still show, because the monitor can be scrolled or expanded away
+          while this header is always visible — so "preview"/"paused"/"ended" is the one piece
+          of broadcast state that would otherwise have nowhere to appear. */}
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+        {!live && (
+          <Badge tone={BROADCAST_TONE[status]} dot>{BROADCAST_LABEL[status] || status}</Badge>
         )}
 
-        {/* Capture: measured from the actual MediaStreamTrack, not the requested target. */}
-        <Pill
-          icon={FiMonitor}
-          title={resolution
-            ? `Capture actually granted by the camera: ${resolution} @ ${media.actual.frameRate ?? "?"}fps (target ${broadcast?.settings?.resolution ?? "—"})`
-            : "Start the preview to read the real capture resolution and frame rate"}
-          className="hidden xl:flex"
-        >
-          <span className={cx(small, "text-slate-700 dark:text-slate-200")}>
-            {resolution ? `${resolution}${media.actual.frameRate ? ` @${media.actual.frameRate}` : ""}` : "—"}
-          </span>
-        </Pill>
+        {recording && (
+          <Badge
+            tone={recording.status === "paused" ? "warning" : "danger"}
+            dot
+            title={recording.enforced
+              ? `Recording ${recording.status} · ${recording.quality || ""}`
+              : "Recording state is tracked, but LiveKit egress isn't capturing a file"}
+          >
+            <FiVideo aria-hidden="true" /> {recording.status === "paused" ? "Rec paused" : "Rec"}
+            {!recording.enforced && " · not captured"}
+          </Badge>
+        )}
 
-        <Pill
-          icon={FiActivity}
-          tone={latencyTone(latency)}
-          title="Round-trip latency to the control server (target under 200ms). Encoder/stream bitrate needs a publishing peer connection, which isn't wired yet."
-        >
-          <span className={cx(small, latencyTone(latency))}>{latency == null ? "—" : `${latency} ms`}</span>
-        </Pill>
+        {recovering && (
+          <Badge tone="danger" dot title="The media room dropped. The broadcast is held open for the publisher to reconnect.">
+            Auto-recovery
+          </Badge>
+        )}
 
-        <Pill
-          icon={net ? FiWifi : FiWifiOff}
-          tone={TONE_TEXT[netTone]}
-          title={net
-            ? `Network: ${net.effectiveType || "unknown"}${net.downlinkMbps != null ? ` · ~${net.downlinkMbps} Mbps down` : ""}${net.rttMs != null ? ` · ${net.rttMs}ms RTT` : ""}`
-            : "This browser doesn't expose the Network Information API"}
-          className="hidden lg:flex"
-        >
-          <span className={cx(small, TONE_TEXT[netTone])}>{net?.effectiveType?.toUpperCase() || "—"}</span>
-        </Pill>
+        {health && (
+          <Badge
+            tone={HEALTH_TONE[health.level]}
+            dot
+            className="hidden xl:inline-flex"
+            title={health.issues?.length ? health.issues.join(" · ") : "All broadcast signals normal"}
+          >
+            <FiHeart aria-hidden="true" /> {HEALTH_LABEL[health.level] || health.level}
+          </Badge>
+        )}
 
-        {/* "Load" is measured main-thread frame budget, NOT OS CPU — no browser exposes
-            system CPU to a page, and the tooltip says exactly that. */}
-        <Pill
-          icon={FiCpu}
-          tone={TONE_TEXT[meterTone(stats.load)]}
-          title={stats.load == null
-            ? "UI load unavailable"
-            : `Console UI load ${stats.load}% (main-thread frame time ${stats.frameMs}ms${stats.cores ? `, ${stats.cores} cores` : ""}). Browsers can't report system CPU.`}
-          className="hidden xl:flex"
-        >
-          <span className={cx(small, TONE_TEXT[meterTone(stats.load)])}>
-            {stats.load == null ? "—" : `${stats.load}%`}
-          </span>
-        </Pill>
+        {!canHost && (
+          <Badge tone="warning" dot title="You aren't assigned as host, so broadcast controls are disabled">
+            <FiShield aria-hidden="true" /> View only
+          </Badge>
+        )}
+      </div>
 
-        <Pill
-          icon={FiHardDrive}
-          tone={TONE_TEXT[meterTone(stats.memory?.percent)]}
-          title={stats.memory
-            ? `JS heap ${stats.memory.usedMb}MB of ${stats.memory.limitMb}MB. This is the tab's memory, not system RAM.`
-            : "Memory reporting is Chromium-only (performance.memory)"}
-          className="hidden xl:flex"
-        >
-          <span className={cx(small, TONE_TEXT[meterTone(stats.memory?.percent)])}>
-            {stats.memory ? `${stats.memory.percent}%` : "—"}
-          </span>
-        </Pill>
+      {/* ── instrument clusters ──────────────────────────────────────────────── */}
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+        {/* Audience — the numbers a producer watches continuously. Never hidden. */}
+        <Cluster>
+          <Readout
+            icon={FiClock}
+            srLabel="Elapsed live time"
+            title="Live time, excluding paused periods"
+          >
+            <span className={val}>{startedAt ? fmtElapsed(elapsed) : "—"}</span>
+          </Readout>
+          <Readout icon={FiEye} srLabel="Viewers now" title="Viewers watching now">
+            <span className={val}>{(a.viewers ?? 0).toLocaleString()}</span>
+          </Readout>
+          <Readout
+            icon={FiTrendingUp}
+            srLabel="Peak viewers"
+            title="Peak concurrent viewers this broadcast"
+            className="hidden sm:flex"
+          >
+            <span className={val}>{(a.peak_viewers ?? 0).toLocaleString()}</span>
+          </Readout>
+        </Cluster>
 
-        <Pill
-          icon={conn.icon}
-          tone={cx(conn.tone, conn.spin && "animate-spin motion-reduce:animate-none")}
-          title={attempt > 0 ? `${conn.label} — auto-reconnect attempt ${attempt}` : conn.label}
-        >
-          <span className={cx(small, conn.tone)}>
-            {conn.label}{attempt > 0 && connection !== "open" ? ` ·${attempt}` : ""}
-          </span>
-        </Pill>
+        {/* Room — who is in it. Roster split is stage / moderators / total connected. */}
+        <Cluster className="hidden md:flex">
+          <Readout
+            icon={FiUsers}
+            srLabel="On stage, moderators, total connected"
+            title="On stage · moderators · total connected"
+          >
+            <span className={valSm}>
+              <span className="text-green-600 dark:text-green-400">{a.speakers ?? 0}</span>
+              <span className={STUDIO.faint}> / </span>
+              <span className="text-blue-600 dark:text-blue-400">{a.moderators ?? 0}</span>
+              <span className={STUDIO.faint}> / </span>
+              <span className={STUDIO.heading}>{a.participants ?? 0}</span>
+            </span>
+          </Readout>
+          {a.hands > 0 && (
+            <Readout
+              icon={FiMic}
+              srLabel="Raised hands"
+              title={`${a.hands} raised hand(s)`}
+              tone={SIGNAL.warn}
+            >
+              <span className={cx(valSm, SIGNAL.warn)}>{a.hands} raised</span>
+            </Readout>
+          )}
+        </Cluster>
 
-        <button
-          onClick={toggle}
-          className="grid h-9 w-9 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
-          aria-label="Toggle theme"
-          title={theme === "dark" ? "Switch to light" : "Switch to dark"}
-        >
-          {theme === "dark" ? <FiSun className="text-lg" /> : <FiMoon className="text-lg" />}
-        </button>
-        <Link to="/organization/dashboard" className="hidden text-slate-400 hover:text-rose-500 sm:block" aria-label="Exit studio" title="Exit studio">
-          <FiLogOut className="text-xl" />
-        </Link>
+        {/* Signal — the health of this console's own link to the event. */}
+        <Cluster>
+          <Readout
+            icon={FiActivity}
+            srLabel="Control-server latency"
+            tone={latencyTone(latency)}
+            title="Round-trip latency to the control server (target under 200ms). Encoder/stream bitrate needs a publishing peer connection, which isn't wired yet."
+          >
+            <span className={cx(valSm, latencyTone(latency))}>
+              {latency == null ? "—" : `${latency} ms`}
+            </span>
+          </Readout>
+          <Readout
+            icon={net ? FiWifi : FiWifiOff}
+            srLabel="Network type"
+            tone={TONE_TEXT[netTone]}
+            title={net
+              ? `Network: ${net.effectiveType || "unknown"}${net.downlinkMbps != null ? ` · ~${net.downlinkMbps} Mbps down` : ""}${net.rttMs != null ? ` · ${net.rttMs}ms RTT` : ""}`
+              : "This browser doesn't expose the Network Information API"}
+            className="hidden lg:flex"
+          >
+            <span className={cx(valSm, TONE_TEXT[netTone])}>
+              {net?.effectiveType?.toUpperCase() || "—"}
+            </span>
+          </Readout>
+          <Readout
+            icon={conn.icon}
+            srLabel="Control connection"
+            tone={conn.tone}
+            spin={conn.spin}
+            title={attempt > 0 ? `${conn.label} — auto-reconnect attempt ${attempt}` : conn.label}
+          >
+            <span className={cx(valSm, conn.tone)}>
+              {conn.label}{attempt > 0 && connection !== "open" ? ` ·${attempt}` : ""}
+            </span>
+          </Readout>
+        </Cluster>
+
+        {/* Diagnostics — real but secondary. First cluster to go as width tightens.
+            "Capture" is measured from the actual MediaStreamTrack, not the requested
+            target; "Load" is main-thread frame budget, NOT OS CPU (no browser exposes
+            system CPU to a page) — both tooltips say so rather than implying otherwise. */}
+        <Cluster className="hidden 2xl:flex">
+          <Readout
+            icon={FiMonitor}
+            srLabel="Granted capture resolution"
+            title={resolution
+              ? `Capture actually granted by the camera: ${resolution} @ ${media.actual.frameRate ?? "?"}fps (target ${broadcast?.settings?.resolution ?? "—"})`
+              : "Start the preview to read the real capture resolution and frame rate"}
+          >
+            <span className={cx(valSm, STUDIO.body)}>
+              {resolution ? `${resolution}${media.actual.frameRate ? ` @${media.actual.frameRate}` : ""}` : "—"}
+            </span>
+          </Readout>
+          <Readout
+            icon={FiCpu}
+            srLabel="Console UI load"
+            tone={TONE_TEXT[meterTone(stats.load)]}
+            title={stats.load == null
+              ? "UI load unavailable"
+              : `Console UI load ${stats.load}% (main-thread frame time ${stats.frameMs}ms${stats.cores ? `, ${stats.cores} cores` : ""}). Browsers can't report system CPU.`}
+          >
+            <span className={cx(valSm, TONE_TEXT[meterTone(stats.load)])}>
+              {stats.load == null ? "—" : `${stats.load}%`}
+            </span>
+          </Readout>
+          <Readout
+            icon={FiHardDrive}
+            srLabel="Tab memory"
+            tone={TONE_TEXT[meterTone(stats.memory?.percent)]}
+            title={stats.memory
+              ? `JS heap ${stats.memory.usedMb}MB of ${stats.memory.limitMb}MB. This is the tab's memory, not system RAM.`
+              : "Memory reporting is Chromium-only (performance.memory)"}
+          >
+            <span className={cx(valSm, TONE_TEXT[meterTone(stats.memory?.percent)])}>
+              {stats.memory ? `${stats.memory.percent}%` : "—"}
+            </span>
+          </Readout>
+        </Cluster>
+
+        {/* ── console actions ────────────────────────────────────────────────── */}
+        <div className={cx("flex items-center gap-1 border-l pl-2", STUDIO.divider)}>
+          <button
+            type="button"
+            onClick={toggle}
+            className={cx(
+              "grid h-8 w-8 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white",
+              t150,
+              focus
+            )}
+            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+          >
+            {theme === "dark" ? <FiSun className="text-base" /> : <FiMoon className="text-base" />}
+          </button>
+          <Link
+            to="/organization/dashboard"
+            className={cx(
+              "grid h-8 w-8 place-items-center rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-600 dark:text-slate-400 dark:hover:bg-rose-500/10 dark:hover:text-rose-400",
+              t150,
+              focus
+            )}
+            aria-label="Exit studio"
+            title="Exit studio"
+          >
+            <FiLogOut className="text-base" />
+          </Link>
+        </div>
       </div>
     </header>
   );
