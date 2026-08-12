@@ -42,6 +42,11 @@ export default function HostDashboard() {
   const screenStreamRef = useRef(null);
   const screenVideoRef = useRef(null);
   const [screenTrack, setScreenTrack] = useState(null);
+  // The shared tab/window's own sound (e.g. playing a video during the share) — separate
+  // from the mic, which keeps publishing throughout a share. Not every capture has one:
+  // Chrome only offers it for "Chrome Tab" (and "Entire Screen" on some platforms), never
+  // for "Window", and other browsers may not support it at all.
+  const [screenAudioTrack, setScreenAudioTrack] = useState(null);
   const [tab, setTab] = useState("participants");
   const [modal, setModal] = useState(null);
 
@@ -73,6 +78,7 @@ export default function HostDashboard() {
     token: state.publishToken,
     streamRef: media.streamRef,
     screenTrack,
+    screenAudioTrack,
     videoTrack: media.videoTrack,
   });
 
@@ -96,6 +102,7 @@ export default function HostDashboard() {
     screenStreamRef.current = null;
     if (screenVideoRef.current) screenVideoRef.current.srcObject = null;
     setScreenTrack(null);
+    setScreenAudioTrack(null);
     setScreenShare(false);
   };
 
@@ -106,10 +113,14 @@ export default function HostDashboard() {
     }
     if (!navigator.mediaDevices?.getDisplayMedia) return;
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      // audio: true asks for the shared tab/window's own sound — the browser only actually
+      // grants it for capture types/platforms that support it (see screenAudioTrack above),
+      // so getAudioTracks() below can still come back empty even on success.
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       screenStreamRef.current = stream;
       if (screenVideoRef.current) screenVideoRef.current.srcObject = stream;
       setScreenTrack(stream.getVideoTracks()[0] || null);
+      setScreenAudioTrack(stream.getAudioTracks()[0] || null);
       setScreenShare(true);
       // The browser's own "Stop sharing" button ends the track directly, bypassing our
       // button — mirror that back into state so the deck and preview stay honest.
