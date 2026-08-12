@@ -190,6 +190,47 @@ def resolve_ctx_from_registration(event_id: uuid.UUID, registration: EventRegist
         db.close()
 
 
+
+
+def resolve_ctx_from_access_link(event_id: uuid.UUID, raw_token: str) -> Ctx | None:
+    """Resolve a host-issued private-event access link into an anonymous viewer context.
+
+    The token is validated against BOTH the requested event id and the stored hash, and
+    revoked/expired links are rejected by ``find_access_link``.  This mirrors the HTTP
+    ``/events/{id}/watch?link=...`` gate so the WebSocket cannot become a side door into a
+    private event.
+
+    ``user_id`` deliberately stays as the access-link row's id rather than using a shared
+    anonymous identity: it keeps presence, slow-mode and moderation state isolated per
+    shared-link viewer without creating a User account.
+    """
+    if not raw_token:
+        return None
+    from ..crud import event as event_crud
+
+    db = SessionLocal()
+    try:
+        ev = db.scalar(select(Event).where(Event.id == event_id, Event.deleted_at.is_(None)))
+        if ev is None or ev.visibility != "private":
+            return None
+        link = event_crud.find_access_link(db, ev.id, raw_token)
+        if link is None:
+            return None
+        identity = f"guest-link-{link.id}"
+        return Ctx(
+            event_id=ev.id,
+            org_id=ev.org_id,
+            room=f"event_{ev.id}",
+            user_id=link.id,
+            name=link.label or "Viewer",
+            identity=identity,
+            role="viewer",
+            can_moderate=False,
+            can_host=False,
+        )
+    finally:
+        db.close()
+
 # ── serializers ───────────────────────────────────────────────────────────────
 # Keys match what the console components already render, so no client-side mapping layer.
 
@@ -376,6 +417,7 @@ SNAPSHOT_EXTRAS: list = []
 async def snapshot(ctx: Ctx) -> dict:
     snap = await tx(lambda db: _snapshot(db, ctx))
     snap["participants"] = await bus.presence_all(ctx.event_id)
+    snap["reactions"] = _reaction_snapshot(await bus.reaction_all(ctx.event_id))
     for extra in SNAPSHOT_EXTRAS:
         snap.update(await extra(ctx))
     return snap
@@ -388,8 +430,19 @@ async def snapshot(ctx: Ctx) -> dict:
 # Actions any authenticated attendee may perform. Everything else needs can_moderate.
 VIEWER_ACTIONS = frozenset({
     "chat.send", "chat.typing", "chat.react", "qa.ask", "qa.vote", "poll.vote",
-    "participant.hand", "participant.state",
+    "participant.hand", "participant.state", "reaction.add",
 })
+
+# The viewer reaction bar under the player (components/watch/ReactionBar.jsx) — a fixed,
+# whole-event tap counter per emoji, distinct from chat.react above (which tags one chat
+# message). Keys match the frontend's REACTIONS list 1:1 so no mapping layer is needed.
+REACTION_KEYS = ("like", "heart", "clap", "fire", "party")
+
+
+def _reaction_snapshot(counts: dict) -> dict:
+    """Zero-fill every known key so the envelope is always the complete state (a viewer
+    who has never seen a `fire` tap this session still needs to know it's 0, not missing)."""
+    return {k: counts.get(k, 0) for k in REACTION_KEYS}
 
 
 def _text(payload, key="text", limit=2000) -> str:
@@ -894,6 +947,31 @@ async def _participant_state(ctx, payload):
     return [("participants", "participant.update", rec)]
 
 
+# reactions ---------------------------------------------------------------------
+
+async def _reaction_add(ctx, payload):
+    """One tap on the viewer reaction bar. `key` is validated against the fixed set the
+    frontend renders (never trust a wire value into a dict key that gets broadcast).
+    The increment itself is bus.reaction_incr, which is atomic (Redis HINCRBY / a bare
+    dict bump with no intervening await) — concurrent taps from different viewers never
+    clobber each other the way a read-count/add-one/save-count round trip would."""
+    key = payload.get("key")
+    if key not in REACTION_KEYS:
+        return "Unsupported reaction"
+
+    # Same toggle the host console already exposes (data/host.js "Reactions"); chat_gate
+    # reads the equivalent chat_enabled flag the same way, from the bus's hot settings
+    # copy rather than a query per tap.
+    settings = await bus.state_get(ctx.event_id)
+    if settings.get("reactions_enabled") is False:
+        return "Reactions are turned off for this event"
+
+    counts = await bus.reaction_incr(ctx.event_id, key)
+    return [("reactions", "reaction.update", {
+        "event_id": str(ctx.event_id), "reactions": _reaction_snapshot(counts),
+    })]
+
+
 async def _participant_action(ctx, payload, op: str):
     identity = str(payload.get("identity") or "")
     if not identity:
@@ -983,6 +1061,7 @@ ACTIONS: dict[str, callable] = {
     "participant.role": lambda c, p: _participant_action(c, p, "role"),
     "participant.ban": lambda c, p: _participant_action(c, p, "ban"),
     "participant.remove": lambda c, p: _participant_action(c, p, "remove"),
+    "reaction.add": _reaction_add,
 }
 
 # Broadcast-control actions, filled in by services/broadcast.py at import (which is

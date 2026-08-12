@@ -70,6 +70,10 @@ const LIVE_EMPTY = {
   questions: [],
   polls: [],
   participants: {},
+  // Backend-authoritative reaction counts (server/app/services/bus.py reaction_all),
+  // keyed like ReactionBar's REACTIONS list. Empty until the snapshot/first update
+  // arrives — ReactionBar defaults any missing key to 0 rather than a fake baseline.
+  reactions: {},
 };
 
 function liveReducer(state, env) {
@@ -85,6 +89,10 @@ function liveReducer(state, env) {
         participants: Object.fromEntries(
           (data.participants || []).map((p) => [p.identity, p])
         ),
+        // A viewer joining (or reconnecting) sees the CURRENT tally immediately, not
+        // 0/0/0/0/0 waiting for the next tap — same guarantee the rest of the snapshot
+        // gives messages/questions/polls.
+        reactions: data.reactions || {},
       };
 
     case "participants/participant.join":
@@ -130,6 +138,11 @@ function liveReducer(state, env) {
       return { ...state, polls: state.polls.map((p) => (p.id === data.id ? { ...p, ...data } : p)) };
     case "poll/poll.delete":
       return { ...state, polls: state.polls.filter((p) => p.id !== data.id) };
+    case "reactions/reaction.update":
+      // Every connected viewer of THIS event gets this envelope (server/app/services/
+      // bus.py publish is scoped per event_id), so event isolation is inherited for
+      // free — the reducer never has to check data.event_id against eventId here.
+      return { ...state, reactions: data.reactions || {} };
     default:
       return state;
   }
@@ -147,6 +160,11 @@ export default function EventWatch() {
   const setRegToken = useCallback((token) => {
     localStorage.setItem(`zk_reg_${eventId}`, token);
     setRegTokenState(token);
+  }, [eventId]);
+  const [linkToken, setLinkTokenState] = useState(() => localStorage.getItem(`zk_link_${eventId}`));
+  const setLinkToken = useCallback((token) => {
+    localStorage.setItem(`zk_link_${eventId}`, token);
+    setLinkTokenState(token);
   }, [eventId]);
 
   const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
@@ -172,7 +190,7 @@ export default function EventWatch() {
     status: liveStatus,
     send: sendLive,
     disconnect: disconnectLive,
-  } = useEventStream(eventId, onLiveEnvelope, regToken);
+  } = useEventStream(eventId, onLiveEnvelope, regToken, linkToken);
 
   const [watch, setWatch] = useState(null);
   const [notFound, setNotFound] = useState(false);
@@ -194,13 +212,18 @@ export default function EventWatch() {
 
   const fetchWatch = () => {
     // A host-invited or self-registered link carries the access token in the URL
-    // (?reg=...) — save it locally so a refresh (or a later visit with no query string)
-    // keeps working without the visitor needing to click the emailed link again.
-    const urlReg = new URLSearchParams(window.location.search).get("reg");
+    // (?reg=... or ?link=...) — save it locally so a refresh (or a later visit with no
+    // query string) keeps working without the visitor needing to click the shared link again.
+    const params = new URLSearchParams(window.location.search);
+    const urlReg = params.get("reg");
+    const urlLink = params.get("link");
     if (urlReg) setRegToken(urlReg);
+    if (urlLink) setLinkToken(urlLink);
     const reg = urlReg || regToken;
+    const link = urlLink || linkToken;
+    const accessParams = { ...(reg ? { reg } : {}), ...(link ? { link } : {}) };
     api
-      .get(`/events/${eventId}/watch`, { params: reg ? { reg } : undefined })
+      .get(`/events/${eventId}/watch`, { params: Object.keys(accessParams).length ? accessParams : undefined })
       .then(({ data }) => setWatch(data))
       .catch(() => setNotFound(true))
       .finally(() => setLoading(false));
@@ -223,12 +246,14 @@ export default function EventWatch() {
   const event = watch ? watchToMockEvent(watch) : null;
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
-  const identified = !!(user || regToken);
+  const identified = !!(user || regToken || linkToken);
   const handleLeaveEvent = useCallback(() => {
     disconnectLive();
 
     localStorage.removeItem(`zk_reg_${eventId}`);
+    localStorage.removeItem(`zk_link_${eventId}`);
     setRegTokenState(null);
+    setLinkTokenState(null);
 
     window.location.href = "/";
   }, [disconnectLive, eventId]);
@@ -331,7 +356,13 @@ export default function EventWatch() {
             ) : (
               <VideoPlayer event={event} viewers={viewers} watch={watch} />
             )}
-            {!timeGated && <ReactionBar eventId={eventId} />}
+            {!timeGated && (
+              <ReactionBar
+                reactions={panel.reactions}
+                onReact={(key) => sendLive("reaction.add", { key })}
+                disabled={liveStatus !== "open"}
+              />
+            )}
           </div>
 
           {/* row-span-2 so the panel's grid area covers the player AND the info card —

@@ -93,17 +93,18 @@ async def _accept(websocket: WebSocket, event_id: uuid.UUID) -> bool:
 
 
 @router.websocket("/events/{event_id}/ws")
-async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | None = None, reg: str | None = None):
+async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | None = None, reg: str | None = None, link: str | None = None):
     # Real device/platform mix for the host's analytics panel, straight off the handshake.
     # Nothing is inferred beyond what the UA states; unknowns stay "Unknown".
     agent = broadcast.classify_ua(websocket.headers.get("user-agent"))
     db = next(get_db())
     try:
         user = _user_from_token(token, db)
-        # No login? An anonymous visitor who self-identified with name+email (the
-        # registration_required video gate, or the chat/Q&A/polls identify prompt on any
-        # other event) gets a socket too — see mod.resolve_ctx_from_registration.
-        registration = None if user else _registration_from_reg_token(reg, event_id, db)
+        # Anonymous credentials are alternatives, not a privilege escalation: a valid
+        # registration or host-issued access link can establish a viewer socket. If a
+        # logged-in user is from the wrong org, we still allow a valid event-specific link
+        # to admit them as a guest rather than letting the unrelated JWT block the share link.
+        registration = _registration_from_reg_token(reg, event_id, db)
     finally:
         db.close()
     # Org isolation + per-event moderator check happen BEFORE any envelope is sent, so an
@@ -113,17 +114,22 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     # the browser's CloseEvent.code comes back as 1006 (spec-mandated for a failed handshake),
     # which silently defeats the client's FATAL_CODES-based reconnect-suppression
     # (useEventStream.js) and makes it retry an expired/invalid token forever.
-    if user is None and registration is None:
+    if user is None and registration is None and not link:
         if not await _accept(websocket, event_id):
             return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired session")
         return
 
-    ctx = (
-        await asyncio.to_thread(mod.resolve_ctx, event_id, user)
-        if user is not None
-        else await asyncio.to_thread(mod.resolve_ctx_from_registration, event_id, registration)
-    )
+    ctx = None
+    if user is not None:
+        ctx = await asyncio.to_thread(mod.resolve_ctx, event_id, user)
+    if ctx is None and registration is not None:
+        ctx = await asyncio.to_thread(mod.resolve_ctx_from_registration, event_id, registration)
+    if ctx is None and link:
+        # Final credential path for a private event Share URL. This is intentionally
+        # resolved server-side before accept/snapshot so a direct socket URL cannot bypass
+        # the same event-bound, revocable access-link rules as GET /events/{id}/watch.
+        ctx = await asyncio.to_thread(mod.resolve_ctx_from_access_link, event_id, link)
     if ctx is None:
         if not await _accept(websocket, event_id):
             return
