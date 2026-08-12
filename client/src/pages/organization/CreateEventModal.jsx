@@ -8,7 +8,21 @@ import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import MemberPicker from "./MemberPicker";
 
-const CATEGORIES = ["Webinar", "Conference", "Product Launch", "Workshop", "Q&A Session", "Internal"];
+// Free-form on the server (`EventCreate.category` is `str | None`, max_length=100 — no enum,
+// no DB constraint), so this list is purely the UI's menu and can grow without a migration.
+const CATEGORIES = [
+  "Webinar",
+  "Conference",
+  "Corporate Event",
+  "Product Launch",
+  "Workshop / Training",
+  "Entertainment",
+  "Sports",
+  "Wedding / Celebration",
+  "Funeral / Memorial",
+  "Community / Charity",
+  "Other",
+];
 const TIMEZONES = ["UTC", "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Kolkata", "Asia/Singapore"];
 
 // Matches the backend Visibility enum (public | private | unlisted).
