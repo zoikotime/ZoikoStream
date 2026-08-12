@@ -63,7 +63,7 @@ export default function VideoPlayer({ event, viewers, watch }) {
   const canStream = Boolean(watch?.status === "live" && watch?.livekit_token);
   const canReplay = isEnded && Boolean(watch?.recording_url);
 
-  const { mediaRef, connected, hasVideo, error: streamError } = useLiveKitViewer({
+  const { mediaRef, connected, reconnecting, hasVideo, error: streamError } = useLiveKitViewer({
     enabled: canStream,
     url: watch?.livekit_url,
     token: watch?.livekit_token,
@@ -299,12 +299,14 @@ export default function VideoPlayer({ event, viewers, watch }) {
                 <p className="text-sm font-semibold text-white">{event.host}</p>
                 <p className="text-xs text-white/70">
                   {canStream && streamError
-                    ? "Couldn't connect to the stream"
-                    : canStream && connected
-                      ? "Waiting for the host's camera…"
-                      : isLive
-                        ? "On air now"
-                        : "Host"}
+                    ? streamError
+                    : canStream && reconnecting
+                      ? "Reconnecting…"
+                      : canStream && connected
+                        ? "Waiting for the host's camera…"
+                        : isLive
+                          ? "On air now"
+                          : "Host"}
                 </p>
               </div>
             </div>

@@ -92,8 +92,12 @@ _SUPPORT_TICKET_COLUMNS = [
 
 # NULL = self-serve registration; set = host-initiated invite (routers/events.py
 # invite_viewers), which also doubles as the access grant into a PRIVATE event.
+# claim_token_hash/claimed_at: one-device claim on a private event's personal invite link —
+# see models/event.py EventRegistration docstring.
 _EVENT_REGISTRATION_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS invited_by UUID REFERENCES users(id)",
+    "ADD COLUMN IF NOT EXISTS claim_token_hash VARCHAR(64)",
+    "ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ",
 ]
 
 # Schema drift: the live table carries org_id/user_id/status/bookmarked/watch_seconds/

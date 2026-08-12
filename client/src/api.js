@@ -8,7 +8,12 @@ export const API_BASE =
 
 // /api namespace: the SPA's own routes (/dashboard, /admin/*, /organization/*) are spelled
 // like the server's router prefixes, and same-origin serving makes that a collision.
-const api = axios.create({ baseURL: `${API_BASE}/api` });
+// withCredentials: GET /events/:id/watch sets an httpOnly claim cookie the first time a
+// private event's invite link is used (routers/events.py) — without this the browser never
+// sends or stores it, and the one-device claim silently never engages. Safe cross-origin in
+// dev too: the backend's CORS config already pins allow_credentials to specific origins,
+// never "*".
+const api = axios.create({ baseURL: `${API_BASE}/api`, withCredentials: true });
 
 // Attach the stored token to every request.
 api.interceptors.request.use((config) => {

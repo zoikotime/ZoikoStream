@@ -29,22 +29,29 @@ import { Room, RoomEvent, Track } from "livekit-client";
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_RECONNECT_DELAY_MS = 1500;
 
-export default function useLiveKitPublish({ enabled, url, token, streamRef, screenTrack, videoTrack }) {
+export default function useLiveKitPublish({
+  enabled, url, token, streamRef, screenTrack, screenAudioTrack, videoTrack,
+}) {
   const roomRef = useRef(null);
   // The published video track's publication, so screen share can unpublish/republish it
   // by reference instead of guessing what's currently live.
   const cameraPubRef = useRef(null);
   const screenPubRef = useRef(null);
+  // The shared tab/window's own sound, published alongside (never instead of) the mic —
+  // a viewer's <video> attaches every subscribed track, so both are simply audible at once.
+  const screenAudioPubRef = useRef(null);
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [publishError, setPublishError] = useState(null);
 
-  // Latest screenTrack without making the connect effect below re-run on every toggle —
-  // that effect only needs to know what's active the moment it (re)connects; the swap
-  // effect further down handles a toggle while already connected.
+  // Latest screenTrack/screenAudioTrack without making the connect effect below re-run on
+  // every toggle — that effect only needs to know what's active the moment it (re)connects;
+  // the swap effect further down handles a toggle while already connected.
   const screenTrackRef = useRef(screenTrack);
+  const screenAudioTrackRef = useRef(screenAudioTrack);
   useEffect(() => {
     screenTrackRef.current = screenTrack;
+    screenAudioTrackRef.current = screenAudioTrack;
   });
 
   useEffect(() => {
@@ -64,6 +71,11 @@ export default function useLiveKitPublish({ enabled, url, token, streamRef, scre
       const activeScreen = screenTrackRef.current;
       if (activeScreen) {
         screenPubRef.current = await room.localParticipant.publishTrack(activeScreen, { source: Track.Source.ScreenShare });
+        if (screenAudioTrackRef.current) {
+          screenAudioPubRef.current = await room.localParticipant.publishTrack(
+            screenAudioTrackRef.current, { source: Track.Source.ScreenShareAudio },
+          );
+        }
       } else if (video) {
         cameraPubRef.current = await room.localParticipant.publishTrack(video, { source: Track.Source.Camera });
       }
@@ -135,6 +147,7 @@ export default function useLiveKitPublish({ enabled, url, token, streamRef, scre
       roomRef.current = null;
       cameraPubRef.current = null;
       screenPubRef.current = null;
+      screenAudioPubRef.current = null;
     };
   }, [enabled, url, token, streamRef]);
 
@@ -157,9 +170,18 @@ export default function useLiveKitPublish({ enabled, url, token, streamRef, scre
         if (!cancelled) {
           screenPubRef.current = await room.localParticipant.publishTrack(screenTrack, { source: Track.Source.ScreenShare });
         }
+        if (!cancelled && screenAudioTrack && !screenAudioPubRef.current) {
+          screenAudioPubRef.current = await room.localParticipant.publishTrack(
+            screenAudioTrack, { source: Track.Source.ScreenShareAudio },
+          );
+        }
       } else if (!screenTrack && screenPubRef.current) {
         await room.localParticipant.unpublishTrack(screenPubRef.current.track, false);
         screenPubRef.current = null;
+        if (screenAudioPubRef.current) {
+          await room.localParticipant.unpublishTrack(screenAudioPubRef.current.track, false);
+          screenAudioPubRef.current = null;
+        }
         const video = streamRef.current?.getVideoTracks()[0];
         if (video && !cancelled) {
           cameraPubRef.current = await room.localParticipant.publishTrack(video, { source: Track.Source.Camera });
@@ -169,7 +191,7 @@ export default function useLiveKitPublish({ enabled, url, token, streamRef, scre
     return () => {
       cancelled = true;
     };
-  }, [screenTrack, connected, streamRef]);
+  }, [screenTrack, screenAudioTrack, connected, streamRef]);
 
   // Swaps the published camera track when it changes identity WHILE already connected —
   // e.g. useMediaPreview's flipCamera, which tears down and reacquires a whole new

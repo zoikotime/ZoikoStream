@@ -201,6 +201,32 @@ def list_registrations(db, event_id) -> list[EventRegistration]:
     ).all()
 
 
+def get_registration_by_id(db, event_id, registration_id) -> EventRegistration | None:
+    return db.scalar(
+        select(EventRegistration).where(
+            EventRegistration.id == registration_id, EventRegistration.event_id == event_id,
+        )
+    )
+
+
+# One-device claim on a private event's personal invite token — see EventRegistration's
+# docstring. Reuses _hash_link_token's sha256 scheme further down this file.
+
+def claim_registration(db, reg: EventRegistration) -> str:
+    """First successful use of a private event's invite token claims this row to one
+    device. Returns the raw claim secret to set as an httpOnly cookie; only its hash is
+    stored, so a leaked DB row alone can't forge a claim."""
+    raw = secrets.token_urlsafe(32)
+    reg.claim_token_hash = _hash_link_token(raw)
+    reg.claimed_at = datetime.now(timezone.utc)
+    db.commit()
+    return raw
+
+
+def claim_matches(reg: EventRegistration, raw: str | None) -> bool:
+    return bool(raw) and reg.claim_token_hash == _hash_link_token(raw)
+
+
 def list_replay_candidates(db, event_id) -> list[LiveRecording]:
     """Finished, actually-captured recordings for this event, newest first — what a viewer's
     replay link points at. `enforced=False` rows (LiveKit egress unavailable) are excluded:

@@ -34,7 +34,9 @@ from ..models import (
     LiveAnnouncement,
     LiveMessage,
     LivePoll,
+    LivePollVote,
     LiveQuestion,
+    LiveQuestionVote,
     User,
 )
 from . import bus, livekit
@@ -661,13 +663,31 @@ async def _qa_ask(ctx, payload):
 
 
 async def _qa_vote(ctx, payload):
+    """Upvote is a toggle (see WatchPanel.jsx's toggleVote), enforced server-side via a
+    (question, voter) ledger row rather than trusting the client's local `voted` state —
+    that state is only ever in memory, so a page refresh reset it to "not voted" with
+    nothing stopping a repeat upvote from being counted again. `down` here means "remove
+    my upvote", not "downvote"; it's a no-op if this voter never had one."""
+    down = bool(payload.get("down"))
+
     def work(db):
         q = _row(db, LiveQuestion, ctx, payload.get("id"))
         if not q:
             return None
-        # ponytail: no per-user vote ledger — one upvote row per person needs its own
-        # table; add live_question_votes if vote-stuffing shows up.
-        q.votes = max(0, q.votes + (-1 if payload.get("down") else 1))
+        existing = db.scalar(
+            select(LiveQuestionVote).where(
+                LiveQuestionVote.question_id == q.id, LiveQuestionVote.user_id == ctx.user_id,
+            )
+        )
+        if down:
+            if existing is not None:
+                db.delete(existing)
+                q.votes = max(0, q.votes - 1)
+        elif existing is None:
+            db.add(LiveQuestionVote(
+                event_id=ctx.event_id, org_id=ctx.org_id, question_id=q.id, user_id=ctx.user_id,
+            ))
+            q.votes += 1
         return question_out(q)
 
     q = await tx(work)
@@ -852,6 +872,11 @@ async def _poll_lifecycle(ctx, payload, op: str):
 
 
 async def _poll_vote(ctx, payload):
+    """A vote is final (the console never offers "change your vote" — see WatchPanel.jsx's
+    Poll), so unlike _qa_vote this isn't a toggle: a (poll, voter) ledger row existing at
+    all means this voter is done, no matter what option they try next. Without this check,
+    the option index alone gated nothing — a page refresh reset the client's local `voted`
+    flag with nothing server-side remembering the vote had already been cast."""
     index = payload.get("option")
 
     def work(db):
@@ -861,6 +886,14 @@ async def _poll_vote(ctx, payload):
         options = [dict(o) for o in (p.options or [])]
         if not isinstance(index, int) or not 0 <= index < len(options):
             return None
+        already_voted = db.scalar(
+            select(LivePollVote).where(LivePollVote.poll_id == p.id, LivePollVote.user_id == ctx.user_id)
+        )
+        if already_voted is not None:
+            return poll_out(p)  # no-op: return current truth, don't count a second vote
+        db.add(LivePollVote(
+            event_id=ctx.event_id, org_id=ctx.org_id, poll_id=p.id, user_id=ctx.user_id, option=index,
+        ))
         options[index]["votes"] = options[index].get("votes", 0) + 1
         p.options = options  # reassign: JSON columns don't track in-place mutation
         return poll_out(p)

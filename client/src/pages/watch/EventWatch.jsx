@@ -16,7 +16,7 @@ import { Link, useParams } from "react-router-dom";
 import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
 import { useAuth } from "../../auth/AuthContext";
-import api from "../../api";
+import api, { errMsg } from "../../api";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
@@ -194,6 +194,7 @@ export default function EventWatch() {
 
   const [watch, setWatch] = useState(null);
   const [notFound, setNotFound] = useState(false);
+  const [blockedReason, setBlockedReason] = useState(null);
   const [loading, setLoading] = useState(true);
 
   // Reset for a new eventId synchronously during render, not inside an effect — this is
@@ -207,6 +208,7 @@ export default function EventWatch() {
     setLoadedEventId(eventId);
     setWatch(null);
     setNotFound(false);
+    setBlockedReason(null);
     setLoading(true);
   }
 
@@ -225,7 +227,13 @@ export default function EventWatch() {
     api
       .get(`/events/${eventId}/watch`, { params: Object.keys(accessParams).length ? accessParams : undefined })
       .then(({ data }) => setWatch(data))
-      .catch(() => setNotFound(true))
+      .catch((e) => {
+        // A 403 here means the visitor was recognized but refused (private event, or an
+        // invite link already claimed by another device) — worth a real reason, not the
+        // generic "not found" a stranger with no token at all should see.
+        if (e?.response?.status === 403) setBlockedReason(errMsg(e));
+        setNotFound(true);
+      })
       .finally(() => setLoading(false));
   };
 
@@ -284,7 +292,9 @@ export default function EventWatch() {
     return (
       <div className="grid min-h-screen place-items-center bg-slate-50 dark:bg-slate-950">
         <div className="text-center">
-          <p className="text-sm text-slate-500 dark:text-slate-400">This event could not be found.</p>
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            {blockedReason || "This event could not be found."}
+          </p>
           <Link to="/" className="mt-2 inline-block text-sm font-medium text-emerald-600 hover:text-emerald-500 dark:text-emerald-400">
             Back to home
           </Link>
