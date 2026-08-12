@@ -98,15 +98,24 @@ def create_registration_token(registration: EventRegistration) -> str:
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 
-def decode_registration_token(token: str, event_id: uuid.UUID) -> str | None:
-    """Returns the registered email if `token` verifies and matches `event_id`, else None."""
+def decode_registration_payload(token: str, event_id: uuid.UUID) -> dict | None:
+    """Full claims (reg id, email) of a registration token if it verifies and matches
+    event_id, else None. watch_event needs the reg id to look up the row for private-event
+    claim checking (crud.claim_registration); decode_registration_token below covers callers
+    that only ever needed the email."""
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         return None
     if payload.get("event_id") != str(event_id):
         return None
-    return payload.get("email")
+    return payload
+
+
+def decode_registration_token(token: str, event_id: uuid.UUID) -> str | None:
+    """Returns the registered email if `token` verifies and matches `event_id`, else None."""
+    payload = decode_registration_payload(token, event_id)
+    return payload.get("email") if payload else None
 
 
 def require_super_admin(user: User = Depends(get_current_user)) -> User:

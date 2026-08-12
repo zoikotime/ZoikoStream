@@ -139,7 +139,15 @@ class EventRegistration(Base):
     User row: registrants are identified only by name/email, and access to the watch page's
     stream is granted via a signed token (see security.py), not login. A row also doubles as
     the access grant that lets a specific outside person into a PRIVATE event — see
-    watch_event's visibility gate."""
+    watch_event's visibility gate.
+
+    claim_token_hash/claimed_at: a PRIVATE event's personal invite token is a long-lived
+    bearer credential (90 days, see create_registration_token) — anyone who gets the URL,
+    forwarded or not, could use it. The first browser to present a valid token for a private
+    event "claims" this row (crud.claim_registration); watch_event then requires every later
+    request to present the matching claim cookie, so a forwarded link stops working for
+    anyone but the device that claimed it first. Only the hash is stored, same pattern as
+    EventAccessLink.token_hash."""
 
     __tablename__ = "event_registrations"
     __table_args__ = (UniqueConstraint("event_id", "email", name="uq_event_registration_email"),)
@@ -149,6 +157,8 @@ class EventRegistration(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     invited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    claim_token_hash: Mapped[str | None] = mapped_column(String(64))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped["Event"] = relationship()

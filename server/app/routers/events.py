@@ -13,7 +13,7 @@ Permissions:
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -32,7 +32,7 @@ from ..schemas.event import (
     RegistrantOut, RegistrationCreate, RegistrationOut, ViewerInviteCreate, WatchOut,
 )
 from ..security import (
-    create_registration_token, decode_registration_token,
+    create_registration_token, decode_registration_payload,
     get_current_user, get_current_user_optional, org_scoped, require_org_admin,
 )
 from ..services import broadcast as broadcast_svc
@@ -132,6 +132,8 @@ def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: S
 @router.get("/{event_id}/watch", response_model=WatchOut)
 def watch_event(
     event_id: uuid.UUID,
+    request: Request,
+    response: Response,
     reg: str | None = Query(None, description="Registration access token from POST /register"),
     link: str | None = Query(None, description="Access-link token from POST /access-links"),
     user: User | None = Depends(get_current_user_optional),
@@ -149,6 +151,14 @@ def watch_event(
     Independently, a registration_required event withholds the stream token until the caller
     is registered (org members always pass; everyone else needs a valid `reg` or `link` token).
 
+    A private event's `reg` token is otherwise a plain 90-day bearer credential — anyone who
+    gets the URL (forwarded, screenshotted, ...) could use it. The first browser to present a
+    valid one claims the registration row to itself (crud.claim_registration) via an httpOnly
+    cookie; every later request for a PRIVATE event must present the matching cookie, or the
+    token is treated as not-invited. Not enforced for a merely registration_required PUBLIC
+    event — that's capacity/data collection, not a confidentiality boundary, so sharing that
+    link isn't the problem this exists to solve.
+
     A scheduled start_time/end_time also time-boxes the VIEWER link: before start_time or
     after end_time, no stream token goes out even if the host is live — this is deliberately
     independent of `status`, which the host still drives manually (going live early or
@@ -159,12 +169,41 @@ def watch_event(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
 
     is_org_member = bool(user and (user.role == "super_admin" or user.org_id == ev.org_id))
-    invited = bool(reg) and decode_registration_token(reg, ev.id) is not None
+    reg_payload = decode_registration_payload(reg, ev.id) if reg else None
+    invited = reg_payload is not None
     link_admitted = bool(link) and crud.find_access_link(db, ev.id, link) is not None
+
+    claim_rejected = False
+    if invited and ev.visibility == "private" and not is_org_member:
+        reg_row = crud.get_registration_by_id(db, ev.id, uuid.UUID(reg_payload["reg"]))
+        if reg_row is None:
+            invited = False
+        elif reg_row.claim_token_hash is None:
+            raw_claim = crud.claim_registration(db, reg_row)
+            # Cloud Run terminates TLS and forwards to this container over plain HTTP, so
+            # request.url.scheme alone reads "http" even in production — X-Forwarded-Proto
+            # is what actually says the browser connection was HTTPS. Deriving this from
+            # settings.APP_URL instead is a trap: this project's local .env often points
+            # APP_URL at the deployed prod URL even while running against 127.0.0.1, which
+            # would mark the cookie Secure and make the browser silently refuse to ever send
+            # it back over plain http — locking out the real invitee on their own next visit.
+            is_https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+            response.set_cookie(
+                f"zk_claim_{reg_row.id}", raw_claim, httponly=True, samesite="lax",
+                secure=is_https, max_age=60 * 60 * 24 * 90,
+            )
+        elif not crud.claim_matches(reg_row, request.cookies.get(f"zk_claim_{reg_row.id}")):
+            invited = False
+            claim_rejected = True
+
     registered = is_org_member or invited or link_admitted
 
     if ev.visibility == "private" and not is_org_member and not invited and not link_admitted:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private")
+        detail = (
+            "This invite has already been used on another device — ask the host to resend it"
+            if claim_rejected else "This event is private"
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail)
 
     now = datetime.now(timezone.utc)
     not_started = bool(ev.start_time and now < ev.start_time)
