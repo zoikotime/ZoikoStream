@@ -171,8 +171,9 @@ export default function EventReadiness() {
           </label>
           <span className={cx("ml-auto text-[11px] leading-snug", CONSOLE.faint)}>
             Every upcoming event with a scheduled start time. Standard-impact events have no
-            mandatory gates, so they always read Passed — the gate ladder only tightens for
-            High and Unrepeatable events.
+            mandatory gates, so missing configuration can never Block them — but an unset gate
+            (no host, no recording, ...) still reads Conditional even on a Standard event; only
+            High and Unrepeatable events can actually Block on it.
           </span>
         </div>
       </Panel>

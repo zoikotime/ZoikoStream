@@ -142,12 +142,16 @@ function CaseDrawer({ incident, open, onClose, onUpdated }) {
       <p className={cx("font-mono text-[11px]", CONSOLE.faint)}>{incident.ref}</p>
       {incident.detail && <p className={cx("mt-2 text-[13px]", CONSOLE.body)}>{incident.detail}</p>}
 
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      {/* DetailField's own label/value grid reads the sm: breakpoint off the viewport, not
+          this ~450px drawer panel — an outer grid-cols-2 squeezes each field too narrow and
+          wraps the value character-by-character. Stack instead, per DetailField's own doc
+          comment on how a drawer should use it. */}
+      <dl className={cx("mt-4 divide-y", CONSOLE.divider)}>
         <DetailField label="Organization" value={incident.organization_name || "—"} />
         <DetailField label="Commander" value={incident.commander || "—"} />
         <DetailField label="Opened" value={incident.started_at ? new Date(incident.started_at).toLocaleString() : "—"} />
         <DetailField label="Resolved" value={incident.resolved_at ? new Date(incident.resolved_at).toLocaleString() : "—"} />
-      </div>
+      </dl>
 
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         <div>

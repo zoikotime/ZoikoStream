@@ -65,7 +65,11 @@ function RecordingDrawer({ recording, open, onClose }) {
 
   return (
     <Drawer open={open} onClose={onClose} title={recording.event_title || "Untitled event"} width="w-[28rem] max-w-[90vw]">
-      <div className="grid grid-cols-2 gap-3">
+      {/* DetailField's own label/value grid reads the sm: breakpoint off the viewport, not
+          this ~450px drawer panel — an outer grid-cols-2 squeezes each field too narrow and
+          wraps the value character-by-character. Stack instead, per DetailField's own doc
+          comment on how a drawer should use it. */}
+      <dl className={cx("divide-y", CONSOLE.divider)}>
         <DetailField label="Organization" value={recording.organization || "—"} />
         <DetailField label="Status" value={<Badge tone={STATUS_TONE[recording.status]}>{recording.status}</Badge>} />
         <DetailField label="Quality" value={recording.quality || "—"} />
@@ -76,7 +80,7 @@ function RecordingDrawer({ recording, open, onClose }) {
           label="LiveKit egress"
           value={recording.enforced ? <Badge tone="success">Enforced</Badge> : <Badge tone="warning">Not enforced</Badge>}
         />
-      </div>
+      </dl>
 
       {recording.error && (
         <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-[12px] text-rose-700 dark:border-rose-500/25 dark:bg-rose-500/10 dark:text-rose-300">

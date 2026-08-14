@@ -63,7 +63,7 @@ export default function VideoPlayer({ event, viewers, watch }) {
   const canStream = Boolean(watch?.status === "live" && watch?.livekit_token);
   const canReplay = isEnded && Boolean(watch?.recording_url);
 
-  const { mediaRef, connected, reconnecting, hasVideo, error: streamError } = useLiveKitViewer({
+  const { mediaRef, connected, reconnecting, hasVideo, hasAudio, error: streamError } = useLiveKitViewer({
     enabled: canStream,
     url: watch?.livekit_url,
     token: watch?.livekit_token,
@@ -158,11 +158,19 @@ export default function VideoPlayer({ event, viewers, watch }) {
     else mediaRef.current.pause();
   }, [canStream, playing, hasVideo, mediaRef]);
 
+  // livekit-client's own attachToElement() (called on every track.attach(), including a
+  // reconnect's resubscribe) sets `element.muted = mediaStream.getAudioTracks().length ===
+  // 0` as an autoplay-compliance side effect — the moment the audio track attaches, it
+  // force-UNMUTES the element outright, silently overriding whatever the viewer had chosen.
+  // Depending on hasVideo/hasAudio (flipped by useLiveKitViewer's TrackSubscribed/
+  // Unsubscribed handlers, i.e. exactly when attach()/detach() run) re-asserts our own
+  // muted/volume state right after LiveKit's reset instead of only reacting to the viewer's
+  // own clicks — otherwise a track (re)attaching after the user muted quietly undoes it.
   useEffect(() => {
     if (!canStream || !mediaRef.current) return;
     mediaRef.current.muted = muted;
     mediaRef.current.volume = Math.min(1, Math.max(0, volume / 100));
-  }, [canStream, muted, volume, mediaRef]);
+  }, [canStream, muted, volume, mediaRef, hasVideo, hasAudio]);
 
   useEffect(() => {
     if (!canReplay || !replayRef.current) return;
