@@ -21,6 +21,12 @@ from ..schemas.admin import (
     FeatureFlagCreate,
     FeatureFlagOut,
     FeatureFlagUpdate,
+    GovernanceRecordCreate,
+    GovernanceRecordOut,
+    GovernanceRecordUpdate,
+    IncidentCreate,
+    IncidentOut,
+    IncidentUpdate,
     OrgCreate,
     OrgOut,
     OrgUpdate,
@@ -225,6 +231,14 @@ def list_users(
     return Page(items=items, total=total, page=page, page_size=page_size)
 
 
+@router.get("/users/summary")
+def user_summary(db: Session = Depends(get_db)):
+    """Dataset-wide counts for the Users console's KPI row, independent of whatever search/
+    filter is active — one query instead of the four page_size=1 round trips the page used
+    to make just to total/active/inactive/super_admin counts."""
+    return crud.user_stats(db)
+
+
 @router.patch("/users/{user_id}")
 def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
                db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
@@ -302,6 +316,40 @@ def live_events(state: str = Query("live", pattern="^(live|recent)$"), db: Sessi
 @router.get("/platform-health")
 def platform_health(db: Session = Depends(get_db)):
     return svc.platform_health(db)
+
+
+@router.get("/recordings")
+def list_recordings(
+    status_: str | None = Query(None, alias="status"),
+    org_id: uuid.UUID | None = None,
+    limit: int = Query(200, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """Cross-org recordings for the Media console (pages/admin/Media.jsx) — real
+    LiveRecording rows, nothing fabricated."""
+    return svc.list_recordings(db, status=status_, org_id=org_id, limit=limit)
+
+
+@router.get("/recordings/{recording_id}/playback-url")
+def recording_playback_url(recording_id: uuid.UUID, db: Session = Depends(get_db)):
+    url = svc.recording_playback_url(db, recording_id)
+    if url is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No playable file for this recording")
+    return {"url": url}
+
+
+@router.get("/event-readiness")
+def event_readiness(
+    include_test: bool = Query(False),
+    high_impact_only: bool = Query(False),
+    limit: int = Query(200, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """The full Event Readiness pipeline (pages/admin/EventReadiness.jsx) — the same real
+    gate computation the Command Center's badge count and "upcoming high-impact" widget
+    already use (ops_svc.event_readiness), just without the dashboard's top-8/high-impact-
+    only narrowing, so every upcoming event with a scheduled start time shows up here."""
+    return ops_svc.event_readiness(db, include_test=include_test, limit=limit, high_impact_only=high_impact_only)
 
 
 @router.get("/events/{event_id}")
@@ -516,6 +564,92 @@ def delete_support_ticket(ticket_id: uuid.UUID, request: Request,
     crud.delete_support_ticket(db, ticket)
     _audit(db, admin, request, "support_ticket.delete", target_type="support_ticket",
            target_id=ticket_id, org_id=org_id)
+
+
+# ── Incidents (Trust & Safety console) ───────────────────────────────────────
+# Same `incidents` table the Command Center's Incidents panel and action queues already
+# read (services/ops.py) — this is the write side that table never had, and the console a
+# super admin uses to open/track/resolve a security case for real.
+
+@router.get("/incidents", response_model=Page)
+def list_incidents(
+    status_: str | None = Query(None, alias="status"),
+    kind: str | None = None,
+    org_id: uuid.UUID | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    items, total = crud.list_incidents(db, status=status_, kind=kind, org_id=org_id, page=page, page_size=page_size)
+    return Page(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.post("/incidents", response_model=IncidentOut, status_code=status.HTTP_201_CREATED)
+def create_incident(data: IncidentCreate, request: Request,
+                    db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    if data.org_id and db.get(Organization, data.org_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    incident = crud.create_incident(db, data, commander_default=admin.full_name or admin.email)
+    _audit(db, admin, request, "incident.create", target_type="incident",
+           target_id=incident.id, org_id=data.org_id, meta={"title": data.title, "severity": data.severity})
+    return incident
+
+
+@router.patch("/incidents/{incident_id}", response_model=IncidentOut)
+def update_incident(incident_id: uuid.UUID, data: IncidentUpdate, request: Request,
+                    db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    incident = crud.get_incident(db, incident_id)
+    if not incident:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incident not found")
+    org_id = incident.org_id
+    out = crud.update_incident(db, incident, data)
+    _audit(db, admin, request, "incident.update", target_type="incident",
+           target_id=incident_id, org_id=org_id, meta=data.model_dump(exclude_none=True))
+    return out
+
+
+# ── Governance records ────────────────────────────────────────────────────────
+# The same `governance_records` table services/ops.py already reads for
+# single_path_override and break_glass — this is the write side, plus the other kinds
+# (dpia, legal_hold, privacy_request, access_review, exception, obligation) the Governance
+# console needs. GOVERNANCE_KINDS is this API's own closed list (informational for
+# clients), not a DB constraint.
+
+@router.get("/governance-records", response_model=Page)
+def list_governance_records(
+    kind: str | None = None,
+    status_: str | None = Query(None, alias="status"),
+    org_id: uuid.UUID | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    items, total = crud.list_governance_records(db, kind=kind, status=status_, org_id=org_id, page=page, page_size=page_size)
+    return Page(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.post("/governance-records", response_model=GovernanceRecordOut, status_code=status.HTTP_201_CREATED)
+def create_governance_record(data: GovernanceRecordCreate, request: Request,
+                             db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    if data.org_id and db.get(Organization, data.org_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    record = crud.create_governance_record(db, data)
+    _audit(db, admin, request, "governance_record.create", target_type="governance_record",
+           target_id=record.id, org_id=data.org_id, meta={"kind": data.kind})
+    return record
+
+
+@router.patch("/governance-records/{record_id}", response_model=GovernanceRecordOut)
+def update_governance_record(record_id: uuid.UUID, data: GovernanceRecordUpdate, request: Request,
+                             db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    record = crud.get_governance_record(db, record_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Governance record not found")
+    org_id = record.org_id
+    out = crud.update_governance_record(db, record, data)
+    _audit(db, admin, request, "governance_record.update", target_type="governance_record",
+           target_id=record_id, org_id=org_id, meta=data.model_dump(exclude_none=True))
+    return out
 
 
 # ── Developer / API keys ─────────────────────────────────────────────────────

@@ -33,3 +33,20 @@ export const errMsg = (e, fallback = "Something went wrong") => {
   if (Array.isArray(d)) return d.map((x) => x?.msg).filter(Boolean).join(", ") || fallback;
   return e?.message || fallback;
 };
+
+// A failed console load needs a diagnosis, not just "couldn't load X": a 404 means the
+// running server predates this endpoint, 401/403 means the session expired, and a missing
+// status means the API is unreachable — each sends an operator to a different fix, so an
+// ops console (where "why" matters mid-incident) should never collapse them into one
+// generic message. `endpointPath` names the route being loaded, e.g. "/admin/roles".
+export const diagnoseLoadError = (e, endpointPath) => {
+  const status = e?.response?.status;
+  if (status === 404) {
+    return `The API responded, but doesn’t have ${endpointPath} — the server is running an older build. Restart it to pick up the current code.`;
+  }
+  if (status === 401 || status === 403) {
+    return "Your session isn’t authorised for the platform console. Sign in again as a super admin.";
+  }
+  if (status) return `The platform API returned ${status}: ${errMsg(e)}`;
+  return "The platform API is unreachable — check that the API server is running and that VITE_API_URL points at it.";
+};

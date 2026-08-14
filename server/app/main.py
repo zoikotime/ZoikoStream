@@ -4,6 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from jose import JWTError, jwt
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -17,12 +18,14 @@ from .routers.organization import router as organization_router
 from .routers.events import router as events_router
 from .routers.live import router as live_router
 from .routers.commercial import router as commercial_router
+from .security import ALGORITHM
 from .services import bus
+from .services import platform_settings
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
 from .services.ops import request_stats, run_metric_sampler
 from .config import settings
-from .db import DB_MAX_CONNECTIONS
+from .db import DB_MAX_CONNECTIONS, SessionLocal
 
 
 @contextlib.asynccontextmanager
@@ -88,6 +91,58 @@ async def measure_requests(request: Request, call_next):
         raise
     request_stats.record((time.perf_counter() - start) * 1000, response.status_code)
     return response
+
+
+# The management-console surfaces this gate protects: the org/host self-service console
+# (create events, manage members, billing) and its legacy dashboard alias. Scoped
+# deliberately narrow rather than "every /api/ route" — a sweeping gate risks silently
+# blocking something viewer- or webhook-facing that a live broadcast depends on: public
+# event watch/registration pages (/api/events), the live WebSocket + LiveKit's signed
+# webhook receiver (/api/live — the WebSocket scope is "websocket" not "http" anyway, so
+# @app.middleware("http") never sees it), login (/api/auth — a super admin must still be
+# able to sign in to turn maintenance back off; POST /auth/register has its own independent
+# signups_enabled gate, not tied to maintenance), and the admin console itself (/api/admin,
+# already self-gated to super_admin by the router's own dependency).
+_MAINTENANCE_GATED_PREFIXES = ("/api/organization", "/api/dashboard")
+
+
+def _bearer_role(request: Request) -> str | None:
+    """Best-effort role lookup straight from the JWT, without a DB round trip: middleware
+    runs before route dependencies, so there is no `User` from get_current_user yet, and a
+    gate that fires on almost every request should not add a second query on top of the one
+    below. The role claim is the same one create_access_token signs (routers/auth.py) — good
+    enough to answer "is this caller a super admin", which is all this check needs."""
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None
+    try:
+        payload = jwt.decode(auth[7:], settings.SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    return payload.get("role")
+
+
+@app.middleware("http")
+async def maintenance_gate(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith(_MAINTENANCE_GATED_PREFIXES):
+        return await call_next(request)
+    if _bearer_role(request) == "super_admin":
+        return await call_next(request)
+
+    def check():
+        db = SessionLocal()
+        try:
+            return platform_settings.maintenance_mode(db)
+        finally:
+            db.close()
+
+    if await asyncio.to_thread(check):
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "The platform is under maintenance. Please try again shortly."},
+        )
+    return await call_next(request)
 
 
 # Everything lives under /api because the SPA is served from the same origin (see the mount

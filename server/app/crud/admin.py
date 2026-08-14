@@ -13,6 +13,8 @@ from ..models import (
     AuditLog,
     Event,
     FeatureFlag,
+    GovernanceRecord,
+    Incident,
     Organization,
     Plan,
     Release,
@@ -27,6 +29,8 @@ from ..schemas.admin import (
     ApiKeyOut,
     AuditLogOut,
     FeatureFlagOut,
+    GovernanceRecordOut,
+    IncidentOut,
     OrgOut,
     PlanOut,
     ReleaseOut,
@@ -186,6 +190,21 @@ def list_users(db, q=None, role=None, org_id=None, is_active=None, page=1, page_
         stmt.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     ).all()
     return [_user_out(u) for u in users], total
+
+
+def user_stats(db) -> dict:
+    """Dataset-wide counts for the Users console's KPI row — one query instead of the four
+    page_size=1 round trips the page used to make per load."""
+    row = db.execute(
+        select(
+            func.count(),
+            func.count().filter(User.is_active.is_(True)),
+            func.count().filter(User.is_active.is_(False)),
+            func.count().filter(User.role == "super_admin"),
+        )
+    ).one()
+    total, active, inactive, super_admins = row
+    return {"total": total, "active": active, "inactive": inactive, "super_admins": super_admins}
 
 
 def _user_out(u: User) -> AdminUserOut:
@@ -427,6 +446,122 @@ def update_support_ticket(db, ticket: SupportTicket, data) -> SupportTicket:
 def delete_support_ticket(db, ticket: SupportTicket) -> None:
     db.delete(ticket)
     db.commit()
+
+
+# ── Incidents (Trust & Safety console) ───────────────────────────────────────
+
+def _incident_out(i: Incident) -> IncidentOut:
+    out = IncidentOut.model_validate(i)
+    out.organization_name = i.organization.name if i.organization else None
+    return out
+
+
+def _incident_ref(now: datetime) -> str:
+    # INC-20260814-0630-a1b2 — date+time makes it human-scannable, the hex tail keeps
+    # concurrent opens from colliding on the same second.
+    return f"INC-{now:%Y%m%d}-{now:%H%M}-{secrets.token_hex(2)}"
+
+
+def list_incidents(db, status=None, kind=None, org_id=None, page=1, page_size=50):
+    stmt = select(Incident)
+    if status:
+        stmt = stmt.where(Incident.status == status)
+    if kind:
+        stmt = stmt.where(Incident.kind == kind)
+    if org_id:
+        stmt = stmt.where(Incident.org_id == org_id)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    rows = db.scalars(
+        stmt.order_by(Incident.started_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return [_incident_out(i) for i in rows], total
+
+
+def get_incident(db, incident_id) -> Incident | None:
+    return db.get(Incident, incident_id)
+
+
+def create_incident(db, data, commander_default: str | None) -> Incident:
+    now = datetime.now(timezone.utc)
+    incident = Incident(
+        ref=_incident_ref(now), title=data.title, detail=data.detail,
+        severity=data.severity, kind=data.kind, org_id=data.org_id,
+        commander=data.commander or commander_default, started_at=now,
+    )
+    db.add(incident)
+    db.commit()
+    db.refresh(incident)
+    return _incident_out(incident)
+
+
+def update_incident(db, incident: Incident, data) -> Incident:
+    if data.status is not None:
+        incident.status = data.status
+        if data.status == "resolved" and incident.resolved_at is None:
+            incident.resolved_at = datetime.now(timezone.utc)
+        elif data.status != "resolved":
+            incident.resolved_at = None
+    if data.severity is not None:
+        incident.severity = data.severity
+    if data.commander is not None:
+        incident.commander = data.commander
+    db.commit()
+    db.refresh(incident)
+    return _incident_out(incident)
+
+
+# ── Governance records ────────────────────────────────────────────────────────
+
+def _governance_record_out(r: GovernanceRecord) -> GovernanceRecordOut:
+    out = GovernanceRecordOut.model_validate(r)
+    out.organization_name = r.organization.name if r.organization else None
+    return out
+
+
+def list_governance_records(db, kind=None, status=None, org_id=None, page=1, page_size=50):
+    stmt = select(GovernanceRecord)
+    if kind:
+        stmt = stmt.where(GovernanceRecord.kind == kind)
+    if status:
+        stmt = stmt.where(GovernanceRecord.status == status)
+    if org_id:
+        stmt = stmt.where(GovernanceRecord.org_id == org_id)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    rows = db.scalars(
+        stmt.order_by(GovernanceRecord.opened_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return [_governance_record_out(r) for r in rows], total
+
+
+def get_governance_record(db, record_id) -> GovernanceRecord | None:
+    return db.get(GovernanceRecord, record_id)
+
+
+def create_governance_record(db, data) -> GovernanceRecord:
+    record = GovernanceRecord(
+        kind=data.kind, org_id=data.org_id, event_id=data.event_id,
+        detail=data.detail, due_at=data.due_at,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return _governance_record_out(record)
+
+
+def update_governance_record(db, record: GovernanceRecord, data) -> GovernanceRecord:
+    if data.status is not None:
+        record.status = data.status
+        if data.status == "resolved" and record.resolved_at is None:
+            record.resolved_at = datetime.now(timezone.utc)
+        elif data.status != "resolved":
+            record.resolved_at = None
+    if data.detail is not None:
+        record.detail = data.detail
+    if data.due_at is not None:
+        record.due_at = data.due_at
+    db.commit()
+    db.refresh(record)
+    return _governance_record_out(record)
 
 
 # ── Developer / API keys (stored on Organization.api_keys JSON) ─────────────

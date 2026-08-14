@@ -235,6 +235,48 @@ def live_events(db: Session, state: str = "live") -> list[dict]:
     return out
 
 
+def list_recordings(db: Session, status: str | None = None, org_id=None, limit: int = 200) -> list[dict]:
+    """Cross-org recordings for the Media console (pages/admin/Media.jsx) — every real
+    LiveRecording row, joined up to its event and org. No fabricated asset/job/processing
+    pipeline: this is exactly what the platform actually captured, nothing more."""
+    # Deliberately no per-row livekit.object_exists() probe here — that's a real GCS API
+    # call, and this list can run to `limit` rows; recording_playback_url() below does the
+    # existence-backed signed-URL lookup lazily, for one row, when an operator actually asks
+    # to play it back (same one-row-at-a-time cost watch_event already pays per viewer).
+    stmt = select(LiveRecording).order_by(LiveRecording.created_at.desc()).limit(limit)
+    if status:
+        stmt = stmt.where(LiveRecording.status == status)
+    if org_id:
+        stmt = stmt.where(LiveRecording.org_id == org_id)
+    rows = db.scalars(stmt).all()
+    out = []
+    for r in rows:
+        ev = db.get(Event, r.event_id)
+        org = ev.organization if ev else None
+        out.append({
+            "id": str(r.id),
+            "event_id": str(r.event_id),
+            "event_title": ev.title if ev else None,
+            "organization": org.name if org else None,
+            "status": r.status,
+            "quality": r.quality,
+            "size_bytes": r.size_bytes,
+            "enforced": r.enforced,
+            "error": r.error,
+            "started_at": r.started_at,
+            "stopped_at": r.stopped_at,
+            "has_file_reference": bool(r.file_url),
+        })
+    return out
+
+
+def recording_playback_url(db: Session, recording_id) -> str | None:
+    r = db.get(LiveRecording, recording_id)
+    if r is None or not r.file_url or not livekit.object_exists(r.file_url):
+        return None
+    return livekit.signed_url(r.file_url)
+
+
 def _member_out(u: User) -> dict:
     return {"id": str(u.id), "name": u.full_name, "email": u.email}
 

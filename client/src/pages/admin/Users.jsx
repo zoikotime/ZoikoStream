@@ -34,21 +34,17 @@ function useUsersData({ q, role, isActive }) {
 }
 
 // Dataset-wide counts for the KPI cards — independent of whatever filters are active, so
-// they don't collapse to the size of the current search result.
+// they don't collapse to the size of the current search result. One round trip against
+// GET /admin/users/summary rather than four page_size=1 list calls.
 function useUserStats() {
   const [stats, setStats] = useState(null);
   const load = () => {
-    Promise.all([
-      api.get("/admin/users", { params: { page_size: 1 } }),
-      api.get("/admin/users", { params: { page_size: 1, is_active: true } }),
-      api.get("/admin/users", { params: { page_size: 1, is_active: false } }),
-      api.get("/admin/users", { params: { page_size: 1, role: "super_admin" } }),
-    ]).then(([total, active, inactive, superAdmins]) => {
+    api.get("/admin/users/summary").then((r) => {
       setStats({
-        total: total.data.total,
-        active: active.data.total,
-        inactive: inactive.data.total,
-        superAdmins: superAdmins.data.total,
+        total: r.data.total,
+        active: r.data.active,
+        inactive: r.data.inactive,
+        superAdmins: r.data.super_admins,
       });
     });
   };

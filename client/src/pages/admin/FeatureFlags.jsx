@@ -12,8 +12,11 @@ function useFlagsData() {
 }
 
 // Platform feature toggles — real GET/POST/PATCH/DELETE against /admin/feature-flags.
-// Reading a flag elsewhere in the app isn't wired up yet; this is the admin-managed
-// source of truth other modules can check against later.
+// Most keys created here are admin-managed reference data only — reading a flag elsewhere
+// in the app isn't wired up by default. The one exception: a flag literally keyed
+// "recordings_enabled" is checked by services/broadcast.py's recording.start handler
+// (disabled -> new recordings are refused platform-wide, e.g. during a storage incident);
+// any other key an admin creates here has no effect on app behavior yet.
 export default function FeatureFlags() {
   const { data: flags, loading, error, reload } = useFlagsData();
   const [modalOpen, setModalOpen] = useState(false);

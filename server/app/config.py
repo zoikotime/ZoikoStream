@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     GCS_BUCKET: str = ""
     GCS_CREDENTIALS_PATH: str = ""
 
+    # Payments — services/payments.py has no real provider yet (MockPaymentProvider only),
+    # so this is unset in every environment today. Once a real provider is wired, its
+    # signing secret goes here; POST /commercial/webhooks/payments refuses every call while
+    # this is blank rather than accepting unsigned payloads (routers/commercial.py).
+    PAYMENTS_WEBHOOK_SECRET: str = ""
+
     RESEND_API_KEY: str = ""  # blank = welcome emails skipped (logged), registration still works
     # ponytail: onboarding@resend.dev only delivers to the Resend account owner. Verify
     # zoikostream.com in Resend and switch this to noreply@zoikostream.com before launch.

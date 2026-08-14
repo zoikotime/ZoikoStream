@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import toast from "react-hot-toast";
 import { FiClock } from "react-icons/fi";
-import api, { errMsg } from "../../api";
+import api, { diagnoseLoadError } from "../../api";
 import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
 import { CONSOLE, cx, type } from "../../ui/tokens";
@@ -125,15 +125,7 @@ export default function AdminDashboard() {
     // Name the actual failure. "The API didn't answer" sends someone hunting the network
     // when a 404 means the running server predates this endpoint and 401/403 means the
     // session expired — different fixes, so the page distinguishes them.
-    const status = error?.response?.status;
-    const diagnosis =
-      status === 404
-        ? "The API responded, but doesn’t have /admin/command-center — the server is running an older build. Restart it to pick up the current code."
-        : status === 401 || status === 403
-        ? "Your session isn’t authorised for the platform console. Sign in again as a super admin."
-        : status
-        ? `The platform API returned ${status}: ${errMsg(error)}`
-        : "The platform API is unreachable — check that the API server is running and that VITE_API_URL points at it.";
+    const diagnosis = diagnoseLoadError(error, "/admin/command-center");
 
     return (
       <div className="mx-auto max-w-[1500px]">
