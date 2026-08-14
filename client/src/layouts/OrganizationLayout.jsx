@@ -20,6 +20,19 @@ import { OrgScopeContext } from "../components/organization/orgScope";
 // while the Overview page owns the fetch; it reaches the page through OrgScopeContext.
 const REFRESH_MS = 30_000;
 
+// The rail's collapsed state is a per-operator preference, so it outlives the mount rather
+// than resetting on every navigation. Reading localStorage is wrapped because it throws in
+// private-mode Safari and with storage disabled — a themed preference is never worth a
+// blank console.
+const COLLAPSE_KEY = "zk.org.sidebar.collapsed";
+const readCollapsed = () => {
+  try {
+    return localStorage.getItem(COLLAPSE_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
 export default function OrganizationLayout() {
   const { data: state, loading, error, reload } = useApi(() =>
     api.get("/organization/console-state").then((r) => r.data)
@@ -28,6 +41,19 @@ export default function OrganizationLayout() {
 
   const [filters, setFilters] = useState({ workspace: null, range: "24h" });
   const [scoped, setScoped] = useState(false);
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+
+  const toggleCollapsed = useCallback(() => {
+    setCollapsed((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+      } catch {
+        /* preference is best-effort; the session still works without it */
+      }
+      return next;
+    });
+  }, []);
 
   // A page opts into the topbar's scope controls by calling this; pages that don't
   // (Events, Settings…) leave the controls hidden instead of showing dead ones.
@@ -41,7 +67,13 @@ export default function OrganizationLayout() {
         surface={`${CONSOLE.page} text-slate-800 dark:text-neutral-200`}
         mainClass="p-4 sm:p-6 lg:px-8 lg:py-7"
         renderSidebar={({ open, setOpen }) => (
-          <Sidebar open={open} onClose={() => setOpen(false)} state={state} />
+          <Sidebar
+            open={open}
+            onClose={() => setOpen(false)}
+            state={state}
+            collapsed={collapsed}
+            onToggleCollapse={toggleCollapsed}
+          />
         )}
         renderTopbar={({ setOpen }) => (
           <Topbar

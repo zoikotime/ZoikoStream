@@ -37,15 +37,6 @@ export default function Landing() {
         <Logo height="h-7" />
       </div>
 
-      {/* "Talk to an expert" now opens mail rather than the console, so this is the only
-          way back in for someone who already has an account. */}
-      <Link
-        to="/login"
-        className="absolute right-6 top-8 z-20 text-sm font-medium text-white/70 transition hover:text-white lg:right-10 lg:top-10"
-      >
-        Sign in
-      </Link>
-
       <div className="relative z-10 mx-auto grid min-h-screen max-w-7xl gap-12 px-6 pb-14 pt-28 lg:grid-cols-2 lg:items-center lg:gap-10 lg:px-10 lg:pb-16 lg:pt-32">
         <div className="zk-fade-in max-w-xl">
           {/* Live indicator: blinking dot with an expanding halo, and the pill's own border
