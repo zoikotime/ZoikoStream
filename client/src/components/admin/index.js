@@ -7,6 +7,7 @@ export { ConsoleButton as Button } from "../../ui/Button";
 export { default as Badge } from "../../ui/Badge";
 export { default as StatCard } from "./StatCard";
 export { default as KpiCard } from "./KpiCard";
+export { default as MetricCard } from "./MetricCard";
 export { default as DataTable } from "./DataTable";
 export { default as Panel } from "./Panel";
 export { default as StatRow } from "./StatRow";

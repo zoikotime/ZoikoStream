@@ -31,10 +31,15 @@ const C_BASE = cx(
 const C_SIZES = { sm: "h-8 px-3 text-[13px]", md: "h-9 px-3.5 text-sm", lg: "h-10 px-4 text-sm" };
 // Every variant gains a hover shadow so a console button reads as a raised control rather than a
 // bordered label — the secondary variant in particular was near-invisible on a white filter row.
+// Primary is a violet→indigo gradient rather than a flat fill, so the one action a screen
+// wants you to take is unmistakably the brightest thing on it. The gradient shifts lighter on
+// hover and the shadow deepens; `active:` returns it to the resting shadow so a press reads as
+// a press. Danger keeps a flat fill — a gradient on a destructive action reads as decoration.
 const C_VARIANTS = {
-  primary: "bg-violet-600 text-white shadow-sm hover:bg-violet-700 hover:shadow-md active:bg-violet-800 active:shadow-sm",
+  primary:
+    "bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-sm shadow-violet-600/25 hover:from-violet-500 hover:to-indigo-500 hover:shadow-md hover:shadow-violet-600/35 active:shadow-sm",
   secondary:
-    "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800",
+    "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:text-slate-200 dark:hover:border-white/20 dark:hover:bg-white/[0.07]",
   ghost:
     "text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white",
   danger: "bg-rose-600 text-white shadow-sm hover:bg-rose-700 hover:shadow-md active:bg-rose-800 active:shadow-sm",
