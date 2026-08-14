@@ -52,7 +52,12 @@ export default function ReadinessRecordDrawer({ event, open, onClose }) {
         <p className={cx("mt-0.5 text-[12px]", CONSOLE.muted)}>{copy.body}</p>
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      {/* DetailField lays out its own label/value row (sm:grid-cols-[190px_1fr]) — that
+          breakpoint reads the VIEWPORT, not this drawer's ~450px panel width, so wrapping
+          these in an outer grid-cols-2 squeezes each field into a cell too narrow for its
+          own internal grid and wraps the value character-by-character. Stack them instead,
+          the way DetailField's own doc comment says a drawer should. */}
+      <dl className={cx("mt-4 divide-y", CONSOLE.divider)}>
         <DetailField label="Organization" value={event.organization || "—"} />
         <DetailField
           label="Impact"
@@ -63,7 +68,7 @@ export default function ReadinessRecordDrawer({ event, open, onClose }) {
           value={event.start_time ? new Date(event.start_time).toLocaleString() : "—"}
         />
         <DetailField label="Timezone" value={event.timezone || "—"} />
-      </div>
+      </dl>
 
       <div className="mt-5">
         <p className={cx("mb-1 text-[11px] font-semibold uppercase tracking-wider", CONSOLE.faint)}>

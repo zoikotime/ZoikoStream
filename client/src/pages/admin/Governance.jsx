@@ -147,7 +147,11 @@ function RecordDrawer({ record, open, onClose, onUpdated }) {
     <Drawer open={open} onClose={onClose} title={KIND_LABEL[record.kind] || record.kind} width="w-[28rem] max-w-[90vw]">
       {record.detail && <p className={cx("text-[13px]", CONSOLE.body)}>{record.detail}</p>}
 
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      {/* DetailField's own label/value grid reads the sm: breakpoint off the viewport, not
+          this ~450px drawer panel — an outer grid-cols-2 squeezes each field too narrow and
+          wraps the value character-by-character. Stack instead, per DetailField's own doc
+          comment on how a drawer should use it. */}
+      <dl className={cx("mt-4 divide-y", CONSOLE.divider)}>
         <DetailField label="Organization" value={record.organization_name || "—"} />
         <DetailField label="Status" value={<Badge tone={STATUS_TONE[record.status]}>{record.status}</Badge>} />
         <DetailField label="Opened" value={record.opened_at ? new Date(record.opened_at).toLocaleString() : "—"} />
@@ -162,7 +166,7 @@ function RecordDrawer({ record, open, onClose, onUpdated }) {
           }
         />
         <DetailField label="Resolved" value={record.resolved_at ? new Date(record.resolved_at).toLocaleString() : "—"} />
-      </div>
+      </dl>
 
       <div className="mt-5">
         <Label variant="console" htmlFor="gov-edit-status">Status</Label>
