@@ -31,9 +31,15 @@ export const STUDIO = {
   chrome: "border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900",
   // A card/panel sitting on the page.
   card: "rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900",
-  // Hover for an interactive card — a border lift, never a translate or a shadow.
-  cardHover:
-    "transition-colors duration-150 hover:border-slate-300 dark:hover:border-slate-700 motion-reduce:transition-none",
+  // Hover for an interactive CARD. Cards may lift — a transform never reflows, and a card is
+  // not part of a wrapping control row (see the note on `t150` for why deck keys may not).
+  // Kept to 1px and a soft shadow: an instrument strip that jumps is a distraction on air.
+  cardHover: [
+    "transition-[border-color,box-shadow,transform] duration-200 ease-out",
+    "hover:-translate-y-px hover:border-slate-300 hover:shadow-lg hover:shadow-slate-900/5",
+    "dark:hover:border-slate-700 dark:hover:shadow-black/40",
+    "motion-reduce:transition-none motion-reduce:hover:translate-y-0",
+  ].join(" "),
   // A recessed group inside a card/chrome (metric clusters, stat tiles, filter tracks).
   inset: "rounded-lg border border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-800/40",
   divider: "border-slate-200 dark:border-slate-800",
@@ -72,6 +78,15 @@ export const focusOnStage =
 // wrapping control row jitters as the pointer crosses it.
 export const t150 = "transition-colors duration-150 ease-out motion-reduce:transition-none";
 
+// Same rule, extended to the properties that DON'T move a control: shadow and ring. Use this
+// where a button should feel like it has depth without changing where it sits.
+export const t200 =
+  "transition-[background-color,border-color,color,box-shadow,transform] duration-200 ease-out motion-reduce:transition-none";
+
+// A press. Scale is transient and never reflows, so this is safe even inside the wrapping
+// deck row that `t150` exists to protect — the key returns to its exact position on release.
+export const press = "active:scale-[0.96] motion-reduce:active:scale-100";
+
 // ── semantic state → text/icon colour ────────────────────────────────────────────────
 // Used by every readout that reports a live measurement. `neutral` means "no signal",
 // which is distinct from "healthy" and must never render green.
@@ -95,26 +110,67 @@ export const KPI_ACCENT = {
   slate: "text-slate-500 dark:text-slate-400",
 };
 
+// The icon now sits in a tinted chip rather than floating bare in the corner, which gives each
+// tile an anchor and makes the six-up strip scannable by colour before it is read. Split from
+// KPI_ACCENT (icon colour) so a tile can tint its chip without tinting anything else.
+export const KPI_CHIP = {
+  brand: "bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400",
+  blue: "bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400",
+  green: "bg-green-100 text-green-600 dark:bg-green-500/15 dark:text-green-400",
+  amber: "bg-amber-100 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400",
+  rose: "bg-rose-100 text-rose-600 dark:bg-rose-500/15 dark:text-rose-400",
+  slate: "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
+};
+
+// Hover bloom behind the icon chip, one gradient per accent. Sits on a -z-10 layer so it can
+// never intercept a click on the tile.
+export const KPI_GLOW = {
+  brand: "from-violet-500/10",
+  blue: "from-blue-500/10",
+  green: "from-green-500/10",
+  amber: "from-amber-500/10",
+  rose: "from-rose-500/10",
+  slate: "from-slate-500/10",
+};
+
 // ── control-deck button skins ────────────────────────────────────────────────────────
 // A deck button has three visual states beyond disabled: at rest (quiet, bordered),
 // engaged (filled, so "my mic is off" is unmistakable at a glance) and destructive.
 // `active` fills are keyed to what the state MEANS, not to the button's position.
+// An engaged key is a gradient fill plus a coloured cast beneath it, so "my mic is off" is
+// visible in peripheral vision rather than needing to be looked at. The cast is a shadow, not
+// a ring, because a ring on a 64px key in a wrapping row visually collides with its neighbour.
 export const DECK = {
-  rest: "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:bg-slate-800 dark:hover:text-white",
+  rest: [
+    "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 hover:shadow-sm",
+    "dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:bg-slate-800 dark:hover:text-white",
+  ].join(" "),
   // Engaged states.
-  brand: "border border-violet-600 bg-violet-600 text-white hover:bg-violet-500 hover:border-violet-500",
-  danger: "border border-rose-600 bg-rose-600 text-white hover:bg-rose-500 hover:border-rose-500",
-  warn: "border border-amber-500 bg-amber-500 text-white hover:bg-amber-400 hover:border-amber-400",
-  good: "border border-green-600 bg-green-600 text-white hover:bg-green-500 hover:border-green-500",
+  brand:
+    "border border-violet-600 bg-gradient-to-b from-violet-500 to-violet-600 text-white shadow-md shadow-violet-600/30 hover:from-violet-400 hover:to-violet-500 hover:shadow-lg hover:shadow-violet-600/40",
+  danger:
+    "border border-rose-600 bg-gradient-to-b from-rose-500 to-rose-600 text-white shadow-md shadow-rose-600/30 hover:from-rose-400 hover:to-rose-500 hover:shadow-lg hover:shadow-rose-600/40",
+  warn:
+    "border border-amber-500 bg-gradient-to-b from-amber-400 to-amber-500 text-white shadow-md shadow-amber-500/30 hover:from-amber-300 hover:to-amber-400 hover:shadow-lg hover:shadow-amber-500/40",
+  good:
+    "border border-green-600 bg-gradient-to-b from-green-500 to-green-600 text-white shadow-md shadow-green-600/30 hover:from-green-400 hover:to-green-500 hover:shadow-lg hover:shadow-green-600/40",
 };
 
 // Transport buttons (Go Live / Pause / Resume / End). Larger, labelled, and the only
 // place in the deck that carries weight — an operator must find these without looking.
+// Gradient + a deeper cast than a deck key, and the shadow SHRINKS on press so the button
+// reads as pushed into the surface rather than just tinting.
 export const TRANSPORT = {
-  primary: "bg-violet-600 text-white hover:bg-violet-500",
-  hold: "bg-amber-500 text-white hover:bg-amber-400",
-  danger: "bg-rose-600 text-white hover:bg-rose-500",
-  dangerArmed: "bg-rose-700 text-white ring-2 ring-rose-400 dark:ring-rose-500/50",
+  primary:
+    "bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-md shadow-violet-600/35 hover:from-violet-500 hover:to-indigo-500 hover:shadow-lg hover:shadow-violet-600/45 active:shadow-sm",
+  hold:
+    "bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-amber-500/35 hover:from-amber-400 hover:to-orange-400 hover:shadow-lg hover:shadow-amber-500/45 active:shadow-sm",
+  danger:
+    "bg-gradient-to-r from-rose-600 to-rose-500 text-white shadow-md shadow-rose-600/35 hover:from-rose-500 hover:to-rose-400 hover:shadow-lg hover:shadow-rose-600/45 active:shadow-sm",
+  // Armed is the one place in the studio that pulses: this click ends a live event, and the
+  // 4-second self-disarm window has to be legible without reading the label.
+  dangerArmed:
+    "bg-rose-700 text-white ring-2 ring-rose-400 shadow-lg shadow-rose-600/50 animate-pulse motion-reduce:animate-none dark:ring-rose-500/60",
 };
 
 export const disabled = "disabled:cursor-not-allowed disabled:opacity-45";

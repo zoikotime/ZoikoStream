@@ -357,20 +357,29 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, class
               onClick={() => setTab(t.key)}
               title={count > 0 ? `${t.label} — ${count} need attention` : t.label}
               className={cx(
-                "relative flex min-w-0 flex-col items-center justify-center gap-1 border-b-2 px-1 py-2",
+                "group relative flex min-w-0 flex-col items-center justify-center gap-1 border-b-2 px-1 py-2",
                 on
-                  ? "border-violet-600 text-violet-700 dark:border-violet-400 dark:text-violet-300"
+                  ? "border-violet-600 bg-violet-50/60 text-violet-700 dark:border-violet-400 dark:bg-violet-500/[0.09] dark:text-violet-300"
                   : cx("border-transparent", STUDIO.muted, "hover:bg-violet-50/70 hover:text-slate-900 dark:hover:bg-violet-500/[0.07] dark:hover:text-white"),
                 t150,
                 focus
               )}
             >
-              <t.icon aria-hidden="true" className="text-[15px]" />
+              <t.icon
+                aria-hidden="true"
+                className={cx(
+                  "text-[15px] transition-transform duration-200 ease-out",
+                  "group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:scale-100",
+                  on && "scale-110 motion-reduce:scale-100"
+                )}
+              />
               <span className="max-w-full truncate text-[10px] font-semibold leading-none">
                 {t.label}
               </span>
+              {/* A count here means something is waiting on the operator, so it pulses until
+                  the queue is cleared — an unmoving badge on a busy console gets missed. */}
               {count > 0 && (
-                <span className="absolute right-0.5 top-0.5 min-w-[15px] rounded-full bg-amber-500 px-1 text-[9px] font-bold leading-[15px] tabular-nums text-white">
+                <span className="absolute right-0.5 top-0.5 min-w-[15px] animate-pulse rounded-full bg-amber-500 px-1 text-[9px] font-bold leading-[15px] tabular-nums text-white shadow-sm shadow-amber-500/40 motion-reduce:animate-none">
                   {count}
                 </span>
               )}

@@ -6,6 +6,7 @@ import {
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
+import { tzShort } from "../../data/timezones";
 import { notify } from "../../ui/Toast";
 import { PageSpinner } from "../../ui/Spinner";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
@@ -230,7 +231,9 @@ export default function EventDetails() {
             </p>
             <div className="mt-4 flex flex-wrap gap-2 text-xs">
               {event.category && <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{event.category}</span>}
-              {event.timezone && <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{event.timezone}</span>}
+              {/* Abbreviation + live offset, matching how the scheduler labels it. `title`
+                  keeps the IANA identifier reachable — it is the unambiguous value. */}
+              {event.timezone && <span title={event.timezone} className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{tzShort(event.timezone)}</span>}
               {(event.tags || []).map((t) => (
                 <span key={t} className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">#{t}</span>
               ))}
@@ -320,7 +323,7 @@ export default function EventDetails() {
               ["Category", event.category || "—"],
               ["Visibility", visLabel(event.visibility)],
               ["Registration", event.registration_required ? "Required" : "Open"],
-              ["Timezone", event.timezone || "—"],
+              ["Timezone", tzShort(event.timezone) || "—"],
               ["Chat", event.chat_enabled ? "On" : "Off"],
               ["Q&A", event.qa_enabled ? "On" : "Off"],
               ["Recording", event.recording_enabled ? "On" : "Off"],

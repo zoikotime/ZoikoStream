@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { FiGlobe, FiLock, FiEyeOff } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
+import { TIMEZONE_GROUPS, tzLabel } from "../../data/timezones";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
+import TimeField from "../../ui/TimeField";
 import { Input, Textarea, Select, Label, Switch } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
@@ -23,7 +25,9 @@ const CATEGORIES = [
   "Community / Charity",
   "Other",
 ];
-const TIMEZONES = ["UTC", "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Kolkata", "Asia/Singapore"];
+// Timezone list lives in data/timezones.js — the option VALUE stays an IANA identifier
+// (which is what the API stores and what Intl.DateTimeFormat needs) while the label reads
+// as the abbreviation people actually schedule by.
 
 // Matches the backend Visibility enum (public | private | unlisted).
 const VISIBILITY = [
@@ -85,6 +89,22 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
       return next;
     });
   };
+
+  // Built once per mount: each label calls Intl for the zone's current GMT offset, and this
+  // form re-renders on every keystroke — recomputing ~65 offsets that often is pure waste.
+  const timezoneOptions = useMemo(
+    () =>
+      TIMEZONE_GROUPS.map(([group, zones]) => (
+        <optgroup key={group} label={group}>
+          {zones.map(([zone, abbr, places]) => (
+            <option key={zone} value={zone}>
+              {tzLabel(zone, abbr, places)}
+            </option>
+          ))}
+        </optgroup>
+      )),
+    []
+  );
 
   const canSchedule = form.title.trim().length > 0;
 
@@ -161,7 +181,10 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
       {/* ponytail: media upload has no storage endpoint yet. Moderators/speakers are
           assigned from the event page after creation (see AssignPeopleModal) — hosts get
           a picker here too since that's the most common thing to set up-front. */}
-      <div className="max-h-[65vh] overflow-y-auto pr-1">
+      {/* Modal already height-caps its panel and scrolls its body (see ui/Modal), so the
+          max-h + overflow that used to be here produced a SECOND scrollbar nested inside the
+          first — two tracks, and neither one scrolled the whole form. */}
+      <div>
         <Section title="Basic Information">
           <div className="space-y-4">
             <div>
@@ -190,16 +213,16 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
             <div>
               <Label>Timezone</Label>
               <Select variant="console" value={form.timezone} onChange={(e) => set("timezone", e.target.value)}>
-                {TIMEZONES.map((t) => <option key={t}>{t}</option>)}
+                {timezoneOptions}
               </Select>
             </div>
             <div>
               <Label>Start Time</Label>
-              <Input variant="console" type="time" value={form.start} onChange={(e) => set("start", e.target.value)} />
+              <TimeField label="start time" value={form.start} onChange={(v) => set("start", v)} />
             </div>
             <div>
               <Label>End Time</Label>
-              <Input variant="console" type="time" value={form.end} onChange={(e) => set("end", e.target.value)} />
+              <TimeField label="end time" value={form.end} onChange={(v) => set("end", v)} />
             </div>
           </div>
         </Section>
