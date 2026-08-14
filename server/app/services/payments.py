@@ -119,14 +119,13 @@ def get_provider(name: str = "mock") -> PaymentProvider:
 
 
 def verify_webhook_signature(payload: bytes, signature: str | None, secret: str | None) -> bool:
-    """No production provider is configured, so there is no real signing secret to check
-    against (doc Section 26 go-live gate). Once a real provider is wired, this becomes an
-    HMAC/constant-time comparison against that provider's documented scheme — the shape
-    (bytes payload + header signature + configured secret) is written now so callers don't
-    need to change when it does."""
-    if secret is None:
-        return True
-    if not signature:
+    """Fails closed: no configured secret means no provider is wired up yet (doc Section 26
+    go-live gate), so there is nothing legitimate this webhook could be — an unsigned/
+    forged payload must never be accepted just because verification isn't set up. Callers
+    distinguish "not configured" (503) from "bad signature" (401) themselves by checking
+    the secret before calling this; this function only ever answers "was that payload
+    actually signed with the configured secret."""
+    if not secret or not signature:
         return False
     expected = hmac.new(secret.encode(), payload, "sha256").hexdigest()
     return hmac.compare_digest(expected, signature)

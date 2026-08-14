@@ -20,6 +20,7 @@ from ..schemas import (
     VerifyOtpIn,
 )
 from ..security import create_access_token, get_current_user, hash_password, verify_password
+from ..services import platform_settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -38,7 +39,14 @@ _REGISTER_LIMIT = rate_limit("register", limit=5, window=300.0)
              dependencies=[_REGISTER_LIMIT])
 def register(data: RegisterIn, background: BackgroundTasks, db: Session = Depends(get_db)):
     email = data.email.lower()
-    
+
+    # The Settings console's "Signups enabled" switch (services.platform_settings) — off
+    # means no new organizations, full stop. The one exception is the designated super-admin
+    # email: signups being off platform-wide must never be able to lock out the account that
+    # would otherwise be the only way to turn it back on.
+    if email != settings.SUPER_ADMIN_EMAIL.lower() and not platform_settings.signups_enabled(db):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Signups are currently disabled")
+
     # Auto-generate username from email if not provided (use part before @)
     if data.username:
         username = data.username.lower()

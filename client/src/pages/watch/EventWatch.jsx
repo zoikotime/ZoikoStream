@@ -167,31 +167,6 @@ export default function EventWatch() {
     setLinkTokenState(token);
   }, [eventId]);
 
-  const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
-  // Real viewers only — staff and waiting-room entries never count as "watching".
-  const viewers = Object.values(panel.participants || {}).filter(
-    (participant) =>
-      participant.role === "viewer" &&
-      !participant.waiting
-  ).length;
-  // A rejected chat.send/qa.ask/poll.vote (chat turned off, slow mode, emoji-only mode,
-  // banned, …) comes back as a moderator/error envelope addressed only to this socket — the
-  // reducer above doesn't have a case for it (nothing to store), so without this the
-  // message just silently vanishes and "chat isn't working" is the only symptom a viewer
-  // ever sees. Surfacing the server's actual reason instead.
-  const onLiveEnvelope = useCallback((env) => {
-    if (env.channel === "moderator" && env.type === "error") {
-      notify.error(env.data.message);
-      return;
-    }
-    dispatchPanel(env);
-  }, []);
-  const {
-    status: liveStatus,
-    send: sendLive,
-    disconnect: disconnectLive,
-  } = useEventStream(eventId, onLiveEnvelope, regToken, linkToken);
-
   const [watch, setWatch] = useState(null);
   const [notFound, setNotFound] = useState(false);
   const [blockedReason, setBlockedReason] = useState(null);
@@ -212,7 +187,7 @@ export default function EventWatch() {
     setLoading(true);
   }
 
-  const fetchWatch = () => {
+  const fetchWatch = useCallback(() => {
     // A host-invited or self-registered link carries the access token in the URL
     // (?reg=... or ?link=...) — save it locally so a refresh (or a later visit with no
     // query string) keeps working without the visitor needing to click the shared link again.
@@ -235,7 +210,42 @@ export default function EventWatch() {
         setNotFound(true);
       })
       .finally(() => setLoading(false));
-  };
+  }, [eventId, regToken, linkToken, setRegToken, setLinkToken]);
+
+  const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
+  // Real viewers only — staff and waiting-room entries never count as "watching".
+  const viewers = Object.values(panel.participants || {}).filter(
+    (participant) =>
+      participant.role === "viewer" &&
+      !participant.waiting
+  ).length;
+  // A rejected chat.send/qa.ask/poll.vote (chat turned off, slow mode, emoji-only mode,
+  // banned, …) comes back as a moderator/error envelope addressed only to this socket — the
+  // reducer above doesn't have a case for it (nothing to store), so without this the
+  // message just silently vanishes and "chat isn't working" is the only symptom a viewer
+  // ever sees. Surfacing the server's actual reason instead.
+  const onLiveEnvelope = useCallback((env) => {
+    if (env.channel === "moderator" && env.type === "error") {
+      notify.error(env.data.message);
+      return;
+    }
+    // The host ending (or emergency-stopping) the broadcast lands here as
+    // broadcast/broadcast.update with the session's new status — it's the only signal
+    // that the event just ended. Without re-fetching, `watch.status` (and therefore
+    // canStream/isEnded in VideoPlayer) stays stuck at "live": the LiveKit room drops
+    // and useLiveKitViewer just retries a now-dead room forever ("Reconnecting…") until
+    // it gives up, instead of showing the real "This event has ended" state. A page
+    // refresh happened to fix it only because that re-runs fetchWatch from scratch.
+    if (env.channel === "broadcast" && env.type === "broadcast.update" && env.data?.status === "ended") {
+      fetchWatch();
+    }
+    dispatchPanel(env);
+  }, [fetchWatch]);
+  const {
+    status: liveStatus,
+    send: sendLive,
+    disconnect: disconnectLive,
+  } = useEventStream(eventId, onLiveEnvelope, regToken, linkToken);
 
   useEffect(() => {
     // fetchWatch only sets state inside its own .then/.catch/.finally (an async
@@ -244,11 +254,12 @@ export default function EventWatch() {
     // setState call, which is the actual anti-pattern it exists to catch.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchWatch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventId]);
+  }, [fetchWatch]);
 
   // Keeps a page opened before the host goes live from needing a manual refresh. Once
-  // live, useLiveKitViewer's own room connection is what actually reflects state.
+  // live, polling stays off — the live socket's own broadcast.update "ended" signal
+  // (onLiveEnvelope above) is what triggers the one fetchWatch() that matters, instead of
+  // a timer racing it.
   useInterval(fetchWatch, POLL_MS, Boolean(watch) && watch.status !== "live" && watch.status !== "ended");
 
   const event = watch ? watchToMockEvent(watch) : null;

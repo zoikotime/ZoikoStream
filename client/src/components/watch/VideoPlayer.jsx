@@ -93,6 +93,22 @@ export default function VideoPlayer({ event, viewers, watch }) {
       ? (replayTime / replayDuration) * 100
       : 0;
 
+  // `playing` only seeds from `isLive` at mount (see useState(isLive) above) — it never
+  // notices a LIVE EVENT ending under it without a remount. Left alone, the live stream's
+  // playing=true survives straight into the ended state: showPlaceholder's `isEnded &&
+  // !playing` check then never passes, so the placeholder falls through to the stale
+  // "Host"/streaming caption instead of "This event has ended". A page refresh used to
+  // paper over this by remounting with isLive already false. React's own pattern for
+  // "adjusting state when a prop changes" (react.dev/learn/you-might-not-need-an-effect) —
+  // same one EventWatch's loadedEventId reset uses — rather than a setState-in-effect: this
+  // only fires on the actual live->ended transition, so it never stomps on a viewer who
+  // already clicked "Watch the replay".
+  const [wasEnded, setWasEnded] = useState(isEnded);
+  if (isEnded !== wasEnded) {
+    setWasEnded(isEnded);
+    if (isEnded) setPlaying(false);
+  }
+
   useEffect(() => {
     const onFs = () => setFs(Boolean(document.fullscreenElement));
 

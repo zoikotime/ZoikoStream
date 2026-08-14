@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from ..crud.admin import get_feature_flag_by_key
 from ..models import (
     AnalyticsSnapshot,
     BroadcastSession,
@@ -41,7 +42,7 @@ from ..models import (
     Organization,
     Subscription,
 )
-from . import bus, livekit
+from . import bus, livekit, platform_settings
 from . import moderation as mod
 
 log = logging.getLogger(__name__)
@@ -88,10 +89,19 @@ SETTING_SPECS: dict[str, object] = {
 }
 
 
-def clean_settings(patch: dict) -> dict:
-    """Keep only known keys with valid values. Returns the accepted subset."""
+def clean_settings(patch: dict, max_bitrate_kbps: int | None = None) -> dict:
+    """Keep only known keys with valid values. Returns the accepted subset.
+
+    `max_bitrate_kbps` narrows bitrate_kbps's own range (SETTING_SPECS' static 500-20000)
+    down to the platform's configured ceiling (Settings.jsx's "Storage & Streaming Limits"
+    panel, services.platform_settings.max_bitrate_kbps) — a host can still request less,
+    never more, than what the platform allows."""
+    specs = SETTING_SPECS
+    if max_bitrate_kbps is not None:
+        lo, hi = SETTING_SPECS["bitrate_kbps"]
+        specs = {**SETTING_SPECS, "bitrate_kbps": (lo, min(hi, max_bitrate_kbps))}
     out = {}
-    for key, spec in SETTING_SPECS.items():
+    for key, spec in specs.items():
         if key not in patch:
             continue
         value = patch[key]
@@ -192,10 +202,23 @@ def _current_recording(db, ctx) -> LiveRecording | None:
     )
 
 
+def _feature_enabled(db, key: str, default: bool) -> bool:
+    """A Super Admin console-managed kill switch (FeatureFlag rows, admin-created — see
+    models/feature_flag.py, whose own docstring flags that nothing reads them yet). No row
+    for `key` means nobody has created it, which must mean "unchanged from default", not
+    "off" — an absent flag can never itself turn a feature off."""
+    flag = get_feature_flag_by_key(db, key)
+    return flag.enabled if flag else default
+
+
 def _storage_over_limit(db, org_id) -> bool:
     """True once the org's real usage (storage_used_gb, written from actual egress file
-    sizes — see record_egress_result) has reached its plan's max_storage_gb. A plan with no
-    limit (Enterprise: max_storage_gb=None) never blocks."""
+    sizes — see record_egress_result) has reached its plan's max_storage_gb, OR the
+    platform-wide ceiling set in Settings.jsx's "Storage & Streaming Limits" panel
+    (services.platform_settings.storage_ceiling_gb) — whichever is lower. A plan with no
+    limit (Enterprise: max_storage_gb=None) falls through to the platform ceiling instead
+    of never blocking, so an unlimited plan still respects a platform-wide cap the console
+    admin set on purpose."""
     org = db.get(Organization, org_id)
     if org is None:
         return False
@@ -205,9 +228,10 @@ def _storage_over_limit(db, org_id) -> bool:
         .order_by(Subscription.started_at.desc())
     )
     plan = sub.plan if sub else None
-    if plan is None or plan.max_storage_gb is None:
+    limits = [l for l in (plan.max_storage_gb if plan else None, platform_settings.storage_ceiling_gb(db)) if l is not None]
+    if not limits:
         return False
-    return float(org.storage_used_gb or 0) >= plan.max_storage_gb
+    return float(org.storage_used_gb or 0) >= min(limits)
 
 
 def _seed_settings(ev: Event | None) -> dict:
@@ -412,7 +436,8 @@ async def _countdown(ctx, payload):
 
 
 async def _settings(ctx, payload):
-    patch = clean_settings(payload.get("settings") or payload)
+    ceiling = await mod.tx(lambda db: platform_settings.max_bitrate_kbps(db))
+    patch = clean_settings(payload.get("settings") or payload, max_bitrate_kbps=ceiling)
     if not patch:
         return "No recognised settings in that request"
     merged = await _apply_settings(ctx, patch)
@@ -459,6 +484,9 @@ async def _recording_start(ctx, payload):
     existing = await mod.tx(lambda db: (lambda r: recording_out(r) if r else None)(_current_recording(db, ctx)))
     if existing:
         return "A recording is already running"
+
+    if not await mod.tx(lambda db: _feature_enabled(db, "recordings_enabled", default=True)):
+        return "Recording is temporarily disabled platform-wide — contact support"
 
     if await mod.tx(lambda db: _storage_over_limit(db, ctx.org_id)):
         return "Storage limit reached for your plan — free up space or upgrade to keep recording"

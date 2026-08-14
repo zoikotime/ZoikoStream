@@ -4,6 +4,7 @@ import toast from "react-hot-toast";
 import {
   FiX, FiActivity, FiCheckSquare, FiGrid, FiFilm, FiShield, FiUser, FiCode,
   FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget, FiDollarSign,
+  FiTrendingUp, FiFlag, FiPackage, FiUsers, FiServer,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
@@ -33,6 +34,7 @@ const GROUPS = [
       { to: "/admin/media", label: "Media", icon: FiFilm },
       { to: "/admin/security", label: "Trust & Safety", icon: FiShield },
       { to: "/admin/users", label: "Identity & Access", icon: FiUser },
+      { to: "/admin/roles", label: "Roles", icon: FiUsers },
     ],
   },
   {
@@ -41,11 +43,15 @@ const GROUPS = [
       { to: "/admin/developers", label: "Developer Platform", icon: FiCode },
       { to: "/admin/subscriptions", label: "Usage & Entitlements", icon: FiBarChart2 },
       { to: "/admin/commerce", label: "Live Events Commerce", icon: FiDollarSign },
+      { to: "/admin/analytics", label: "Analytics", icon: FiTrendingUp },
       { to: "/admin/support", label: "Support Operations", icon: FiClock },
       { to: "/admin/settings", label: "Platform Configuration", icon: FiSliders },
       { to: "/admin/governance", label: "Governance", icon: FiGlobe },
       { to: "/admin/audit", label: "Audit", icon: FiFileText },
       { to: "/admin/status", label: "System Status", icon: FiShield, badge: "system_status" },
+      { to: "/admin/infrastructure", label: "Media Infrastructure", icon: FiServer },
+      { to: "/admin/feature-flags", label: "Feature Flags", icon: FiFlag },
+      { to: "/admin/releases", label: "Release Center", icon: FiPackage },
     ],
   },
 ];

@@ -51,6 +51,7 @@ const AdminMedia = lazy(() => import("./pages/admin/Media"));
 const TrustSafety = lazy(() => import("./pages/admin/Security"));
 const AdminGovernance = lazy(() => import("./pages/admin/Governance"));
 const Commerce = lazy(() => import("./pages/admin/Commerce"));
+const Infrastructure = lazy(() => import("./pages/admin/Infrastructure"));
 
 // Organization console — the eight Build/Operate/Manage pages, code-split for the same reason
 // as the admin console above: only org admins reach /organization/*, so shipping them in the
@@ -99,7 +100,7 @@ function LandingOrDashboard() {
 
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
 // so the console nav never 404s. Everything else in the sidebar is a real page below.
-const adminStubs = [["infrastructure", "Media Infrastructure"]];
+const adminStubs = [];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
 const legacyStubs = [
@@ -165,6 +166,7 @@ export default function App() {
                 <Route path="/admin/security" element={<TrustSafety />} />
                 <Route path="/admin/governance" element={<AdminGovernance />} />
                 <Route path="/admin/commerce" element={<Commerce />} />
+                <Route path="/admin/infrastructure" element={<Infrastructure />} />
                 {adminStubs.map(([path, title]) => (
                   <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
                 ))}

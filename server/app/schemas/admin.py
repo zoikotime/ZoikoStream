@@ -228,6 +228,86 @@ class SupportTicketUpdate(BaseModel):
     priority: str | None = None
 
 
+# ── Incidents (Trust & Safety console) ───────────────────────────────────────
+# Same `incidents` table the Command Center's own Incidents panel and action queues
+# already read (services/ops.py) — these are the write side that table never had.
+
+class IncidentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    ref: str
+    title: str
+    detail: str | None = None
+    severity: str
+    kind: str
+    stage: str | None = None
+    region: str | None = None
+    org_id: uuid.UUID | None = None
+    organization_name: str | None = None
+    status: str
+    commander: str | None = None
+    started_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class IncidentCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    detail: str | None = None
+    severity: str = "sev3"
+    kind: str = "security"
+    org_id: uuid.UUID | None = None
+    commander: str | None = None
+
+
+class IncidentUpdate(BaseModel):
+    status: str | None = None
+    severity: str | None = None
+    commander: str | None = None
+
+
+# ── Governance records (Governance console) ──────────────────────────────────
+# One generic obligation-tracking table already read by services/ops.py for two kinds
+# ("single_path_override", "break_glass") — this is the write side + the other kinds
+# (dpia, legal_hold, privacy_request, access_review, exception, obligation) the Governance
+# console needs. `kind` is free-text on the model; GOVERNANCE_KINDS below is this API's own
+# closed list, not a DB constraint, so the two ops.py-owned kinds keep working unmodified.
+
+GOVERNANCE_KINDS = (
+    "dpia", "legal_hold", "privacy_request", "access_review", "exception", "obligation",
+    "single_path_override", "break_glass",
+)
+
+
+class GovernanceRecordOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: str
+    org_id: uuid.UUID | None = None
+    organization_name: str | None = None
+    event_id: uuid.UUID | None = None
+    status: str
+    detail: str | None = None
+    opened_at: datetime | None = None
+    due_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class GovernanceRecordCreate(BaseModel):
+    kind: str = Field(min_length=1, max_length=30)
+    org_id: uuid.UUID | None = None
+    event_id: uuid.UUID | None = None
+    detail: str | None = Field(None, max_length=300)
+    due_at: datetime | None = None
+
+
+class GovernanceRecordUpdate(BaseModel):
+    status: str | None = None
+    detail: str | None = Field(None, max_length=300)
+    due_at: datetime | None = None
+
+
 # ── Developer / API keys ─────────────────────────────────────────────────────
 
 class ApiKeyOut(BaseModel):

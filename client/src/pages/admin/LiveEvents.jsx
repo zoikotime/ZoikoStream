@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { FiSearch, FiRadio, FiGrid, FiClock } from "react-icons/fi";
-import api from "../../api";
+import api, { diagnoseLoadError } from "../../api";
 import useApi from "../../hooks/useApi";
 import { cx } from "../../ui/tokens";
 import Card from "../../ui/Card";
@@ -105,7 +105,7 @@ export default function LiveEvents() {
 
       {error ? (
         <div className="rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
-          Couldn't load live events. Try refreshing the page.
+          {diagnoseLoadError(error, "/admin/live-events")}
         </div>
       ) : (
         <>

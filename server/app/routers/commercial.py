@@ -739,13 +739,18 @@ def resolve_exception(exception_id: uuid.UUID, data: ExceptionResolveCreate,
 
 @router.post("/webhooks/payments", status_code=status.HTTP_200_OK)
 async def payment_webhook(request: Request, data: PaymentWebhookIn, db: Session = Depends(get_db)):
-    """No production provider is configured (services.payments docstring) so signature
-    verification is a no-op today; the shape is here so wiring a real provider later means
-    passing its signing secret through, not rewriting this endpoint."""
+    """No production provider is configured (services.payments docstring), so there is no
+    real signing secret yet — refuse outright rather than accept-and-process, the same
+    choice routers/live.py's LiveKit webhook makes when it isn't configured. This endpoint
+    is unauthenticated (a real provider calls it directly, no user JWT), so accepting any
+    unsigned payload here would let anyone forge a "payment captured" event and mark a real
+    order paid by guessing/reading its provider_payment_ref."""
     from ..services.payments import verify_webhook_signature
+    if not settings.PAYMENTS_WEBHOOK_SECRET:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Payments provider is not configured")
     body = await request.body()
     signature = request.headers.get("x-webhook-signature")
-    if not verify_webhook_signature(body, signature, secret=None):
+    if not verify_webhook_signature(body, signature, secret=settings.PAYMENTS_WEBHOOK_SECRET):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook signature")
     payment = crud.ingest_payment_webhook(
         db, provider_name=data.provider_name, provider_payment_ref=data.provider_payment_ref,

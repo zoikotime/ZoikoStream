@@ -113,7 +113,7 @@ export default function Settings() {
         </div>
       </Panel>
 
-      <Panel eyebrow="Limits" title="Storage & Streaming Limits" description="Defaults applied to new organizations; caps enforced platform-wide.">
+      <Panel eyebrow="Limits" title="Storage & Streaming Limits" description="Max storage and max bitrate are enforced platform-wide as a hard ceiling on top of every organization's own plan. Default storage and default streaming hours are not yet applied anywhere — they don't do anything today.">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <Label>Default storage (GB)</Label>
@@ -154,7 +154,10 @@ export default function Settings() {
             label={
               <span>
                 <span className="block font-medium text-slate-800 dark:text-slate-100">Maintenance mode</span>
-                <span className="block text-xs text-slate-400">Block non-admin access platform-wide</span>
+                <span className="block text-xs text-slate-400">
+                  Blocks the organization/host console for non-admins. Live broadcasts, viewer
+                  pages, and this console stay reachable.
+                </span>
               </span>
             }
           />
