@@ -3,7 +3,18 @@
 // live socket EventWatch opens (see its `liveReducer`) — same backend the host/moderator
 // consoles use. An unidentified visitor (no login, no self-serve registration) sees the
 // IdentifyForm instead of dead controls — never a "sign in" prompt; a name+email is enough.
-import { useEffect, useRef, useState } from "react";
+//
+// Chat/QA/Polls are memoized: EventWatch's liveReducer keeps every live-panel slice
+// (messages, typing, questions, polls, participants, reactions) in ONE state object, so a
+// reaction tap or a presence update from ANY viewer produces a new top-level object and
+// re-renders this whole tree for EVERY connected viewer, even though messages/questions/
+// polls didn't change. With a couple dozen concurrent viewers tapping reactions, that
+// cascades into the chat feeling laggy purely from unrelated re-renders, not real load.
+// React.memo on each tab breaks the cascade at this boundary: since messages/typing/
+// questions/polls only get NEW references from the reducer cases that actually touch
+// them, a reaction-only or presence-only update leaves those references unchanged and
+// these three skip re-rendering entirely.
+import { memo, useEffect, useRef, useState } from "react";
 import { FiSend, FiChevronUp, FiCheckCircle, FiMessageSquare } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
 import { initials } from "../../data/watch";
@@ -32,7 +43,7 @@ const TABS = [
 // Real chat, wired to the same live socket the host/moderator consoles use. Reaching this
 // component at all means the caller (WatchPanel) has already confirmed the visitor is
 // identified — logged in or self-registered — so there's no gate to check here.
-function Chat({ messages = [], typing = {}, send, connected }) {
+const Chat = memo(function Chat({ messages = [], typing = {}, send, connected }) {
   const [text, setText] = useState("");
   const scroller = useRef(null);
 
@@ -102,12 +113,12 @@ function Chat({ messages = [], typing = {}, send, connected }) {
       </form>
     </div>
   );
-}
+});
 
 // Real Q&A. No per-user vote ledger on the server (see moderation._qa_vote), so the "voted"
 // highlight is purely local — it survives this tab session, not a reload, same as the mock
 // it replaced.
-function QA({ questions = [], send, connected }) {
+const QA = memo(function QA({ questions = [], send, connected }) {
   const [voted, setVoted] = useState({});
   const [text, setText] = useState("");
 
@@ -182,7 +193,7 @@ function QA({ questions = [], send, connected }) {
       </form>
     </div>
   );
-}
+});
 
 // Options are index-addressed on the server (moderation._poll_vote takes `option` as an
 // array index, not an id — see poll_out), so voting sends the option's position, not a key.
@@ -244,7 +255,7 @@ function Poll({ poll, send }) {
   );
 }
 
-function Polls({ polls = [], send }) {
+const Polls = memo(function Polls({ polls = [], send }) {
   const visible = polls.filter((p) => p.status === "live" || p.status === "closed");
 
   if (!visible.length) return <EmptyState>No polls yet.</EmptyState>;
@@ -256,7 +267,7 @@ function Polls({ polls = [], send }) {
       ))}
     </div>
   );
-}
+});
 
 const IDENTIFY_LABEL = {
   chat: "Enter your name and email to join the chat.",
@@ -264,7 +275,10 @@ const IDENTIFY_LABEL = {
   polls: "Enter your name and email to vote in polls.",
 };
 
-export default function WatchPanel({
+// Memoized too: without it, EventWatch re-rendering for an unrelated panel change (a
+// reaction tap, a 15s ping/pong) still re-runs this wrapper's own badge/tab-bar JSX even
+// though Chat/QA/Polls below correctly bail out — cheap on its own, but free to skip.
+const WatchPanel = memo(function WatchPanel({
   className = "", messages, typing, questions, polls, send, connected,
   identified, eventId, onIdentified,
 }) {
@@ -328,4 +342,6 @@ export default function WatchPanel({
       </div>
     </div>
   );
-}
+});
+
+export default WatchPanel;
