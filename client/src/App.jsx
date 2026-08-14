@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
@@ -26,9 +26,7 @@ import EventRegistration from "./pages/EventRegistration";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import ModeratorDashboard from "./pages/moderator/Dashboard";
-
-// Public marketing homepage — code-split from the app bundle.
-const Home = lazy(() => import("./pages/Home/Home"));
+import Landing from "./pages/Landing";
 
 // Super Admin console — code-split as one area. Only super admins can reach /admin/*, so
 // shipping these 14 pages (plus their charts and tables) in the main bundle made every
@@ -89,18 +87,14 @@ function RootRedirect() {
   return <Navigate to={roleHome(user.role) || "/"} replace />;
 }
 
-// "/" shows the public homepage to visitors and to roles without an app dashboard
+// "/" shows the public landing page to visitors and to roles without an app dashboard
 // (viewers); logged-in staff/admins go to their dashboard.
 function LandingOrDashboard() {
   const { user, loading } = useAuth();
   if (loading) return null;
   const home = user && roleHome(user.role);
   if (home) return <Navigate to={home} replace />;
-  return (
-    <Suspense fallback={<div className="min-h-screen bg-slate-950" />}>
-      <Home />
-    </Suspense>
-  );
+  return <Landing />;
 }
 
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
@@ -120,7 +114,7 @@ export default function App() {
       <AuthProvider>
         <BrowserRouter>
           <Routes>
-            {/* Public marketing homepage */}
+            {/* Public landing page */}
             <Route path="/" element={<LandingOrDashboard />} />
 
             {/* Authentication — one login for every role; brand panel shared via AuthLayout.
