@@ -254,6 +254,18 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
     elif kind in _TRACK_EVENTS and p:
         rec = await bus.presence_upsert(event_id, p.identity, {"publishing": _TRACK_EVENTS[kind]})
         await bus.publish(event_id, "participants", "participant.update", rec)
+        # LiveKit's server-side mute (services.livekit.mute_participant) only mutes the
+        # tracks that existed at the moment it was called — it has no memory of "this
+        # identity should stay muted." A track (re)published afterward (a reconnect, an
+        # ICE restart, a renegotiation after a brief network blip, or simply the mute
+        # call landing before the track finished publishing) always starts UNMUTED at the
+        # SFU, so audio quietly starts flowing again a few seconds later while the console
+        # still shows the mute icon as on — presence, not LiveKit, is what the UI trusts.
+        # Presence is the source of truth for "should this identity be muted right now",
+        # so re-assert the enforcement on every fresh publish rather than only at the
+        # moment a moderator clicked mute.
+        if kind == "track_published" and rec.get("muted"):
+            await livekit.mute_participant(evt.room.name, p.identity, True)
 
     elif kind in ("room_started", "room_finished"):
         started = kind == "room_started"

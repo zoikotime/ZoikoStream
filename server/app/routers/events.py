@@ -28,7 +28,7 @@ from ..models import Event, User
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
     AccessLinkCreate, AccessLinkIssued, AccessLinkOut,
-    AssignmentUpdate, EventCreate, EventOut, EventUpdate,
+    AssignmentUpdate, EventCreate, EventOut, EventUpdate, FeedbackOut,
     RegistrantOut, RegistrationCreate, RegistrationOut, ViewerInviteCreate, WatchOut,
 )
 from ..security import (
@@ -434,6 +434,22 @@ def get_registrations(event_id: uuid.UUID, user: User = Depends(get_current_user
     Org-scoped like every other event read."""
     _get_event_or_404(db, user, event_id)
     return crud.list_registrations(db, event_id)
+
+
+@router.get("/{event_id}/feedback", response_model=list[FeedbackOut])
+def get_feedback(
+    event_id: uuid.UUID,
+    role: str | None = Query(None, pattern="^(host|viewer)$"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Feedback submitted through the end-of-event modal a VIEWER sees on leaving (see
+    moderation._feedback_submit — the host console no longer collects its own). Same
+    org-scoped read as every other event sub-resource — any org member can view it: both
+    the host dashboard and the organizer's event page pass role=viewer to see what
+    attendees said."""
+    _get_event_or_404(db, user, event_id)
+    return crud.list_feedback(db, event_id, role=role)
 
 
 @router.post("/{event_id}/invite-viewers", response_model=list[RegistrationOut])

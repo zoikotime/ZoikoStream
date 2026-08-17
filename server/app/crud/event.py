@@ -8,7 +8,10 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import asc, desc, func, or_, select
 
-from ..models import Event, EventAccessLink, EventAssignment, EventRegistration, LiveRecording, User
+from ..models import (
+    Event, EventAccessLink, EventAssignment, EventFeedback, EventRegistration,
+    LiveRecording, User,
+)
 
 _EVENT_SORTS = {
     "created_at": Event.created_at,
@@ -199,6 +202,16 @@ def list_registrations(db, event_id) -> list[EventRegistration]:
         .where(EventRegistration.event_id == event_id)
         .order_by(EventRegistration.created_at)
     ).all()
+
+
+def list_feedback(db, event_id, role: str | None = None) -> list[EventFeedback]:
+    """Feedback rows for an event, newest first. `role` filters to "host" or "viewer" —
+    the host dashboard only wants viewer feedback, and the organizer's event page only
+    wants the host's own; leaving it unset returns everything."""
+    stmt = select(EventFeedback).where(EventFeedback.event_id == event_id)
+    if role:
+        stmt = stmt.where(EventFeedback.role == role)
+    return db.scalars(stmt.order_by(EventFeedback.created_at.desc())).all()
 
 
 def get_registration_by_id(db, event_id, registration_id) -> EventRegistration | None:

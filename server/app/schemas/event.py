@@ -162,6 +162,21 @@ class RegistrantOut(BaseModel):
     created_at: datetime | None = None
 
 
+class FeedbackOut(BaseModel):
+    """One feedback submission. Feedback is viewer-only (see moderation._feedback_submit)
+    — `role` is kept for backward compatibility with existing rows, but every reader
+    (the host dashboard and the organizer's event page alike) now filters this to
+    role="viewer"."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    role: str
+    name: str | None = None
+    rating: int | None = None
+    comment: str | None = None
+    created_at: datetime | None = None
+
+
 class AccessLinkCreate(BaseModel):
     label: str | None = Field(None, max_length=120)
     expires_in_days: int | None = Field(None, ge=1, le=3650)

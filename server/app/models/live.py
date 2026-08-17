@@ -220,6 +220,26 @@ class AnalyticsSnapshot(_EventScoped):
     hands: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
+class EventFeedback(_EventScoped):
+    """One row per feedback submission — a viewer leaving the event (see
+    services/moderation._feedback_submit, which now rejects a host/moderator connection's
+    submission outright). `role` is kept as a column for backward compatibility with rows
+    written before that change, but every current row is "viewer" and every reader
+    (the host console's own Feedback tab and the organization's event detail page) filters
+    on it. Both `rating` and `comment` are optional individually (the submitter can skip
+    either), but the handler that writes this row requires at least one of them — an
+    empty submission isn't persisted at all, it's just treated as a skip."""
+
+    __tablename__ = "event_feedback"
+
+    role: Mapped[str] = mapped_column(String(16), nullable=False)     # viewer (legacy rows: host)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    identity: Mapped[str] = mapped_column(String(120), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(120))
+    rating: Mapped[int | None] = mapped_column(Integer)                # 1-5
+    comment: Mapped[str | None] = mapped_column(Text)
+
+
 class LiveActivity(_EventScoped):
     """Append-only event timeline, written by ONE helper (services/moderation.record).
     Exists so the feed survives a reconnect and stays searchable/exportable without

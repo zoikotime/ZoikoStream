@@ -197,13 +197,34 @@ const QA = memo(function QA({ questions = [], send, connected }) {
 
 // Options are index-addressed on the server (moderation._poll_vote takes `option` as an
 // array index, not an id — see poll_out), so voting sends the option's position, not a key.
+//
+// `poll.your_vote` is the server's own memory of this ballot (server/app/services/
+// moderation.py poll_out, filled in from the snapshot's per-viewer vote lookup) — it's
+// what makes a refreshed or reconnected page open already showing "you voted for X"
+// instead of the vote buttons again. `choice` still exists as local state so a vote cast
+// THIS session updates the UI instantly, without waiting on a round trip; it's seeded
+// from your_vote on mount so a returning viewer starts in the right state.
+//
+// A vote can still be CHANGED while the poll is live — the ledger row moves to the new
+// option server-side (see moderation._poll_vote) instead of being rejected as a second
+// vote, so re-picking here is just another `poll.vote` send. Once the poll closes, or on
+// reconnect, `your_vote` is what's trusted — that's the option a refresh will show.
 function Poll({ poll, send }) {
-  const [choice, setChoice] = useState(null);
+  const [choice, setChoice] = useState(() => (poll.your_vote ?? null));
+  // The server is the source of truth once it has an opinion — if this poll object came
+  // back from a fresh snapshot (reconnect) with your_vote set, trust it over whatever
+  // stale local choice this component instance happened to hold.
+  useEffect(() => {
+    if (poll.your_vote != null && poll.your_vote !== choice) setChoice(poll.your_vote);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poll.your_vote]);
   const voted = choice !== null;
+  const canChange = poll.status === "live";
   const opts = poll.options || [];
   const total = opts.reduce((s, o) => s + (o.votes || 0), 0);
 
   const vote = (index) => {
+    if (index === choice) return; // already this option — nothing to send
     setChoice(index);
     send("poll.vote", { id: poll.id, option: index });
   };
@@ -229,8 +250,19 @@ function Poll({ poll, send }) {
                 {o.label}
               </button>
             );
+          // Already voted: still clickable while the poll is live, so a viewer can
+          // change their mind — locked to a static bar once the poll closes.
+          const Row = canChange ? "button" : "div";
           return (
-            <div key={i} className="relative overflow-hidden rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-700">
+            <Row
+              key={i}
+              type={canChange ? "button" : undefined}
+              onClick={canChange ? () => vote(i) : undefined}
+              className={cx(
+                "relative w-full overflow-hidden rounded-lg border border-slate-200 px-3 py-2 text-left dark:border-slate-700",
+                canChange && "transition duration-150 hover:border-emerald-400 active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100 dark:hover:border-emerald-500/50"
+              )}
+            >
               <div
                 className={cx(
                   "absolute inset-y-0 left-0 transition-[width] duration-500 ease-out motion-reduce:transition-none",
@@ -244,12 +276,13 @@ function Poll({ poll, send }) {
                 </span>
                 <span className="zk-tnum text-slate-500 dark:text-slate-400">{pct}%</span>
               </div>
-            </div>
+            </Row>
           );
         })}
       </div>
       <p className="mt-2 text-xs text-slate-400">
-        {total.toLocaleString()} votes{voted ? " · thanks for voting" : poll.status !== "live" ? " · closed" : ""}
+        {total.toLocaleString()} votes
+        {voted && canChange ? " · thanks for voting — tap another option to change it" : voted ? " · thanks for voting" : poll.status !== "live" ? " · closed" : ""}
       </p>
     </div>
   );

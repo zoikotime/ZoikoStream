@@ -11,6 +11,7 @@
 // point of a control room. `min-w-0` on every flex child is what keeps a long event title
 // or a wide filmstrip from forcing the page to scroll sideways.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { FiRadio } from "react-icons/fi";
 import useLiveEvent from "../../hooks/useLiveEvent";
 import useMediaPreview from "../../hooks/useMediaPreview";
@@ -26,8 +27,8 @@ import ControlBar from "../../components/host/ControlBar";
 import HostPanel from "../../components/host/HostPanel";
 import FeatureModal from "../../components/host/FeatureModal";
 import StartMeetingPrompt from "../../components/host/StartMeetingPrompt";
-
 export default function HostDashboard() {
+  const navigate = useNavigate();
   const { state, resolved, loading, error, status, latency, attempt, send } = useLiveEvent();
 
   // Local capture state. Deliberately NOT server state: whether this host's camera is on is
@@ -246,7 +247,16 @@ export default function HostDashboard() {
             }}
             onPause={() => send("broadcast.pause", {})}
             onResume={() => send("broadcast.resume", {})}
-            onEnd={() => send("broadcast.end", {})}
+            onEnd={() => {
+              send("broadcast.end", {});
+              // Release the camera/mic (this is also what stops LiveKit publishing,
+              // since useLiveKitPublish above is gated on media.active) and drop any
+              // active screen share, then leave — feedback is a viewer-only prompt
+              // (see components/watch/EventWatch.jsx), the host doesn't get one.
+              stopScreenShare();
+              setPreviewOn(false);
+              navigate("/");
+            }}
             onEmergencyStop={() => send("broadcast.emergency_stop", {})}
             onCountdown={(seconds) => send("broadcast.countdown", { seconds })}
             onRecord={() => send("recording.start", {})}
@@ -266,6 +276,7 @@ export default function HostDashboard() {
           state={state}
           canModerate={state.canModerate}
           send={send}
+          eventId={resolved.id}
           className={cx(
             "min-h-[70vh] w-full shrink-0 border-t lg:min-h-0 lg:w-[340px] lg:border-l lg:border-t-0 xl:w-[380px] 2xl:w-[420px]",
             STUDIO.divider

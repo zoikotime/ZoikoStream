@@ -17,6 +17,7 @@ from .event import (
 from .live import (
     AnalyticsSnapshot,
     BroadcastSession,
+    EventFeedback,
     LiveActivity,
     LiveAnnouncement,
     LiveMessage,
