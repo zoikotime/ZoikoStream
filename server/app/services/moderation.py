@@ -22,13 +22,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from ..crud.admin import create_audit_log
 from ..db import SessionLocal
 from ..models import (
     Event,
     EventAssignment,
+    EventFeedback,
     EventRegistration,
     LiveActivity,
     LiveAnnouncement,
@@ -258,12 +259,20 @@ def question_out(q: LiveQuestion) -> dict:
     }
 
 
-def poll_out(p: LivePoll) -> dict:
+def poll_out(p: LivePoll, your_vote: int | None = None) -> dict:
+    """`your_vote` is the CALLER's own option index (or None if they haven't voted) —
+    always per-connection, never broadcast-derived, since it would leak one viewer's
+    ballot to every other viewer if it were. Callers that build a public broadcast
+    (poll.new/update/delete) simply omit it and every viewer gets `your_vote: None`,
+    which is correct for them. Only `_snapshot` (below), which runs once per socket
+    with that socket's own Ctx, passes a real value — that's what lets a refreshed
+    page know it already voted instead of showing the vote buttons again."""
     return {
         "id": str(p.id), "question": p.question, "options": p.options or [], "status": p.status,
         "scheduled_at": _iso(p.scheduled_at), "closes_at": _iso(p.closes_at),
         "launched_at": _iso(p.launched_at), "closed_at": _iso(p.closed_at),
         "votes": sum(o.get("votes", 0) for o in (p.options or [])),
+        "your_vote": your_vote,
         "created_at": _iso(p.created_at),
     }
 
@@ -387,6 +396,22 @@ def _snapshot(db, ctx: Ctx) -> dict:
     def recent(model, limit=HISTORY_LIMIT):
         return list(reversed(db.scalars(_scoped(model, ctx).order_by(model.created_at.desc()).limit(limit)).all()))
 
+    # Newest-first, same as the old inline `reversed(recent(LivePoll, 50))` — kept as its
+    # own list so the vote lookup below can reuse it instead of querying twice.
+    polls = list(reversed(recent(LivePoll, 50)))
+    # This viewer's own ballots, so a refreshed/reconnected page can show "you voted for
+    # X" and disable the buttons instead of re-offering a vote the server will just no-op
+    # (see _poll_vote's already_voted check) — without this the poll LOOKED like it reset.
+    my_poll_votes: dict = {}
+    if ctx.user_id and polls:
+        rows = db.scalars(
+            select(LivePollVote).where(
+                LivePollVote.poll_id.in_([p.id for p in polls]),
+                LivePollVote.user_id == ctx.user_id,
+            )
+        ).all()
+        my_poll_votes = {r.poll_id: r.option for r in rows}
+
     started = ev.start_time if ev.status == "live" else None
     return {
         "event": {
@@ -402,7 +427,7 @@ def _snapshot(db, ctx: Ctx) -> dict:
         "speakers": [{"id": str(s.id), "name": s.full_name or s.email} for s in speakers],
         "messages": [message_out(m) for m in recent(LiveMessage) if m.status != "deleted"],
         "questions": [question_out(q) for q in recent(LiveQuestion)],
-        "polls": [poll_out(p) for p in reversed(recent(LivePoll, 50))],
+        "polls": [poll_out(p, my_poll_votes.get(p.id)) for p in polls],
         "announcements": [announcement_out(a) for a in reversed(recent(LiveAnnouncement, 50))],
         "activity": [activity_out(a) for a in reversed(recent(LiveActivity, 100))],
         "can_moderate": ctx.can_moderate,
@@ -432,7 +457,7 @@ async def snapshot(ctx: Ctx) -> dict:
 # Actions any authenticated attendee may perform. Everything else needs can_moderate.
 VIEWER_ACTIONS = frozenset({
     "chat.send", "chat.typing", "chat.react", "qa.ask", "qa.vote", "poll.vote",
-    "participant.hand", "participant.state", "reaction.add",
+    "participant.hand", "participant.state", "reaction.add", "feedback.submit",
 })
 
 # The viewer reaction bar under the player (components/watch/ReactionBar.jsx) — a fixed,
@@ -856,6 +881,11 @@ async def _poll_lifecycle(ctx, payload, op: str):
             # Capture before the delete — record() flushes, and a deleted instance's
             # attributes are unavailable after that.
             pid, question = str(p.id), p.question
+            # LivePollVote rows FK onto live_polls.id with no ON DELETE CASCADE (see
+            # models/live.py), so deleting a poll that already has votes would otherwise
+            # hit a foreign-key violation and silently fail the whole action. Clear the
+            # ledger first so a poll with votes can still be deleted.
+            db.execute(delete(LivePollVote).where(LivePollVote.poll_id == p.id))
             db.delete(p)
             act = record(db, ctx, "poll", f"Deleted poll: {question}", audit="live.poll.delete",
                          target_type="live_poll", target_id=pid)
@@ -872,11 +902,15 @@ async def _poll_lifecycle(ctx, payload, op: str):
 
 
 async def _poll_vote(ctx, payload):
-    """A vote is final (the console never offers "change your vote" — see WatchPanel.jsx's
-    Poll), so unlike _qa_vote this isn't a toggle: a (poll, voter) ledger row existing at
-    all means this voter is done, no matter what option they try next. Without this check,
-    the option index alone gated nothing — a page refresh reset the client's local `voted`
-    flag with nothing server-side remembering the vote had already been cast."""
+    """A (poll, voter) ledger row is how a page refresh knows this voter already has a
+    ballot in (see poll_out's `your_vote`, filled from the snapshot's per-viewer lookup) —
+    without it the option index alone gated nothing, and a refresh reset the client's
+    local `voted` flag with nothing server-side remembering the vote.
+
+    A voter CAN change their mind while the poll is still live: re-voting moves their
+    existing ledger row to the new option (decrementing the old tally, incrementing the
+    new one) instead of being rejected as a second vote. Once the poll closes the ledger
+    row — and so the tally — is frozen, same as before."""
     index = payload.get("option")
 
     def work(db):
@@ -890,12 +924,21 @@ async def _poll_vote(ctx, payload):
             select(LivePollVote).where(LivePollVote.poll_id == p.id, LivePollVote.user_id == ctx.user_id)
         )
         if already_voted is not None:
-            return poll_out(p)  # no-op: return current truth, don't count a second vote
-        db.add(LivePollVote(
-            event_id=ctx.event_id, org_id=ctx.org_id, poll_id=p.id, user_id=ctx.user_id, option=index,
-        ))
+            if already_voted.option == index:
+                return poll_out(p)  # no-op: re-picking the same option
+            if 0 <= already_voted.option < len(options):
+                options[already_voted.option]["votes"] = max(0, options[already_voted.option].get("votes", 0) - 1)
+            already_voted.option = index
+        else:
+            db.add(LivePollVote(
+                event_id=ctx.event_id, org_id=ctx.org_id, poll_id=p.id, user_id=ctx.user_id, option=index,
+            ))
         options[index]["votes"] = options[index].get("votes", 0) + 1
         p.options = options  # reassign: JSON columns don't track in-place mutation
+        # `your_vote` is intentionally omitted here (see poll_out's docstring) — this
+        # dict is broadcast to EVERY viewer, and it must not leak this voter's ballot
+        # to the rest of the room. The voter's own UI already updated optimistically
+        # in WatchPanel.jsx's Poll before this round trip returned.
         return poll_out(p)
 
     p = await tx(work)
@@ -1059,6 +1102,51 @@ async def _participant_action(ctx, payload, op: str):
             ("moderator", "action.result", {"op": op, "identity": identity, "enforced": enforced})]
 
 
+# feedback ----------------------------------------------------------------------
+
+async def _feedback_submit(ctx, payload):
+    """Sent once, by the modal shown when a viewer leaves the event — right before the
+    socket disconnects, which is why this is a socket action rather than a REST call: the
+    connection (and the ctx/identity it carries) is still open at that moment, and
+    everything else the console does already goes through here.
+
+    Feedback is a viewer-only signal: it's what the organization dashboard's event detail
+    page averages to show how the audience felt about the event, not how the host felt
+    running it. The host console no longer shows the modal at all (see
+    pages/host/Dashboard.jsx), but this guard keeps a stray/legacy `feedback.submit` from
+    a host or moderator connection from landing in that same average.
+
+    Both fields are optional on their own (a submitter can rate without commenting, or
+    comment without rating), but a submission with neither is a no-op, not an empty row —
+    that's what lets the modal's "Skip" button just close without a network call."""
+
+    if ctx.can_moderate:
+        return []
+
+    rating = payload.get("rating")
+    try:
+        rating = int(rating) if rating is not None else None
+    except (TypeError, ValueError):
+        rating = None
+    if rating is not None:
+        rating = max(1, min(rating, 5))
+    comment = _text(payload, "comment", 2000) or None
+    if rating is None and not comment:
+        return []
+
+    role = "host" if ctx.can_host else "viewer"
+
+    def work(db):
+        db.add(EventFeedback(
+            event_id=ctx.event_id, org_id=ctx.org_id, role=role,
+            user_id=ctx.user_id, identity=ctx.identity, name=ctx.name,
+            rating=rating, comment=comment,
+        ))
+
+    await tx(work)
+    return []
+
+
 # dispatcher ------------------------------------------------------------------
 
 ACTIONS: dict[str, callable] = {
@@ -1095,6 +1183,7 @@ ACTIONS: dict[str, callable] = {
     "participant.ban": lambda c, p: _participant_action(c, p, "ban"),
     "participant.remove": lambda c, p: _participant_action(c, p, "remove"),
     "reaction.add": _reaction_add,
+    "feedback.submit": _feedback_submit,
 }
 
 # Broadcast-control actions, filled in by services/broadcast.py at import (which is

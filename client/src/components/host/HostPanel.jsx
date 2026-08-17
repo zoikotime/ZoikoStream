@@ -14,12 +14,13 @@
 // The tab rail is a 6-column GRID, not a scrolling flex row. The old row overflowed at the
 // 380px sidebar width and put a horizontal scrollbar between the operator and their tabs;
 // six equal 1/6 columns with a stacked icon+label fit the same width with room to spare.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   FiUsers, FiMessageSquare, FiHelpCircle, FiBarChart2, FiTrendingUp, FiActivity,
   FiCheck, FiX, FiMicOff, FiClock, FiSmartphone, FiMonitor, FiGlobe,
-  FiEye, FiHeart,
+  FiEye, FiHeart, FiStar,
 } from "react-icons/fi";
+import api, { errMsg } from "../../api";
 import { cx, ACCENT, SERIES } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
 import EmptyState from "../organization/OrganizationEmptyState";
@@ -36,6 +37,7 @@ const TABS = [
   { key: "qa", label: "Q&A", icon: FiHelpCircle },
   { key: "polls", label: "Polls", icon: FiBarChart2 },
   { key: "analytics", label: "Stats", icon: FiTrendingUp },
+  { key: "feedback", label: "Feedback", icon: FiStar },
   { key: "activity", label: "Feed", icon: FiActivity },
 ];
 
@@ -318,9 +320,107 @@ function AnalyticsTab({ analytics, health }) {
   );
 }
 
+// ── feedback ──────────────────────────────────────────────────────────────────
+
+// Fetched over REST (not part of the live socket snapshot) because a submission
+// persists after the submitter has already disconnected — see routers/events.py's
+// GET /{event_id}/feedback and services/moderation._feedback_submit. Fetched lazily,
+// only once the tab is actually opened, and only while an eventId is available (the
+// pre-live "start meeting" screen has none yet).
+function FeedbackStars({ rating }) {
+  if (!rating) return <span className="text-[11px] text-slate-400 dark:text-slate-500">No rating</span>;
+  return (
+    <span className="flex items-center gap-0.5" aria-label={`${rating} out of 5 stars`}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <FiStar
+          key={n}
+          aria-hidden="true"
+          className={cx(
+            "h-3 w-3",
+            n <= rating ? "fill-amber-400 text-amber-400" : "text-slate-300 dark:text-slate-600"
+          )}
+        />
+      ))}
+    </span>
+  );
+}
+
+function FeedbackTab({ eventId }) {
+  const [items, setItems] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+
+  useEffect(() => {
+    if (!eventId) return;
+    let cancelled = false;
+    setItems(null);
+    setLoadError(null);
+    api
+      .get(`/events/${eventId}/feedback`, { params: { role: "viewer" } })
+      .then((res) => { if (!cancelled) setItems(res.data); })
+      .catch((e) => { if (!cancelled) setLoadError(errMsg(e, "Couldn't load feedback")); });
+    return () => { cancelled = true; };
+  }, [eventId]);
+
+  if (loadError) {
+    return (
+      <EmptyState icon={FiStar} title="Couldn't load feedback" description={loadError} className="py-10" />
+    );
+  }
+  if (items === null) {
+    return <p className="p-3 text-[12px] text-slate-400 dark:text-slate-500">Loading feedback…</p>;
+  }
+  if (items.length === 0) {
+    return (
+      <EmptyState
+        icon={FiStar}
+        title="No feedback yet"
+        description="Ratings and comments viewers leave when they exit will show up here."
+        className="py-10"
+      />
+    );
+  }
+
+  const rated = items.filter((f) => f.rating != null);
+  const avg = rated.length ? rated.reduce((s, f) => s + f.rating, 0) / rated.length : null;
+
+  return (
+    <div className="space-y-3">
+      {avg != null && (
+        <div className="flex items-center justify-between rounded-lg border border-slate-200 p-2.5 dark:border-slate-700">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+              Average rating
+            </p>
+            <p className="text-lg font-semibold text-slate-900 dark:text-white">{avg.toFixed(1)} / 5</p>
+          </div>
+          <FeedbackStars rating={Math.round(avg)} />
+          <span className="text-[11px] text-slate-400 dark:text-slate-500">
+            {items.length} response{items.length === 1 ? "" : "s"}
+          </span>
+        </div>
+      )}
+      <ul className="space-y-2">
+        {items.map((f) => (
+          <li key={f.id} className="rounded-lg border border-slate-200 p-2.5 dark:border-slate-700">
+            <div className="flex items-center justify-between gap-2">
+              <FeedbackStars rating={f.rating} />
+              <span className="shrink-0 text-[10px] text-slate-400 dark:text-slate-500">
+                {f.created_at ? new Date(f.created_at).toLocaleString() : ""}
+              </span>
+            </div>
+            {f.comment && (
+              <p className="mt-1.5 text-[12px] leading-relaxed text-slate-700 dark:text-slate-200">{f.comment}</p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // ── shell ─────────────────────────────────────────────────────────────────────
 
-export default function HostPanel({ tab, setTab, state, canModerate, send, className = "" }) {
+export default function HostPanel({ tab, setTab, state, canModerate, send, eventId, className = "" }) {
   const [muteArmed, setMuteArmed] = useState(false);
   const {
     participants = [], messages = [], questions = [], polls = [], announcements = [],
@@ -343,7 +443,7 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, class
       <div
         role="tablist"
         aria-label="Producer panels"
-        className={cx("grid shrink-0 grid-cols-6 border-b", STUDIO.divider)}
+        className={cx("grid shrink-0 grid-cols-7 border-b", STUDIO.divider)}
       >
         {TABS.map((t) => {
           const on = tab === t.key;
@@ -440,6 +540,12 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, class
         {tab === "analytics" && (
           <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
             <AnalyticsTab analytics={analytics} health={health} />
+          </div>
+        )}
+
+        {tab === "feedback" && (
+          <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+            <FeedbackTab eventId={eventId} />
           </div>
         )}
 

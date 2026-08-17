@@ -1,10 +1,11 @@
-import { useCallback, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer } from "react";
 import { useSearchParams } from "react-router-dom";
 import api from "../api";
 import useApi from "./useApi";
 import useEventStream from "./useEventStream";
 import useInterval from "./useInterval";
 import { notify } from "../ui/Toast";
+import { playQuestionAlert, unlockAudio } from "../utils/sound";
 
 // The whole data layer for a live event console — event resolution, the socket, and one
 // reducer over the server's envelopes.
@@ -221,10 +222,24 @@ export default function useLiveEvent() {
     if (env.type === "action.result" && env.data.enforced === false) {
       notify.info("Recorded — LiveKit isn't connected, so it wasn't enforced on the stream.");
     }
+    // A viewer just raised a new question — chime so the host/moderator notices without
+    // having to sit on the Q&A tab, and can answer it faster. Not fired for question.update
+    // (votes, pinning, assignment, answered/dismissed) — only a brand-new question should
+    // interrupt the host's attention.
+    if (env.channel === "qa" && env.type === "question.new") {
+      playQuestionAlert();
+    }
     dispatch(env);
   }, []);
 
   const stream = useEventStream(resolved?.id, onEnvelope);
+
+  // Warm up the notification chime's AudioContext on this console's first click/keypress,
+  // rather than waiting for one to happen to land inside playQuestionAlert's own call —
+  // see utils/sound.js for why that race silently ate the sound before.
+  useEffect(() => {
+    unlockAudio();
+  }, []);
 
   // Expire stale typing indicators. Only ticks while somebody is typing.
   useInterval(() => dispatch({ channel: "local", type: "typing.prune" }),

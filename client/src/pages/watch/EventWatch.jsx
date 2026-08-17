@@ -24,6 +24,7 @@ import EventInfo from "../../components/watch/EventInfo";
 import ReactionBar from "../../components/watch/ReactionBar";
 import RegistrationGate from "../../components/watch/RegistrationGate";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
+import FeedbackModal from "../../components/common/FeedbackModal";
 import Spinner from "../../ui/Spinner";
 import Logo from "../../ui/Logo";
 import { notify } from "../../ui/Toast";
@@ -266,7 +267,16 @@ export default function EventWatch() {
   const live = event?.status === "Live";
   const ended = event?.status === "Completed";
   const identified = !!(user || regToken || linkToken);
+  // "Leave Event" opens the feedback modal first (the live socket is still connected at
+  // that point, so the modal's onSubmit can ride it) — the actual disconnect/token-clear/
+  // redirect that used to fire immediately on click now happens in finishLeave, which the
+  // modal calls via onDone whether the viewer submitted or skipped.
+  const [showLeaveFeedback, setShowLeaveFeedback] = useState(false);
   const handleLeaveEvent = useCallback(() => {
+    setShowLeaveFeedback(true);
+  }, []);
+  const finishLeave = useCallback(() => {
+    setShowLeaveFeedback(false);
     disconnectLive();
 
     localStorage.removeItem(`zk_reg_${eventId}`);
@@ -412,6 +422,13 @@ export default function EventWatch() {
       <footer className="border-t border-slate-200 py-6 text-center text-xs text-slate-400 dark:border-white/10">
         © 2024 ZoikoStream. All rights reserved.
       </footer>
+
+      <FeedbackModal
+        open={showLeaveFeedback}
+        role="viewer"
+        onSubmit={(payload) => sendLive("feedback.submit", payload)}
+        onDone={finishLeave}
+      />
     </div>
   );
 }
