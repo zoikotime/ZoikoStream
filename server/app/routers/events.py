@@ -172,7 +172,8 @@ def watch_event(
     is_org_member = bool(user and (user.role == "super_admin" or user.org_id == ev.org_id))
     reg_payload = decode_registration_payload(reg, ev.id) if reg else None
     invited = reg_payload is not None
-    link_admitted = bool(link) and crud.find_access_link(db, ev.id, link) is not None
+    link_row = crud.find_access_link(db, ev.id, link) if link else None
+    link_admitted = link_row is not None
 
     claim_rejected = False
     if invited and ev.visibility == "private" and not is_org_member:
@@ -218,7 +219,29 @@ def watch_event(
         and (not ev.registration_required or registered)
     )
     if can_stream:
-        identity = f"viewer-{user.id}" if user else f"viewer-{uuid.uuid4()}"
+        # This identity has to be the SAME string the live moderation socket uses as this
+        # visitor's presence identity (services/moderation.py resolve_ctx and friends) —
+        # host actions like Promote to Speaker (participant.role), Mute, and Remove all
+        # call into services/livekit.py with THAT identity to update/kick the matching
+        # LiveKit room participant. A mismatched identity here meant those calls were
+        # silently updating (or kicking) a LiveKit participant that didn't exist, so a
+        # promoted viewer's own client still held stale (no-publish) permissions and got
+        # "insufficient permissions" the moment it tried to publish its mic — the state
+        # changed everywhere except the one place (LiveKit) that actually enforces it.
+        # Mirrors routers/live.py's own resolve_ctx / resolve_ctx_from_registration /
+        # resolve_ctx_from_access_link precedence (user, then reg, then link) exactly.
+        if user:
+            identity = str(user.id)
+        elif invited and reg_payload:
+            identity = f"guest-{reg_payload['reg']}"
+        elif link_admitted and link_row:
+            identity = f"guest-link-{link_row.id}"
+        else:
+            # No credential the live socket would accept either (see live.py's own
+            # "Invalid or expired session" refusal) — this viewer can watch/listen but was
+            # never going to hold a moderation-socket identity to promote in the first
+            # place, so a disposable identity is correct here, not a bug.
+            identity = f"viewer-{uuid.uuid4()}"
         token = livekit.create_stream_token(identity, room, False)
         url = livekit.settings.LIVEKIT_URL
 
@@ -532,7 +555,13 @@ def invite_viewers(
 # ── Access links (revocable, shareable — link-based counterpart to invite-viewers) ────────
 
 def _access_link_url(event_id: uuid.UUID, token: str) -> str:
-    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    # THE BUG THIS FIXES: this used to read settings.CORS_ORIGINS (a comma-separated list
+    # of allowed browser origins, meant for CORS — not a "public URL" setting) instead of
+    # settings.APP_URL, which every other email link builder in this app uses
+    # (_invite_url, _console_url, _registration_console_url, _base_url in email.py). Since
+    # CORS_ORIGINS is commonly left at its dev default of localhost origins, access-link
+    # invite emails sent from a real deployment pointed viewers at http://localhost:5173.
+    base = settings.APP_URL.rstrip("/")
     return f"{base}/events/{event_id}/watch?link={token}"
 
 

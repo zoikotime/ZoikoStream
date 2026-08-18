@@ -167,9 +167,31 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             await bus.publish(ctx.event_id, "stage", "waiting.join", rec)
 
         async def writer():
-            """Only this task writes to the socket, so sends never interleave."""
+            """Only this task writes to the socket, so sends never interleave.
+
+            One thing this loop watches for itself: a "session"/"removed" envelope
+            addressed to THIS identity (published by moderation._participant_action on
+            participant.remove / participant.ban — see services/moderation.py). It's
+            broadcast to every connection on the event like anything else on the bus, but
+            only the matching connection is meant to act on it — deliver it, then close
+            this socket from the server side with the same policy-violation code the
+            connect path already uses for a banned rejoin attempt, so a removed viewer
+            can't just keep sitting on the page with a live socket to a room they were
+            just kicked out of. useEventStream.js already treats that code as fatal and
+            does not retry."""
             while True:
-                await websocket.send_json(await queue.get())
+                env = await queue.get()
+                await websocket.send_json(env)
+                if (
+                    env.get("channel") == "session"
+                    and env.get("type") == "removed"
+                    and env.get("data", {}).get("identity") == ctx.identity
+                ):
+                    await websocket.close(
+                        code=status.WS_1008_POLICY_VIOLATION,
+                        reason=env["data"].get("reason") or "Removed from event",
+                    )
+                    return
 
         pump = asyncio.create_task(writer())
         try:
