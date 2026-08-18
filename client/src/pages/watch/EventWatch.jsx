@@ -76,6 +76,15 @@ const LIVE_EMPTY = {
   // keyed like ReactionBar's REACTIONS list. Empty until the snapshot/first update
   // arrives — ReactionBar defaults any missing key to 0 rather than a fake baseline.
   reactions: {},
+  // This connection's own identity (server/app/services/moderation.py snapshot's "you") —
+  // how this viewer recognizes ITS OWN row in `participants` (am I on stage right now?)
+  // and matches a broadcast session.removed envelope against itself rather than reacting
+  // to somebody else being removed.
+  you: null,
+  // Set once a session/removed envelope (see services/moderation.py _participant_action,
+  // op remove/ban) names THIS identity. The server closes the socket right after sending
+  // it, so this never clears itself — the viewer has actually been removed.
+  removed: null,
 };
 
 function liveReducer(state, env) {
@@ -84,6 +93,7 @@ function liveReducer(state, env) {
   switch (`${channel}/${type}`) {
     case "moderator/snapshot":
       return {
+        ...LIVE_EMPTY,
         messages: data.messages || [],
         typing: {},
         questions: data.questions || [],
@@ -95,7 +105,14 @@ function liveReducer(state, env) {
         // 0/0/0/0/0 waiting for the next tap — same guarantee the rest of the snapshot
         // gives messages/questions/polls.
         reactions: data.reactions || {},
+        you: data.you || null,
       };
+
+    case "session/removed":
+      // Broadcast to every connection on the event (see services/bus.py "session"
+      // channel) — only the one whose identity matches is actually being told anything.
+      if (!state.you || data.identity !== state.you.identity) return state;
+      return { ...state, removed: { reason: data.reason || "You were removed from this event." } };
 
     case "participants/participant.join":
     case "participants/participant.update":
@@ -289,13 +306,29 @@ export default function EventWatch() {
       playAlertChime();
       notify.alert(env.data?.text ? `Announcement: ${env.data.text}` : "New announcement from the host");
     }
+    // This viewer's own promote/demote — a toast is the only signal they'd otherwise get
+    // that their mic just started (or stopped) being published; VideoPlayer's on-stage
+    // badge only shows up on the video itself, which they might not be looking at.
+    if (env.channel === "participants" && env.type === "participant.update" && panel.you && env.data.identity === panel.you.identity) {
+      const wasOnStage = Boolean(panel.participants[env.data.identity]?.on_stage);
+      const nowOnStage = Boolean(env.data.on_stage);
+      if (nowOnStage && !wasOnStage) notify.success("The host invited you on stage — your mic is now live.");
+      else if (!nowOnStage && wasOnStage) notify.info("You're no longer on stage.");
+    }
     dispatchPanel(env);
-  }, [fetchWatch, markAlert]);
+  }, [fetchWatch, markAlert, panel.you, panel.participants]);
   const {
     status: liveStatus,
     send: sendLive,
     disconnect: disconnectLive,
   } = useEventStream(eventId, onLiveEnvelope, regToken, linkToken);
+
+  // This viewer's own presence record, once the snapshot has named it — whether they're
+  // currently invited on stage (mic live, real LiveKit publish grant; see
+  // services/moderation.py participant.role/participant.stage and useLiveKitViewer.js).
+  const isOnStage = Boolean(
+    panel.you && panel.participants[panel.you.identity]?.on_stage
+  );
 
   useEffect(() => {
     // fetchWatch only sets state inside its own .then/.catch/.finally (an async
@@ -396,6 +429,27 @@ export default function EventWatch() {
       </div>
     );
 
+  // The host removed/banned this viewer (services/moderation.py participant.remove /
+  // participant.ban -> "session"/"removed", handled server-side by closing this socket —
+  // see routers/live.py). The live connection is already gone at this point; this is
+  // purely the honest "here's why the page just stopped working" the viewer is owed,
+  // instead of a stream that silently freezes with no explanation.
+  if (panel.removed)
+    return (
+      <div className="grid min-h-screen place-items-center bg-slate-50 px-4 dark:bg-slate-950">
+        <div className="max-w-sm text-center">
+          <p className="text-lg font-semibold text-slate-900 dark:text-white">You&apos;ve left this event</p>
+          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{panel.removed.reason}</p>
+          <Link
+            to="/"
+            className="mt-4 inline-block rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
+          >
+            Back to home
+          </Link>
+        </div>
+      </div>
+    );
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
       {/* Brand bar — the real wordmark asset (ui/Logo), not a text stand-in. */}
@@ -458,7 +512,7 @@ export default function EventWatch() {
             ) : watch.not_started ? (
               <AccessWindowNotice variant="not_started" startTime={watch.start_time} />
             ) : (
-              <VideoPlayer event={event} viewers={viewers} watch={watch} />
+              <VideoPlayer event={event} viewers={viewers} watch={watch} onStage={isOnStage} />
             )}
             {!timeGated && (
               <ReactionBar
