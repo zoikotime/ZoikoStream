@@ -422,7 +422,7 @@ def test_overview_payload_is_complete_on_every_range():
         org = _org(db)
         u = _user(db, org)
         required = {"generated_at", "window", "organization", "workspace", "workspaces",
-                    "lifecycle", "service_health", "sessions", "media_assets",
+                    "lifecycle", "service_health", "sessions", "trends", "media_assets",
                     "entitlements", "api", "attention", "upcoming_events",
                     "developer_ops", "security_support", "gaps"}
         for r in ("1h", "24h", "7d", "30d"):
@@ -432,6 +432,85 @@ def test_overview_payload_is_complete_on_every_range():
             assert out["window"]["range"] == r
             assert out["window"]["since"] < out["window"]["until"]
         assert len(org_svc.ORG_GAPS) == 11
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_range_window_actually_narrows_the_session_figures():
+    """The regression this exists for: `since` was accepted by sessions() and never used, so
+    the console's range control refetched and returned identical numbers at every setting."""
+    db = SessionLocal()
+    try:
+        org = _org(db)
+        u = _user(db, org)
+        ev = _event(db, org, u)
+        # Ended 3 days ago with a big audience, plus a small one that ended an hour ago.
+        _session(db, org, ev, status="ended", peak_viewers=900,
+                 started_at=NOW - timedelta(days=3, hours=2), ended_at=NOW - timedelta(days=3))
+        _session(db, org, ev, status="ended", peak_viewers=12,
+                 started_at=NOW - timedelta(hours=2), ended_at=NOW - timedelta(hours=1))
+
+        day = org_svc.overview(db, org, u, range_="24h")["sessions"]
+        week = org_svc.overview(db, org, u, range_="7d")["sessions"]
+
+        # 24h sees only the recent one; 7d sees both. The window moves the number.
+        assert day["peak_audience"] == 12, day["peak_audience"]
+        assert week["peak_audience"] == 900, week["peak_audience"]
+        # All-time is window-independent, so a UI can label it as a record without lying.
+        assert day["peak_audience_all_time"] == 900 == week["peak_audience_all_time"]
+        # The old session ended outside the 24h window, so it is not listed there.
+        assert len(day["items"]) == 1 and len(week["items"]) == 2
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_live_sessions_ignore_the_window():
+    """A broadcast that started before the window is still on air — "now" is not windowed."""
+    db = SessionLocal()
+    try:
+        org = _org(db)
+        u = _user(db, org)
+        ev = _event(db, org, u)
+        _session(db, org, ev, status="live", peak_viewers=40,
+                 started_at=NOW - timedelta(days=5))
+
+        for range_key in ("1h", "24h", "7d", "30d"):
+            sess = org_svc.overview(db, org, u, range_=range_key)["sessions"]
+            assert sess["live"] == 1, (range_key, sess)
+            assert len(sess["items"]) == 1
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_audience_trend_buckets_peak_and_sums_concurrent_events():
+    db = SessionLocal()
+    try:
+        org = _org(db)
+        u = _user(db, org)
+        e1, e2 = _event(db, org, u), _event(db, org, u)
+        # Two events live in the SAME hour: 30 + 5 concurrent. Within e1's hour the peak is
+        # 30, so the bucket must read 35 — sum of per-event peaks, not sum of every sample.
+        db.add_all([
+            AnalyticsSnapshot(event_id=e1.id, org_id=org.id, viewers=10,
+                              created_at=NOW - timedelta(hours=2, minutes=50)),
+            AnalyticsSnapshot(event_id=e1.id, org_id=org.id, viewers=30,
+                              created_at=NOW - timedelta(hours=2, minutes=40)),
+            AnalyticsSnapshot(event_id=e2.id, org_id=org.id, viewers=5,
+                              created_at=NOW - timedelta(hours=2, minutes=45)),
+        ])
+        db.flush()
+
+        out = org_svc.overview(db, org, u, range_="24h")
+        series = out["trends"]["audience"]
+        assert series, "24h window with snapshots must produce a series"
+        assert max(p["value"] for p in series) == 35, series
+        # Quiet buckets are emitted as 0 rather than skipped, so the x-axis isn't compressed.
+        assert any(p["value"] == 0 for p in series)
+        # No snapshots in range -> [] (not zeros), so the UI can say "no history yet".
+        assert org_svc.audience_trend(db, org.id, NOW - timedelta(minutes=5), NOW, "1h") == []
     finally:
         db.rollback()
         db.close()

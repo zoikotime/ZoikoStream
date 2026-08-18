@@ -18,7 +18,15 @@ from ..crud import organization as crud
 from ..db import get_db
 from ..email import send_invitation_email
 from ..models import Organization, User
-from ..schemas.admin import AdminUserOut, Page, PlanOut, UserUpdate
+from ..schemas.admin import (
+    AdminUserOut,
+    ApiKeyCreate,
+    ApiKeyCreated,
+    ApiKeyOut,
+    Page,
+    PlanOut,
+    UserUpdate,
+)
 from ..schemas.auth import TokenOut, UserOut
 from ..schemas.organization import (
     InvitationAccept,
@@ -199,11 +207,45 @@ def update_branding(
     return crud.apply_fields(db, org, data)
 
 
-# ── Developer (read-only) ─────────────────────────────────────────────────────
+# ── Developer / API keys ──────────────────────────────────────────────────────
+# Key records are shaped through ApiKeyOut rather than returned raw: the stored record also
+# holds `key_hash`, which is credential material and has no business reaching a browser.
 
 @router.get("/developer", response_model=OrgDeveloperOut)
-def get_developer(org: Organization = Depends(get_my_org_admin)):
-    return OrgDeveloperOut(api_keys=org.api_keys or [], webhook_urls=org.webhook_urls or [])
+def get_developer(org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db)):
+    return OrgDeveloperOut(
+        # mode="json" so nested datetimes come out as ISO strings — the response field is a
+        # loose list[dict] and would otherwise carry raw datetime objects.
+        api_keys=[k.model_dump(mode="json") for k in admin_crud.list_api_keys(db, org)],
+        webhook_urls=org.webhook_urls or [],
+    )
+
+
+@router.get("/api-keys", response_model=list[ApiKeyOut])
+def list_my_api_keys(org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db)):
+    return admin_crud.list_api_keys(db, org)
+
+
+@router.post("/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
+def create_my_api_key(
+    data: ApiKeyCreate,
+    org: Organization = Depends(get_my_org_admin),
+    db: Session = Depends(get_db),
+):
+    """Mint a key for the caller's OWN org. The raw key is in this response and nowhere
+    else — only its sha256 is stored, so it can never be re-shown."""
+    return admin_crud.create_api_key(db, org, data.label, expires_in_days=data.expires_in_days)
+
+
+@router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_my_api_key(
+    key_id: str,
+    org: Organization = Depends(get_my_org_admin),
+    db: Session = Depends(get_db),
+):
+    # Scoped to the caller's own org, so a key id from another org is simply not found.
+    if not admin_crud.revoke_api_key(db, org, key_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "API key not found")
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────

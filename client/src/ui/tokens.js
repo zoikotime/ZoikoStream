@@ -107,6 +107,27 @@ export const type = {
   mono: "font-mono tabular-nums",
 };
 
+// ── Brand gradient ───────────────────────────────────────────────────────────
+// The ZoikoStream mark runs blue → violet → magenta (the "Z" sweep and the STREAM wordmark
+// are both that ramp), so every primary action in the console paints with THIS string and
+// the buttons finally match the logo above them.
+//
+// One definition on purpose: the old violet→indigo fill was spelled out separately in the
+// console Button, the org rail's active row, the org topbar CTA and four avatar chips, so
+// re-tinting the product meant finding five copies.
+//
+// Dark mode lifts every stop one step (600 → 500, hover 500 → 400). On the console's true
+// black a 600-weight ramp reads muddy; 500 keeps it legible without becoming neon.
+export const brand = {
+  fill: "bg-gradient-to-r from-blue-600 via-violet-600 to-fuchsia-600 dark:from-blue-500 dark:via-violet-500 dark:to-fuchsia-500",
+  fillHover:
+    "hover:from-blue-500 hover:via-violet-500 hover:to-fuchsia-500 dark:hover:from-blue-400 dark:hover:via-violet-400 dark:hover:to-fuchsia-400",
+  glow: "shadow-sm shadow-violet-600/25 hover:shadow-md hover:shadow-fuchsia-600/35 dark:shadow-fuchsia-500/20 dark:hover:shadow-fuchsia-400/30",
+  // Identity chips (avatars, workspace initials) — same ramp on the diagonal.
+  chip: "bg-gradient-to-br from-blue-600 via-violet-600 to-fuchsia-600 dark:from-blue-500 dark:via-violet-500 dark:to-fuchsia-500",
+};
+export const brandButton = `${brand.fill} ${brand.fillHover} ${brand.glow} text-white`;
+
 // Interaction primitives — every interactive element composes these.
 export const focusRing =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-900";
@@ -158,33 +179,39 @@ const FIELD_BASE = [
   "dark:hover:border-slate-600 dark:hover:bg-slate-800/60 dark:focus-visible:bg-slate-900",
 ].join(" ");
 
+// Dark-mode note: the page stays true black (one black, everything above it derived), but
+// every layer ON it was pitched too low to read — a 2% panel fill on #000 is almost the page
+// itself, and neutral-500 body copy on black is grey mush. Each dark value below is lifted
+// one step: fills ~2× brighter, borders 10% → 16%, and the text ladder up one shade.
 export const CONSOLE = {
   // Shell
   page: "bg-slate-50 dark:bg-black",
-  rail: "border-slate-200 bg-white dark:border-white/10 dark:bg-black",
-  bar: "border-slate-200 bg-white/85 dark:border-white/10 dark:bg-black/85",
+  rail: "border-slate-200 bg-white dark:border-white/12 dark:bg-black",
+  bar: "border-slate-200 bg-white/85 dark:border-white/12 dark:bg-black/85",
   // Panels — flat, bordered, no shadow (console surface, not a marketing card).
-  panel: "rounded-xl border border-slate-200 bg-white dark:border-white/10 dark:bg-white/[0.02]",
-  panelHover: "hover:border-slate-300 dark:hover:border-white/20",
-  inset: "rounded-lg border border-slate-200 bg-slate-50/80 dark:border-white/10 dark:bg-white/[0.03]",
-  divider: "border-slate-200 dark:border-white/10",
-  divideY: "divide-slate-100 dark:divide-white/[0.07]",
+  panel: "rounded-xl border border-slate-200 bg-white dark:border-white/[0.14] dark:bg-white/[0.05]",
+  panelHover: "hover:border-slate-300 dark:hover:border-white/25",
+  inset: "rounded-lg border border-slate-200 bg-slate-50/80 dark:border-white/[0.14] dark:bg-white/[0.07]",
+  divider: "border-slate-200 dark:border-white/[0.14]",
+  divideY: "divide-slate-100 dark:divide-white/[0.10]",
   // Text ladder
   heading: "text-slate-900 dark:text-white",
-  body: "text-slate-600 dark:text-neutral-300",
-  muted: "text-slate-500 dark:text-neutral-400",
-  faint: "text-slate-400 dark:text-neutral-500",
+  body: "text-slate-600 dark:text-neutral-200",
+  muted: "text-slate-500 dark:text-neutral-300",
+  faint: "text-slate-400 dark:text-neutral-400",
   // Controls
   control:
-    "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.03] dark:text-neutral-200 dark:hover:bg-white/[0.07]",
-  segment: "bg-slate-100 dark:bg-white/[0.05]",
-  segmentOn: "bg-violet-600 text-white shadow-sm",
+    "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-white/[0.16] dark:bg-white/[0.07] dark:text-neutral-100 dark:hover:bg-white/[0.12]",
+  segment: "bg-slate-100 dark:bg-white/[0.08]",
+  // The selected segment carries the brand ramp, so a tab strip and the primary button in the
+  // same toolbar read as one system.
+  segmentOn: `${brand.fill} text-white shadow-sm`,
   // An inactive segment/tab now lifts on hover instead of only darkening its text. In light mode
   // a text-only change on a grey track is nearly invisible, which made every tab strip read as
   // static labels rather than as controls.
   segmentOff:
-    "text-slate-600 hover:bg-white hover:text-slate-900 hover:shadow-sm dark:text-neutral-400 dark:hover:bg-white/10 dark:hover:text-white",
-  link: "text-violet-600 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300",
+    "text-slate-600 hover:bg-white hover:text-slate-900 hover:shadow-sm dark:text-neutral-300 dark:hover:bg-white/12 dark:hover:text-white",
+  link: "text-violet-600 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200",
 
   // ── Filter-bar fields ──────────────────────────────────────────────────────
   // Ready-made shapes built from FIELD_BASE (defined above). Thirteen admin pages were each
@@ -206,18 +233,22 @@ export const CONSOLE = {
   // Sidebar navigation states. Three levels have to stay tellable apart at a glance:
   //   rest  — quiet, recedes
   //   hover — clearly reactive (the old values were ~4% washes, effectively invisible)
-  //   on    — violet-tinted in BOTH themes, matching the active-item treatment in the design
-  // Hover is a neutral lift rather than a violet tint so it never reads as "selected".
-  navOn: "bg-violet-50 text-violet-700 dark:bg-violet-500/[0.14] dark:text-white",
+  //   on    — the brand ramp, filled, in BOTH themes and BOTH consoles
+  // Hover is a neutral lift rather than a brand tint so it never reads as "selected".
+  //
+  // The active row used to be a pale violet tint here (admin rail) while the org rail drew its
+  // own violet→indigo gradient. Same product, two answers — this is now the one treatment, and
+  // the org rail's private copy is gone.
+  navOn: `${brand.fill} text-white shadow-[0_2px_10px_-2px_rgba(124,58,237,0.5)]`,
   navOff: [
-    "text-slate-600 dark:text-neutral-400",
+    "text-slate-600 dark:text-neutral-300",
     "hover:bg-slate-100 hover:text-slate-900",
-    "dark:hover:bg-white/[0.08] dark:hover:text-white",
+    "dark:hover:bg-white/[0.10] dark:hover:text-white",
   ].join(" "),
-  // Icons carry the state too — a violet icon on the active row, muted at rest, and
-  // brightened on hover so the whole row responds as one target.
-  navIconOn: "text-violet-600 dark:text-violet-400",
-  navIconOff: "text-slate-400 group-hover:text-slate-600 dark:text-neutral-500 dark:group-hover:text-neutral-200",
+  // On a filled active row the icon inherits white; at rest it stays muted and brightens with
+  // the row so the whole target responds as one.
+  navIconOn: "text-white",
+  navIconOff: "text-slate-400 group-hover:text-slate-600 dark:text-neutral-400 dark:group-hover:text-neutral-100",
 };
 
 // Heat cells for the stage × region availability matrix. Thresholds are availability %,

@@ -569,7 +569,8 @@ def update_governance_record(db, record: GovernanceRecord, data) -> GovernanceRe
 def list_api_keys(db, org: Organization) -> list[ApiKeyOut]:
     records = org.api_keys or []
     return [ApiKeyOut(id=r["id"], label=r["label"], prefix=r["prefix"],
-                      created_at=r["created_at"], revoked=r.get("revoked", False))
+                      created_at=r["created_at"], expires_at=r.get("expires_at"),
+                      revoked=r.get("revoked", False))
             for r in records]
 
 

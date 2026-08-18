@@ -2,6 +2,7 @@
 Session. Run with `python test_org_settings.py` (or pytest)."""
 from types import SimpleNamespace
 
+from app.crud import admin as admin_crud
 from app.crud import organization as crud
 from app.schemas.organization import OrgMeOut, OrgNotifications, OrgProfileUpdate
 
@@ -49,6 +50,25 @@ def test_schema_shapes():
     # Notification defaults fill missing keys on read.
     n = OrgNotifications(**{"billing": False})
     assert n.billing is False and n.event_scheduled is True
+
+
+def test_api_keys_round_trip_without_leaking_the_hash():
+    """The org console can now mint/revoke its own keys, so the shaped record it gets back
+    matters: the raw key appears once (at creation) and the stored sha256 never at all."""
+    org = SimpleNamespace(api_keys=None)
+    created = admin_crud.create_api_key(FakeDB(), org, "CI", expires_in_days=30)
+    assert created.key.startswith("zk_live_")
+
+    listed = admin_crud.list_api_keys(FakeDB(), org)
+    assert len(listed) == 1
+    record = listed[0].model_dump()
+    assert "key_hash" not in record and "key" not in record
+    # Regression: the list used to drop expires_at, so an expiring key read as non-expiring.
+    assert record["expires_at"] is not None
+
+    assert admin_crud.revoke_api_key(FakeDB(), org, created.id) is True
+    assert admin_crud.list_api_keys(FakeDB(), org)[0].revoked is True
+    assert admin_crud.revoke_api_key(FakeDB(), org, "not-a-key") is False
 
 
 if __name__ == "__main__":

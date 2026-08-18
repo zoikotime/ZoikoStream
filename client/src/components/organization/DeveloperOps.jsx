@@ -45,7 +45,10 @@ export default function DeveloperOps({ ops }) {
     >
       <ul className={cx("divide-y", CONSOLE.divideY)}>
         {rows.map((r) => (
-          <li key={r.label} className="flex items-center justify-between gap-4 px-4 py-2.5 sm:px-5">
+          <li
+            key={r.label}
+            className="flex items-center justify-between gap-4 px-4 py-2.5 transition-colors duration-150 hover:bg-slate-50 motion-reduce:transition-none sm:px-5 dark:hover:bg-white/[0.03]"
+          >
             <p className={cx("min-w-0 text-[13px]", CONSOLE.body)}>{r.label}</p>
             <span
               className={cx(
@@ -53,6 +56,9 @@ export default function DeveloperOps({ ops }) {
                 r.mono && type.mono,
                 r.value == null ? CONSOLE.faint : r.tone
               )}
+              // The panel footnote says why some rows are dashed; this puts the reason on the
+              // row itself, where the reader is actually looking.
+              title={r.value == null ? "No source integrated for this figure yet" : undefined}
             >
               {r.value == null ? "—" : r.value}
             </span>

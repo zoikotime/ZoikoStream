@@ -9,7 +9,7 @@ import {
 import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import useInterval from "../../hooks/useInterval";
-import { CONSOLE, cx, focusRing, type } from "../../ui/tokens";
+import { CONSOLE, brand, cx, focusRing, type } from "../../ui/tokens";
 import Logo from "../../ui/Logo";
 
 // Platform navigation, grouped the way the console is meant to be read:
@@ -271,7 +271,7 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
             }
           />
           <div className="flex items-center gap-2.5 px-6 pb-4">
-            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-[11px] font-semibold text-white">
+            <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white", brand.chip)}>
               {initials(person.name)}
             </span>
             <div className="min-w-0">

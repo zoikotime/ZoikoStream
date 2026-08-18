@@ -89,7 +89,7 @@ const QUICKSTARTS = [
 const FOOTER_LINKS = [
   ["Feedback", null],
   ["Accessibility", null],
-  ["Security", "/organization/settings"],
+  ["Security", "/organization/settings?tab=security"],
   ["Status", "/organization/support"],
   ["Terms", null],
 ];

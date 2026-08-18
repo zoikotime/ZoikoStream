@@ -27,6 +27,7 @@ import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import ModeratorDashboard from "./pages/moderator/Dashboard";
 import Landing from "./pages/Landing";
+import Contact from "./pages/Contact";
 
 // Super Admin console — code-split as one area. Only super admins can reach /admin/*, so
 // shipping these 14 pages (plus their charts and tables) in the main bundle made every
@@ -117,6 +118,11 @@ export default function App() {
           <Routes>
             {/* Public landing page */}
             <Route path="/" element={<LandingOrDashboard />} />
+
+            {/* Public contact form — where the landing page's "Talk to an expert" goes.
+                Deliberately NOT behind LandingOrDashboard: a signed-in operator should still
+                be able to reach it without being bounced to their dashboard. */}
+            <Route path="/contact" element={<Contact />} />
 
             {/* Authentication — one login for every role; brand panel shared via AuthLayout.
                 All dummy: no API calls. After login, roleHome() picks the dashboard. */}

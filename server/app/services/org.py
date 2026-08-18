@@ -361,10 +361,22 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
 # ── sessions and media ────────────────────────────────────────────────────────
 
 def sessions(db: Session, org_id, since: datetime, limit: int = 6) -> dict:
-    """Active counts plus the live/recent session list."""
+    """Active counts plus the live/recent session list, scoped to the operational window.
+
+    `since` used to be accepted and ignored — every figure here was all-time, so the console's
+    range control refetched and returned identical numbers no matter what it was set to. It is
+    now the window for everything that HAS a time: ended sessions, and peak audience.
+
+    What is deliberately NOT windowed: live/paused/starting_soon. "On air now" is a question
+    about now, and a broadcast that started before the window is still on air.
+    """
     rows = db.scalars(
         select(BroadcastSession)
-        .where(BroadcastSession.org_id == org_id)
+        .where(
+            BroadcastSession.org_id == org_id,
+            # Still running (no end yet) OR it ended inside the window.
+            or_(BroadcastSession.ended_at.is_(None), BroadcastSession.ended_at >= since),
+        )
         .order_by(BroadcastSession.created_at.desc())
         .limit(50)
     ).all()
@@ -431,7 +443,12 @@ def sessions(db: Session, org_id, since: datetime, limit: int = 6) -> dict:
         "paused": len(paused),
         "starting_soon": starting,
         "current_audience": current_audience or None,
-        "peak_audience": db.scalar(
+        # Peak inside the window — this is what the range control now moves. `rows` is already
+        # the windowed set (live/paused plus anything that ended since `since`).
+        "peak_audience": max((s.peak_viewers or 0 for s in rows), default=0) or None,
+        # All-time peak alongside it, so a UI can say "peak N all time" without a second call
+        # and without mislabelling the windowed figure as a record.
+        "peak_audience_all_time": db.scalar(
             select(func.coalesce(func.max(BroadcastSession.peak_viewers), 0))
             .where(BroadcastSession.org_id == org_id)
         ) or None,
@@ -439,6 +456,63 @@ def sessions(db: Session, org_id, since: datetime, limit: int = 6) -> dict:
         # There is no self-service vs managed-event distinction in the schema.
         "breakdown_note": "Self-service vs managed classification is not modelled.",
     }
+
+
+# Bucket width + label format per operational window, chosen so a series lands at roughly
+# 12–30 points: dense enough to read as a trend, sparse enough for a 34px sparkline.
+_TREND_BUCKETS = {
+    "1h": (timedelta(minutes=5), "%H:%M"),
+    "24h": (timedelta(hours=1), "%H:%M"),
+    "7d": (timedelta(hours=6), "%b %d %H:%M"),
+    "30d": (timedelta(days=1), "%b %d"),
+}
+
+
+def audience_trend(db: Session, org_id, since: datetime, until: datetime,
+                   range_key: str = "24h") -> list[dict]:
+    """Concurrent audience across the org over the window, from real AnalyticsSnapshot rows.
+
+    Two deliberate choices:
+      * PEAK per bucket, not mean — an operator asks "how many were watching at once", and a
+        mean across the bucket hides the spike that mattered.
+      * Concurrency across events is the SUM of each event's peak in that bucket, which is the
+        same rollup `current_audience` above already uses (sum of the latest snapshot per
+        event). Consistent with the number shown beside it, rather than a second definition.
+
+    Empty window -> [] (not zeros), so the UI can say "no history yet" instead of drawing a
+    flat line that looks like a measured zero.
+    """
+    width, fmt = _TREND_BUCKETS.get(range_key, _TREND_BUCKETS["24h"])
+    rows = db.execute(
+        select(AnalyticsSnapshot.created_at, AnalyticsSnapshot.event_id, AnalyticsSnapshot.viewers)
+        .where(AnalyticsSnapshot.org_id == org_id, AnalyticsSnapshot.created_at >= since)
+        .order_by(AnalyticsSnapshot.created_at)
+    ).all()
+    if not rows:
+        return []
+
+    seconds = width.total_seconds()
+    # (bucket index, event) -> that event's peak inside the bucket.
+    per_event: dict[tuple[int, object], int] = {}
+    for created_at, event_id, viewers in rows:
+        when = _aware(created_at)
+        if when is None:
+            continue
+        idx = int((when - since).total_seconds() // seconds)
+        key = (idx, event_id)
+        per_event[key] = max(per_event.get(key, 0), viewers or 0)
+
+    totals: dict[int, int] = {}
+    for (idx, _event_id), peak in per_event.items():
+        totals[idx] = totals.get(idx, 0) + peak
+
+    # Emit every bucket in the window, including the quiet ones — a gap in the middle of a
+    # trend is information, and skipping it would compress the x-axis into a lie.
+    buckets = max(1, int((until - since).total_seconds() // seconds))
+    return [
+        {"label": (since + width * i).strftime(fmt), "value": totals.get(i, 0)}
+        for i in range(buckets + 1)
+    ]
 
 
 def media_assets(db: Session, org_id) -> dict:
@@ -489,7 +563,9 @@ def attention(db: Session, org: Organization, ent: dict, readiness: list[dict]) 
                          if days >= 0 else "Production credential has expired",
                 "detail": f"Credentials · {key.get('label') or key.get('prefix') or 'API key'}",
                 "action": "Rotate",
-                "to": "/organization/settings",
+                # Deep-links to the panel that actually holds the keys; the bare path opens
+                # Settings on General, which has no credential on it.
+                "to": "/organization/settings?tab=developer",
             })
 
     # Entitlement thresholds.
@@ -543,7 +619,7 @@ def attention(db: Session, org: Organization, ent: dict, readiness: list[dict]) 
             "title": g.detail or g.kind.replace("_", " ").capitalize(),
             "detail": f"Security & Governance · {g.kind.replace('_', ' ')}",
             "action": "Review",
-            "to": "/organization/settings",
+            "to": "/organization/settings?tab=security",
         })
 
     # Members waiting on an invitation decision.
@@ -739,6 +815,9 @@ def overview(db: Session, org: Organization, user: User, range_: str = "24h",
         "lifecycle": stages,
         "service_health": service_health(stages),
         "sessions": sess,
+        # Audience over the same window the toolbar selects. Feeds the KPI tiles' sparklines,
+        # which until now had no series to draw and always fell back to a flat hairline.
+        "trends": {"audience": audience_trend(db, org.id, since, generated_at, range_)},
         "media_assets": media,
         "entitlements": ent,
         "api": api_posture(),
