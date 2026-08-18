@@ -171,9 +171,12 @@ export default function EventReadiness() {
           </label>
           <span className={cx("ml-auto text-[11px] leading-snug", CONSOLE.faint)}>
             Every upcoming event with a scheduled start time. Standard-impact events have no
-            mandatory gates, so missing configuration can never Block them — but an unset gate
-            (no host, no recording, ...) still reads Conditional even on a Standard event; only
-            High and Unrepeatable events can actually Block on it.
+            mandatory operational gates, so missing configuration can never Block them — but an
+            unset gate (no host, no recording, ...) still reads Conditional even on a Standard
+            event; only High and Unrepeatable events can actually Block on it. Events carrying a
+            commercial/risk-tier obligation (a service profile, an elevated risk tier, or an
+            audience estimate over the default envelope) also get a "Commercial/risk-tier
+            readiness" gate, which is always mandatory regardless of impact class.
           </span>
         </div>
       </Panel>

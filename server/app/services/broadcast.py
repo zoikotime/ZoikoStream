@@ -310,9 +310,9 @@ async def _golive(ctx, payload):
         session.status = "live"
         session.started_at = session.started_at or now
         session.paused_at = None
-        # The event's own lifecycle only moves forward from a publishable state — reuse the
-        # existing guard rather than writing "live" unconditionally.
-        if ev is not None and ev.status in ("published", "scheduled"):
+        # The event's own lifecycle only moves forward from a publishable (or armed) state —
+        # reuse the existing guard rather than writing "live" unconditionally.
+        if ev is not None and ev.status in ("published", "scheduled", "armed"):
             ev.status = "live"
             ev.start_time = ev.start_time or now
         act = mod.record(db, ctx, "system", "Host started the stream", audit="live.broadcast.golive",

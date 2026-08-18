@@ -10,7 +10,10 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
 Visibility = Literal["public", "private", "unlisted"]
 CreateStatus = Literal["draft", "published", "scheduled"]  # other states only via transitions
-EventStatus = Literal["draft", "published", "scheduled", "live", "ended", "cancelled", "archived"]
+EventStatus = Literal[
+    "draft", "published", "scheduled", "rehearsal", "ready_to_arm", "armed", "live",
+    "degraded", "ending", "processing", "replay_ready", "ended", "cancelled", "archived", "blocked",
+]
 
 _SLUG = r"^[a-z0-9][a-z0-9-]*$"
 
@@ -30,6 +33,7 @@ class _EventBase(BaseModel):
     start_time: datetime | None = None
     end_time: datetime | None = None
     registration_limit: int | None = Field(None, ge=0)
+    expected_audience: int | None = Field(None, ge=0)
 
 
 class EventCreate(_EventBase):
@@ -37,8 +41,8 @@ class EventCreate(_EventBase):
     registration_required: bool = False
     waiting_room_enabled: bool = False
     recording_enabled: bool = False
-    chat_enabled: bool = True
-    qa_enabled: bool = True
+    chat_enabled: bool = False
+    qa_enabled: bool = False
     polls_enabled: bool = False
     raise_hand_enabled: bool = True
     allow_screen_share: bool = True
@@ -83,6 +87,7 @@ class EventOut(BaseModel):
     visibility: str
     registration_required: bool
     registration_limit: int | None = None
+    expected_audience: int | None = None
     waiting_room_enabled: bool
     recording_enabled: bool
     chat_enabled: bool

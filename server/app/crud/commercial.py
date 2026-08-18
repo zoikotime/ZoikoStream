@@ -25,6 +25,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .event import elevated_risk_tier
 from ..models import (
     AuditLog,
     CancellationPolicy,
@@ -386,7 +387,9 @@ def accept_order(db: Session, order: EventOrder, actor: User, *, terms_version: 
     if event is not None:
         event.billing_classification = order.billing_classification
         event.billing_source = order.billing_source
-        event.risk_tier = order.risk_tier
+        # An order can raise an event's risk tier but never accept it below the category's
+        # floor (doc: memorials "cannot be downgraded below the category minimum").
+        event.risk_tier = elevated_risk_tier(event.category, order.risk_tier)
         event.service_profile_id = order.service_profile_id
         event.commercial_account_id = order.commercial_account_id
     audit(db, actor=actor, action="commercial.order.accept", target_type="event_order", target_id=order.id,
@@ -453,6 +456,46 @@ def release_capacity(db: Session, reservation: CapacityReservation, reason: str)
     reservation.state = "released"
     reservation.released_at = datetime.now(timezone.utc)
     reservation.release_reason = reason
+    db.commit()
+    db.refresh(reservation)
+    return reservation
+
+
+# Doc Sec. 23.3 "Operating defaults": default qualification band is up to 500 concurrent
+# viewers; an event expected above that needs an explicit, hard-reserved capacity commitment
+# and Operations approval. This is a platform-wide default, not a paid-tier feature, so it
+# applies independent of any commercial ServiceProfile/order — unlike capacity_confirmed
+# below, which is profile-scoped.
+DEFAULT_CAPACITY_ENVELOPE = 500
+AUDIENCE_CAPACITY_RESOURCE = "audience_capacity"
+
+
+def envelope_capacity_confirmed(db: Session, event: Event) -> bool:
+    if not event.expected_audience or event.expected_audience <= DEFAULT_CAPACITY_ENVELOPE:
+        return True
+    return db.scalar(
+        select(CapacityReservation.id).where(
+            CapacityReservation.event_id == event.id,
+            CapacityReservation.resource_type == AUDIENCE_CAPACITY_RESOURCE,
+            CapacityReservation.state == "hard_reserved",
+        )
+    ) is not None
+
+
+def approve_audience_capacity(db: Session, event: Event, actor: User) -> CapacityReservation:
+    """Operations approval for an event expected above the default envelope (doc Sec. 23.3)
+    — a direct hard-reserved commitment, not a paid commercial resource. Deliberately bypasses
+    hard_reserve_capacity's order requirement: that function is for commercial/ServiceProfile
+    resources, this is a platform operating-default approval that self-service events must be
+    able to clear too."""
+    reservation = CapacityReservation(
+        event_id=event.id, resource_type=AUDIENCE_CAPACITY_RESOURCE,
+        quantity=event.expected_audience or 0, state="hard_reserved",
+        hard_reserved_at=datetime.now(timezone.utc),
+    )
+    db.add(reservation)
+    audit(db, actor=actor, action="commercial.capacity.approve_envelope", target_type="event",
+          target_id=event.id, org_id=event.org_id, expected_audience=event.expected_audience)
     db.commit()
     db.refresh(reservation)
     return reservation
@@ -924,6 +967,12 @@ def evaluate_readiness(db: Session, event: Event, order: EventOrder | None) -> d
 
     if not capacity_confirmed(db, event):
         reasons.append("required capacity is not hard-reserved")
+
+    if not envelope_capacity_confirmed(db, event):
+        reasons.append(
+            f"expected audience ({event.expected_audience}) exceeds the default "
+            f"{DEFAULT_CAPACITY_ENVELOPE}-viewer envelope without an approved capacity reservation"
+        )
 
     if order is not None:
         fin_state = financial_readiness_state(db, order)

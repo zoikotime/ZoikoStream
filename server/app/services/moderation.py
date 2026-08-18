@@ -504,6 +504,25 @@ def chat_gate(settings: dict, ctx: Ctx, text: str) -> str | None:
     return None
 
 
+def qa_gate(settings: dict, ctx: Ctx) -> str | None:
+    """Reason to reject this question outright, or None to allow it. Same shape as
+    chat_gate — staff bypass, everyone else honors the event's qa_enabled toggle."""
+    if ctx.can_moderate:
+        return None
+    if settings.get("qa_enabled") is False:
+        return "Q&A is turned off"
+    return None
+
+
+def poll_gate(settings: dict, ctx: Ctx) -> str | None:
+    """Reason to reject this vote outright, or None to allow it. Same shape as chat_gate."""
+    if ctx.can_moderate:
+        return None
+    if settings.get("polls_enabled") is False:
+        return "Polls are turned off"
+    return None
+
+
 def slow_mode_error(slow_seconds: int, since_last: float | None) -> str | None:
     """Slow mode, measured against this author's own previous message."""
     if not slow_seconds or since_last is None or since_last >= slow_seconds:
@@ -675,6 +694,11 @@ async def _qa_ask(ctx, payload):
     text = _text(payload, limit=1000)
     if not text:
         return []
+
+    settings = await bus.state_get(ctx.event_id)
+    blocked_reason = qa_gate(settings, ctx)
+    if blocked_reason:
+        return blocked_reason
 
     def work(db):
         q = LiveQuestion(event_id=ctx.event_id, org_id=ctx.org_id, user_id=ctx.user_id,
@@ -912,6 +936,11 @@ async def _poll_vote(ctx, payload):
     new one) instead of being rejected as a second vote. Once the poll closes the ledger
     row — and so the tally — is frozen, same as before."""
     index = payload.get("option")
+
+    settings = await bus.state_get(ctx.event_id)
+    blocked_reason = poll_gate(settings, ctx)
+    if blocked_reason:
+        return blocked_reason
 
     def work(db):
         p = _row(db, LivePoll, ctx, payload.get("id"))

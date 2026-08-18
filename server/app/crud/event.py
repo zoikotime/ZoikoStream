@@ -23,20 +23,66 @@ _EVENT_SORTS = {
 
 # ── Lifecycle validation (pure — unit-testable without a DB) ──────────────────
 
-def status_transition_error(current: str, new: str, title) -> str | None:
+def status_transition_error(
+    current: str, new: str, title,
+    *, readiness_ready: bool | None = None, readiness_reasons: list[str] | None = None,
+) -> str | None:
     """Return an error message if current -> new is not allowed, else None.
-    Encodes exactly the four spec rules; other transitions are permitted."""
+    Encodes the base spec rules plus the optional v1.1 canonical-spec chain
+    (rehearsal -> ready_to_arm -> armed -> live -> degraded -> ending -> processing ->
+    replay_ready -> ended); other transitions are permitted. Ordinary events that skip
+    straight from published/scheduled to live are unaffected — that path is untouched.
+
+    `readiness_ready` gates armed and MUST be explicitly True (not just not-False) for the
+    caller to arm — this is the spec's "non-waivable" guard, so an omitted/None value blocks
+    rather than silently passing."""
     if new == current:
         return None
     if new in ("published", "scheduled") and not (title and str(title).strip()):
         return "Cannot publish an event without a title"
-    if new == "live" and current not in ("published", "scheduled"):
-        return "Cannot go live unless the event is published"
-    if new == "ended" and current != "live":
+    if new == "ready_to_arm" and current not in ("published", "scheduled", "rehearsal"):
+        return "Must be published or rehearsed before marking ready to arm"
+    if new == "armed":
+        if current != "ready_to_arm":
+            return "Must be ready_to_arm before arming"
+        if readiness_ready is not True:
+            reasons = f": {'; '.join(readiness_reasons)}" if readiness_reasons else ""
+            return f"Cannot arm — readiness checks have not passed{reasons}"
+    if new == "live" and current not in ("published", "scheduled", "armed"):
+        return "Cannot go live unless the event is published or armed"
+    if new == "degraded" and current != "live":
+        return "Only a live event can be marked degraded"
+    if new == "ending" and current not in ("live", "degraded"):
+        return "Can only end from live or degraded"
+    if new == "processing" and current != "ending":
+        return "Must be ending before processing"
+    if new == "replay_ready" and current != "processing":
+        return "Must be processing before replay is ready"
+    if new == "ended" and current not in ("live", "degraded", "replay_ready"):
         return "Cannot end an event that is not live"
-    if new == "archived" and current == "live":
-        return "Cannot archive a live event"
+    if new == "archived" and current in ("live", "armed", "degraded", "ending", "processing"):
+        return "Cannot archive an active event"
     return None
+
+
+# Category -> minimum risk tier (doc Sec. 4.1/4.2: "Category sets the minimum risk class...
+# Memorials default here and cannot be downgraded"). Only the memorial category has a
+# defined floor in the current registry; every other category stays at the r0 baseline
+# until later categories get their own entries.
+CATEGORY_MIN_RISK_TIER = {"Funeral / Memorial": "r2"}
+_RISK_ORDER = {"r0": 0, "r1": 1, "r2": 2, "r3": 3}
+
+
+def category_min_risk_tier(category: str | None) -> str:
+    return CATEGORY_MIN_RISK_TIER.get(category or "", "r0")
+
+
+def elevated_risk_tier(category: str | None, proposed: str) -> str:
+    """The risk tier to actually store: never below the category's floor. Category alone
+    can only raise a tier, never lower one an operator or commercial order explicitly set
+    higher — so this is safe to apply unconditionally on every write."""
+    minimum = category_min_risk_tier(category)
+    return minimum if _RISK_ORDER[minimum] > _RISK_ORDER.get(proposed, 0) else proposed
 
 
 # ── Slugs (unique within org) ─────────────────────────────────────────────────
@@ -106,8 +152,9 @@ def get_event_unscoped(db, event_id) -> Event | None:
 
 
 def create_event(db, org_id, created_by, data, slug) -> Event:
-    ev = Event(org_id=org_id, created_by=created_by, slug=slug,
-               **data.model_dump(exclude={"slug"}))
+    fields = data.model_dump(exclude={"slug"})
+    fields["risk_tier"] = elevated_risk_tier(fields.get("category"), "r0")
+    ev = Event(org_id=org_id, created_by=created_by, slug=slug, **fields)
     db.add(ev)
     db.commit()
     db.refresh(ev)

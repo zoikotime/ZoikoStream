@@ -68,6 +68,7 @@ _EVENT_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS risk_tier VARCHAR(4) NOT NULL DEFAULT 'r0'",
     "ADD COLUMN IF NOT EXISTS service_profile_id UUID REFERENCES service_profiles(id)",
     "ADD COLUMN IF NOT EXISTS commercial_account_id UUID REFERENCES commercial_accounts(id)",
+    "ADD COLUMN IF NOT EXISTS expected_audience INTEGER",
 ]
 
 # Commercial recording fields (doc Section 14/J — R2/R3 independent dual recording).

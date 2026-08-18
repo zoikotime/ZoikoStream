@@ -12,6 +12,7 @@ import {
 import { Badge, Button, Panel } from "../../components/admin";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
+import useInterval from "../../hooks/useInterval";
 import { PageSpinner } from "../../ui/Spinner";
 import { fmtDateTime } from "../../data/events";
 import ConfirmDialog from "../../ui/ConfirmDialog";
@@ -19,6 +20,11 @@ import EventCommerceAdmin from "./EventCommerceAdmin";
 
 const STATUS_TONE = { draft: "neutral", scheduled: "info", published: "info", live: "success", ended: "neutral", cancelled: "danger" };
 const BROADCAST_STATUS_TONE = { live: "success", paused: "warning", ended: "neutral", preview: "info" };
+
+// No WebSocket on this page either — same staleness bug as LiveEvents.jsx, worse here since
+// an admin lands on this exact page precisely to check whether one specific event is still
+// live. Same fix, same interval.
+const POLL_MS = 15000;
 
 function Meta({ icon: Icon, label, children }) {
   return (
@@ -66,9 +72,10 @@ export default function AdminEventDetail() {
   const [busy, setBusy] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const { data: ev, loading, error } = useApi(() =>
+  const { data: ev, loading, error, reload } = useApi(() =>
     api.get(`/admin/events/${eventId}`).then((r) => r.data)
   );
+  useInterval(reload, POLL_MS);
 
   const back = (
     <button

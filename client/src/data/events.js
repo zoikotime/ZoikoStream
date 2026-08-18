@@ -36,10 +36,18 @@ export const EVENT_STATUS = {
   draft: { label: "Draft", tone: "neutral" },
   scheduled: { label: "Scheduled", tone: "info" },
   published: { label: "Published", tone: "info" },
+  rehearsal: { label: "Rehearsal", tone: "info" },
+  ready_to_arm: { label: "Ready to Arm", tone: "info" },
+  armed: { label: "Armed", tone: "warning" },
   live: { label: "Live", tone: "brand", pulse: true },
+  degraded: { label: "Degraded", tone: "warning", pulse: true },
+  ending: { label: "Ending", tone: "warning" },
+  processing: { label: "Processing", tone: "info" },
+  replay_ready: { label: "Replay Ready", tone: "success" },
   ended: { label: "Ended", tone: "neutral" },
   cancelled: { label: "Cancelled", tone: "danger" },
   archived: { label: "Archived", tone: "neutral" },
+  blocked: { label: "Blocked", tone: "danger" },
 };
 export const statusMeta = (s) => EVENT_STATUS[s] || { label: s || "—", tone: "neutral" };
 

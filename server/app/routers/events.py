@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..crud import commercial as commercial_crud
 from ..crud import event as crud
 from ..db import get_db
 from ..email import (
@@ -325,9 +326,20 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
     if fields.get("slug") and crud.event_slug_taken(db, user.org_id, fields["slug"], exclude_id=ev.id):
         raise HTTPException(status.HTTP_409_CONFLICT, "An event with that slug already exists")
 
+    if "category" in fields:
+        fields["risk_tier"] = crud.elevated_risk_tier(fields["category"], ev.risk_tier)
+
     if fields.get("status"):
         title_after = fields.get("title", ev.title)
-        err = crud.status_transition_error(ev.status, fields["status"], title_after)
+        readiness_ready, readiness_reasons = None, None
+        if fields["status"] == "armed":
+            order = commercial_crud.get_current_order(db, ev.id)
+            evaluation = commercial_crud.evaluate_readiness(db, ev, order)
+            readiness_ready, readiness_reasons = evaluation["ready"], evaluation["blocking_reasons"]
+        err = crud.status_transition_error(
+            ev.status, fields["status"], title_after,
+            readiness_ready=readiness_ready, readiness_reasons=readiness_reasons,
+        )
         if err:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
 
@@ -337,6 +349,35 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end_time must be after start_time")
 
     return crud.update_event(db, ev, fields)
+
+
+@router.post("/{event_id}/end", response_model=EventOut)
+async def end_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Force-end a live event from the org dashboard — same real teardown delete_event already
+    uses (stop recording, close the LiveKit room, publish broadcast.update so every connected
+    viewer/host updates immediately), just without also deleting the event. This is the
+    guaranteed way out of "live": if a real BroadcastSession exists, _end() drives the normal
+    live -> ended transition; if the data is inconsistent (status says live but no session
+    exists — e.g. debug/manual writes), the fallback below still forces status to ended rather
+    than leaving the event stuck live with no recovery path."""
+    ev = _get_event_or_404(db, user, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only end events you host")
+    if ev.status not in ("live", "degraded"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event is not live")
+
+    ctx = mod.Ctx(
+        event_id=ev.id, org_id=ev.org_id, room=f"event_{ev.id}",
+        user_id=user.id, name=user.full_name or user.email,
+        identity=f"host-{user.id}", role=user.role,
+        can_moderate=True, can_host=True,
+    )
+    await broadcast_svc._end(ctx, {}, emergency=True)
+    db.refresh(ev)
+
+    if ev.status in ("live", "degraded") and not crud.status_transition_error(ev.status, "ended", ev.title):
+        ev = crud.update_event(db, ev, {"status": "ended"})
+    return ev
 
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)

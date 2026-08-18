@@ -47,6 +47,7 @@ from ..models import (
     SupportTicket,
     User,
 )
+from ..crud import commercial as commercial_crud
 from . import admin as admin_svc
 
 log = logging.getLogger(__name__)
@@ -605,6 +606,23 @@ def _gate_results(ev: Event, hosts: dict, moderators: dict, single_path: set) ->
             for key, label, required_for in _GATES]
 
 
+def _commercial_gate(db: Session, ev: Event) -> dict | None:
+    """Folds the commercial/risk-tier readiness system (crud/commercial.py:evaluate_readiness
+    — the same non-waivable check the "armed" transition itself calls) into this gate list,
+    so an admin sees both readiness systems in one place instead of needing to know a second
+    endpoint exists. Only appears for events that actually carry commercial/risk-tier
+    obligations (a service profile, a non-default risk tier, or an audience estimate over the
+    default envelope) — an ordinary self-service event's gate list, verdict and query cost are
+    all unchanged from before this existed."""
+    if ev.service_profile_id is None and (ev.risk_tier or "r0") == "r0" and not ev.expected_audience:
+        return None
+    order = commercial_crud.get_current_order(db, ev.id)
+    evaluation = commercial_crud.evaluate_readiness(db, ev, order)
+    label = ("Commercial/risk-tier readiness" if evaluation["ready"]
+             else "Commercial/risk-tier readiness: " + "; ".join(evaluation["blocking_reasons"]))
+    return {"key": "commercial_readiness", "label": label, "passed": evaluation["ready"], "required": True}
+
+
 def _verdict(gates: list[dict]) -> str:
     if any(g["required"] and not g["passed"] for g in gates):
         return "blocked"
@@ -653,6 +671,9 @@ def event_readiness(db: Session, include_test: bool, limit: int = 8,
     out = []
     for ev in events:
         gates = _gate_results(ev, hosts, moderators, single_path)
+        commercial_gate = _commercial_gate(db, ev)
+        if commercial_gate is not None:
+            gates = gates + [commercial_gate]
         out.append({
             "id": str(ev.id),
             "title": ev.title or "Untitled event",

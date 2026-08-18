@@ -15,8 +15,14 @@ if TYPE_CHECKING:
     from .user import User
 
 # Lifecycle. Guarded transitions (crud.status_transition_error): publish needs a title,
-# live only from published/scheduled, ended only from live, archive not while live.
-EVENT_STATUSES = ("draft", "published", "scheduled", "live", "ended", "cancelled", "archived")
+# live only from published/scheduled/armed, ended only from live/degraded/replay_ready,
+# archive not while active. rehearsal/ready_to_arm/armed/degraded/ending/processing/
+# replay_ready/blocked are the v1.1 canonical-spec states (ZS-PRD-LE-01 Sec. 13) — optional:
+# an event that skips straight from published/scheduled to live never touches them.
+EVENT_STATUSES = (
+    "draft", "published", "scheduled", "rehearsal", "ready_to_arm", "armed", "live",
+    "degraded", "ending", "processing", "replay_ready", "ended", "cancelled", "archived", "blocked",
+)
 EVENT_VISIBILITY = ("public", "private", "unlisted")
 ASSIGNMENT_ROLES = ("host", "moderator", "speaker")
 
@@ -52,12 +58,17 @@ class Event(Base):
     visibility: Mapped[str] = mapped_column(String(20), default="public", nullable=False)
     registration_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     registration_limit: Mapped[int | None] = mapped_column(Integer)
+    # Organizer's own estimate of peak concurrent viewers (doc Sec. 8 "audience qualification
+    # band") — distinct from registration_limit, which caps signups, not concurrency. Null
+    # means no estimate given; the capacity envelope gate in crud/commercial.py treats that as
+    # "assume default band", not as "unlimited".
+    expected_audience: Mapped[int | None] = mapped_column(Integer)
 
     # Feature toggles — stored config the streaming/chat phases will read; behavior not built here.
     waiting_room_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     recording_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    chat_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    qa_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    chat_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    qa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     polls_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     raise_hand_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     allow_screen_share: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
