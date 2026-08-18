@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { FiSearch, FiRadio, FiGrid, FiClock } from "react-icons/fi";
 import api, { diagnoseLoadError } from "../../api";
 import useApi from "../../hooks/useApi";
+import useInterval from "../../hooks/useInterval";
 import { cx } from "../../ui/tokens";
 import Card from "../../ui/Card";
 import StatsCard from "../../ui/StatsCard";
@@ -16,6 +17,13 @@ const TABS = [
 ];
 
 const dash = <span className="text-slate-300 dark:text-slate-600">—</span>;
+
+// This page has no WebSocket of its own (unlike the host console / viewer page) and
+// GET /admin/live-events only ever fetched once on mount — an event a host ended never
+// moved out of the "Live" tab here until the admin manually refreshed the whole page.
+// Polling is the plain fix: a session already open here just needs to notice within one
+// tick, not instantly.
+const POLL_MS = 15000;
 
 // Real broadcast duration from start/end timestamps (live = up to now).
 function duration(startedAt, endedAt) {
@@ -42,7 +50,8 @@ function useLiveEventsData() {
 // stats) render as "—", not a number.
 export default function LiveEvents() {
   const navigate = useNavigate();
-  const { data, loading, error } = useLiveEventsData();
+  const { data, loading, error, reload } = useLiveEventsData();
+  useInterval(reload, POLL_MS);
   const [tab, setTab] = useState("live");
   const [q, setQ] = useState("");
 

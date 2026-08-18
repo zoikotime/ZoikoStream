@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   FiArrowLeft, FiCalendar, FiClock, FiEye, FiUsers, FiMic, FiMail,
   FiUploadCloud, FiLink, FiTrash2, FiVideo, FiBarChart2, FiUserCheck, FiUserPlus, FiX, FiStar,
+  FiShield, FiPhoneOff,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
@@ -133,13 +134,22 @@ export default function EventDetails() {
     notify.success("Event link copied");
   };
 
+  const STATUS_TOAST = {
+    published: "Event published",
+    ready_to_arm: "Marked ready to arm",
+    armed: "Event armed",
+  };
+
   const setStatus = async (status) => {
     setBusy(true);
     try {
       await api.patch(`/events/${event.id}`, { status });
-      notify.success(status === "published" ? "Event published" : "Event updated");
+      notify.success(STATUS_TOAST[status] || "Event updated");
       reload();
     } catch (e) {
+      // For "armed" specifically, the backend's 400 message already carries the
+      // non-waivable readiness gate's actual blocker list (crud.event.status_transition_error)
+      // — surfacing it as-is is the operator's "authoritative blocker list", not a generic error.
       notify.error(errMsg(e));
     } finally {
       setBusy(false);
@@ -159,7 +169,38 @@ export default function EventDetails() {
     }
   };
 
+  // The real teardown (stops recording, closes the LiveKit room, notifies every connected
+  // viewer/host immediately) — never a raw status PATCH, which would leave the room running
+  // and every already-connected viewer stuck on a stale "live" view. Exists specifically as a
+  // guaranteed way out of "live" from the org dashboard, not just from the host console.
+  const endEvent = async () => {
+    if (!window.confirm(`End "${event.title || "this event"}" now? Viewers will be disconnected immediately.`)) return;
+    setBusy(true);
+    try {
+      await api.post(`/events/${event.id}/end`);
+      notify.success("Event ended");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const canPublish = ["draft", "scheduled"].includes(event.status);
+  const canEnd = ["live", "degraded"].includes(event.status);
+
+  // Progressive arm step: one button whose label/target advances the event through the
+  // optional v1.1 canonical pre-live chain (published/scheduled/rehearsal -> ready_to_arm ->
+  // armed), mirroring how the Publish button above already advances draft -> published.
+  // Nothing shows once armed (or beyond) — the banner badge above already reads "Armed".
+  const ARM_STEP = {
+    published: { label: "Mark Ready to Arm", next: "ready_to_arm" },
+    scheduled: { label: "Mark Ready to Arm", next: "ready_to_arm" },
+    rehearsal: { label: "Mark Ready to Arm", next: "ready_to_arm" },
+    ready_to_arm: { label: "Arm Event", next: "armed" },
+  };
+  const armStep = ARM_STEP[event.status];
 
   const ROLE_LIST = { Host: hosts, Moderator: moderators, Speaker: speakers };
 
@@ -201,6 +242,14 @@ export default function EventDetails() {
         <div className="mt-6 flex flex-wrap gap-2 border-t border-slate-100 pt-5 dark:border-slate-800">
           {canPublish && (
             <Button variant="primary" size="sm" leftIcon={FiUploadCloud} loading={busy} onClick={() => setStatus("published")}>Publish</Button>
+          )}
+          {armStep && (
+            <Button variant="secondary" size="sm" leftIcon={FiShield} loading={busy} onClick={() => setStatus(armStep.next)}>
+              {armStep.label}
+            </Button>
+          )}
+          {canEnd && (
+            <Button variant="danger" size="sm" leftIcon={FiPhoneOff} loading={busy} onClick={endEvent}>End Event</Button>
           )}
           <Button variant="secondary" size="sm" leftIcon={FiLink} onClick={copyLink}>Copy Link</Button>
           <Button variant="danger" size="sm" leftIcon={FiTrash2} disabled={busy} onClick={del}>Delete</Button>

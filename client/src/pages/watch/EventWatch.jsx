@@ -231,13 +231,23 @@ export default function EventWatch() {
       return;
     }
     // The host ending (or emergency-stopping) the broadcast lands here as
-    // broadcast/broadcast.update with the session's new status — it's the only signal
+    // broadcast/broadcast.update with the session's new status — normally the signal
     // that the event just ended. Without re-fetching, `watch.status` (and therefore
     // canStream/isEnded in VideoPlayer) stays stuck at "live": the LiveKit room drops
     // and useLiveKitViewer just retries a now-dead room forever ("Reconnecting…") until
-    // it gives up, instead of showing the real "This event has ended" state. A page
-    // refresh happened to fix it only because that re-runs fetchWatch from scratch.
-    if (env.channel === "broadcast" && env.type === "broadcast.update" && env.data?.status === "ended") {
+    // it gives up, instead of showing the real "This event has ended" state.
+    //
+    // That live push can be missed outright: useEventStream reconnects on any drop
+    // (network blip, backgrounded tab, laptop sleep) and the exact moment the host ends
+    // the stream is exactly when a viewer's socket is most likely to be mid-reconnect. A
+    // missed push used to mean staying stuck until a manual refresh (which re-runs
+    // fetchWatch from scratch). But every reconnect already gets a fresh opening
+    // moderator/snapshot with the same up-to-date broadcast.status baked in — checking it
+    // too means a reconnect alone repairs the stale "live" view, no refresh needed.
+    const endedSignal =
+      (env.channel === "broadcast" && env.type === "broadcast.update" && env.data?.status === "ended") ||
+      (env.channel === "moderator" && env.type === "snapshot" && env.data?.broadcast?.status === "ended");
+    if (endedSignal) {
       fetchWatch();
     }
     dispatchPanel(env);
@@ -256,6 +266,22 @@ export default function EventWatch() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchWatch();
   }, [fetchWatch]);
+
+  // Private/unlisted events must never be indexable — a leaked or guessed watch URL
+  // showing up in search results defeats the whole point of restricting access. There's no
+  // SSR here, so this can't be a response header; a robots meta tag is the SPA-native
+  // equivalent, and Google (unlike most crawlers) does execute JS before indexing, so it's
+  // still effective for the crawler that matters most. Injected directly rather than via a
+  // Helmet-style library — one tag doesn't earn a new dependency. Removed on unmount so a
+  // later public page in the same session never inherits a stale noindex.
+  useEffect(() => {
+    if (!watch || watch.visibility === "public") return undefined;
+    const meta = document.createElement("meta");
+    meta.name = "robots";
+    meta.content = "noindex, nofollow";
+    document.head.appendChild(meta);
+    return () => meta.remove();
+  }, [watch]);
 
   // Keeps a page opened before the host goes live from needing a manual refresh. Once
   // live, polling stays off — the live socket's own broadcast.update "ended" signal

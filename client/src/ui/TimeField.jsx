@@ -11,11 +11,11 @@ import { Input } from "./forms";
 // clock button opens a styled list instead.
 //
 // The input itself is untouched, deliberately:
-//   · typing stays exact — the list is 15-minute slots, and 15:10 is not one of them
+//   · typing stays exact — every minute is a real slot, so the list and typing always agree
 //   · the browser keeps its own parsing, validation and locale (12h vs 24h) behaviour
 //   · Firefox and Safari, which have no dropdown to suppress, lose nothing
 // The value contract is unchanged: "HH:MM" or "", which is what toISO() consumes.
-const STEP_MIN = 15;
+const STEP_MIN = 1;
 
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -36,6 +36,13 @@ function nearestSlot(value) {
   if (!Number.isFinite(h) || !Number.isFinite(m)) return -1;
   const i = Math.round((h * 60 + m) / STEP_MIN);
   return Math.min(SLOTS.length - 1, Math.max(0, i));
+}
+
+// Where an empty field's list opens: the clock's current time, not midnight — you pick
+// "in 20 minutes" starting from now, not by scrolling up from 00:00.
+function nowSlot() {
+  const d = new Date();
+  return nearestSlot(`${pad(d.getHours())}:${pad(d.getMinutes())}`);
 }
 
 export default function TimeField({
@@ -67,7 +74,7 @@ export default function TimeField({
   // effect would re-centre the list on every keystroke and fight the user's own scrolling.
   const openList = () => {
     const i = exact >= 0 ? exact : nearestSlot(value);
-    setActive(i >= 0 ? i : 0);
+    setActive(i >= 0 ? i : nowSlot());
     setOpen(true);
   };
 

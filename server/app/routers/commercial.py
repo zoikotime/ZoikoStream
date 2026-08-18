@@ -578,6 +578,19 @@ def record_readiness_check(event_id: uuid.UUID, data: ReadinessCheckCreate, admi
     return crud.record_readiness_check(db, ev, actor=admin, **data.model_dump())
 
 
+@router.post("/events/{event_id}/capacity/approve-envelope", response_model=CapacityOut, status_code=status.HTTP_201_CREATED)
+def approve_audience_capacity(event_id: uuid.UUID, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+    """Operations approval for an event whose expected_audience exceeds the default 500-
+    viewer envelope (doc Sec. 23.3) — clears the envelope_capacity_confirmed readiness gate.
+    Self-service events (no commercial order) can hit this gate too, so this is deliberately
+    not folded into the order-gated hard_reserve_capacity flow."""
+    ev = _get_event_or_404(db, admin, event_id)
+    if not ev.expected_audience or ev.expected_audience <= crud.DEFAULT_CAPACITY_ENVELOPE:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                             f"Expected audience is within the default {crud.DEFAULT_CAPACITY_ENVELOPE}-viewer envelope — nothing to approve")
+    return crud.approve_audience_capacity(db, ev, actor=admin)
+
+
 # ── Incidents & remedies (doc Section 15/K, maker-checker) ──────────────────────────────
 
 @router.get("/events/{event_id}/incidents", response_model=list[IncidentOut])
