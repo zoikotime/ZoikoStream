@@ -1,8 +1,13 @@
 // client/src/utils/sound.js
 // A tiny notification chime, synthesized with the Web Audio API — no audio file to bundle
-// or fetch, so it plays instantly and works offline. Used to alert the host/moderator
-// console when a viewer raises a new Q&A question (see hooks/useLiveEvent.js), so a host
-// mid-broadcast doesn't have to keep glancing at the Q&A tab to notice one came in.
+// or fetch, so it plays instantly and works offline. Used to alert:
+//   - the host/moderator console (hooks/useLiveEvent.js) whenever a VIEWER does something —
+//     sends a chat message, asks a Q&A question, or votes on a poll — so a host mid-
+//     broadcast doesn't have to keep every tab open to notice audience activity.
+//   - the viewer watch page (pages/watch/EventWatch.jsx) whenever the HOST/moderator does
+//     something — sends a chat message, starts a poll, answers a question, or posts an
+//     announcement — so a viewer with the tab in the background still notices.
+// Same chime for both directions; call sites decide what to notify.
 
 let ctx = null;
 // Browsers refuse to start an AudioContext until a user gesture has happened on the page
@@ -72,7 +77,10 @@ export function unlockAudio() {
   );
 }
 
-export function playQuestionAlert() {
+// Generic alert chime — used for every live-event notification (chat/Q&A/polls/
+// announcements, in both directions). `playQuestionAlert` below is kept as a named
+// alias so existing call sites (and anyone searching for "question alert") still work.
+export function playAlertChime() {
   try {
     const audioCtx = getCtx();
     if (!audioCtx) return;
@@ -82,4 +90,8 @@ export function playQuestionAlert() {
   } catch {
     // Never let a notification sound break the feature it's attached to.
   }
+}
+
+export function playQuestionAlert() {
+  playAlertChime();
 }

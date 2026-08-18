@@ -28,6 +28,7 @@ import FeedbackModal from "../../components/common/FeedbackModal";
 import Spinner from "../../ui/Spinner";
 import Logo from "../../ui/Logo";
 import { notify } from "../../ui/Toast";
+import { playAlertChime, unlockAudio } from "../../utils/sound";
 
 const STATUS_LABEL = { live: "Live", ended: "Completed" }; // anything else -> "Upcoming"
 
@@ -214,6 +215,14 @@ export default function EventWatch() {
   }, [eventId, regToken, linkToken, setRegToken, setLinkToken]);
 
   const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
+  // Visual "new activity" alert per WatchPanel tab — independent of the message/question/
+  // poll counts, which never reset and so can't say "something NEW happened since you last
+  // looked". Set true when a host action lands for a tab the viewer isn't currently on;
+  // cleared by WatchPanel the moment that tab is opened. Sound is fire-and-forget
+  // (playAlertChime in onLiveEnvelope below); this is the visible half of the same alert.
+  const [alerts, setAlerts] = useState({ chat: false, qa: false, polls: false });
+  const markAlert = useCallback((tabKey) => setAlerts((a) => ({ ...a, [tabKey]: true })), []);
+  const clearAlert = useCallback((tabKey) => setAlerts((a) => (a[tabKey] ? { ...a, [tabKey]: false } : a)), []);
   // Real viewers only — staff and waiting-room entries never count as "watching".
   const viewers = Object.values(panel.participants || {}).filter(
     (participant) =>
@@ -250,8 +259,38 @@ export default function EventWatch() {
     if (endedSignal) {
       fetchWatch();
     }
+    // Live sound + toast + tab-badge alert for host/moderator-initiated actions — chat,
+    // Q&A, polls, announcements — so a viewer notices without having the chat panel
+    // focused or the sound on. `actor_role` (server/app/services/moderation.py
+    // _actor_role) is "host" for anyone who can moderate the event (host, moderator,
+    // org_admin) since a viewer's own actions are never notified back to itself.
+    //
+    // THE BUG THIS FIXES: `fromHost` used to require actor_role === "host" || "moderator"
+    // exactly, but the server never sent that field at all — so the chat notification here
+    // never fired, and NONE of these four had a sound or a visible alert, only whichever
+    // ones happened to already be unconditional got a toast.
+    const fromHost = env.data?.actor_role === "host";
+    if (env.channel === "chat" && env.type === "message.new" && fromHost) {
+      playAlertChime();
+      markAlert("chat");
+      notify.alert(`${env.data.name}: ${env.data.text}`);
+    }
+    if (env.channel === "poll" && env.type === "poll.new") {
+      playAlertChime();
+      markAlert("polls");
+      notify.alert("Host started a new poll");
+    }
+    if (env.channel === "qa" && env.type === "question.update" && env.data?.status === "answered") {
+      playAlertChime();
+      markAlert("qa");
+      notify.alert("Host answered a question");
+    }
+    if (env.channel === "announcement" && env.type === "announcement.new") {
+      playAlertChime();
+      notify.alert(env.data?.text ? `Announcement: ${env.data.text}` : "New announcement from the host");
+    }
     dispatchPanel(env);
-  }, [fetchWatch]);
+  }, [fetchWatch, markAlert]);
   const {
     status: liveStatus,
     send: sendLive,
@@ -266,6 +305,14 @@ export default function EventWatch() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchWatch();
   }, [fetchWatch]);
+
+  // Warm up the notification chime's AudioContext on this page's first click/keypress —
+  // browsers refuse to play audio before a user gesture. Mirrors useLiveEvent.js's own
+  // call for the host/moderator console; without it here, a viewer's FIRST host-action
+  // alert (before they've clicked anything on this page) would silently not sound.
+  useEffect(() => {
+    unlockAudio();
+  }, []);
 
   // Private/unlisted events must never be indexable — a leaked or guessed watch URL
   // showing up in search results defeats the whole point of restricting access. There's no
@@ -436,6 +483,8 @@ export default function EventWatch() {
               eventId={eventId}
               onIdentified={setRegToken}
               connected={liveStatus === "open"}
+              alerts={alerts}
+              onTabView={clearAlert}
             />
           )}
 

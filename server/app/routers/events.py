@@ -532,7 +532,13 @@ def invite_viewers(
 # ── Access links (revocable, shareable — link-based counterpart to invite-viewers) ────────
 
 def _access_link_url(event_id: uuid.UUID, token: str) -> str:
-    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    # THE BUG THIS FIXES: this used to read settings.CORS_ORIGINS (a comma-separated list
+    # of allowed browser origins, meant for CORS — not a "public URL" setting) instead of
+    # settings.APP_URL, which every other email link builder in this app uses
+    # (_invite_url, _console_url, _registration_console_url, _base_url in email.py). Since
+    # CORS_ORIGINS is commonly left at its dev default of localhost origins, access-link
+    # invite emails sent from a real deployment pointed viewers at http://localhost:5173.
+    base = settings.APP_URL.rstrip("/")
     return f"{base}/events/{event_id}/watch?link={token}"
 
 
