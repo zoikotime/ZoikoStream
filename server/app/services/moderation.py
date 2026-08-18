@@ -241,25 +241,43 @@ def _iso(dt):
     return dt.isoformat() if dt else None
 
 
-def message_out(m: LiveMessage) -> dict:
+def _actor_role(ctx: "Ctx") -> str:
+    """Two-bucket role label for live-event notification routing (see useLiveEvent.js and
+    EventWatch.jsx on the client): "host" for anyone who can moderate this event (host,
+    moderator, org_admin, super_admin), "viewer" for everyone else — an anonymous guest, a
+    self-registered attendee, or a logged-in member with no moderation rights on THIS
+    event. This is deliberately coarser than ctx.role (which carries the platform role
+    verbatim): the client only ever needs to know which side of the console/watch-page
+    divide an action came from, not the actor's exact title.
+
+    THE BUG THIS FIXES: message_out/question_out/poll_out never included this field at
+    all, so every `env.data.actor_role === "viewer"` / `"host"` check on the client was
+    always comparing against `undefined` — the host console's chat/poll notifications and
+    the viewer page's chat notification silently never fired, in every environment, since
+    the fields being checked never existed on the wire.
+    """
+    return "host" if ctx.can_moderate else "viewer"
+
+
+def message_out(m: LiveMessage, actor_role: str | None = None) -> dict:
     return {
         "id": str(m.id), "name": m.author_name, "user_id": str(m.user_id) if m.user_id else None,
         "text": m.text, "status": m.status, "pinned": m.pinned,
         "flags": m.flags or [], "flagged": bool(m.flags), "reactions": m.reactions or {},
         "reply_to": str(m.reply_to) if m.reply_to else None, "note": m.note,
-        "created_at": _iso(m.created_at),
+        "created_at": _iso(m.created_at), "actor_role": actor_role,
     }
 
 
-def question_out(q: LiveQuestion) -> dict:
+def question_out(q: LiveQuestion, actor_role: str | None = None) -> dict:
     return {
         "id": str(q.id), "name": q.author_name, "text": q.text, "votes": q.votes,
         "status": q.status, "pinned": q.pinned, "assigned_name": q.assigned_name,
-        "flags": q.flags or [], "created_at": _iso(q.created_at),
+        "flags": q.flags or [], "created_at": _iso(q.created_at), "actor_role": actor_role,
     }
 
 
-def poll_out(p: LivePoll, your_vote: int | None = None) -> dict:
+def poll_out(p: LivePoll, your_vote: int | None = None, actor_role: str | None = None) -> dict:
     """`your_vote` is the CALLER's own option index (or None if they haven't voted) —
     always per-connection, never broadcast-derived, since it would leak one viewer's
     ballot to every other viewer if it were. Callers that build a public broadcast
@@ -273,7 +291,7 @@ def poll_out(p: LivePoll, your_vote: int | None = None) -> dict:
         "launched_at": _iso(p.launched_at), "closed_at": _iso(p.closed_at),
         "votes": sum(o.get("votes", 0) for o in (p.options or [])),
         "your_vote": your_vote,
-        "created_at": _iso(p.created_at),
+        "created_at": _iso(p.created_at), "actor_role": actor_role,
     }
 
 
@@ -432,6 +450,13 @@ def _snapshot(db, ctx: Ctx) -> dict:
         "activity": [activity_out(a) for a in reversed(recent(LiveActivity, 100))],
         "can_moderate": ctx.can_moderate,
         "livekit_enforced": livekit.configured(),
+        # This connection's own identity. The snapshot's `participants` list (added by
+        # snapshot() below) already carries everyone's role/on_stage/muted — clients that
+        # need to know "is THIS ME" (a promoted viewer deciding whether to start
+        # publishing its mic, a removed viewer's own socket recognizing a broadcast
+        # session.removed envelope is about them) match on this rather than the console
+        # needing its own separate notion of identity.
+        "you": {"identity": ctx.identity, "can_moderate": ctx.can_moderate, "can_host": ctx.can_host},
     }
 
 
@@ -504,25 +529,6 @@ def chat_gate(settings: dict, ctx: Ctx, text: str) -> str | None:
     return None
 
 
-def qa_gate(settings: dict, ctx: Ctx) -> str | None:
-    """Reason to reject this question outright, or None to allow it. Same shape as
-    chat_gate — staff bypass, everyone else honors the event's qa_enabled toggle."""
-    if ctx.can_moderate:
-        return None
-    if settings.get("qa_enabled") is False:
-        return "Q&A is turned off"
-    return None
-
-
-def poll_gate(settings: dict, ctx: Ctx) -> str | None:
-    """Reason to reject this vote outright, or None to allow it. Same shape as chat_gate."""
-    if ctx.can_moderate:
-        return None
-    if settings.get("polls_enabled") is False:
-        return "Polls are turned off"
-    return None
-
-
 def slow_mode_error(slow_seconds: int, since_last: float | None) -> str | None:
     """Slow mode, measured against this author's own previous message."""
     if not slow_seconds or since_last is None or since_last >= slow_seconds:
@@ -589,7 +595,7 @@ async def _chat_send(ctx, payload):
             return record(db, ctx, "mod", f"Auto-moderation removed a message from {ctx.name}",
                           audit="live.message.auto_removed", target_type="live_message",
                           target_id=msg.id, meta={"flags": flags}), True
-        return message_out(msg), False
+        return message_out(msg, actor_role=_actor_role(ctx)), False
 
     out = await tx(work)
     if isinstance(out, str):
@@ -618,7 +624,7 @@ async def _chat_react(ctx, payload):
         counts = dict(m.reactions or {})
         counts[emoji] = counts.get(emoji, 0) + 1
         m.reactions = counts
-        return message_out(m)
+        return message_out(m, actor_role=_actor_role(ctx))
 
     msg = await tx(work)
     return [("chat", "message.update", msg)] if msg else []
@@ -650,7 +656,7 @@ async def _chat_moderate(ctx, payload, op: str):
             text = f"Deleted a message from {m.author_name}"
         act = record(db, ctx, "chat", text, audit=f"live.message.{op}",
                      target_type="live_message", target_id=m.id)
-        return message_out(m), act
+        return message_out(m, actor_role=_actor_role(ctx)), act
 
     out = await tx(work)
     if not out:
@@ -678,7 +684,7 @@ async def _chat_bulk(ctx, payload):
                 m.status, m.flags = "approved", []
             else:
                 m.status, m.deleted_at, m.deleted_by = "deleted", datetime.now(timezone.utc), ctx.user_id
-            rows.append(message_out(m))
+            rows.append(message_out(m, actor_role=_actor_role(ctx)))
         act = record(db, ctx, "mod", f"Bulk {op}d {len(rows)} message(s)", audit=f"live.message.bulk_{op}",
                      target_type="live_message", meta={"count": len(rows)})
         return rows, act
@@ -695,17 +701,12 @@ async def _qa_ask(ctx, payload):
     if not text:
         return []
 
-    settings = await bus.state_get(ctx.event_id)
-    blocked_reason = qa_gate(settings, ctx)
-    if blocked_reason:
-        return blocked_reason
-
     def work(db):
         q = LiveQuestion(event_id=ctx.event_id, org_id=ctx.org_id, user_id=ctx.user_id,
                          author_name=ctx.name, text=text, flags=flag_text(text))
         db.add(q)
         db.flush()
-        return question_out(q), record(db, ctx, "qa", f"New question from {ctx.name}")
+        return question_out(q, actor_role=_actor_role(ctx)), record(db, ctx, "qa", f"New question from {ctx.name}")
 
     q, act = await tx(work)
     return [("qa", "question.new", q), ("activity", "activity.new", act)]
@@ -737,7 +738,7 @@ async def _qa_vote(ctx, payload):
                 event_id=ctx.event_id, org_id=ctx.org_id, question_id=q.id, user_id=ctx.user_id,
             ))
             q.votes += 1
-        return question_out(q)
+        return question_out(q, actor_role=_actor_role(ctx))
 
     q = await tx(work)
     return [("qa", "question.update", q)] if q else []
@@ -790,7 +791,7 @@ async def _qa_moderate(ctx, payload, op: str):
             return {"id": qid}, act, True
         act = record(db, ctx, "qa", text, audit=f"live.question.{op}",
                      target_type="live_question", target_id=q.id)
-        return question_out(q), act, False
+        return question_out(q, actor_role=_actor_role(ctx)), act, False
 
     out = await tx(work)
     if not out:
@@ -855,7 +856,7 @@ async def _poll_create(ctx, payload):
         verb = "Launched" if launch_now else "Scheduled" if scheduled else "Drafted"
         act = record(db, ctx, "poll", f"{verb} poll: {question}", audit="live.poll.create",
                      target_type="live_poll", target_id=p.id)
-        return poll_out(p), act
+        return poll_out(p, actor_role=_actor_role(ctx)), act
 
     p, act = await tx(work)
     return [("poll", "poll.new", p), ("activity", "activity.new", act)]
@@ -878,7 +879,7 @@ async def _poll_update(ctx, payload):
             p.status = "scheduled" if p.scheduled_at else p.status
         act = record(db, ctx, "poll", f"Edited poll: {p.question}", audit="live.poll.update",
                      target_type="live_poll", target_id=p.id)
-        return poll_out(p), act
+        return poll_out(p, actor_role=_actor_role(ctx)), act
 
     out = await tx(work)
     if not out:
@@ -916,7 +917,7 @@ async def _poll_lifecycle(ctx, payload, op: str):
             return {"id": pid}, act, True
         act = record(db, ctx, "poll", text, audit=f"live.poll.{op}",
                      target_type="live_poll", target_id=p.id)
-        return poll_out(p), act, False
+        return poll_out(p, actor_role=_actor_role(ctx)), act, False
 
     out = await tx(work)
     if not out:
@@ -937,11 +938,6 @@ async def _poll_vote(ctx, payload):
     row — and so the tally — is frozen, same as before."""
     index = payload.get("option")
 
-    settings = await bus.state_get(ctx.event_id)
-    blocked_reason = poll_gate(settings, ctx)
-    if blocked_reason:
-        return blocked_reason
-
     def work(db):
         p = _row(db, LivePoll, ctx, payload.get("id"))
         if not p or p.status != "live":
@@ -954,7 +950,7 @@ async def _poll_vote(ctx, payload):
         )
         if already_voted is not None:
             if already_voted.option == index:
-                return poll_out(p)  # no-op: re-picking the same option
+                return poll_out(p, actor_role=_actor_role(ctx))  # no-op: re-picking the same option
             if 0 <= already_voted.option < len(options):
                 options[already_voted.option]["votes"] = max(0, options[already_voted.option].get("votes", 0) - 1)
             already_voted.option = index
@@ -1077,6 +1073,43 @@ async def _reaction_add(ctx, payload):
     })]
 
 
+def _user_id_from_identity(identity: str) -> uuid.UUID | None:
+    """Presence identities are either the signed-in user's id verbatim (resolve_ctx) or
+    `guest-<registration id>` for an anonymous viewer (resolve_ctx_from_registration /
+    resolve_ctx_from_access_link) — see routers/live.py. Only the former maps to a real
+    `users` row, so only the former can hold a persisted event role."""
+    try:
+        return uuid.UUID(identity)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _grant_event_role(db, event_id: uuid.UUID, user_id: uuid.UUID, role: str) -> None:
+    """Persist a moderator/host promotion. resolve_ctx() (this module) decides can_moderate
+    / can_host by reading event_assignments — NOT the live presence "role" label — so
+    writing only the presence patch would make the button cosmetic: the badge would say
+    "moderator" but the person still couldn't moderate anything, and the label itself would
+    disappear the moment they reconnect. This is what actually grants the access the
+    console claims to grant. Replaces any prior moderator/host grant for this person on
+    this event, since a participant holds one standing elevated role at a time."""
+    db.execute(delete(EventAssignment).where(
+        EventAssignment.event_id == event_id,
+        EventAssignment.user_id == user_id,
+        EventAssignment.role.in_(("moderator", "host")),
+    ))
+    db.add(EventAssignment(event_id=event_id, user_id=user_id, role=role))
+
+
+def _revoke_event_role(db, event_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    """Demote: drop any standing moderator/host grant so a demoted participant can't just
+    reconnect (or open a second tab) and keep the access they were just stripped of."""
+    db.execute(delete(EventAssignment).where(
+        EventAssignment.event_id == event_id,
+        EventAssignment.user_id == user_id,
+        EventAssignment.role.in_(("moderator", "host")),
+    ))
+
+
 async def _participant_action(ctx, payload, op: str):
     identity = str(payload.get("identity") or "")
     if not identity:
@@ -1102,7 +1135,36 @@ async def _participant_action(ctx, payload, op: str):
         text = "{name} was " + ("invited to the stage" if on else "removed from the stage")
     elif op == "role":
         role = payload.get("role") if payload.get("role") in ("host", "speaker", "moderator", "viewer") else "viewer"
-        patch = {"role": role}
+
+        # Granting "host" hands over broadcast control (go live / end / record / emergency
+        # stop) — a moderator running the audience must not be able to grant that, only the
+        # host themself can. Promoting to "moderator" is a normal moderation action and
+        # stays available to any moderator, same as every other action in this table.
+        if role == "host" and not ctx.can_host:
+            return "Only the event host can grant host access"
+
+        target_user_id = _user_id_from_identity(identity)
+        if role in ("host", "moderator"):
+            if target_user_id is None:
+                return "Only a signed-in participant can be promoted — this person joined as a guest"
+            await tx(lambda db: _grant_event_role(db, ctx.event_id, target_user_id, role))
+        elif target_user_id is not None:
+            # Demoted to viewer/speaker: revoke any standing moderator/host grant they held.
+            await tx(lambda db: _revoke_event_role(db, ctx.event_id, target_user_id))
+
+        # "speaker" IS the stage role — becoming one has to be a real LiveKit publish
+        # grant (same call participant.stage makes), not just a badge that says
+        # "speaker" while the person still has no mic. Symmetrically, moving OFF speaker
+        # revokes it. Promoting/demoting moderator or host doesn't touch stage rights —
+        # those are about the console, not the room.
+        if role == "speaker":
+            enforced = await livekit.set_stage(ctx.room, identity, True)
+            patch = {"role": role, "on_stage": True}
+        elif role == "viewer":
+            enforced = await livekit.set_stage(ctx.room, identity, False)
+            patch = {"role": role, "on_stage": False}
+        else:
+            patch = {"role": role}
         text = "{name} is now " + role
     elif op == "ban":
         patch = {"banned": True}
@@ -1126,9 +1188,28 @@ async def _participant_action(ctx, payload, op: str):
         target_type="participant", target_id=identity,
         meta={"enforced_in_livekit": enforced, **patch},
     ))
-    kind = "participant.leave" if op == "remove" else "participant.update"
-    return [("participants", kind, rec), ("activity", "activity.new", act),
-            ("moderator", "action.result", {"op": op, "identity": identity, "enforced": enforced})]
+    # A ban also has to drop out of everyone else's roster, same as a remove — it wasn't
+    # doing that before (it published "participant.update", which every OTHER console's
+    # reducer treats as an upsert, so the banned person's stale row just sat there instead
+    # of disappearing).
+    kind = "participant.leave" if op in ("remove", "ban") else "participant.update"
+    out = [("participants", kind, rec), ("activity", "activity.new", act),
+           ("moderator", "action.result", {"op": op, "identity": identity, "enforced": enforced})]
+
+    if op in ("remove", "ban"):
+        # Kicking someone off the room's media (livekit.remove_participant, above) doesn't
+        # touch their console/watch-page WEBSOCKET at all — without this, a removed
+        # viewer's page just sits there, live socket still open, none the wiser that they
+        # were removed. This targeted envelope is what routers/live.py's socket loop
+        # watches for: it's broadcast to the whole event (like everything else here), but
+        # only the ONE connection whose identity matches acts on it — showing the removal
+        # notice and then closing that socket itself, on the server side, so the person
+        # can't just keep watching after being removed.
+        reason = "You were banned from this event by the host." if op == "ban" \
+            else "You were removed from this event by the host."
+        out.append(("session", "removed", {"identity": identity, "reason": reason}))
+
+    return out
 
 
 # feedback ----------------------------------------------------------------------
@@ -1258,12 +1339,16 @@ def _due(db) -> list[tuple[str, str, dict]]:
     for p in db.scalars(select(LivePoll).where(LivePoll.status == "scheduled",
                                                LivePoll.scheduled_at <= now)).all():
         p.status, p.launched_at = "live", now
-        out.append((str(p.event_id), "poll.update", poll_out(p)))
+        # No Ctx here — this is a scheduler tick, not a live socket action — but a
+        # scheduled poll going live is conceptually a host/moderator action (they're the
+        # only ones who can schedule one), so it's labeled "host" for the same viewer-side
+        # "poll.new"-style alert a manually-launched poll gets.
+        out.append((str(p.event_id), "poll.update", poll_out(p, actor_role="host")))
     for p in db.scalars(select(LivePoll).where(LivePoll.status == "live",
                                                LivePoll.closes_at.isnot(None),
                                                LivePoll.closes_at <= now)).all():
         p.status, p.closed_at, p.closes_at = "closed", now, None
-        out.append((str(p.event_id), "poll.update", poll_out(p)))
+        out.append((str(p.event_id), "poll.update", poll_out(p, actor_role="host")))
     for a in db.scalars(select(LiveAnnouncement).where(LiveAnnouncement.sent_at.is_(None),
                                                        LiveAnnouncement.scheduled_at.isnot(None),
                                                        LiveAnnouncement.scheduled_at <= now)).all():

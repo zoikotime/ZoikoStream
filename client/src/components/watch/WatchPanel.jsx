@@ -313,7 +313,7 @@ const IDENTIFY_LABEL = {
 // though Chat/QA/Polls below correctly bail out — cheap on its own, but free to skip.
 const WatchPanel = memo(function WatchPanel({
   className = "", messages, typing, questions, polls, send, connected,
-  identified, eventId, onIdentified,
+  identified, eventId, onIdentified, alerts = {}, onTabView,
 }) {
   const [tab, setTab] = useState("chat");
 
@@ -322,6 +322,11 @@ const WatchPanel = memo(function WatchPanel({
   const badges = {
     qa: questions?.length || 0,
     polls: (polls || []).filter((p) => p.status === "live").length,
+  };
+
+  const openTab = (key) => {
+    setTab(key);
+    onTabView?.(key); // clears that tab's "new activity" alert dot — see EventWatch.jsx
   };
 
   return (
@@ -335,7 +340,7 @@ const WatchPanel = memo(function WatchPanel({
         {TABS.map((t) => (
           <button
             key={t.key}
-            onClick={() => setTab(t.key)}
+            onClick={() => openTab(t.key)}
             aria-current={tab === t.key ? "true" : undefined}
             className={cx(
               "relative flex flex-1 items-center justify-center gap-1.5 border-b-2 px-3 py-3.5 text-sm font-semibold transition duration-150 motion-reduce:transition-none",
@@ -349,6 +354,20 @@ const WatchPanel = memo(function WatchPanel({
               <span className="zk-tnum rounded-full bg-slate-100 px-1.5 text-[10px] font-bold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                 {badges[t.key]}
               </span>
+            )}
+            {/* New-activity alert symbol — a viewer-facing counterpart to the host
+                console's pending-count badge. Lights up the moment a host action lands
+                for a tab that isn't the active one (see EventWatch.jsx's `alerts`/
+                `markAlert`) and disappears the instant the viewer opens that tab, so it
+                only ever means "something happened since you last looked". Pulses for
+                the same reason the host console's own badge does: a static dot on a busy
+                page gets missed. */}
+            {alerts[t.key] && tab !== t.key && (
+              <span
+                className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-rose-500 shadow-sm shadow-rose-500/50 motion-reduce:animate-none"
+                aria-label={`New activity in ${t.label}`}
+                role="status"
+              />
             )}
           </button>
         ))}
