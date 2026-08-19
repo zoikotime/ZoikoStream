@@ -4,7 +4,7 @@ import {
   FiActivity, FiFilm, FiPlayCircle, FiRadio, FiUserCheck, FiBarChart2,
   FiCreditCard, FiShield, FiLifeBuoy, FiChevronDown, FiChevronsLeft, FiChevronsRight,
 } from "react-icons/fi";
-import { CONSOLE, cx, focusRing, type } from "../../ui/tokens";
+import { CONSOLE, brand, cx, focusRing, type } from "../../ui/tokens";
 import Logo from "../../ui/Logo";
 
 // Organization console navigation, grouped by what the operator is doing:
@@ -49,23 +49,21 @@ const GROUPS = [
     items: [
       { to: "/organization/analytics", label: "Analytics", icon: FiBarChart2 },
       { to: "/organization/billing", label: "Usage & Entitlements", icon: FiCreditCard },
-      { to: "/organization/settings", label: "Security & Governance", icon: FiShield },
+      // Deep-links to the panel this row is named after. Without the ?tab= the row opened
+      // Settings on General — a nav item labelled "Security & Governance" landing on an
+      // organization-name field, which read as the rail pointing at the wrong page.
+      { to: "/organization/settings?tab=security", label: "Security & Governance", icon: FiShield },
       { to: "/organization/support", label: "Support & Status", icon: FiLifeBuoy },
     ],
   },
 ];
 
-// Active row: a filled violet gradient with a soft cast beneath it, so the current
-// destination is unmistakable at a glance instead of being a slightly tinted row.
-// Declared here rather than in tokens' CONSOLE.navOn because that token is shared with the
-// admin console rail, and this treatment is the org console's.
-const NAV_ON =
-  "bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-[0_2px_10px_-2px_rgba(124,58,237,0.5)]";
-const NAV_OFF = [
-  "text-slate-600 dark:text-neutral-400",
-  "hover:bg-slate-100 hover:text-slate-900",
-  "dark:hover:bg-white/[0.07] dark:hover:text-white",
-].join(" ");
+// Active row: the filled brand ramp with a soft cast beneath it, so the current destination is
+// unmistakable at a glance. This used to be a private violet→indigo copy declared here because
+// the shared token was a pale tint; the token now carries this exact treatment, so both consoles
+// share one answer and there is nothing to keep in sync.
+const NAV_ON = CONSOLE.navOn;
+const NAV_OFF = CONSOLE.navOff;
 
 const initials = (name = "") =>
   name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
@@ -109,7 +107,7 @@ function WorkspaceHeader({ organization, workspace, count, collapsed }) {
           collapsed && "lg:justify-center lg:px-2"
         )}
       >
-        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-gradient-to-br from-violet-600 to-indigo-700 text-[11px] font-bold text-white shadow-sm shadow-violet-900/25">
+        <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-md text-[11px] font-bold text-white shadow-sm shadow-violet-900/25", brand.chip)}>
           {initials(name)}
         </span>
         <div className={cx("min-w-0 flex-1", collapsed && "lg:hidden")}>
@@ -345,7 +343,7 @@ export default function Sidebar({ open, onClose, state, collapsed = false, onTog
               collapsed && "lg:justify-center lg:px-0"
             )}
           >
-            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-[11px] font-semibold text-white shadow-sm shadow-violet-900/25">
+            <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white shadow-sm shadow-violet-900/25", brand.chip)}>
               {initials(person?.name)}
             </span>
             <div className={cx("min-w-0", collapsed && "lg:hidden")}>

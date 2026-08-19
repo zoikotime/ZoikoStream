@@ -7,7 +7,7 @@ import api from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import useInterval from "../../hooks/useInterval";
 import { useTheme } from "../../theme/ThemeContext";
-import { CONSOLE, cx, type } from "../../ui/tokens";
+import { CONSOLE, brand, cx, type } from "../../ui/tokens";
 import HealthDot from "./HealthDot";
 
 // Route -> breadcrumb leaf. Keys mirror the sidebar so the crumb always names the page the
@@ -248,7 +248,7 @@ export default function AdminTopbar({ onMenuClick, state, unknown, onRetry }) {
             )}
             aria-label="Account menu"
           >
-            <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-[10px] font-semibold text-white">
+            <span className={cx("grid h-7 w-7 place-items-center rounded-full text-[10px] font-semibold text-white", brand.chip)}>
               {initials(person.name)}
             </span>
             <FiChevronDown className={cx("hidden text-[13px] sm:block", CONSOLE.faint)} />

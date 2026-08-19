@@ -17,7 +17,11 @@ export const COMPANY_SIZES = ["1–10", "11–50", "51–200", "201–500", "500
 export const domain = { custom: "events.zoikotech.com", status: "Verified" };
 
 // Keys into the app's ACCENT token map (Branding color picker).
-export const ACCENTS = ["violet", "emerald", "blue", "amber", "rose", "indigo"];
+// "emerald" is deliberately absent: index.css remaps the emerald scale onto the brand purple
+// (--color-emerald-600: #7c3aed), which is byte-identical to violet-600. Offering both drew two
+// indistinguishable swatches, and picking the second stored the string "emerald" for a purple.
+// An org that already saved "emerald" falls back to "violet" — the same colour, so nothing moves.
+export const ACCENTS = ["violet", "indigo", "blue", "amber", "rose"];
 
 export const securityDefaults = {
   require2fa: true,

@@ -18,7 +18,15 @@ from ..crud import organization as crud
 from ..db import get_db
 from ..email import send_invitation_email
 from ..models import Event, LiveIngressEndpoint, Organization, User, WEBHOOK_EVENTS
-from ..schemas.admin import AdminUserOut, ApiKeyCreate, ApiKeyCreated, Page, PlanOut, UserUpdate
+from ..schemas.admin import (
+    AdminUserOut,
+    ApiKeyCreate,
+    ApiKeyCreated,
+    ApiKeyOut,
+    Page,
+    PlanOut,
+    UserUpdate,
+)
 from ..schemas.auth import TokenOut, UserOut
 from ..schemas.organization import (
     InvitationAccept,
@@ -315,6 +323,8 @@ def update_branding(
 
 
 # ── Developer ───────────────────────────────────────────────────────────────
+# Key records are shaped through ApiKeyOut rather than returned raw: the stored record also
+# holds `key_hash`, which is credential material and has no business reaching a browser.
 
 @router.get("/developer", response_model=OrgDeveloperOut)
 def get_developer(org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db)):
@@ -322,6 +332,37 @@ def get_developer(org: Organization = Depends(get_my_org_admin), db: Session = D
         api_keys=org.api_keys or [],
         webhooks=crud.list_webhook_endpoints(db, org.id),
     )
+
+
+# Settings.jsx's Developer tab talks to these directly (its own list/create/revoke flow),
+# separate from the /developer/api-keys pair below that Credentials.jsx uses via
+# GET /developer's raw api_keys field — both read/write the same org.api_keys column
+# through the same crud.admin mint/hash logic, just via two different pages' routes.
+@router.get("/api-keys", response_model=list[ApiKeyOut])
+def list_my_api_keys(org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db)):
+    return admin_crud.list_api_keys(db, org)
+
+
+@router.post("/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
+def create_my_api_key(
+    data: ApiKeyCreate,
+    org: Organization = Depends(get_my_org_admin),
+    db: Session = Depends(get_db),
+):
+    """Mint a key for the caller's OWN org. The raw key is in this response and nowhere
+    else — only its sha256 is stored, so it can never be re-shown."""
+    return admin_crud.create_api_key(db, org, data.label, expires_in_days=data.expires_in_days)
+
+
+@router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_my_api_key(
+    key_id: str,
+    org: Organization = Depends(get_my_org_admin),
+    db: Session = Depends(get_db),
+):
+    # Scoped to the caller's own org, so a key id from another org is simply not found.
+    if not admin_crud.revoke_api_key(db, org, key_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "API key not found")
 
 
 @router.post("/developer/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)

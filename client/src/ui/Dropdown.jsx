@@ -17,6 +17,14 @@ import { CONSOLE, cx, focusRing } from "./tokens";
 // `options`: [{ value, label, hint?, icon?, dot? }]. `value === null|""` selects nothing.
 // Controlled only: it never holds a selection of its own, so the caller's state stays the
 // single source of truth and existing onChange handlers keep working unchanged.
+// Trigger geometry. `md` is the console filter-bar field (h-9), which every existing caller
+// gets by default; `lg` matches the taller inputs on a public form, so a page can use this
+// dropdown beside an <input> without the two disagreeing about height.
+const SIZES = {
+  md: "h-9 rounded-lg text-[13px]",
+  lg: "h-11 rounded-xl text-sm",
+};
+
 export default function Dropdown({
   value,
   onChange,
@@ -25,6 +33,7 @@ export default function Dropdown({
   placeholder = "Select…",
   align = "left",
   width = "w-56",
+  size = "md",
   className = "",
   triggerClassName = "",
   disabled = false,
@@ -131,7 +140,8 @@ export default function Dropdown({
         aria-expanded={open}
         aria-label={label}
         className={cx(
-          "flex h-9 w-full items-center gap-2 rounded-lg border px-3 text-left text-[13px] font-medium",
+          "flex w-full items-center gap-2 border px-3 text-left font-medium",
+          SIZES[size] || SIZES.md,
           "transition-colors duration-150 motion-reduce:transition-none",
           CONSOLE.control,
           "disabled:cursor-not-allowed disabled:opacity-50",

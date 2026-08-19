@@ -2,13 +2,14 @@ import { useMemo, useState } from "react";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
-import { CONSOLE, cx, type } from "../../ui/tokens";
+import { FiPause, FiPlay, FiRefreshCw } from "react-icons/fi";
+import { CONSOLE, cx, focusRing, type } from "../../ui/tokens";
 import Skeleton from "../../ui/Skeleton";
 import { ConsoleButton } from "../../ui/Button";
 import { compact } from "../../components/admin/format";
 import MetricTile from "../../components/admin/MetricTile";
-import LifecycleRail from "../../components/admin/sections/LifecycleRail";
 import { useOrgScope } from "../../components/organization/orgScope";
+import LiveStatusBand from "../../components/organization/LiveStatusBand";
 import AttentionRequired from "../../components/organization/AttentionRequired";
 import ManagedEvents from "../../components/organization/ManagedEvents";
 import SessionsTable from "../../components/organization/SessionsTable";
@@ -69,7 +70,11 @@ export default function OrganizationDashboard() {
     reload();
   }
 
-  useInterval(reload, REFRESH_MS);
+  // Auto-refresh is pausable: reading a figure off an ops dashboard while it reloads under
+  // you is the one thing this page shouldn't do to you. The timer is the only thing that
+  // stops — the manual button still works while paused.
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  useInterval(reload, REFRESH_MS, autoRefresh);
 
   // Freshness ticks locally; the clock is read inside the interval, never during render.
   const [ageSeconds, setAgeSeconds] = useState(0);
@@ -82,6 +87,8 @@ export default function OrganizationDashboard() {
     () => (ageSeconds < 1 ? "just now" : `${ageSeconds} sec ago`),
     [ageSeconds]
   );
+  // Counts down to the next automatic refresh, so "is this stale?" has a visible answer.
+  const nextIn = Math.max(0, Math.ceil(REFRESH_MS / 1000 - ageSeconds));
 
   if (loading && !data) return <OverviewSkeleton />;
 
@@ -122,28 +129,67 @@ export default function OrganizationDashboard() {
   return (
     <div className="mx-auto max-w-[1500px] space-y-4">
       {/* Header */}
-      <div>
-        <h1 className={cx("text-[26px] font-bold leading-tight tracking-tight sm:text-[30px]", CONSOLE.heading)}>
-          Organization Overview
-        </h1>
-        <p className={cx("mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]", CONSOLE.muted)}>
-          <span className="font-medium">{org.name || "Organization"}</span>
-          <span className={CONSOLE.faint}>·</span>
-          <span>{workspace?.label || "production"} workspace</span>
-          <span className={CONSOLE.faint}>·</span>
-          <span className={cx("text-green-600 dark:text-green-400", type.mono)}>
-            ● Refreshed {ageLabel}
-          </span>
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+        <div className="min-w-0">
+          <h1 className={cx("text-[26px] font-bold leading-tight tracking-tight sm:text-[30px]", CONSOLE.heading)}>
+            Organization Overview
+          </h1>
+          <p className={cx("mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]", CONSOLE.muted)}>
+            <span className="font-medium">{org.name || "Organization"}</span>
+            <span className={CONSOLE.faint}>·</span>
+            <span>{workspace?.label || "production"} workspace</span>
+            <span className={CONSOLE.faint}>·</span>
+            <span
+              className={cx(
+                type.mono,
+                autoRefresh ? "text-green-600 dark:text-green-400" : CONSOLE.faint
+              )}
+            >
+              <span className={cx("mr-1", loading && "animate-pulse motion-reduce:animate-none")}>●</span>
+              Refreshed {ageLabel}
+              {autoRefresh && <span className={CONSOLE.faint}> · next in {nextIn}s</span>}
+            </span>
+          </p>
+        </div>
+
+        {/* Refresh controls. Both act on the fetch this page already makes — same endpoint,
+            same params, nothing new asked of the API. */}
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setAutoRefresh((a) => !a)}
+            aria-pressed={autoRefresh}
+            title={autoRefresh ? `Auto-refreshing every ${REFRESH_MS / 1000}s` : "Auto-refresh paused"}
+            className={cx(
+              "inline-flex h-9 items-center gap-2 rounded-lg border px-3 text-[13px] font-medium transition-colors duration-150 motion-reduce:transition-none",
+              focusRing,
+              autoRefresh
+                ? "border-violet-300 bg-violet-50 text-violet-700 dark:border-violet-500/40 dark:bg-violet-500/10 dark:text-violet-300"
+                : CONSOLE.control
+            )}
+          >
+            {autoRefresh ? <FiPause className="text-[13px]" aria-hidden="true" /> : <FiPlay className="text-[13px]" aria-hidden="true" />}
+            {autoRefresh ? "Live" : "Paused"}
+          </button>
+          <ConsoleButton
+            variant="secondary"
+            size="md"
+            onClick={reload}
+            loading={loading}
+            leftIcon={FiRefreshCw}
+          >
+            Refresh
+          </ConsoleButton>
+        </div>
       </div>
 
-      {/* Lifecycle rail — dims the stages this organization does not use, because a healthy
-          tick for a service you never touch is noise, not reassurance. */}
-      <LifecycleRail
-        stages={data?.lifecycle || []}
-        eyebrow={`Platform health for ${org.name || "this organization"} — services in use`}
-        dimUnused
-      />
+      {/* What is happening in this org right now. This slot held the media lifecycle rail —
+          platform stage availability, which is (a) the super admin's question, (b) already
+          answered twice more on this screen by the topbar health pill and the Service health
+          tile, and (c) still available to org admins on Support & Status, where the same
+          component is mounted. Availability also reads a flat 100.00% whenever no Incident row
+          exists, so the rail could never tell this org anything about itself. */}
+      <LiveStatusBand sessions={sessions} attention={data?.attention || []} age={ageLabel} />
 
       {/* KPI row — same tile component as the platform console. */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
@@ -197,6 +243,10 @@ export default function OrganizationDashboard() {
               ? `${compact(sessions.current_audience)} watching now`
               : "No audience recorded yet"
           }
+          // The only tile with a real series behind it: concurrent audience over the selected
+          // window, bucketed server-side. The other five have no producer, so they keep the
+          // faint baseline rather than an invented curve.
+          series={data?.trends?.audience || []}
           color="#22d3ee"
           to="/organization/analytics"
           linkLabel="Analytics"

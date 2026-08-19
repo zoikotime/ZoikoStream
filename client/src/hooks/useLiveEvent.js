@@ -5,7 +5,7 @@ import useApi from "./useApi";
 import useEventStream from "./useEventStream";
 import useInterval from "./useInterval";
 import { notify } from "../ui/Toast";
-import { playQuestionAlert, unlockAudio } from "../utils/sound";
+import { playAlertChime, unlockAudio } from "../utils/sound";
 
 // The whole data layer for a live event console — event resolution, the socket, and one
 // reducer over the server's envelopes.
@@ -236,12 +236,29 @@ export default function useLiveEvent() {
     if (env.type === "action.result" && env.data.enforced === false) {
       notify.info("Recorded — LiveKit isn't connected, so it wasn't enforced on the stream.");
     }
-    // A viewer just raised a new question — chime so the host/moderator notices without
-    // having to sit on the Q&A tab, and can answer it faster. Not fired for question.update
-    // (votes, pinning, assignment, answered/dismissed) — only a brand-new question should
-    // interrupt the host's attention.
-    if (env.channel === "qa" && env.type === "question.new") {
-      playQuestionAlert();
+    // Live sound + toast alert for EVERY viewer-initiated action — chat, Q&A, and poll
+    // votes — so the host/moderator console doesn't have to keep every tab open to notice
+    // audience activity. `actor_role` (server/app/services/moderation.py _actor_role) is
+    // populated by the server on every chat/qa/poll envelope; it's only ever "viewer" here
+    // since a host's/moderator's own actions are never notified back to themselves.
+    //
+    // THE BUG THIS FIXES: these checks used to compare against `env.data.actor_role`
+    // before the server ever sent that field, so they silently never matched — no toast,
+    // and (for chat/polls) no sound either. The chime for Q&A used to fire unconditionally
+    // on every question.new instead of being tied to who asked, which happened to work by
+    // accident for the common case but would also have chimed for a host's own question.
+    const isViewer = env.data?.actor_role === "viewer";
+    if (env.channel === "chat" && env.type === "message.new" && isViewer) {
+      playAlertChime();
+      notify.alert(`${env.data.name}: ${env.data.text}`);
+    }
+    if (env.channel === "qa" && env.type === "question.new" && isViewer) {
+      playAlertChime();
+      notify.alert(`New question from ${env.data.name}`);
+    }
+    if (env.channel === "poll" && env.type === "poll.update" && isViewer) {
+      playAlertChime();
+      notify.alert("New vote on your poll");
     }
     dispatch(env);
   }, []);

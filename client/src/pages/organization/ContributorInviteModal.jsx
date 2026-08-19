@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Label, Textarea } from "../../ui/forms";
@@ -19,11 +19,13 @@ const toISO = (local) => (local ? new Date(local).toISOString() : null);
 export default function ContributorInviteModal({ open, onClose, eventId, speaker, onInvited }) {
   const [form, setForm] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
-  useEffect(() => {
+  if (open !== wasOpen) {
+    setWasOpen(open);
     if (open) setForm(EMPTY);
-  }, [open]);
+  }
 
   const send = async () => {
     setSaving(true);

@@ -42,6 +42,8 @@ CHANNELS = (
     "analytics",   # viewer count, peak, retention samples, engagement, distributions
     "stage",       # stage roster, hand-raise queue, waiting room admissions
     "reactions",   # 👍 ❤️ 👏 🔥 🎉 tap counters, broadcast to every viewer of the event
+    "session",     # per-connection lifecycle (e.g. "removed") — addressed by identity;
+                   # broadcast like everything else, but only the matching socket acts on it
 )
 
 # A slow client must never stall the event loop or the other subscribers, so each

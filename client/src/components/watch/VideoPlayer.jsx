@@ -20,6 +20,8 @@ import {
   FiChevronRight,
   FiCheck,
   FiMonitor,
+  FiMic,
+  FiMicOff,
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import { initials } from "../../data/watch";
@@ -57,16 +59,23 @@ const fmtTime = (secs) => {
     : `${m}:${String(r).padStart(2, "0")}`;
 };
 
-export default function VideoPlayer({ event, viewers, watch }) {
+export default function VideoPlayer({ event, viewers, watch, onStage = false }) {
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
   const canStream = Boolean(watch?.status === "live" && watch?.livekit_token);
   const canReplay = isEnded && Boolean(watch?.recording_url);
 
-  const { mediaRef, connected, reconnecting, hasVideo, hasAudio, error: streamError } = useLiveKitViewer({
+  const {
+    mediaRef, connected, reconnecting, hasVideo, hasAudio, error: streamError,
+    micOn, micError, toggleMic,
+  } = useLiveKitViewer({
     enabled: canStream,
     url: watch?.livekit_url,
     token: watch?.livekit_token,
+    // The host promoted this viewer to speaker — see EventWatch.jsx, which derives this
+    // from the viewer's own presence record (participants[you.identity]). The hook does
+    // the actual mic capture + publish; this component only needs to show the control.
+    canPublish: canStream && onStage,
   });
 
   const replayRef = useRef(null);
@@ -292,6 +301,25 @@ export default function VideoPlayer({ event, viewers, watch }) {
         )}
       </div>
 
+      {/* On-stage indicator — only shown to the promoted viewer themselves (onStage is
+          this viewer's OWN status, from EventWatch.jsx), never to the rest of the
+          audience. Sits under the LIVE/viewer-count row so it never collides with it. */}
+      {canStream && onStage && (
+        <div className="pointer-events-none absolute inset-x-0 top-11 z-10 flex justify-center px-3 sm:top-12">
+          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-lg bg-emerald-600/90 px-2.5 py-1 text-xs font-semibold text-white shadow-lg ring-1 ring-white/20 backdrop-blur-md">
+            <FiMic aria-hidden="true" />
+            You&apos;re on stage — the host and audience can hear you
+          </span>
+        </div>
+      )}
+      {canStream && onStage && micError && (
+        <div className="pointer-events-none absolute inset-x-0 top-[4.5rem] z-10 flex justify-center px-3">
+          <span className="pointer-events-auto rounded-lg bg-rose-600/90 px-2.5 py-1 text-xs font-medium text-white shadow-lg ring-1 ring-white/20 backdrop-blur-md">
+            {micError}
+          </span>
+        </div>
+      )}
+
       {/* Stage content — the placeholder. Shown until the host's video track actually
           arrives, so "live but nobody's camera is on yet" reads honestly instead of a
           blank black rectangle. */}
@@ -411,6 +439,20 @@ export default function VideoPlayer({ event, viewers, watch }) {
               className="hidden h-1 w-20 cursor-pointer accent-emerald-500 sm:block"
             />
           </div>
+
+          {/* Own-mic control — only present while this viewer is actually on stage. A
+              separate control from the volume button above: that one controls what THIS
+              viewer hears, this one controls what everyone else hears FROM them. */}
+          {canStream && onStage && (
+            <button
+              onClick={toggleMic}
+              aria-label={micOn ? "Mute your mic" : "Unmute your mic"}
+              title={micOn ? "Mute your mic" : "Unmute your mic"}
+              className={cx(CTRL, micOn ? "text-emerald-400" : "text-rose-400")}
+            >
+              {micOn ? <FiMic className="text-lg" /> : <FiMicOff className="text-lg" />}
+            </button>
+          )}
 
           {isLive ? (
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold">

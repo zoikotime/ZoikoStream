@@ -10,10 +10,15 @@ import Panel from "../admin/Panel";
 // "we checked and found nothing", which is a different and untrue claim.
 function Row({ label, value, tone, title }) {
   return (
-    <div className="flex items-baseline justify-between gap-3 py-1">
+    <div className="-mx-2 flex items-baseline justify-between gap-3 rounded-md px-2 py-1 transition-colors duration-150 hover:bg-slate-50 motion-reduce:transition-none dark:hover:bg-white/[0.03]">
       <p className={cx("min-w-0 text-[12px]", CONSOLE.body)}>{label}</p>
       <span
-        className={cx("shrink-0 text-[12px] font-semibold tabular-nums", tone || CONSOLE.heading)}
+        className={cx(
+          "shrink-0 text-[12px] font-semibold tabular-nums",
+          tone || CONSOLE.heading,
+          // A dashed figure carries its reason; the dotted underline is what tells you to hover.
+          title && "cursor-help decoration-dotted underline-offset-4 hover:underline"
+        )}
         title={title}
       >
         {value}
@@ -29,17 +34,22 @@ const BAD = "text-rose-600 dark:text-rose-400";
 export default function SecuritySupport({ posture }) {
   const s = posture || {};
   const dash = (v) => (v == null ? "—" : v);
+  // Four columns of mixed real values and em dashes read as one undifferentiated grid, so the
+  // footnote below states the convention once instead of leaving it to hover discovery.
+  const unmeasured = [s.open_findings, s.next_review_days, s.maintenance_window].some((v) => v == null);
 
   return (
     <Panel
       title="Security & support"
       action={
-        <Link to="/organization/settings" className={cx("text-[12px] font-semibold", CONSOLE.link)}>
+        <Link to="/organization/settings?tab=security" className={cx("text-[12px] font-semibold", CONSOLE.link)}>
           Security & Governance →
         </Link>
       }
     >
-      <div className="grid gap-x-8 gap-y-5 sm:grid-cols-2 lg:grid-cols-4">
+      {/* Column rules from lg up, where the four groups sit on one row — they're what stop a
+          16-row grid from reading as one list. */}
+      <div className={cx("grid gap-x-6 gap-y-5 sm:grid-cols-2 lg:grid-cols-4 lg:divide-x", CONSOLE.divideY)}>
         <div>
           <p className={cx("mb-1.5 text-[10px] font-semibold uppercase tracking-[0.1em]", CONSOLE.faint)}>
             Security posture
@@ -62,7 +72,7 @@ export default function SecuritySupport({ posture }) {
           />
         </div>
 
-        <div>
+        <div className="lg:pl-6">
           <p className={cx("mb-1.5 text-[10px] font-semibold uppercase tracking-[0.1em]", CONSOLE.faint)}>
             Access
           </p>
@@ -84,7 +94,7 @@ export default function SecuritySupport({ posture }) {
           />
         </div>
 
-        <div>
+        <div className="lg:pl-6">
           <p className={cx("mb-1.5 text-[10px] font-semibold uppercase tracking-[0.1em]", CONSOLE.faint)}>
             Support
           </p>
@@ -101,7 +111,7 @@ export default function SecuritySupport({ posture }) {
           />
         </div>
 
-        <div>
+        <div className="lg:pl-6">
           <p className={cx("mb-1.5 text-[10px] font-semibold uppercase tracking-[0.1em]", CONSOLE.faint)}>
             Maintenance
           </p>
@@ -118,6 +128,13 @@ export default function SecuritySupport({ posture }) {
           />
         </div>
       </div>
+
+      {unmeasured && (
+        <p className={cx("mt-4 border-t pt-3 text-[11px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
+          <span className="font-semibold">—</span> means no source is integrated for that figure
+          yet, not a clean result. Hover a dashed value for what it needs.
+        </p>
+      )}
     </Panel>
   );
 }

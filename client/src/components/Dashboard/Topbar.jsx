@@ -4,7 +4,7 @@ import {
   FiMenu, FiLogOut, FiUser, FiChevronDown, FiPlus, FiClock, FiRefreshCw,
 } from "react-icons/fi";
 import { useAuth } from "../../auth/AuthContext";
-import { CONSOLE, cx, focusRing } from "../../ui/tokens";
+import { CONSOLE, brand, brandButton, cx, focusRing } from "../../ui/tokens";
 import Dropdown from "../../ui/Dropdown";
 import ThemeToggle from "../../ui/ThemeToggle";
 import HealthDot from "../admin/HealthDot";
@@ -63,7 +63,7 @@ export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, 
   // `dot` is Dropdown's leading-node slot — an element, not a component type, so it does
   // not remount the avatar on every render the way an inline icon component would.
   const orgAvatar = (
-    <span className="grid h-5 w-5 shrink-0 place-items-center rounded bg-gradient-to-br from-violet-600 to-indigo-700 text-[9px] font-bold text-white">
+    <span className={cx("grid h-5 w-5 shrink-0 place-items-center rounded text-[9px] font-bold text-white", brand.chip)}>
       {initials(orgName)}
     </span>
   );
@@ -163,10 +163,10 @@ export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, 
         <button
           onClick={() => navigate("/organization/events?create=true")}
           className={cx(
-            "group inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-semibold text-white",
-            "bg-gradient-to-r from-violet-600 to-indigo-600",
-            "shadow-sm shadow-violet-600/25 hover:shadow-md hover:shadow-violet-600/35",
-            "hover:from-violet-500 hover:to-indigo-500 active:scale-[0.98]",
+            "group inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-semibold",
+            // Same brand ramp as the console's primary Button and the rail's active row.
+            brandButton,
+            "active:scale-[0.98]",
             "transition-[background-image,box-shadow,transform] duration-150 ease-out",
             "motion-reduce:transition-none motion-reduce:active:scale-100",
             focusRing
@@ -195,7 +195,7 @@ export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, 
             )}
             aria-label="Account menu"
           >
-            <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-[10px] font-semibold text-white shadow-sm shadow-violet-900/25">
+            <span className={cx("grid h-7 w-7 place-items-center rounded-full text-[10px] font-semibold text-white shadow-sm shadow-violet-900/25", brand.chip)}>
               {initials(person.name)}
             </span>
             <FiChevronDown
@@ -217,7 +217,7 @@ export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, 
               )}
             >
               <div className="flex items-center gap-2.5 px-3 py-2.5">
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-violet-600 to-indigo-700 text-[11px] font-semibold text-white">
+                <span className={cx("grid h-9 w-9 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white", brand.chip)}>
                   {initials(person.name)}
                 </span>
                 <div className="min-w-0">

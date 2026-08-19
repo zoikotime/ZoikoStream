@@ -26,7 +26,17 @@ export default function MetricTile({
 }) {
   const hasValue = value != null && value !== "";
   return (
-    <div className={cx(CONSOLE.panel, CONSOLE.panelHover, "flex flex-col p-4 transition", className)}>
+    // `relative` pairs with the stretched footer link below: the whole tile becomes the click
+    // target without nesting a second <a>, which is invalid and breaks keyboard order.
+    <div
+      className={cx(
+        CONSOLE.panel,
+        CONSOLE.panelHover,
+        "relative flex flex-col p-4 transition duration-150 motion-reduce:transition-none",
+        to && "hover:-translate-y-0.5 hover:shadow-md hover:shadow-slate-900/5 motion-reduce:hover:translate-y-0 dark:hover:shadow-black/30",
+        className
+      )}
+    >
       <div className="flex items-start justify-between gap-2">
         <p className={cx("text-[13px] font-medium leading-tight", CONSOLE.muted)}>{label}</p>
         {delta != null && (
@@ -79,7 +89,13 @@ export default function MetricTile({
 
       {to && (
         <div className={cx("mt-2 flex items-center justify-between border-t pt-2", CONSOLE.divider)}>
-          <Link to={to} className={cx("text-[12px] font-semibold", CONSOLE.link)}>
+          <Link
+            to={to}
+            className={cx(
+              "text-[12px] font-semibold after:absolute after:inset-0 after:rounded-xl after:content-['']",
+              CONSOLE.link
+            )}
+          >
             {linkLabel} →
           </Link>
           {age != null && <span className={cx("text-[11px]", type.mono, CONSOLE.faint)}>{age}</span>}
