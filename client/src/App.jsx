@@ -23,6 +23,7 @@ import CreateOrganization from "./pages/auth/CreateOrganization";
 import ForgotPassword from "./pages/auth/ForgotPassword";
 import AcceptInvitation from "./pages/auth/AcceptInvitation";
 import EventRegistration from "./pages/EventRegistration";
+import CustomerDelivery from "./pages/CustomerDelivery";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import ModeratorDashboard from "./pages/moderator/Dashboard";
@@ -136,6 +137,10 @@ export default function App() {
 
             {/* Public event registration landing (shareable link) */}
             <Route path="/e/:id" element={<EventRegistration />} />
+
+            {/* Controlled customer export / post-event report — token-gated, unauthenticated.
+                The recipient is never a platform user (BRD LE-AC-18). */}
+            <Route path="/deliveries/:token" element={<CustomerDelivery />} />
 
             {/* Viewer Portal — attendee watch page from an invite link (public) */}
             <Route path="/events/:eventId/watch" element={<EventWatch />} />

@@ -693,6 +693,21 @@ def publish_replay(entitlement_id: uuid.UUID, background: BackgroundTasks,
     return ent
 
 
+@router.post("/replay-entitlements/{entitlement_id}/retry-watermark", response_model=ReplayEntitlementOut)
+def retry_replay_watermark(entitlement_id: uuid.UUID,
+                            admin: User = Depends(require_commercial("media_access")), db: Session = Depends(get_db)):
+    """Re-queues a failed watermark burn (services/delivery.py's ticker picks it up on its
+    next tick) without touching publish_state -- the publish decision itself isn't in
+    question, only whether the file behind it is ready yet."""
+    ent = db.get(ReplayEntitlement, entitlement_id)
+    if ent is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Replay entitlement not found")
+    try:
+        return crud.retry_replay_watermark(db, ent)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
 # ── Reconciliation (doc Section 29) ──────────────────────────────────────────────────────
 
 @router.get("/reconciliation", response_model=ReconciliationReport)

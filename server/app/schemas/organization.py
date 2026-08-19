@@ -230,6 +230,10 @@ class RecordingOut(BaseModel):
     # True on the recording's own column, or when its event has an open legal-hold
     # governance record (crud.admin.event_under_legal_hold) — either blocks deletion.
     legal_hold: bool = False
+    # captured|validating|valid|degraded|failed, or None — nothing in this stack sets this
+    # yet (no dual-recording comparison pipeline exists), so it's shown as an honest
+    # "Validation pending" label, not used to gate anything.
+    validation_status: str | None = None
     url: str | None = None
 
 
@@ -263,3 +267,54 @@ class LiveInputOut(BaseModel):
 class LiveInputKeyOut(BaseModel):
     ingest_url: str | None = None
     stream_key: str | None = None
+
+
+# ── Customer export & post-event reports ──────────────────────────────────────
+# CustomerDelivery is the shared mechanism for both (models/live.py's docstring explains
+# why). Never carries `token_hash`, and the raw token itself only ever appears once, in
+# DeliveryCreated below — see EventAccessLink's reveal-once precedent.
+
+class DeliveryCreate(BaseModel):
+    recipient_name: str = Field(min_length=1, max_length=200)
+    recipient_email: EmailStr
+    expires_in_days: int | None = Field(14, ge=1, le=365)
+
+
+class DeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: str
+    recipient_name: str
+    recipient_email: str
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    delivered_at: datetime | None = None
+    last_accessed_at: datetime | None = None
+    access_count: int
+    created_at: datetime
+    # kind="export" only — pending|ready|failed (models.live.WATERMARK_STATUSES).
+    watermark_status: str | None = None
+
+
+class DeliveryCreated(DeliveryOut):
+    """Returned once, at creation — the raw /deliveries/{token} URL. Never reconstructable
+    afterward, same posture as an API key or an event access link."""
+    delivery_url: str
+
+
+class RecordingExportEligibility(BaseModel):
+    eligible: bool
+    reason: str | None = None
+    validation_status: str | None = None
+
+
+class EventReportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    event_id: uuid.UUID
+    version: int
+    data: dict
+    created_at: datetime
+    released_at: datetime | None = None

@@ -10,8 +10,13 @@ import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import MemberPicker from "./MemberPicker";
 
-// Free-form on the server (`EventCreate.category` is `str | None`, max_length=100 — no enum,
-// no DB constraint), so this list is purely the UI's menu and can grow without a migration.
+// Must match crud.event.CATEGORY_MIN_RISK_TIER's key exactly — that's the server's own
+// canonical way of identifying a memorial-tier event (it drives the r2 risk floor, dual
+// recording, legal hold, and the chat/Q&A/polls restriction below). Free-form on the
+// server otherwise (`EventCreate.category` is `str | None`, max_length=100 — no enum, no
+// DB constraint), so this list is purely the UI's menu and can grow without a migration.
+const MEMORIAL_CATEGORY = "Funeral / Memorial";
+
 const CATEGORIES = [
   "Webinar",
   "Conference",
@@ -36,10 +41,14 @@ const VISIBILITY = [
   { value: "private", label: "Private", desc: "Only invited people can watch", icon: FiLock },
 ];
 
+// `interaction: true` marks the features the memorial category locks off (BRD Sec.
+// 11.3/19, non-waivable) — the server forces these False on write regardless of what's
+// submitted (crud.event._enforce_memorial_features), this just keeps the form honest
+// about it up front instead of silently reverting the toggle after save.
 const FEATURES = [
-  { key: "chat_enabled", label: "Enable Chat" },
-  { key: "polls_enabled", label: "Enable Polls" },
-  { key: "qa_enabled", label: "Enable Q&A" },
+  { key: "chat_enabled", label: "Enable Chat", interaction: true },
+  { key: "polls_enabled", label: "Enable Polls", interaction: true },
+  { key: "qa_enabled", label: "Enable Q&A", interaction: true },
   { key: "recording_enabled", label: "Enable Recording" },
 ];
 
@@ -82,6 +91,16 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
   const [hostIds, setHostIds] = useState(() => new Set());
   const [saving, setSaving] = useState(null); // "draft" | "scheduled" | null
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
+  const isMemorial = form.category === MEMORIAL_CATEGORY;
+  // Switching TO the memorial category clears the toggles the server would force off
+  // anyway (crud.event._enforce_memorial_features) — keeps the form honest immediately
+  // rather than showing three switches that silently revert on save.
+  const setCategory = (value) => {
+    setForm((f) => ({
+      ...f, category: value,
+      ...(value === MEMORIAL_CATEGORY && { chat_enabled: false, polls_enabled: false, qa_enabled: false }),
+    }));
+  };
   const toggleHost = (id) => {
     setHostIds((s) => {
       const next = new Set(s);
@@ -199,7 +218,7 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
             </div>
             <div>
               <Label>Category</Label>
-              <Select variant="console" value={form.category} onChange={(e) => set("category", e.target.value)}>
+              <Select variant="console" value={form.category} onChange={(e) => setCategory(e.target.value)}>
                 {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
               </Select>
             </div>
@@ -286,10 +305,22 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
 
         <Section title="Features">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {FEATURES.map(({ key, label: l }) => (
-              <Switch key={key} accent="violet" checked={form[key]} onChange={(v) => set(key, v)} label={l} />
+            {FEATURES.map(({ key, label: l, interaction }) => (
+              <div key={key} className={cx(interaction && isMemorial && "pointer-events-none opacity-40")}>
+                <Switch
+                  accent="violet"
+                  checked={interaction && isMemorial ? false : form[key]}
+                  onChange={(v) => set(key, v)}
+                  label={l}
+                />
+              </div>
             ))}
           </div>
+          {isMemorial && (
+            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+              Chat, Q&amp;A, and polls are unavailable for the Funeral / Memorial category.
+            </p>
+          )}
         </Section>
 
         <Section title="Hosts">

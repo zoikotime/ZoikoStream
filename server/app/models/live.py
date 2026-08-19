@@ -203,6 +203,11 @@ class LiveRecording(_EventScoped):
     # with no primary/secondary distinction at all.
     role: Mapped[str | None] = mapped_column(String(16))              # primary | secondary
     validation_status: Mapped[str | None] = mapped_column(String(16))  # captured|validating|valid|degraded|failed
+    # services/validation.py's real ffprobe-based comparison for a dual-recording pair —
+    # durations, stream presence, the delta, when it ran, and an explicit note on what
+    # ISN'T checked (gap/black-frame detection, caption QA). Written identically to BOTH
+    # rows of a pair, since the evidence describes the comparison, not one side of it.
+    validation_evidence: Mapped[dict | None] = mapped_column(JSON)
     retention_policy_version: Mapped[str | None] = mapped_column(String(60))
     retention_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Overrides normal retention expiry for this specific asset (doc R6) — distinct from a
@@ -338,3 +343,71 @@ class LiveActivity(_EventScoped):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     actor_name: Mapped[str | None] = mapped_column(String(120))
     meta: Mapped[dict | None] = mapped_column(JSON)
+
+
+DELIVERY_KINDS = ("export", "report")
+WATERMARK_STATUSES = ("pending", "ready", "failed")
+
+
+class CustomerDelivery(_EventScoped):
+    """One authorized, expiring, single-recipient delivery of either a validated replay
+    export or a generated event report to an external customer/family contact who is NOT
+    a platform user — the BRD's "controlled customer export" (LE-AC-18) and post-event
+    report release, sharing one mechanism since the spec repeatedly bundles them
+    ("report/export", "replay/report").
+
+    Same token convention as EventAccessLink/EventRegistration.claim_token_hash
+    (crud/event.py::_hash_link_token, mirrored in crud/delivery.py) — the raw token is
+    returned once at creation and only its sha256 hash is ever persisted. Deliberately NOT
+    a public link: the token resolves to a metadata page (routers/deliveries.py), and for
+    kind="export" the actual file URL is a separate, fresh, short-lived signed GCS call
+    made only at the moment of download — nothing durable is embedded in the delivered
+    page itself, which is what keeps this distinct from the disabled public player
+    download.
+
+    Distinct from models.commercial.ReplayEntitlement (scope="customer"): that row is
+    commercial-tier bookkeeping (R2/R3 profiles only, doc J2) with no token, audit, or
+    delivery mechanism of its own. This table is the actual delivery for ANY event,
+    commercial or not."""
+
+    __tablename__ = "customer_deliveries"
+
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # export | report
+    recording_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)  # kind="export"
+    report_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)      # kind="report"
+    recipient_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    access_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+    # ── Watermark burn-in (kind="export" only; BRD "policy watermark", LE-AC-12) ────────
+    # Async — services/watermark.py's ffmpeg pass runs on a background ticker
+    # (services/delivery.py::run_watermark_processor), not inline in the create call, since
+    # a real recording can run 1-3 hours. No email goes out until "ready": an unwatermarked
+    # delivery would be a compliance gap, not just a UX one.
+    watermark_status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)  # pending|ready|failed
+    watermarked_file_key: Mapped[str | None] = mapped_column(String(500))  # burned-in copy; recording_id's file is never touched
+    watermark_error: Mapped[str | None] = mapped_column(Text)
+
+
+class EventReport(_EventScoped):
+    """One generated snapshot of an event's audience + operations facts (BRD §18.2's
+    "generated post-event audience and operations report" — explicitly not a live
+    analytics console, no custom query). `data` is a point-in-time JSON snapshot, not a
+    live query, so a released report reads the same to its recipient no matter what
+    happens to the underlying rows afterward — `created_at` (from _EventScoped) doubles as
+    "generated_at" for exactly that reason. `version` lets an operator regenerate after a
+    correction without losing the history of what was actually released."""
+
+    __tablename__ = "event_reports"
+
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    generated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

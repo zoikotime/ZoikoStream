@@ -314,8 +314,15 @@ const IDENTIFY_LABEL = {
 const WatchPanel = memo(function WatchPanel({
   className = "", messages, typing, questions, polls, send, connected,
   identified, eventId, onIdentified, alerts = {}, onTabView,
+  // Per-event enablement (GET /events/{id}/watch — chat_enabled/qa_enabled/polls_enabled).
+  // A memorial-category event has all three False (crud.event.is_memorial_category,
+  // doc Sec. 11.3/19, non-waivable LE-AC-16) — EventWatch.jsx doesn't render this
+  // component at all in that case, but the individual flags are still honored here so a
+  // non-memorial event that only disabled e.g. polls shows just Chat/Q&A, not a dead tab.
+  enabledTabs = { chat: true, qa: true, polls: true },
 }) {
-  const [tab, setTab] = useState("chat");
+  const visibleTabs = TABS.filter((t) => enabledTabs[t.key]);
+  const [tab, setTab] = useState(visibleTabs[0]?.key || "chat");
 
   // Real counts, straight off the socket state — so a viewer sitting on Chat can still see
   // that questions or polls are waiting.
@@ -329,6 +336,16 @@ const WatchPanel = memo(function WatchPanel({
     onTabView?.(key); // clears that tab's "new activity" alert dot — see EventWatch.jsx
   };
 
+  // enabledTabs can only narrow between renders (the /watch fetch that supplies it is
+  // static per event, not a live toggle) — this keeps `tab` from pointing at a now-hidden
+  // tab. Diffed during render rather than an effect, same pattern this codebase already
+  // uses for prop-driven resets (e.g. Credentials.jsx's CreateKeyModal `wasOpen` check).
+  if (visibleTabs.length && !visibleTabs.some((t) => t.key === tab)) {
+    setTab(visibleTabs[0].key);
+  }
+
+  if (visibleTabs.length === 0) return null;
+
   return (
     <div
       className={cx(
@@ -337,7 +354,7 @@ const WatchPanel = memo(function WatchPanel({
       )}
     >
       <div className="flex shrink-0 items-center border-b border-slate-200 dark:border-slate-800">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t.key}
             onClick={() => openTab(t.key)}

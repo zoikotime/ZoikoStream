@@ -7,8 +7,8 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   FiSearch, FiFilter, FiChevronDown, FiPlay,
-  FiHardDrive, FiDownload, FiShare2, FiTrash2,
-  FiFilm, FiDatabase,
+  FiHardDrive, FiDownload, FiShare2, FiTrash2, FiSend, FiCopy,
+  FiFilm, FiDatabase, FiLock, FiClock,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
@@ -16,6 +16,9 @@ import { cx } from "../../ui/tokens";
 import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import StatsCard from "../../ui/StatsCard";
+import Badge from "../../ui/Badge";
+import Modal from "../../ui/Modal";
+import { Input, Label } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import { fmtDate } from "../../data/events";
 
@@ -77,7 +80,171 @@ function ActionBtn({ icon: Icon, label, danger, disabled, onClick }) {
   );
 }
 
-function RecordingCard({ r, onDownload, onShare, onDelete }) {
+function exportStatus(d) {
+  if (d.revoked_at) return { tone: "neutral", label: "Revoked" };
+  if (d.expires_at && new Date(d.expires_at) < new Date()) return { tone: "warning", label: "Expired" };
+  // Watermarking (BRD "policy watermark", LE-AC-12) runs on a background ticker — see
+  // that state before falling through to "Active", so a still-processing export doesn't
+  // read as already deliverable.
+  if (d.watermark_status === "failed") return { tone: "danger", label: "Failed" };
+  if (d.watermark_status === "pending") return { tone: "warning", label: "Preparing…" };
+  return { tone: "success", label: "Active" };
+}
+
+// Controlled customer export — an authorized, audited, expiring, single-recipient
+// delivery of the validated replay (BRD LE-AC-18). Opens on a history list (prior
+// exports + revoke), with "New export" leading into the recipient form and then the
+// one-time /deliveries/{token} link — same reveal-once posture as an API key.
+function ExportModal({ recording, onClose }) {
+  const { data, loading, reload } = useApi(() =>
+    api.get(`/organization/recordings/${recording.id}/exports`).then((r) => r.data)
+  );
+  const history = data || [];
+  const [view, setView] = useState("list"); // list | form | created
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [expires, setExpires] = useState("14");
+  const [sending, setSending] = useState(false);
+  const [created, setCreated] = useState(null);
+
+  const send = async () => {
+    setSending(true);
+    try {
+      const { data: d } = await api.post(`/organization/recordings/${recording.id}/exports`, {
+        recipient_name: name.trim(), recipient_email: email.trim(),
+        expires_in_days: expires ? Number(expires) : null,
+      });
+      setCreated(d);
+      setView("created");
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const revoke = async (d) => {
+    if (!window.confirm(`Revoke the export sent to ${d.recipient_email}?`)) return;
+    try {
+      await api.delete(`/organization/recordings/${recording.id}/exports/${d.id}`);
+      notify.success("Export revoked");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    }
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(created.delivery_url);
+      notify.success("Export link copied");
+    } catch {
+      notify.error("Couldn't copy — select the link and copy it manually");
+    }
+  };
+
+  return (
+    <Modal
+      open={!!recording}
+      onClose={onClose}
+      title={view === "created" ? "Export sent" : view === "form" ? "Export recording" : "Recording exports"}
+      size="md"
+      footer={
+        view === "created" ? (
+          <>
+            <Button size="sm" variant="secondary" onClick={onClose}>Done</Button>
+            <Button size="sm" onClick={copy}><FiCopy /> Copy link</Button>
+          </>
+        ) : view === "form" ? (
+          <>
+            <Button size="sm" variant="secondary" onClick={() => setView("list")} disabled={sending}>Back</Button>
+            <Button size="sm" onClick={send} disabled={!name.trim() || !email.trim() || sending}>
+              <FiSend /> {sending ? "Sending…" : "Send export"}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button size="sm" variant="secondary" onClick={onClose}>Close</Button>
+            <Button size="sm" onClick={() => { setName(""); setEmail(""); setExpires("14"); setView("form"); }}>
+              <FiSend /> New export
+            </Button>
+          </>
+        )
+      }
+    >
+      {view === "created" ? (
+        <div className="space-y-3 text-sm text-slate-600 dark:text-slate-300">
+          <p>
+            An email was sent to <strong className="text-slate-800 dark:text-slate-100">{created.recipient_email}</strong>{" "}
+            with this link. It won't be shown again after you close this dialog.
+          </p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            The link works now, but the download itself won't be ready until the watermarked copy finishes
+            processing — usually within a few minutes.
+          </p>
+          <code className="block break-all rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs dark:border-slate-700 dark:bg-white/[0.03]">
+            {created.delivery_url}
+          </code>
+        </div>
+      ) : view === "form" ? (
+        <div className="space-y-4">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Generates an authorized, expiring, single-recipient download link — never a public link.
+            The recipient is emailed automatically.
+          </p>
+          <div>
+            <Label htmlFor="exp-name">Recipient name</Label>
+            <Input id="exp-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Family contact name" />
+          </div>
+          <div>
+            <Label htmlFor="exp-email">Recipient email</Label>
+            <Input id="exp-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" />
+          </div>
+          <div>
+            <Label htmlFor="exp-days">Expires in (days)</Label>
+            <Input id="exp-days" type="number" min="1" max="365" value={expires} onChange={(e) => setExpires(e.target.value)} />
+          </div>
+        </div>
+      ) : loading ? (
+        <p className="text-sm text-slate-400">Loading…</p>
+      ) : history.length === 0 ? (
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          No exports sent yet for this recording.
+        </p>
+      ) : (
+        <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+          {history.map((d) => {
+            const s = exportStatus(d);
+            return (
+              <li key={d.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-slate-800 dark:text-slate-100">{d.recipient_name}</p>
+                  <p className="truncate text-xs text-slate-500 dark:text-slate-400">{d.recipient_email}</p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Badge tone={s.tone} size="sm" dot>{s.label}</Badge>
+                  {(s.label === "Active" || s.label === "Preparing…") && (
+                    <button
+                      type="button"
+                      onClick={() => revoke(d)}
+                      aria-label={`Revoke export to ${d.recipient_email}`}
+                      title="Revoke"
+                      className="rounded-md p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
+                    >
+                      <FiTrash2 className="text-sm" />
+                    </button>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Modal>
+  );
+}
+
+function RecordingCard({ r, onDownload, onShare, onDelete, onExport }) {
   const watchHref = `/events/${r.event_id}/watch`;
   return (
     <Card padding="none" hover className="flex flex-col overflow-hidden">
@@ -109,8 +276,16 @@ function RecordingCard({ r, onDownload, onShare, onDelete }) {
           {r.started_at ? fmtDate(r.started_at) : "—"}
         </p>
 
-        <div className="mt-3 flex items-center gap-4 text-xs text-slate-500 dark:text-slate-400">
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
           <span className="inline-flex items-center gap-1"><FiHardDrive /> {fmtBytes(r.size_bytes)}</span>
+          {r.legal_hold && (
+            <Badge tone="danger" size="sm"><FiLock className="text-[10px]" /> Legal hold</Badge>
+          )}
+          {r.validation_status === "valid" ? (
+            <Badge tone="success" size="sm">Validated</Badge>
+          ) : (
+            <Badge tone="warning" size="sm"><FiClock className="text-[10px]" /> Validation pending</Badge>
+          )}
         </div>
 
         {/* Actions */}
@@ -121,7 +296,13 @@ function RecordingCard({ r, onDownload, onShare, onDelete }) {
           <div className="flex items-center gap-1.5">
             <ActionBtn icon={FiDownload} label="Download" disabled={!r.url} onClick={() => onDownload(r)} />
             <ActionBtn icon={FiShare2} label="Share" onClick={() => onShare(r)} />
-            <ActionBtn icon={FiTrash2} label="Delete" danger onClick={() => onDelete(r)} />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <ActionBtn
+              icon={FiSend} label="Export" disabled={r.legal_hold}
+              onClick={() => onExport(r)}
+            />
+            <ActionBtn icon={FiTrash2} label="Delete" danger disabled={r.legal_hold} onClick={() => onDelete(r)} />
           </div>
         </div>
       </div>
@@ -137,6 +318,7 @@ export default function OrganizationRecordings() {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
   const [sort, setSort] = useState("date-desc");
+  const [exporting, setExporting] = useState(null);
 
   const categories = useMemo(
     () => ["All", ...new Set(list.map((r) => r.category).filter(Boolean))],
@@ -178,6 +360,7 @@ export default function OrganizationRecordings() {
       notify.error(errMsg(e));
     }
   };
+  const onExport = (r) => setExporting(r);
 
   return (
     <div className="space-y-6">
@@ -256,10 +439,12 @@ export default function OrganizationRecordings() {
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {shown.map((r) => (
-            <RecordingCard key={r.id} r={r} onDownload={onDownload} onShare={onShare} onDelete={onDelete} />
+            <RecordingCard key={r.id} r={r} onDownload={onDownload} onShare={onShare} onDelete={onDelete} onExport={onExport} />
           ))}
         </div>
       )}
+
+      {exporting && <ExportModal recording={exporting} onClose={() => setExporting(null)} />}
     </div>
   );
 }

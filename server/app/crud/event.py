@@ -73,8 +73,49 @@ CATEGORY_MIN_RISK_TIER = {"Funeral / Memorial": "r2"}
 _RISK_ORDER = {"r0": 0, "r1": 1, "r2": 2, "r3": 3}
 
 
+_CATEGORY_MIN_RISK_TIER_NORMALIZED = {k.strip().lower(): v for k, v in CATEGORY_MIN_RISK_TIER.items()}
+
+
+def _normalize_category(category: str | None) -> str:
+    return (category or "").strip().lower()
+
+
 def category_min_risk_tier(category: str | None) -> str:
-    return CATEGORY_MIN_RISK_TIER.get(category or "", "r0")
+    return _CATEGORY_MIN_RISK_TIER_NORMALIZED.get(_normalize_category(category), "r0")
+
+
+def is_memorial_category(category: str | None) -> bool:
+    """Whether this event falls under the BRD's memorial-launch restriction on audience
+    interaction (no chat, Q&A, polls, raise-hand, or reactions — doc Sec. 11.3/19,
+    non-waivable LE-AC-16). Keys off the same registry category_min_risk_tier reads, so a
+    category that earns the memorial risk floor is treated as memorial everywhere — see
+    services/broadcast.py's _seed_settings and _settings handler for the enforcement side.
+
+    Case/whitespace-insensitive: `category` is free text (CreateEventModal.jsx's dropdown
+    writes the exact registry string, but nothing server-side stops a direct API call from
+    sending "funeral / memorial" or " Funeral / Memorial " instead) — a casing or
+    whitespace difference must not silently bypass the memorial restrictions. This does NOT
+    catch a genuine synonym ("Celebration of Life", "Funeral") — the registry only has one
+    entry today; widening it to a curated alias list is a separate, deliberate product
+    decision, not something to infer here."""
+    return _normalize_category(category) in _CATEGORY_MIN_RISK_TIER_NORMALIZED
+
+
+# Feature flags a memorial-category event is never allowed to enable, applied on every
+# create/update below — belt-and-suspenders with the live-socket enforcement in
+# services/broadcast.py, so the restriction holds even if a caller bypasses this layer.
+_MEMORIAL_DISABLED_FEATURES = ("chat_enabled", "qa_enabled", "polls_enabled", "raise_hand_enabled")
+
+
+def _enforce_memorial_features(category: str | None, fields: dict) -> dict:
+    """Forces the disabled features False whenever the EFFECTIVE category (after this
+    update) is memorial — not just when the caller happened to touch one of those keys —
+    so switching an existing event's category to memorial can't leave a stale
+    chat_enabled=True sitting on the row from before the switch."""
+    if is_memorial_category(category):
+        for key in _MEMORIAL_DISABLED_FEATURES:
+            fields[key] = False
+    return fields
 
 
 def elevated_risk_tier(category: str | None, proposed: str) -> str:
@@ -154,6 +195,7 @@ def get_event_unscoped(db, event_id) -> Event | None:
 def create_event(db, org_id, created_by, data, slug) -> Event:
     fields = data.model_dump(exclude={"slug"})
     fields["risk_tier"] = elevated_risk_tier(fields.get("category"), "r0")
+    fields = _enforce_memorial_features(fields.get("category"), fields)
     ev = Event(org_id=org_id, created_by=created_by, slug=slug, **fields)
     db.add(ev)
     db.commit()
@@ -162,6 +204,8 @@ def create_event(db, org_id, created_by, data, slug) -> Event:
 
 
 def update_event(db, event: Event, fields: dict) -> Event:
+    effective_category = fields.get("category", event.category)
+    fields = _enforce_memorial_features(effective_category, fields)
     for key, value in fields.items():
         setattr(event, key, value)
     db.commit()
@@ -348,13 +392,28 @@ def list_replay_candidates(db, event_id) -> list[LiveRecording]:
 
     Under dual recording (services/broadcast.py._recording_start), `role` distinguishes the
     canonical primary path from its secondary/backup — a viewer should always land on the
-    primary's file when it's actually there, not whichever egress happened to finish first."""
+    primary's file when it's actually there, not whichever egress happened to finish first.
+
+    `validation_status="failed"` rows are excluded outright — services/validation.py only
+    marks a path failed when it genuinely couldn't be read back, so serving it would hand a
+    viewer a broken file even though `enforced`/a stopped status say a row exists.
+    `validation_status="valid"` sorts ahead of `degraded`/unset (single-path events, which
+    are never run through comparison at all) — the confirmed-good source wins over an
+    unverified one, same tie-break precedence the role ordering already established."""
     role_order = case((LiveRecording.role == "primary", 0), (LiveRecording.role == "secondary", 1), else_=0)
+    validation_order = case((LiveRecording.validation_status == "valid", 0), else_=1)
     return db.scalars(
         select(LiveRecording)
-        .where(LiveRecording.event_id == event_id, LiveRecording.status == "stopped",
-               LiveRecording.enforced.is_(True))
-        .order_by(role_order, LiveRecording.stopped_at.desc())
+        .where(
+            LiveRecording.event_id == event_id, LiveRecording.status == "stopped",
+            LiveRecording.enforced.is_(True),
+            # NOT `!= "failed"` — SQL's three-valued logic makes that silently drop every
+            # NULL row too (i.e. every single-path event, which never gets a
+            # validation_status at all), which would have broken replay for the common
+            # case while looking like it only excluded the rare failed-validation one.
+            or_(LiveRecording.validation_status.is_(None), LiveRecording.validation_status != "failed"),
+        )
+        .order_by(validation_order, role_order, LiveRecording.stopped_at.desc())
     ).all()
 
 

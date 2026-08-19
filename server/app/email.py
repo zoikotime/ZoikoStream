@@ -385,6 +385,32 @@ def send_replay_available_email(to: str, name: str, event_title: str, watch_url:
     ))
 
 
+def send_customer_export_email(to: str, name: str, event_title: str, export_url: str, expires_at) -> None:
+    """BRD LE-AC-18 'controlled customer export' — services.delivery.create_export.
+    Deliberately doesn't carry the file link itself, only a link to the token-gated page
+    that generates a fresh, short-lived signed download URL on demand."""
+    safe_title = html.escape(event_title or "your event")
+    until = expires_at.strftime("%d %b %Y") if expires_at else None
+    lines = [f"A validated recording for <strong>{safe_title}</strong> has been prepared for you."]
+    if until:
+        lines.append(f"This link is available until {until}, and only to you.")
+    _send(to, f"Your recording is ready: {event_title}", _commercial_html(
+        "Your recording is ready", name, lines, cta_label="Download recording", cta_url=export_url,
+    ))
+
+
+def send_event_report_email(to: str, name: str, event_title: str, report_url: str, expires_at) -> None:
+    """BRD 'generated post-event audience and operations report' — services.report.release_report."""
+    safe_title = html.escape(event_title or "your event")
+    until = expires_at.strftime("%d %b %Y") if expires_at else None
+    lines = [f"The event report for <strong>{safe_title}</strong> is ready to view."]
+    if until:
+        lines.append(f"This link is available until {until}, and only to you.")
+    _send(to, f"Event report: {event_title}", _commercial_html(
+        "Your event report", name, lines, cta_label="View report", cta_url=report_url,
+    ))
+
+
 def send_refund_credit_email(to: str, name: str, event_title: str, amount: str, currency: str,
                               credit_type: str, order_url: str) -> None:
     """doc Q2 'refund/credit' (crud.commercial.execute_refund_credit)."""

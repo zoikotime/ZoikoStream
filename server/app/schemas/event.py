@@ -131,6 +131,11 @@ class WatchOut(BaseModel):
     chat_enabled: bool
     qa_enabled: bool
     polls_enabled: bool
+    # No persisted Event column (it's a live-only BroadcastSession setting — see
+    # services/broadcast.py's DEFAULT_SETTINGS) — True except for a memorial-category
+    # event, computed the same way _seed_settings computes it (crud.event.
+    # is_memorial_category), so the player never shows a reaction bar it can't use.
+    reactions_enabled: bool = True
     registration_required: bool = False
     registered: bool = True
     not_started: bool = False

@@ -75,6 +75,7 @@ _EVENT_COLUMNS = [
 _LIVE_RECORDING_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS role VARCHAR(16)",
     "ADD COLUMN IF NOT EXISTS validation_status VARCHAR(16)",
+    "ADD COLUMN IF NOT EXISTS validation_evidence JSONB",
     "ADD COLUMN IF NOT EXISTS retention_policy_version VARCHAR(60)",
     "ADD COLUMN IF NOT EXISTS retention_expires_at TIMESTAMPTZ",
     "ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT FALSE",
@@ -110,6 +111,23 @@ _EVENT_REGISTRATION_COLUMNS = [
 # not values that were merely missing a default.
 _EVENT_REGISTRATION_RELAX_NOT_NULL = ["org_id", "user_id", "status", "bookmarked", "watch_seconds", "join_count"]
 
+# Watermark burn-in state (BRD "policy watermark", LE-AC-12) — added after
+# customer_deliveries already existed, so create_all() alone won't add these.
+_CUSTOMER_DELIVERY_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS watermark_status VARCHAR(16) NOT NULL DEFAULT 'pending'",
+    "ADD COLUMN IF NOT EXISTS watermarked_file_key VARCHAR(500)",
+    "ADD COLUMN IF NOT EXISTS watermark_error TEXT",
+]
+
+# Same watermark burn-in state, now also for the published (audience) replay itself — added
+# after replay_entitlements already existed.
+_REPLAY_ENTITLEMENT_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS watermark_status VARCHAR(20) NOT NULL DEFAULT 'not_applicable'",
+    "ADD COLUMN IF NOT EXISTS watermarked_file_key VARCHAR(500)",
+    "ADD COLUMN IF NOT EXISTS watermark_error TEXT",
+    "ADD COLUMN IF NOT EXISTS source_recording_id UUID",
+]
+
 
 def ensure_schema():
     """Create any missing tables and add any missing columns. Idempotent — safe to re-run."""
@@ -135,6 +153,10 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE event_registrations {clause}"))
         for col in _EVENT_REGISTRATION_RELAX_NOT_NULL:
             conn.execute(text(f"ALTER TABLE event_registrations ALTER COLUMN {col} DROP NOT NULL"))
+        for clause in _CUSTOMER_DELIVERY_COLUMNS:
+            conn.execute(text(f"ALTER TABLE customer_deliveries {clause}"))
+        for clause in _REPLAY_ENTITLEMENT_COLUMNS:
+            conn.execute(text(f"ALTER TABLE replay_entitlements {clause}"))
     print("Schema ready!")
 
 

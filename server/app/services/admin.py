@@ -266,6 +266,12 @@ def list_recordings(db: Session, status: str | None = None, org_id=None, limit: 
             "started_at": r.started_at,
             "stopped_at": r.stopped_at,
             "has_file_reference": bool(r.file_url),
+            # Dual-recording validation (services/validation.py) + the replay publish gate
+            # (routers/events.py::watch_event) — surfaced here so pages/admin/Media.jsx can
+            # show the evidence and the Publish action without a second endpoint.
+            "role": r.role,
+            "validation_status": r.validation_status,
+            "validation_evidence": r.validation_evidence,
         })
     return out
 

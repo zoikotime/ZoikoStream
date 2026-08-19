@@ -514,7 +514,10 @@ export default function EventWatch() {
             ) : (
               <VideoPlayer event={event} viewers={viewers} watch={watch} onStage={isOnStage} />
             )}
-            {!timeGated && (
+            {/* reactions_enabled is False only for a memorial-category event (doc Sec.
+                11.3/19, non-waivable LE-AC-16) — computed server-side in routers/events.py's
+                watch_event, since reactions have no persisted Event column of their own. */}
+            {!timeGated && watch.reactions_enabled && (
               <ReactionBar
                 reactions={panel.reactions}
                 onReact={(key) => sendLive("reaction.add", { key })}
@@ -524,7 +527,9 @@ export default function EventWatch() {
           </div>
 
           {/* row-span-2 so the panel's grid area covers the player AND the info card —
-              without it `sticky` has no travel and the info card scrolls past dead space. */}
+              without it `sticky` has no travel and the info card scrolls past dead space.
+              WatchPanel itself renders nothing once none of chat/qa/polls are enabled — a
+              memorial event has all three off, so no empty tab strip shows either. */}
           {!timeGated && (
             <WatchPanel
               className="h-[70vh] min-w-0 lg:col-start-2 lg:row-start-1 lg:row-span-2 lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]"
@@ -539,6 +544,7 @@ export default function EventWatch() {
               connected={liveStatus === "open"}
               alerts={alerts}
               onTabView={clearAlert}
+              enabledTabs={{ chat: watch.chat_enabled, qa: watch.qa_enabled, polls: watch.polls_enabled }}
             />
           )}
 

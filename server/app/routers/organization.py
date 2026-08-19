@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..crud import admin as admin_crud
+from ..crud import delivery as delivery_crud
 from ..crud import event as event_crud
 from ..crud import organization as crud
 from ..db import get_db
@@ -32,6 +33,10 @@ from ..schemas.organization import (
     InvitationAccept,
     InvitationAction,
     InvitationCreate,
+    DeliveryCreate,
+    DeliveryCreated,
+    DeliveryOut,
+    EventReportOut,
     InvitationOut,
     InvitationPreview,
     InvitationReject,
@@ -48,6 +53,7 @@ from ..schemas.organization import (
     OrgProfileOut,
     OrgProfileUpdate,
     OrgSecurity,
+    RecordingExportEligibility,
     RecordingOut,
     WebhookDeliveryOut,
     WebhookEndpointCreate,
@@ -57,7 +63,9 @@ from ..schemas.organization import (
     WebhookSecretOut,
 )
 from ..security import create_access_token, get_current_user, hash_password, require_org_admin
+from ..services import delivery as delivery_svc
 from ..services import livekit, org as org_svc
+from ..services import report as report_svc
 
 # Roles an org admin may assign/invite. Excludes super_admin (platform-only, never via this API).
 ORG_ASSIGNABLE_ROLES = ("org_admin", "host", "moderator", "speaker", "viewer")
@@ -158,6 +166,7 @@ def list_recordings(
             started_at=rec.started_at, duration_seconds=duration, size_bytes=rec.size_bytes,
             url=livekit.signed_url(rec.file_url),
             legal_hold=rec.legal_hold or ev.id in held_event_ids,
+            validation_status=rec.validation_status,
         ))
     return out
 
@@ -189,6 +198,71 @@ def delete_recording(
         org.storage_used_gb = round(max(0.0, float(org.storage_used_gb or 0) - rec.size_bytes / (1024 ** 3)), 3)
     db.delete(rec)
     db.commit()
+
+
+# ── Controlled customer export (BRD LE-AC-18) ─────────────────────────────────
+# services/delivery.py owns eligibility + the audit trail; this layer only shapes the
+# HTTP surface and builds the /deliveries/{token} URL (services never construct URLs,
+# same separation crud/organization.py's invitation links already use).
+
+def _delivery_url(token: str) -> str:
+    return f"{settings.APP_URL.rstrip('/')}/deliveries/{token}"
+
+
+@router.get("/recordings/{recording_id}/export-eligibility", response_model=RecordingExportEligibility)
+def recording_export_eligibility(
+    recording_id: uuid.UUID, org: Organization = Depends(get_my_org), db: Session = Depends(get_db),
+):
+    rec = event_crud.get_org_recording(db, org.id, recording_id)
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
+    held = admin_crud.event_under_legal_hold(db, rec.event_id)
+    eligible, reason = delivery_svc.export_eligibility(rec, held)
+    return RecordingExportEligibility(eligible=eligible, reason=reason, validation_status=rec.validation_status)
+
+
+@router.get("/recordings/{recording_id}/exports", response_model=list[DeliveryOut])
+def list_recording_exports(
+    recording_id: uuid.UUID, org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    rec = event_crud.get_org_recording(db, org.id, recording_id)
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
+    return delivery_crud.list_deliveries(db, recording_id=rec.id)
+
+
+@router.post("/recordings/{recording_id}/exports", response_model=DeliveryCreated, status_code=status.HTTP_201_CREATED)
+def create_recording_export(
+    recording_id: uuid.UUID, data: DeliveryCreate, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    rec = event_crud.get_org_recording(db, org.id, recording_id)
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
+    ev = db.get(Event, rec.event_id)
+    try:
+        delivery, raw = delivery_svc.create_export(
+            db, rec, ev, recipient_name=data.recipient_name, recipient_email=data.recipient_email,
+            expires_in_days=data.expires_in_days, actor=admin,
+        )
+    except delivery_svc.ExportNotEligible as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
+    url = _delivery_url(raw)
+    delivery_svc.deliver_export_email(db, delivery, ev.title or "your event", url)
+    return DeliveryCreated(**DeliveryOut.model_validate(delivery).model_dump(), delivery_url=url)
+
+
+@router.delete("/recordings/{recording_id}/exports/{delivery_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_recording_export(
+    recording_id: uuid.UUID, delivery_id: uuid.UUID, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    delivery = delivery_crud.get_delivery(db, org.id, delivery_id)
+    if delivery is None or delivery.recording_id != recording_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Export not found")
+    delivery_crud.revoke_delivery(db, delivery)
+    admin_crud.create_audit_log(db, actor=admin, action="export.revoke", target_type="customer_delivery",
+                                target_id=delivery.id, org_id=org.id)
 
 
 # ── Live Inputs (LiveKit Ingress) ─────────────────────────────────────────────
@@ -256,6 +330,52 @@ async def reveal_live_input_key(
         return LiveInputKeyOut(ingest_url=None, stream_key=None)
     url, key = await livekit.ingress_credentials(row.ingress_id)
     return LiveInputKeyOut(ingest_url=url, stream_key=key)
+
+
+# ── Post-event reports (BRD §18.2) ─────────────────────────────────────────────
+# Generate/list are read/write on the report snapshot itself; release hands it to
+# services/report.py, which reuses the same CustomerDelivery mechanism as export.
+
+def _report_event(db, org_id, event_id) -> Event:
+    ev = db.get(Event, event_id)
+    if ev is None or ev.org_id != org_id or ev.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    return ev
+
+
+@router.get("/events/{event_id}/reports", response_model=list[EventReportOut])
+def list_event_reports(
+    event_id: uuid.UUID, org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    _report_event(db, org.id, event_id)
+    return delivery_crud.list_reports(db, event_id)
+
+
+@router.post("/events/{event_id}/reports", response_model=EventReportOut, status_code=status.HTTP_201_CREATED)
+def generate_event_report(
+    event_id: uuid.UUID, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    ev = _report_event(db, org.id, event_id)
+    return report_svc.generate_event_report(db, ev, actor=admin)
+
+
+@router.post("/reports/{report_id}/release", response_model=DeliveryCreated, status_code=status.HTTP_201_CREATED)
+def release_event_report(
+    report_id: uuid.UUID, data: DeliveryCreate, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    report = delivery_crud.get_report(db, org.id, report_id)
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
+    ev = db.get(Event, report.event_id)
+    delivery, raw = report_svc.release_report(
+        db, report, ev, recipient_name=data.recipient_name, recipient_email=data.recipient_email,
+        expires_in_days=data.expires_in_days, actor=admin,
+    )
+    url = _delivery_url(raw)
+    report_svc.deliver_report_email(db, delivery, ev.title or "your event", url)
+    return DeliveryCreated(**DeliveryOut.model_validate(delivery).model_dump(), delivery_url=url)
 
 
 @router.delete("/live-inputs/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)

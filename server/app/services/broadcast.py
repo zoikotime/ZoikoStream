@@ -32,6 +32,7 @@ from sqlalchemy import case, func, select
 
 from ..crud import commercial as commercial_crud
 from ..crud.admin import get_feature_flag_by_key
+from ..crud.event import is_memorial_category
 from ..models import (
     AnalyticsSnapshot,
     BroadcastSession,
@@ -44,7 +45,7 @@ from ..models import (
     Organization,
     Subscription,
 )
-from . import bus, livekit, platform_settings, webhooks
+from . import bus, livekit, platform_settings, validation, webhooks
 from . import moderation as mod
 
 log = logging.getLogger(__name__)
@@ -181,6 +182,12 @@ def record_egress_result(egress_info) -> dict | None:
             r.error = egress_info.error
         db.commit()
         db.refresh(r)
+        # A single-path event's replay entitlement can advance straight to
+        # READY_FOR_REVIEW here; a dual-path event's other side may still be recording,
+        # so this is a no-op until services/validation.py's ticker sees both — see that
+        # function's own docstring. Never publishes anything itself (BRD "never
+        # auto-publish on event end").
+        validation.on_recording_captured(db, r)
         out = recording_out(r)
         webhooks.enqueue(db, r.org_id, "recording.failed" if egress_info.error else "recording.ready", {
             "event_id": str(r.event_id), "recording_id": out["id"], "role": out["role"],
@@ -288,19 +295,30 @@ def _seed_settings(ev: Event | None) -> dict:
     """First go-live inherits the event's configured feature flags, so the console opens
     matching what the organiser set up rather than a generic default.
     A missing row (deleted mid-session) falls back to defaults rather than raising — this
-    runs on every socket accept, and one stale id must not refuse every connection."""
+    runs on every socket accept, and one stale id must not refuse every connection.
+
+    Memorial events also force chat/qa/polls/raise_hand/reactions off here, independent of
+    the stored Event columns — crud.event.create_event/update_event already clamp those
+    columns, but this is the actual enforcement point the audience player reads from, so it
+    stays correct even if a row somehow predates that clamp (doc Sec. 11.3/19, LE-AC-16).
+    reactions_enabled has no Event-level column at all (it's session-only), so this is the
+    only place it can be defaulted off for a memorial event."""
     if ev is None:
         return dict(DEFAULT_SETTINGS)
-    return {
+    memorial = is_memorial_category(ev.category)
+    seeded = {
         **DEFAULT_SETTINGS,
-        "chat_enabled": ev.chat_enabled,
-        "qa_enabled": ev.qa_enabled,
-        "polls_enabled": ev.polls_enabled,
+        "chat_enabled": False if memorial else ev.chat_enabled,
+        "qa_enabled": False if memorial else ev.qa_enabled,
+        "polls_enabled": False if memorial else ev.polls_enabled,
         "waiting_room": ev.waiting_room_enabled,
-        "raise_hand_enabled": ev.raise_hand_enabled,
+        "raise_hand_enabled": False if memorial else ev.raise_hand_enabled,
         "allow_screen_share": ev.allow_screen_share,
         "auto_upload": ev.auto_start_recording or DEFAULT_SETTINGS["auto_upload"],
     }
+    if memorial:
+        seeded["reactions_enabled"] = False
+    return seeded
 
 
 async def ensure_state(ctx) -> dict:
@@ -495,11 +513,25 @@ async def _countdown(ctx, payload):
     return [("broadcast", "broadcast.countdown", {"until": deadline.isoformat(), "seconds": seconds})]
 
 
+_MEMORIAL_LOCKED_SETTINGS = ("chat_enabled", "qa_enabled", "polls_enabled", "raise_hand_enabled", "reactions_enabled")
+
+
 async def _settings(ctx, payload):
     ceiling = await mod.tx(lambda db: platform_settings.max_bitrate_kbps(db))
     patch = clean_settings(payload.get("settings") or payload, max_bitrate_kbps=ceiling)
     if not patch:
         return "No recognised settings in that request"
+    # A host cannot toggle chat/Q&A/polls/raise-hand/reactions on mid-broadcast for a
+    # memorial event either — _seed_settings closes the initial state, this closes the
+    # runtime one (doc Sec. 11.3/19, LE-AC-16, non-waivable).
+    def _category(db):
+        ev = db.get(Event, ctx.event_id)
+        return ev.category if ev else None
+    memorial = is_memorial_category(await mod.tx(_category))
+    if memorial:
+        patch = {k: v for k, v in patch.items() if k not in _MEMORIAL_LOCKED_SETTINGS}
+        if not patch:
+            return "Chat, Q&A, polls, raise hand, and reactions cannot be enabled for a memorial event"
     merged = await _apply_settings(ctx, patch)
     changed = ", ".join(f"{k}={patch[k]}" for k in sorted(patch))
     act = await mod.tx(lambda db: mod.record(

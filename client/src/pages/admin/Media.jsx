@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { FiFilm, FiPlay, FiRefreshCw, FiSearch } from "react-icons/fi";
+import { useEffect, useMemo, useState } from "react";
+import { FiFilm, FiPlay, FiRefreshCw, FiSearch, FiCheckCircle, FiUpload } from "react-icons/fi";
 import {
   Badge, Button, DataTable, DetailField, KpiCard, Panel, CONSOLE, cx, type,
 } from "../../components/admin";
@@ -21,6 +21,26 @@ import { notify } from "../../ui/Toast";
 
 const STATUSES = ["recording", "paused", "stopped", "failed"];
 const STATUS_TONE = { recording: "danger", paused: "warning", stopped: "neutral", failed: "danger" };
+
+// Dual-recording validation (services/validation.py) + the replay publish gate
+// (routers/events.py::watch_event's ReplayEntitlement check).
+const VALIDATION_TONE = { valid: "success", degraded: "warning", failed: "danger" };
+const PUBLISH_TONE = {
+  not_available: "neutral", ready_for_review: "warning", published: "success",
+  withheld: "danger", expired: "neutral", deleted_preserved: "neutral",
+};
+const PUBLISH_LABEL = {
+  not_available: "Not available", ready_for_review: "Ready for review", published: "Published",
+  withheld: "Withheld", expired: "Expired", deleted_preserved: "Deleted (preserved)",
+};
+
+// publish_state="published" only flips the switch -- publish_replay queues the watermark
+// burn without waiting for it (services/delivery.py's ticker, a real recording can run
+// hours), so a viewer isn't actually served anything until watermark_status is "ready" too.
+const WATERMARK_TONE = { not_applicable: "neutral", pending: "warning", ready: "success", failed: "danger" };
+const WATERMARK_LABEL = {
+  not_applicable: "Not started", pending: "Preparing…", ready: "Ready", failed: "Failed",
+};
 
 function fmtBytes(n) {
   if (!n) return "—";
@@ -47,8 +67,189 @@ function useRecordingsData(status, orgId) {
   );
 }
 
+// services/validation.py's real ffprobe-based comparison for a dual-recording pair —
+// evidence is written identically to BOTH rows of a pair, so recording.validation_evidence
+// alone (when role is set) already has the primary+secondary breakdown; no second fetch.
+function ValidationPanel({ recording }) {
+  if (!recording.role) return null; // single-path event — nothing was ever compared
+
+  const status = recording.validation_status;
+  const ev = recording.validation_evidence;
+
+  return (
+    <div className="mt-4 rounded-lg border border-slate-200 p-3 dark:border-white/10">
+      <div className="flex items-center justify-between">
+        <p className={cx("text-[11px] font-semibold uppercase tracking-wide", CONSOLE.faint)}>Dual-recording validation</p>
+        {status ? (
+          <Badge tone={VALIDATION_TONE[status] || "neutral"} dot>{status}</Badge>
+        ) : (
+          <Badge tone="neutral" dot>Awaiting the other path</Badge>
+        )}
+      </div>
+      {ev ? (
+        <dl className="mt-2.5 space-y-1.5 text-[12px]">
+          {ev.duration_delta_seconds != null && (
+            <div className="flex justify-between">
+              <dt className={CONSOLE.faint}>Duration delta</dt>
+              <dd className={type.mono}>{ev.duration_delta_seconds}s</dd>
+            </div>
+          )}
+          {["primary", "secondary"].map((label) => {
+            const side = ev[label];
+            if (!side) return null;
+            return (
+              <div key={label} className="flex justify-between">
+                <dt className={cx(CONSOLE.faint, "capitalize")}>{label}</dt>
+                <dd className={type.mono}>
+                  {side.error
+                    ? side.error
+                    : `${side.duration_seconds ?? "—"}s · ${side.has_video ? "video ✓" : "no video"} · ${side.has_audio ? "audio ✓" : "no audio"}`}
+                </dd>
+              </div>
+            );
+          })}
+          <p className={cx("pt-1.5 text-[11px]", CONSOLE.faint)}>
+            Not checked: gap/black-frame detection, caption QA.
+          </p>
+        </dl>
+      ) : (
+        <p className={cx("mt-2 text-[12px]", CONSOLE.faint)}>
+          Waiting for both recording paths to finish before comparing.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function PublishPanel({ loading, entitlement, publishing, onPublish, retrying, onRetryWatermark }) {
+  const state = entitlement?.publish_state || "not_available";
+  const wm = entitlement?.watermark_status || "not_applicable";
+  return (
+    <div className="mt-4 rounded-lg border border-slate-200 p-3 dark:border-white/10">
+      <div className="flex items-center justify-between">
+        <p className={cx("text-[11px] font-semibold uppercase tracking-wide", CONSOLE.faint)}>Audience replay</p>
+        {loading ? (
+          <span className={cx("text-[11px]", CONSOLE.faint)}>Loading…</span>
+        ) : (
+          <Badge tone={PUBLISH_TONE[state] || "neutral"} dot>{PUBLISH_LABEL[state] || state}</Badge>
+        )}
+      </div>
+      <p className={cx("mt-1.5 text-[12px] leading-relaxed", CONSOLE.faint)}>
+        {state === "published"
+          ? "Viewers with access to this event can watch the replay."
+          : "Never automatic — a viewer sees no replay until this is explicitly published."}
+      </p>
+      {!loading && entitlement && state !== "published" && (
+        <Button
+          className="mt-3"
+          size="sm"
+          leftIcon={FiUpload}
+          loading={publishing}
+          disabled={publishing}
+          onClick={onPublish}
+        >
+          Publish replay
+        </Button>
+      )}
+      {!loading && !entitlement && (
+        <p className={cx("mt-2 text-[11px]", CONSOLE.faint)}>
+          No replay entitlement yet — nothing has finished processing for this event.
+        </p>
+      )}
+      {/* Watermark burn — separate from publish_state on purpose (see WATERMARK_TONE
+          comment). Only shown once there's actually a burn to report on. */}
+      {state === "published" && (
+        <div className="mt-2.5 flex items-center justify-between">
+          <span className={cx("text-[11px]", CONSOLE.faint)}>Watermarked copy</span>
+          <Badge tone={WATERMARK_TONE[wm] || "neutral"} dot>{WATERMARK_LABEL[wm] || wm}</Badge>
+        </div>
+      )}
+      {state === "published" && wm === "ready" && (
+        <p className="mt-2 inline-flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+          <FiCheckCircle /> Live to the audience
+        </p>
+      )}
+      {state === "published" && wm === "pending" && (
+        <p className={cx("mt-2 text-[11px]", CONSOLE.faint)}>
+          Publishing is confirmed, but viewers won't see the replay until the watermark burn finishes — this can take a while for a long recording.
+        </p>
+      )}
+      {state === "published" && wm === "failed" && (
+        <>
+          <p className="mt-2 text-[11px] text-rose-600 dark:text-rose-400">
+            {entitlement.watermark_error || "The watermark burn failed."} Viewers see no replay until this is retried.
+          </p>
+          <Button className="mt-2" size="sm" leftIcon={FiRefreshCw} loading={retrying} disabled={retrying} onClick={onRetryWatermark}>
+            Retry watermark
+          </Button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function RecordingDrawer({ recording, open, onClose }) {
   const [playing, setPlaying] = useState(false);
+  const [entitlement, setEntitlement] = useState(null);
+  const [loadingEntitlement, setLoadingEntitlement] = useState(true);
+  const [publishing, setPublishing] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  // Diffed during render, not in the effect below (same pattern Credentials.jsx's
+  // CreateKeyModal uses for its own `wasOpen` reset) — resetting loading here, rather
+  // than as a synchronous setState at the top of the effect body, is what keeps the
+  // fetch effect itself lint-clean (react-hooks/set-state-in-effect only objects to a
+  // DIRECT setState in the effect body; the .then/.catch/.finally calls below are fine).
+  const [fetchedFor, setFetchedFor] = useState(null);
+  if (recording && recording.event_id !== fetchedFor) {
+    setFetchedFor(recording.event_id);
+    setLoadingEntitlement(true);
+  }
+
+  // Fetched per event, not per recording — the audience ReplayEntitlement is one row for
+  // the whole event, same one routers/events.py::watch_event reads to gate replay.
+  useEffect(() => {
+    if (!recording) return undefined; // drawer closes right after (see the early return below);
+    // stale entitlement state is harmless since it won't render until reopened with a real row.
+    let cancelled = false;
+    api
+      .get(`/commercial/events/${recording.event_id}/replay-entitlements`)
+      .then(({ data }) => {
+        if (cancelled) return;
+        setEntitlement((data || []).find((e) => e.scope === "audience") || null);
+      })
+      .catch(() => { if (!cancelled) setEntitlement(null); })
+      .finally(() => { if (!cancelled) setLoadingEntitlement(false); });
+    return () => { cancelled = true; };
+  }, [recording]);
+
+  const publish = async () => {
+    if (!entitlement) return;
+    setPublishing(true);
+    try {
+      const { data } = await api.post(`/commercial/replay-entitlements/${entitlement.id}/publish`);
+      setEntitlement(data);
+      notify.success("Replay published");
+    } catch (e) {
+      notify.error(errMsg(e, "Couldn't publish this replay"));
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  const retryWatermark = async () => {
+    if (!entitlement) return;
+    setRetrying(true);
+    try {
+      const { data } = await api.post(`/commercial/replay-entitlements/${entitlement.id}/retry-watermark`);
+      setEntitlement(data);
+      notify.success("Watermark burn re-queued");
+    } catch (e) {
+      notify.error(errMsg(e, "Couldn't retry the watermark burn"));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   if (!recording) return <Drawer open={open} onClose={onClose} title="Recording" />;
 
   const play = async () => {
@@ -80,6 +281,7 @@ function RecordingDrawer({ recording, open, onClose }) {
           label="LiveKit egress"
           value={recording.enforced ? <Badge tone="success">Enforced</Badge> : <Badge tone="warning">Not enforced</Badge>}
         />
+        {recording.role && <DetailField label="Recording path" value={recording.role} />}
       </dl>
 
       {recording.error && (
@@ -87,6 +289,17 @@ function RecordingDrawer({ recording, open, onClose }) {
           {recording.error}
         </div>
       )}
+
+      <ValidationPanel recording={recording} />
+
+      <PublishPanel
+        loading={loadingEntitlement}
+        entitlement={entitlement}
+        publishing={publishing}
+        onPublish={publish}
+        retrying={retrying}
+        onRetryWatermark={retryWatermark}
+      />
 
       <Button
         className="mt-5"
