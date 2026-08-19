@@ -11,7 +11,7 @@ Permissions:
   read (list / get / view assignees)               -> any org member
 """
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
@@ -25,7 +25,7 @@ from ..email import (
     send_assignment_email, send_contributor_invite_email, send_event_created_email,
     send_registration_confirmation_email, send_viewer_invite_email,
 )
-from ..models import Event, User
+from ..models import Event, LiveRecording, User
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
     AccessLinkCreate, AccessLinkIssued, AccessLinkOut,
@@ -43,12 +43,6 @@ from ..services import moderation as mod
 from ..services import webhooks
 
 router = APIRouter(prefix="/events", tags=["events"])
-
-# How long after a recording stops we tolerate its file not being in GCS yet before treating
-# that as a real failure — LiveKit's own upload finishes asynchronously after the row is
-# already "stopped". Generous on purpose: a false "failed" is permanent, a few extra minutes
-# of "no replay yet" is not.
-RECORDING_UPLOAD_GRACE = timedelta(minutes=3)
 
 
 def _get_event_or_404(db, user: User, event_id) -> Event:
@@ -250,33 +244,38 @@ def watch_event(
     # Replay: same access rule as the live token (registration_required gates it the same
     # way), but independent of not_started/expired — the whole point of a replay is that it
     # stays watchable after the scheduled window closes.
+    #
+    # Gated on the audience ReplayEntitlement's publish_state (BRD table 53: "never
+    # auto-publish on event end") — until an operator explicitly publishes
+    # (routers/commercial.py's publish endpoint, surfaced in pages/admin/Media.jsx),
+    # recording_url stays None here even for a fully captured, already-validated file. No
+    # row / not "published" both read as "no replay yet" — same as the pre-existing
+    # not-recorded case, so this needed no frontend change.
+    #
+    # ALSO gated on watermark_status == "ready": publish_replay queues the burn but doesn't
+    # wait for it (services/delivery.py's shared ticker — a real recording can run hours),
+    # so "published" alone isn't enough to serve the file yet. Same "publish now, deliver
+    # once ready" split the customer export's /deliveries/{token} page already uses.
+    replay_entitlement = commercial_crud.get_replay_entitlement(db, ev.id, scope="audience")
+    replay_published = (
+        replay_entitlement is not None
+        and replay_entitlement.publish_state == "published"
+        and replay_entitlement.watermark_status == "ready"
+    )
+
     recording_url = recording_duration = None
-    if not can_stream and (not ev.registration_required or registered):
-        # A "stopped" row only means the host clicked stop — LiveKit's egress can still have
-        # failed to actually produce a file (dropped publisher, network blip, ...) with no
-        # signal reaching us if the egress_ended webhook never arrives. Verify the newest
-        # candidate is really in the bucket before handing a viewer a dead link; a confirmed
-        # miss is marked failed so it's excluded (and this check skipped) from here on, and
-        # we fall back to the next-newest real recording instead of showing nothing.
-        #
-        # LiveKit's own upload can take a while to land after `stopped_at` (observed up to
-        # ~20s for a short clip), so a miss within RECORDING_UPLOAD_GRACE isn't proof of
-        # failure — it stops the search without condemning the row OR falling back to an
-        # older recording, so a still-uploading file doesn't get permanently misdiagnosed
-        # and a viewer doesn't get shown stale content in its place. A later visit re-checks.
-        for rec in crud.list_replay_candidates(db, ev.id):
-            if livekit.object_exists(rec.file_url):
-                recording_url = livekit.signed_url(rec.file_url)
-                if rec.started_at and rec.stopped_at:
-                    recording_duration = int(
-                        (rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000
-                    )
-                break
-            if rec.stopped_at and (now - rec.stopped_at) < RECORDING_UPLOAD_GRACE:
-                break
-            rec.status = "failed"
-            rec.error = "Recording file not found in storage — the egress likely failed silently"
-            db.commit()
+    if replay_published and not can_stream and (not ev.registration_required or registered):
+        # The watermarked copy is the ONLY thing ever served here — never the original
+        # recording.file_url — so every replay a viewer can reach already carries the
+        # policy watermark (BRD LE-AC-12). object_exists still guards it: the burn could
+        # have completed and then the object gone missing from storage since.
+        if livekit.object_exists(replay_entitlement.watermarked_file_key):
+            recording_url = livekit.signed_url(replay_entitlement.watermarked_file_key)
+            source = db.get(LiveRecording, replay_entitlement.source_recording_id)
+            if source and source.started_at and source.stopped_at:
+                recording_duration = int(
+                    (source.stopped_at - source.started_at).total_seconds() - source.paused_ms / 1000
+                )
 
     org_name = ev.organization.name if ev.organization else None
     hosts = crud.list_assignees(db, ev.id, "host")
@@ -286,6 +285,7 @@ def watch_event(
         visibility=ev.visibility, start_time=ev.start_time,
         organization_name=org_name, host_name=hosts[0].full_name if hosts else org_name,
         chat_enabled=ev.chat_enabled, qa_enabled=ev.qa_enabled, polls_enabled=ev.polls_enabled,
+        reactions_enabled=not crud.is_memorial_category(ev.category),
         registration_required=ev.registration_required, registered=registered or not ev.registration_required,
         not_started=not_started, expired=expired,
         livekit_url=url, livekit_token=token, room=room if token else None,

@@ -15,6 +15,13 @@ RUN npm run build
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
+# ffmpeg burns the BRD's "policy watermark" (LE-AC-12) into a customer export
+# (services/watermark.py, services/delivery.py's background ticker) — fonts-dejavu-core
+# is installed specifically so watermark.py's known font path resolves without depending
+# on fontconfig's own default-config discovery, which turned out fragile in testing.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fontconfig fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

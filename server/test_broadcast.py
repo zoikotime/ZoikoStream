@@ -201,6 +201,43 @@ def test_session_out_tolerates_no_session():
     assert set(bc.DEFAULT_SETTINGS) <= set(out["settings"])
 
 
+def _fake_event(**overrides):
+    base = dict(
+        category="Webinar", chat_enabled=True, qa_enabled=True, polls_enabled=True,
+        waiting_room_enabled=False, raise_hand_enabled=True, allow_screen_share=True,
+        auto_start_recording=False,
+    )
+    base.update(overrides)
+    return types.SimpleNamespace(**base)
+
+
+def test_seed_settings_respects_the_events_own_flags_for_a_normal_event():
+    seeded = bc._seed_settings(_fake_event())
+    assert seeded["chat_enabled"] is True
+    assert seeded["qa_enabled"] is True
+    assert seeded["polls_enabled"] is True
+    assert seeded["raise_hand_enabled"] is True
+    assert seeded["reactions_enabled"] is True  # untouched default for non-memorial
+
+
+def test_seed_settings_forces_interaction_off_for_memorial_events():
+    """doc Sec. 11.3/19, LE-AC-16 (non-waivable): no audience chat/comments/reactions/
+    guestbook surface for the memorial launch, even if the row's own columns say True
+    (e.g. an event whose category was switched to memorial after creation)."""
+    ev = _fake_event(category="Funeral / Memorial", chat_enabled=True, qa_enabled=True,
+                     polls_enabled=True, raise_hand_enabled=True)
+    seeded = bc._seed_settings(ev)
+    assert seeded["chat_enabled"] is False
+    assert seeded["qa_enabled"] is False
+    assert seeded["polls_enabled"] is False
+    assert seeded["raise_hand_enabled"] is False
+    assert seeded["reactions_enabled"] is False  # no Event column at all for this one
+
+
+def test_seed_settings_tolerates_no_event():
+    assert bc._seed_settings(None) == dict(bc.DEFAULT_SETTINGS)
+
+
 def _fake_recording(**overrides):
     """recording_out only reads attributes off the row, so a SimpleNamespace stands in for
     a LiveRecording without a DB — same technique as test_contributor.py's _session."""

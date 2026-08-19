@@ -577,6 +577,11 @@ class ReplayEntitlementOut(BaseModel):
     download_permission: bool
     expires_at: datetime | None = None
     created_at: datetime | None = None
+    # Whether the watermarked file viewers will actually be served is ready yet -- distinct
+    # from publish_state, since publish_replay queues the burn without waiting for it (a
+    # real recording can run hours). See routers/events.py::watch_event's own gate.
+    watermark_status: str
+    watermark_error: str | None = None
 
 
 # ── Reconciliation ────────────────────────────────────────────────────────────────────

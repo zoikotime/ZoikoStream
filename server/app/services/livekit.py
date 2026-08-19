@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -21,6 +23,16 @@ from livekit import api
 from app.config import settings
 
 log = logging.getLogger(__name__)
+
+
+# BRD "Secure" stage requirement: "short-lived playback authorization" for the audience
+# player (routers/events.py's watch_event, can_publish=False). Left unset, the SDK falls
+# back to an undocumented ~6h default — bounding it explicitly is the fix. 4 hours covers
+# a real live memorial service plus margin (viewers typically load the watch page once,
+# at or shortly before go-live, and useLiveKitViewer.js doesn't currently re-fetch a token
+# on reconnect — see that file's own docstring — so this can't be cut much tighter without
+# also adding a refresh mechanism, which is deliberately out of scope for this pass).
+PLAYBACK_TOKEN_TTL = timedelta(hours=4)
 
 
 def create_stream_token(
@@ -45,6 +57,12 @@ def create_stream_token(
 
     token.with_identity(identity)
     token.with_grants(grant)
+    # Publish tokens (host/contributor) are deliberately left on the SDK default — a host
+    # or speaker's session can legitimately run long, and shortening THAT token is a
+    # separate tradeoff the BRD doesn't ask for here. Only playback (can_publish=False) is
+    # bounded, per the "short-lived playback authorization" requirement specifically.
+    if not can_publish:
+        token.with_ttl(PLAYBACK_TOKEN_TTL)
 
 
     return token.to_jwt()
@@ -250,6 +268,41 @@ def delete_object(object_key: str) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001
         log.warning("GCS delete failed for %s: %s", object_key, exc)
+        return False
+
+
+def download_to_temp(object_key: str) -> str | None:
+    """Pulls a recording's raw bytes onto local disk for local processing (currently:
+    services/watermark.py's ffmpeg pass) — the one case that needs the actual file rather
+    than a signed URL a browser can stream. Caller owns cleanup of the returned path.
+    None (never raises) on any failure, same posture as every other function here."""
+    if not object_key:
+        return None
+    client = _gcs_client()
+    if client is None:
+        return None
+    try:
+        fd, local_path = tempfile.mkstemp(suffix=Path(object_key).suffix or ".mp4")
+        os.close(fd)
+        client.bucket(settings.GCS_BUCKET).blob(object_key).download_to_filename(local_path)
+        return local_path
+    except Exception as exc:  # noqa: BLE001 — a download failure must not raise into a ticker
+        log.warning("GCS download failed for %s: %s", object_key, exc)
+        return None
+
+
+def upload_object(local_path: str, object_key: str) -> bool:
+    """Uploads a local file (a watermark burn's output) to GCS at object_key. The
+    counterpart to download_to_temp — everything else in this module only ever reads what
+    LiveKit's own egress already wrote (see _egress_request's GCPUpload)."""
+    client = _gcs_client()
+    if client is None:
+        return False
+    try:
+        client.bucket(settings.GCS_BUCKET).blob(object_key).upload_from_filename(local_path)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("GCS upload failed for %s: %s", object_key, exc)
         return False
 
 

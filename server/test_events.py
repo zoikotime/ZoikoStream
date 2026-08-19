@@ -177,6 +177,55 @@ def test_duration_computed():
     assert e2.duration_minutes is None
 
 
+def test_is_memorial_category_matches_registry():
+    assert crud.is_memorial_category("Funeral / Memorial") is True
+    assert crud.is_memorial_category("Webinar") is False
+    assert crud.is_memorial_category(None) is False
+    assert crud.is_memorial_category("") is False
+
+
+def test_is_memorial_category_ignores_case_and_whitespace():
+    """category is free text — nothing server-side stops a direct API call from sending a
+    casing/whitespace variant of the registry string, and that must not silently bypass
+    the memorial restrictions (chat/Q&A/polls, dual-recording, watermark)."""
+    assert crud.is_memorial_category("funeral / memorial") is True
+    assert crud.is_memorial_category("FUNERAL / MEMORIAL") is True
+    assert crud.is_memorial_category("  Funeral / Memorial  ") is True
+    assert crud.is_memorial_category("Funeral/Memorial") is False  # not a synonym match, just case/whitespace
+
+
+def test_category_min_risk_tier_ignores_case_and_whitespace():
+    assert crud.category_min_risk_tier("funeral / memorial") == "r2"
+    assert crud.category_min_risk_tier(" FUNERAL / MEMORIAL ") == "r2"
+    assert crud.category_min_risk_tier("Webinar") == "r0"
+
+
+def test_enforce_memorial_features_forces_all_four_off():
+    fields = {"title": "x", "chat_enabled": True, "qa_enabled": True,
+              "polls_enabled": True, "raise_hand_enabled": True}
+    out = crud._enforce_memorial_features("Funeral / Memorial", dict(fields))
+    assert out["chat_enabled"] is False
+    assert out["qa_enabled"] is False
+    assert out["polls_enabled"] is False
+    assert out["raise_hand_enabled"] is False
+    assert out["title"] == "x"  # untouched fields pass through
+
+
+def test_enforce_memorial_features_injects_false_even_when_absent():
+    """A partial update patch that never mentions chat_enabled must still come out False —
+    this is what stops a category switch (Webinar -> Funeral / Memorial) from leaving a
+    stale chat_enabled=True on the row."""
+    out = crud._enforce_memorial_features("Funeral / Memorial", {"category": "Funeral / Memorial"})
+    assert out["chat_enabled"] is False
+    assert out["raise_hand_enabled"] is False
+
+
+def test_enforce_memorial_features_is_a_noop_for_other_categories():
+    fields = {"chat_enabled": True, "qa_enabled": True}
+    out = crud._enforce_memorial_features("Webinar", dict(fields))
+    assert out == fields
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

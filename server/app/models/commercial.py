@@ -529,6 +529,19 @@ class ReplayEntitlement(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # ── Replay watermark (BRD table 53: publication "applies... watermark policy" —
+    # crud.commercial.publish_replay/services.delivery's shared watermark ticker) ────────
+    # "not_applicable" until a publish is actually requested — an unpublished entitlement
+    # has nothing to burn yet, so it must not show as a stuck "pending"/"failed" watermark.
+    watermark_status: Mapped[str] = mapped_column(String(20), default="not_applicable", nullable=False)
+    watermarked_file_key: Mapped[str | None] = mapped_column(String(500))
+    watermark_error: Mapped[str | None] = mapped_column(Text)
+    # Which LiveRecording the watermarked copy was actually burned from (crud.event.
+    # list_replay_candidates' own selection — primary-first, validation-aware) — recorded
+    # so routers/events.py::watch_event can still show a real duration without re-deriving
+    # the selection a second time.
+    source_recording_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
     event: Mapped["Event"] = relationship()
 
 

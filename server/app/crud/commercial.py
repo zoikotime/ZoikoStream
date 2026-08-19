@@ -1044,12 +1044,67 @@ def create_replay_entitlement(db: Session, event: Event, *, scope: str = "audien
     return ent
 
 
+def get_replay_entitlement(db: Session, event_id, *, scope: str = "audience") -> ReplayEntitlement | None:
+    """Read-only lookup — routers/events.py::watch_event's actual publish gate. None means
+    not_available in every way that matters to a viewer (no row yet is exactly as
+    unpublished as a row stuck at not_available)."""
+    return db.scalar(
+        select(ReplayEntitlement).where(ReplayEntitlement.event_id == event_id, ReplayEntitlement.scope == scope)
+    )
+
+
+def get_or_create_replay_entitlement(db: Session, event: Event, *, scope: str = "audience") -> ReplayEntitlement:
+    """Idempotent counterpart to create_replay_entitlement — services/validation.py calls
+    this from the recording lifecycle (not a human), so it must never create a duplicate
+    row for the same event+scope on a repeated trigger (e.g. record_egress_result firing
+    again for the secondary path of a dual recording)."""
+    existing = db.scalar(
+        select(ReplayEntitlement).where(ReplayEntitlement.event_id == event.id, ReplayEntitlement.scope == scope)
+    )
+    if existing is not None:
+        return existing
+    return create_replay_entitlement(db, event, scope=scope)
+
+
+def advance_to_ready_for_review(db: Session, entitlement: ReplayEntitlement) -> ReplayEntitlement:
+    """The automated half of the state machine — moves NOT_AVAILABLE to READY_FOR_REVIEW
+    once services/validation.py confirms a real, usable replay source exists. Never touches
+    PUBLISHED or any other state (idempotent against being called more than once, and never
+    un-publishes something an operator already released)."""
+    if entitlement.publish_state == "not_available":
+        entitlement.publish_state = "ready_for_review"
+        db.commit()
+        db.refresh(entitlement)
+    return entitlement
+
+
 def publish_replay(db: Session, entitlement: ReplayEntitlement) -> ReplayEntitlement:
     """Publication is never automatic on live-end (doc J2) — this is the one explicit call
-    that moves READY_FOR_REVIEW/NOT_AVAILABLE to PUBLISHED."""
+    that moves READY_FOR_REVIEW/NOT_AVAILABLE to PUBLISHED. Also queues the watermark burn
+    (services/delivery.py's shared export/replay ticker, BRD "policy watermark" LE-AC-12) —
+    the audience-facing URL stays withheld (routers/events.py::watch_event) until that
+    finishes, the same "publish now, deliver once ready" split the customer export already
+    uses. Doesn't reset an already-`ready` watermark (a re-publish after some other field
+    changed shouldn't discard a successful burn and force a re-encode)."""
     if entitlement.publish_state not in ("not_available", "ready_for_review"):
         raise ValueError(f"Cannot publish replay from state '{entitlement.publish_state}'")
     entitlement.publish_state = "published"
+    if entitlement.watermark_status != "ready":
+        entitlement.watermark_status = "pending"
+        entitlement.watermark_error = None
+    db.commit()
+    db.refresh(entitlement)
+    return entitlement
+
+
+def retry_replay_watermark(db: Session, entitlement: ReplayEntitlement) -> ReplayEntitlement:
+    """Re-queues a failed watermark burn (e.g. a transient GCS/ffmpeg hiccup) without
+    touching publish_state — publish_replay's own state guard would otherwise refuse a
+    second call once the entitlement is already PUBLISHED."""
+    if entitlement.watermark_status != "failed":
+        raise ValueError(f"Cannot retry from watermark_status '{entitlement.watermark_status}'")
+    entitlement.watermark_status = "pending"
+    entitlement.watermark_error = None
     db.commit()
     db.refresh(entitlement)
     return entitlement
