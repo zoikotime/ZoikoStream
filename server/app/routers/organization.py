@@ -17,8 +17,8 @@ from ..crud import event as event_crud
 from ..crud import organization as crud
 from ..db import get_db
 from ..email import send_invitation_email
-from ..models import Organization, User
-from ..schemas.admin import AdminUserOut, Page, PlanOut, UserUpdate
+from ..models import Event, LiveIngressEndpoint, Organization, User, WEBHOOK_EVENTS
+from ..schemas.admin import AdminUserOut, ApiKeyCreate, ApiKeyCreated, Page, PlanOut, UserUpdate
 from ..schemas.auth import TokenOut, UserOut
 from ..schemas.organization import (
     InvitationAccept,
@@ -27,6 +27,9 @@ from ..schemas.organization import (
     InvitationOut,
     InvitationPreview,
     InvitationReject,
+    LiveInputCreate,
+    LiveInputKeyOut,
+    LiveInputOut,
     OrgBrandingOut,
     OrgBrandingUpdate,
     OrgDeveloperOut,
@@ -38,6 +41,12 @@ from ..schemas.organization import (
     OrgProfileUpdate,
     OrgSecurity,
     RecordingOut,
+    WebhookDeliveryOut,
+    WebhookEndpointCreate,
+    WebhookEndpointCreated,
+    WebhookEndpointOut,
+    WebhookEndpointUpdate,
+    WebhookSecretOut,
 )
 from ..security import create_access_token, get_current_user, hash_password, require_org_admin
 from ..services import livekit, org as org_svc
@@ -108,6 +117,18 @@ def analytics(
     return org_svc.analytics(db, org, range_key=range_)
 
 
+@router.get("/audience-attendance")
+def audience_attendance(
+    range_: str = Query("30d", alias="range", pattern="^(7d|30d|90d|12m)$"),
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """Attendance aggregate for the Audience & Access page's Attendance panel — see
+    org_svc.audience_attendance's docstring for exactly which figures are real counts vs.
+    labeled estimates. Readable by any member, same posture as /analytics."""
+    return org_svc.audience_attendance(db, org, range_key=range_)
+
+
 @router.get("/recordings", response_model=list[RecordingOut])
 def list_recordings(
     org: Organization = Depends(get_my_org),
@@ -117,8 +138,10 @@ def list_recordings(
     captured something (status=stopped, enforced=True) — a failed/unenforced attempt has no
     file behind it and would be a dead "Watch Replay" link. Any member may read this, same
     as the rest of the read surface here."""
+    recordings = event_crud.list_org_recordings(db, org.id)
+    held_event_ids = admin_crud.legal_hold_event_ids(db, {ev.id for _, ev in recordings})
     out = []
-    for rec, ev in event_crud.list_org_recordings(db, org.id):
+    for rec, ev in recordings:
         duration = None
         if rec.started_at and rec.stopped_at:
             duration = int((rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000)
@@ -126,6 +149,7 @@ def list_recordings(
             id=rec.id, event_id=ev.id, title=ev.title, category=ev.category,
             started_at=rec.started_at, duration_seconds=duration, size_bytes=rec.size_bytes,
             url=livekit.signed_url(rec.file_url),
+            legal_hold=rec.legal_hold or ev.id in held_event_ids,
         ))
     return out
 
@@ -138,14 +162,105 @@ def delete_recording(
     db: Session = Depends(get_db),
 ):
     """Removes both the file (best-effort — see livekit.delete_object) and the DB row.
-    Org-admin only: this is a destructive, unrecoverable action on org data."""
+    Org-admin only: this is a destructive, unrecoverable action on org data.
+
+    Legal hold overrides deletion — checked against BOTH the recording's own `legal_hold`
+    column and an open legal-hold governance record on its event (crud.admin.
+    event_under_legal_hold); only a super_admin can place or release one (routers/admin.py),
+    so an org admin can never delete their way around a hold they didn't set and can't lift."""
     rec = event_crud.get_org_recording(db, admin.org_id, recording_id)
     if rec is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
+    if rec.legal_hold or admin_crud.event_under_legal_hold(db, rec.event_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This recording is under legal hold and cannot be deleted. Contact platform support to release the hold.",
+        )
     livekit.delete_object(rec.file_url)
     if rec.size_bytes:
         org.storage_used_gb = round(max(0.0, float(org.storage_used_gb or 0) - rec.size_bytes / (1024 ** 3)), 3)
     db.delete(rec)
+    db.commit()
+
+
+# ── Live Inputs (LiveKit Ingress) ─────────────────────────────────────────────
+# RTMP/WHIP ingest endpoints for on-site encoders — see models/live.py's
+# LiveIngressEndpoint and services/livekit.py's create_ingress/ingress_credentials/
+# delete_ingress. Event-scoped like everything else in this app's live domain: an input
+# targets one event's room (f"event_{event_id}", same convention as every other LiveKit
+# room reference), not a standalone persistent channel.
+
+@router.get("/live-inputs", response_model=list[LiveInputOut])
+def list_live_inputs(org: Organization = Depends(get_my_org), db: Session = Depends(get_db)):
+    return [
+        LiveInputOut(
+            id=i.id, event_id=ev.id, event_title=ev.title, title=i.title,
+            description=i.description, input_type=i.input_type, state=i.state,
+            enforced=i.enforced, error=i.error, created_at=i.created_at,
+        )
+        for i, ev in event_crud.list_org_ingress_endpoints(db, org.id)
+    ]
+
+
+@router.post("/live-inputs", response_model=LiveInputOut, status_code=status.HTTP_201_CREATED)
+async def create_live_input(
+    data: LiveInputCreate, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    ev = db.get(Event, data.event_id)
+    if ev is None or ev.org_id != org.id or ev.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+
+    row = LiveIngressEndpoint(
+        event_id=ev.id, org_id=org.id, title=data.title, description=data.description,
+        input_type=data.input_type, created_by=admin.id,
+    )
+    # Identity mirrors the on-site-encoder naming other live-domain identities use
+    # (moderation.Ctx.identity is str(user.id) for a logged-in participant) — here there's
+    # no user behind the connection, so the row's own id stands in.
+    db.add(row)
+    db.flush()
+    identity = f"ingress-{row.id}"
+    info, error = await livekit.create_ingress(f"event_{ev.id}", data.input_type, data.title, identity)
+    row.participant_identity = identity
+    row.enforced = info is not None
+    row.error = error
+    if info is not None:
+        row.ingress_id = info.ingress_id
+    db.commit()
+    db.refresh(row)
+    return LiveInputOut(
+        id=row.id, event_id=ev.id, event_title=ev.title, title=row.title,
+        description=row.description, input_type=row.input_type, state=row.state,
+        enforced=row.enforced, error=row.error, created_at=row.created_at,
+    )
+
+
+@router.get("/live-inputs/{endpoint_id}/key", response_model=LiveInputKeyOut)
+async def reveal_live_input_key(
+    endpoint_id: uuid.UUID, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    row = event_crud.get_org_ingress_endpoint(db, org.id, endpoint_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Live input not found")
+    if not row.ingress_id:
+        return LiveInputKeyOut(ingest_url=None, stream_key=None)
+    url, key = await livekit.ingress_credentials(row.ingress_id)
+    return LiveInputKeyOut(ingest_url=url, stream_key=key)
+
+
+@router.delete("/live-inputs/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_live_input(
+    endpoint_id: uuid.UUID, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    row = event_crud.get_org_ingress_endpoint(db, org.id, endpoint_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Live input not found")
+    if row.ingress_id:
+        await livekit.delete_ingress(row.ingress_id)
+    db.delete(row)
     db.commit()
 
 
@@ -199,11 +314,113 @@ def update_branding(
     return crud.apply_fields(db, org, data)
 
 
-# ── Developer (read-only) ─────────────────────────────────────────────────────
+# ── Developer ───────────────────────────────────────────────────────────────
 
 @router.get("/developer", response_model=OrgDeveloperOut)
-def get_developer(org: Organization = Depends(get_my_org_admin)):
-    return OrgDeveloperOut(api_keys=org.api_keys or [], webhook_urls=org.webhook_urls or [])
+def get_developer(org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db)):
+    return OrgDeveloperOut(
+        api_keys=org.api_keys or [],
+        webhooks=crud.list_webhook_endpoints(db, org.id),
+    )
+
+
+@router.post("/developer/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
+def create_developer_api_key(
+    data: ApiKeyCreate, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    """Org-scoped minting — same mint/hash logic as the super-admin path
+    (crud.admin.create_api_key), just gated to this org's own admin instead of a platform
+    operator. The raw key is returned once, here, and never again."""
+    created = admin_crud.create_api_key(db, org, data.label, data.expires_in_days)
+    admin_crud.create_audit_log(db, actor=admin, action="api_key.create", target_type="api_key",
+                                target_id=created.id, org_id=org.id, meta={"label": data.label})
+    return created
+
+
+@router.delete("/developer/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_developer_api_key(
+    key_id: str, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    if not admin_crud.revoke_api_key(db, org, key_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "API key not found")
+    admin_crud.create_audit_log(db, actor=admin, action="api_key.revoke", target_type="api_key",
+                                target_id=key_id, org_id=org.id)
+
+
+# ── Developer / Webhooks ──────────────────────────────────────────────────────
+# See models/webhook.py + services/webhooks.py for the delivery system itself
+# (signing, retries, the ticker). This is just the registration CRUD + delivery log read.
+
+def _validate_events(events: list[str]) -> None:
+    bad = [e for e in events if e not in WEBHOOK_EVENTS]
+    if bad:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown event type(s): {', '.join(bad)}")
+
+
+@router.post("/developer/webhooks", response_model=WebhookEndpointCreated, status_code=status.HTTP_201_CREATED)
+def create_developer_webhook(
+    data: WebhookEndpointCreate, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    _validate_events(data.events)
+    ep = crud.create_webhook_endpoint(db, org.id, data.url, data.label, data.events, admin.id)
+    admin_crud.create_audit_log(db, actor=admin, action="webhook.create", target_type="webhook_endpoint",
+                                target_id=ep.id, org_id=org.id, meta={"url": data.url})
+    return ep
+
+
+@router.patch("/developer/webhooks/{endpoint_id}", response_model=WebhookEndpointOut)
+def update_developer_webhook(
+    endpoint_id: uuid.UUID, data: WebhookEndpointUpdate, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    ep = crud.get_webhook_endpoint(db, org.id, endpoint_id)
+    if ep is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook endpoint not found")
+    if data.events is not None:
+        _validate_events(data.events)
+    ep = crud.update_webhook_endpoint(db, ep, url=data.url, label=data.label,
+                                      events=data.events, enabled=data.enabled)
+    admin_crud.create_audit_log(db, actor=admin, action="webhook.update", target_type="webhook_endpoint",
+                                target_id=ep.id, org_id=org.id)
+    return ep
+
+
+@router.delete("/developer/webhooks/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_developer_webhook(
+    endpoint_id: uuid.UUID, admin: User = Depends(get_current_user),
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    ep = crud.get_webhook_endpoint(db, org.id, endpoint_id)
+    if ep is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook endpoint not found")
+    crud.delete_webhook_endpoint(db, ep)
+    admin_crud.create_audit_log(db, actor=admin, action="webhook.delete", target_type="webhook_endpoint",
+                                target_id=endpoint_id, org_id=org.id)
+
+
+@router.get("/developer/webhooks/{endpoint_id}/secret", response_model=WebhookSecretOut)
+def reveal_developer_webhook_secret(
+    endpoint_id: uuid.UUID, org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    """Re-viewable, not reveal-once — see models/webhook.py's docstring for why this
+    secret is a shared verification secret rather than a bearer credential."""
+    ep = crud.get_webhook_endpoint(db, org.id, endpoint_id)
+    if ep is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook endpoint not found")
+    return WebhookSecretOut(secret=ep.secret)
+
+
+@router.get("/developer/webhooks/{endpoint_id}/deliveries", response_model=list[WebhookDeliveryOut])
+def list_developer_webhook_deliveries(
+    endpoint_id: uuid.UUID, org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    ep = crud.get_webhook_endpoint(db, org.id, endpoint_id)
+    if ep is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook endpoint not found")
+    return crud.list_webhook_deliveries(db, ep.id)
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────

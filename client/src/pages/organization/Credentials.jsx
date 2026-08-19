@@ -3,15 +3,18 @@ import { Link } from "react-router-dom";
 // Feather has no "infinity" glyph, so a non-expiring key uses FiSlash — read as "no
 // lifetime set", which is exactly what the metric counts.
 import {
-  FiKey, FiCopy, FiLifeBuoy, FiShield, FiRefreshCw, FiCheckCircle,
-  FiClock, FiSlash, FiFilter,
+  FiKey, FiCopy, FiShield, FiRefreshCw, FiCheckCircle,
+  FiClock, FiSlash, FiFilter, FiPlus, FiTrash2,
 } from "react-icons/fi";
-import api from "../../api";
+import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { CONSOLE, cx, focusRing, type } from "../../ui/tokens";
 import { ConsoleButton } from "../../ui/Button";
 import Badge from "../../ui/Badge";
 import Dropdown from "../../ui/Dropdown";
+import Modal from "../../ui/Modal";
+import ConfirmDialog from "../../ui/ConfirmDialog";
+import { Input, Label } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import DataTable from "../../components/admin/DataTable";
 import MetricCard from "../../components/admin/MetricCard";
@@ -23,11 +26,10 @@ import OrganizationErrorState from "../../components/organization/OrganizationEr
 
 // Credentials — the API keys this organization authenticates with.
 //
-// READ-ONLY on purpose. GET /organization/developer returns the inventory, but minting and
-// revoking keys exist only under /admin/organizations/{id}/api-keys, which requires
-// super-admin. Rendering an enabled "Create key" button here would produce a 403 on click, so
-// the action states who can do it and routes to Support instead. This page gets its write
-// half the day an org-scoped endpoint does — no frontend change can grant that authority.
+// Org-admin scoped create/revoke, mirroring the same mint/hash logic the platform's own
+// super-admin console uses (crud.admin.create_api_key/revoke_api_key) — this is a separate,
+// org-bound endpoint (POST/DELETE /organization/developer/api-keys), not a frontend-only
+// unlock of the super-admin path.
 const WARN_DAYS = 30;
 
 const daysUntil = (iso) => {
@@ -70,11 +72,125 @@ const RULES = [
   ["Prefer short lifetimes", "A non-expiring key is a permanent liability."],
 ];
 
+// The raw key exists in the response exactly once — the platform stores only its hash
+// (crud.admin.create_api_key), so it can never be shown again after this dialog closes.
+function RevealKeyDialog({ created, onClose }) {
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(created.key);
+      notify.success("API key copied");
+    } catch {
+      notify.error("Couldn't copy — select the key and copy it manually");
+    }
+  };
+  return (
+    <Modal
+      open={!!created}
+      onClose={onClose}
+      title="API key created"
+      size="lg"
+      footer={
+        <>
+          <ConsoleButton variant="secondary" onClick={onClose}>Done</ConsoleButton>
+          <ConsoleButton leftIcon={FiCopy} onClick={copy}>Copy key</ConsoleButton>
+        </>
+      }
+    >
+      {created && (
+        <>
+          <p className={cx("text-[13px] leading-[20px]", CONSOLE.muted)}>
+            Store this somewhere safe — it is shown{" "}
+            <strong className="font-semibold text-slate-800 dark:text-slate-100">only now</strong>.
+            The platform keeps a hash, not the key, so it cannot be recovered later. Revoke and
+            mint a new one if it's lost.
+          </p>
+          <code
+            className={cx(
+              "mt-4 block break-all rounded-lg px-3 py-2 text-[12px]",
+              type.mono, CONSOLE.inset, CONSOLE.body
+            )}
+          >
+            {created.key}
+          </code>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function CreateKeyModal({ open, onClose, onCreated }) {
+  const [label, setLabel] = useState("");
+  const [expiresInDays, setExpiresInDays] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) { setLabel(""); setExpiresInDays(""); }
+  }
+
+  const create = async () => {
+    setSaving(true);
+    try {
+      const { data } = await api.post("/organization/developer/api-keys", {
+        label: label.trim(),
+        expires_in_days: expiresInDays ? Number(expiresInDays) : null,
+      });
+      onCreated(data);
+      onClose();
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="New API key"
+      size="md"
+      footer={
+        <>
+          <ConsoleButton variant="secondary" onClick={onClose} disabled={saving}>Cancel</ConsoleButton>
+          <ConsoleButton disabled={!label.trim() || saving} loading={saving} onClick={create}>
+            Create key
+          </ConsoleButton>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div>
+          <Label variant="console" htmlFor="ck-label">Label</Label>
+          <Input
+            variant="console" id="ck-label" value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="Production — ingest worker"
+            maxLength={80}
+          />
+        </div>
+        <div>
+          <Label variant="console" htmlFor="ck-expiry">Expires in (days, optional)</Label>
+          <Input
+            variant="console" id="ck-expiry" type="number" min="1" max="730"
+            value={expiresInDays}
+            onChange={(e) => setExpiresInDays(e.target.value)}
+            placeholder="Leave blank for a non-expiring key"
+          />
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export default function Credentials() {
   const { data, loading, error, reload } = useApi(() =>
     api.get("/organization/developer").then((r) => r.data)
   );
   const [status, setStatus] = useState("all");
+  const [creating, setCreating] = useState(false);
+  const [created, setCreated] = useState(null);
+  const [revoking, setRevoking] = useState(null);
   const keys = useMemo(() => data?.api_keys || [], [data]);
 
   const summary = useMemo(() => {
@@ -103,6 +219,17 @@ export default function Credentials() {
       notify.success("Key prefix copied");
     } catch {
       notify.error("Clipboard is unavailable in this browser");
+    }
+  };
+
+  const revokeKey = async () => {
+    try {
+      await api.delete(`/organization/developer/api-keys/${revoking.id}`);
+      notify.success(`${revoking.label || "Key"} revoked`);
+      setRevoking(null);
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
     }
   };
 
@@ -191,9 +318,8 @@ export default function Credentials() {
             <ConsoleButton variant="secondary" leftIcon={FiRefreshCw} onClick={reload} loading={loading}>
               Refresh
             </ConsoleButton>
-            {/* Deliberately not a create button — see the file header. */}
-            <ConsoleButton href="/organization/support" leftIcon={FiLifeBuoy}>
-              Request a key
+            <ConsoleButton leftIcon={FiPlus} onClick={() => setCreating(true)}>
+              New key
             </ConsoleButton>
           </>
         }
@@ -263,36 +389,53 @@ export default function Credentials() {
             initialSort={{ key: "label", dir: "asc" }}
             pageSize={10}
             minWidth={680}
-            rowActions={(k) =>
-              k.prefix ? (
-                <button
-                  type="button"
-                  onClick={() => copyPrefix(k.prefix)}
-                  aria-label={`Copy the prefix of ${k.label || "this key"}`}
-                  title="Copy prefix"
-                  className={cx(
-                    "rounded-md p-1.5 transition-colors duration-150 motion-reduce:transition-none",
-                    CONSOLE.faint,
-                    "hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-white/10 dark:hover:text-white",
-                    focusRing
-                  )}
-                >
-                  <FiCopy className="text-[14px]" />
-                </button>
-              ) : null
-            }
+            rowActions={(k) => (
+              <>
+                {k.prefix && (
+                  <button
+                    type="button"
+                    onClick={() => copyPrefix(k.prefix)}
+                    aria-label={`Copy the prefix of ${k.label || "this key"}`}
+                    title="Copy prefix"
+                    className={cx(
+                      "rounded-md p-1.5 transition-colors duration-150 motion-reduce:transition-none",
+                      CONSOLE.faint,
+                      "hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-white/10 dark:hover:text-white",
+                      focusRing
+                    )}
+                  >
+                    <FiCopy className="text-[14px]" />
+                  </button>
+                )}
+                {!k.revoked && (
+                  <button
+                    type="button"
+                    onClick={() => setRevoking(k)}
+                    aria-label={`Revoke ${k.label || "this key"}`}
+                    title="Revoke"
+                    className={cx(
+                      "rounded-md p-1.5 transition-colors duration-150 motion-reduce:transition-none",
+                      CONSOLE.faint,
+                      "hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10 dark:hover:text-rose-400",
+                      focusRing
+                    )}
+                  >
+                    <FiTrash2 className="text-[14px]" />
+                  </button>
+                )}
+              </>
+            )}
             empty={
               // The filtered-to-nothing case is a different problem from having no keys at
-              // all, and offering "Request a key" to someone who has ten of them is noise.
+              // all, and offering to create one to someone who has ten already is noise.
               status === "all"
                 ? {
                     icon: FiKey,
                     title: "No credentials yet",
-                    description:
-                      "This organization has no API keys. Ask the platform team to mint one for your workspace — creation is a platform-admin operation.",
+                    description: "This organization has no API keys. Create one to authenticate a server-side integration.",
                     action: (
-                      <ConsoleButton href="/organization/support" size="sm" leftIcon={FiLifeBuoy}>
-                        Request a key
+                      <ConsoleButton size="sm" leftIcon={FiPlus} onClick={() => setCreating(true)}>
+                        New key
                       </ConsoleButton>
                     ),
                   }
@@ -380,7 +523,7 @@ export default function Credentials() {
               ))}
             </ul>
             <p className={cx("mt-3 border-t pt-3 text-[12px]", CONSOLE.divider, CONSOLE.faint)}>
-              Creating and revoking keys is a platform-admin operation.{" "}
+              Need help with an integration?{" "}
               <Link to="/organization/support" className={cx("font-semibold", CONSOLE.link)}>
                 Open a request
               </Link>
@@ -389,6 +532,25 @@ export default function Credentials() {
           </Panel>
         </div>
       </div>
+
+      <CreateKeyModal open={creating} onClose={() => setCreating(false)} onCreated={(k) => { setCreated(k); reload(); }} />
+      <RevealKeyDialog created={created} onClose={() => setCreated(null)} />
+      <ConfirmDialog
+        open={!!revoking}
+        onClose={() => setRevoking(null)}
+        onConfirm={revokeKey}
+        title="Revoke this key?"
+        confirmLabel="Revoke"
+        body={
+          <>
+            Anything authenticating with{" "}
+            <strong className="font-semibold text-slate-800 dark:text-slate-100">
+              {revoking?.label || "this key"}
+            </strong>{" "}
+            loses access immediately. The row stays so the revocation remains auditable.
+          </>
+        }
+      />
     </div>
   );
 }

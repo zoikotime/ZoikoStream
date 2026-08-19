@@ -22,14 +22,15 @@ from ..crud import commercial as commercial_crud
 from ..crud import event as crud
 from ..db import get_db
 from ..email import (
-    send_assignment_email, send_event_created_email,
+    send_assignment_email, send_contributor_invite_email, send_event_created_email,
     send_registration_confirmation_email, send_viewer_invite_email,
 )
 from ..models import Event, User
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
     AccessLinkCreate, AccessLinkIssued, AccessLinkOut,
-    AssignmentUpdate, EventCreate, EventOut, EventUpdate, FeedbackOut,
+    AssignmentUpdate, ContributorInvite, ContributorSessionOut, EventCreate, EventOut,
+    EventUpdate, FeedbackOut,
     RegistrantOut, RegistrationCreate, RegistrationOut, ViewerInviteCreate, WatchOut,
 )
 from ..security import (
@@ -39,6 +40,7 @@ from ..security import (
 from ..services import broadcast as broadcast_svc
 from ..services import livekit
 from ..services import moderation as mod
+from ..services import webhooks
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -311,6 +313,9 @@ def register_for_event(
         reg.email, reg.name, ev.title or "this event",
         _registration_console_url(ev.id, create_registration_token(reg)),
     )
+    webhooks.enqueue(db, ev.org_id, "registration.created", {
+        "event_id": str(ev.id), "registration_id": str(reg.id), "email": reg.email, "name": reg.name,
+    })
     return RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=create_registration_token(reg))
 
 
@@ -412,7 +417,9 @@ def _console_url(role: str, event_id: uuid.UUID) -> str:
         return f"{base}/host/dashboard?event={event_id}"
     if role == "moderator":
         return f"{base}/moderator/dashboard?event={event_id}"
-    return base  # speakers have no dedicated console route yet
+    if role == "speaker":
+        return f"{base}/speaker/backstage?event={event_id}"
+    return base
 
 
 def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
@@ -469,6 +476,73 @@ def set_speakers(event_id: uuid.UUID, data: AssignmentUpdate, background: Backgr
     return _set_role(db, admin, event_id, "speaker", data.user_ids, background)
 
 
+# ── Contributor (speaker) backstage invitations ─────────────────────────────────
+# EventAssignment(role="speaker") above is only eligibility. Inviting is a separate,
+# repeatable act — its own join window/expiry/consent notice, sent as a REST call (not a
+# socket action) because it can happen well before any live socket exists, same reasoning
+# as host/moderator assignment above.
+
+def _assigned_speaker_or_404(db, admin, event_id, user_id) -> tuple[Event, User]:
+    ev = _get_event_or_404(db, admin, event_id)
+    if not crud.is_assigned(db, ev.id, user_id, "speaker"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This user is not assigned as a speaker for this event")
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return ev, user
+
+
+@router.post("/{event_id}/speakers/{user_id}/invite", response_model=ContributorSessionOut)
+def invite_contributor(
+    event_id: uuid.UUID, user_id: uuid.UUID, data: ContributorInvite, background: BackgroundTasks,
+    admin: User = Depends(require_org_admin), db: Session = Depends(get_db),
+):
+    """(Re-)send a backstage invitation. Re-inviting resets the session's runtime state
+    (consent/preflight/rehearsal) to fresh — see crud.upsert_contributor_invite."""
+    ev, user = _assigned_speaker_or_404(db, admin, event_id, user_id)
+    session = crud.upsert_contributor_invite(
+        db, ev, user, admin.id,
+        join_window_start=data.join_window_start, join_window_end=data.join_window_end,
+        expires_at=data.expires_at, contribution_method=data.contribution_method,
+        consent_notice=data.consent_notice, support_contact=data.support_contact,
+    )
+    org_name = admin.organization.name if admin.organization else None
+    background.add_task(
+        send_contributor_invite_email,
+        user.email, user.full_name, ev.title or "this event", org_name,
+        _console_url("speaker", ev.id), data.join_window_start, data.join_window_end,
+        data.consent_notice,
+    )
+    return session
+
+
+@router.get("/{event_id}/speakers/{user_id}/invite", response_model=ContributorSessionOut)
+def get_contributor_invite(
+    event_id: uuid.UUID, user_id: uuid.UUID,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    _get_event_or_404(db, user, event_id)
+    session = crud.get_contributor_session(db, event_id, user_id)
+    if session is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No invitation on record for this speaker")
+    return session
+
+
+@router.post("/{event_id}/speakers/{user_id}/revoke", response_model=ContributorSessionOut)
+def revoke_contributor_invite(
+    event_id: uuid.UUID, user_id: uuid.UUID,
+    admin: User = Depends(require_org_admin), db: Session = Depends(get_db),
+):
+    """Revoke a speaker's backstage access. "Rotate" is deliberately not offered here —
+    unlike EventAccessLink, a contributor invite has no bearer token to rotate under
+    login-based auth, only an invitation window to close."""
+    _get_event_or_404(db, admin, event_id)
+    session = crud.get_contributor_session(db, event_id, user_id)
+    if session is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No invitation on record for this speaker")
+    return crud.revoke_contributor_session(db, session)
+
+
 @router.get("/{event_id}/registrations", response_model=list[RegistrantOut])
 def get_registrations(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Who has registered for this event — self-serve or host-invited (see `invited_by`).
@@ -519,6 +593,9 @@ def invite_viewers(
         reg = crud.get_registration(db, event_id, email)
         if reg is None:
             reg = crud.create_registration(db, event_id, item.name, email, invited_by=user.id)
+            webhooks.enqueue(db, ev.org_id, "registration.created", {
+                "event_id": str(ev.id), "registration_id": str(reg.id), "email": reg.email, "name": reg.name,
+            })
         token = create_registration_token(reg)
         background.add_task(
             send_viewer_invite_email,
@@ -580,7 +657,11 @@ def revoke_access_link(
     link = crud.get_access_link(db, event_id, link_id)
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
-    return crud.revoke_access_link(db, link)
+    out = crud.revoke_access_link(db, link)
+    webhooks.enqueue(db, ev.org_id, "access_link.revoked", {
+        "event_id": str(ev.id), "access_link_id": str(link.id), "label": link.label,
+    })
+    return out
 
 
 @router.delete("/{event_id}/access-links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)

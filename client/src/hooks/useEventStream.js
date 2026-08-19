@@ -40,6 +40,10 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken)
   const [token] = useState(() => localStorage.getItem("token"));
   const authKey = token || regToken || linkToken;
   const [status, setStatus] = useState(authKey ? "connecting" : "unauthorized"); // connecting | open | reconnecting | offline | unauthorized
+  // The server's close reason (e.g. a join-window/ban/invalid-session message) — only
+  // meaningful alongside status === "unauthorized". Every other caller ignores it, so this
+  // is purely additive.
+  const [closeReason, setCloseReason] = useState(null);
   const [latency, setLatency] = useState(null);
   const [attempt, setAttempt] = useState(0);          // surfaces "retrying…" in the header
 
@@ -96,6 +100,7 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken)
         setLatency(null);
         if (closed || manuallyClosed.current) return;
         if (FATAL_CODES.has(e.code)) {
+          setCloseReason(e.reason || null);
           setStatus("unauthorized");
           return;
         }
@@ -147,5 +152,5 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken)
     setStatus("offline");
   }, []);
 
-  return { status, latency, attempt, send, disconnect };
+  return { status, closeReason, latency, attempt, send, disconnect };
 }

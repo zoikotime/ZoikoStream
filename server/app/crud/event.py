@@ -6,11 +6,11 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import asc, desc, func, or_, select
+from sqlalchemy import asc, case, desc, func, or_, select
 
 from ..models import (
-    Event, EventAccessLink, EventAssignment, EventFeedback, EventRegistration,
-    LiveRecording, User,
+    ContributorSession, Event, EventAccessLink, EventAssignment, EventFeedback,
+    EventRegistration, LiveIngressEndpoint, LiveRecording, User,
 )
 
 _EVENT_SORTS = {
@@ -261,6 +261,57 @@ def list_feedback(db, event_id, role: str | None = None) -> list[EventFeedback]:
     return db.scalars(stmt.order_by(EventFeedback.created_at.desc())).all()
 
 
+# ── Contributor (speaker) backstage invitations ────────────────────────────────
+# EventAssignment(role="speaker") stays the eligibility list; ContributorSession is the
+# per-event invitation + runtime backstage state for one of those assignees (see
+# models/live.py's ContributorSession docstring — presence in services/bus.py is
+# ephemeral and can't hold consent/preflight/rehearsal across a dropped room).
+
+def get_contributor_session(db, event_id, user_id) -> ContributorSession | None:
+    return db.scalar(
+        select(ContributorSession).where(
+            ContributorSession.event_id == event_id, ContributorSession.user_id == user_id,
+        )
+    )
+
+
+def upsert_contributor_invite(db, event: Event, user: User, invited_by_id, *, join_window_start,
+                              join_window_end, expires_at, contribution_method, consent_notice,
+                              support_contact) -> ContributorSession:
+    """(Re-)invite an assigned speaker. Re-inviting resets `state` to "waiting" — a fresh
+    invite means a fresh backstage session, not a resumption of whatever the last one
+    reached (consent/preflight from a stale invite must not silently carry over)."""
+    s = get_contributor_session(db, event.id, user.id)
+    if s is None:
+        s = ContributorSession(event_id=event.id, org_id=event.org_id, user_id=user.id,
+                               identity=str(user.id))
+        db.add(s)
+    s.state = "waiting"
+    s.invited_at = datetime.now(timezone.utc)
+    s.invited_by = invited_by_id
+    s.join_window_start = join_window_start
+    s.join_window_end = join_window_end
+    s.expires_at = expires_at
+    s.contribution_method = contribution_method or "livekit_browser"
+    s.consent_notice = consent_notice
+    s.support_contact = support_contact
+    s.consent_given, s.consent_at = False, None
+    s.preflight_result = None
+    s.rehearsal_complete, s.rehearsal_at = False, None
+    s.removed_by, s.removed_at, s.removed_reason = None, None, None
+    db.commit()
+    db.refresh(s)
+    return s
+
+
+def revoke_contributor_session(db, session: ContributorSession) -> ContributorSession:
+    session.state = "removed"
+    session.expires_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
 def get_registration_by_id(db, event_id, registration_id) -> EventRegistration | None:
     return db.scalar(
         select(EventRegistration).where(
@@ -288,16 +339,22 @@ def claim_matches(reg: EventRegistration, raw: str | None) -> bool:
 
 
 def list_replay_candidates(db, event_id) -> list[LiveRecording]:
-    """Finished, actually-captured recordings for this event, newest first — what a viewer's
-    replay link points at. `enforced=False` rows (LiveKit egress unavailable) are excluded:
-    there is no file behind them. Returns every candidate, not just the newest, because the
-    caller verifies each against GCS and a "stopped" row can still turn out to have no real
-    file behind it (see services.livekit.object_exists) — the next-newest one is the fallback."""
+    """Finished, actually-captured recordings for this event, primary-role first and newest
+    within each role — what a viewer's replay link points at. `enforced=False` rows (LiveKit
+    egress unavailable) are excluded: there is no file behind them. Returns every candidate,
+    not just the newest, because the caller verifies each against GCS and a "stopped" row can
+    still turn out to have no real file behind it (see services.livekit.object_exists) — the
+    next candidate (secondary, or the next-newest) is the fallback.
+
+    Under dual recording (services/broadcast.py._recording_start), `role` distinguishes the
+    canonical primary path from its secondary/backup — a viewer should always land on the
+    primary's file when it's actually there, not whichever egress happened to finish first."""
+    role_order = case((LiveRecording.role == "primary", 0), (LiveRecording.role == "secondary", 1), else_=0)
     return db.scalars(
         select(LiveRecording)
         .where(LiveRecording.event_id == event_id, LiveRecording.status == "stopped",
                LiveRecording.enforced.is_(True))
-        .order_by(LiveRecording.stopped_at.desc())
+        .order_by(role_order, LiveRecording.stopped_at.desc())
     ).all()
 
 
@@ -393,6 +450,28 @@ def get_org_recording(db, org_id, recording_id) -> LiveRecording | None:
         .join(Event, Event.id == LiveRecording.event_id)
         .where(LiveRecording.id == recording_id, Event.org_id == org_id)
     )
+
+
+def get_org_ingress_endpoint(db, org_id, endpoint_id) -> LiveIngressEndpoint | None:
+    """A single live input, scoped through its event's org_id — same posture as
+    get_org_recording."""
+    return db.scalar(
+        select(LiveIngressEndpoint)
+        .join(Event, Event.id == LiveIngressEndpoint.event_id)
+        .where(LiveIngressEndpoint.id == endpoint_id, Event.org_id == org_id)
+    )
+
+
+def list_org_ingress_endpoints(db, org_id) -> list[tuple[LiveIngressEndpoint, Event]]:
+    """Every live input across the org, newest first — the org-wide Live Inputs page.
+    Joined to Event for title, same reasoning as list_org_recordings."""
+    rows = db.execute(
+        select(LiveIngressEndpoint, Event)
+        .join(Event, Event.id == LiveIngressEndpoint.event_id)
+        .where(Event.org_id == org_id)
+        .order_by(LiveIngressEndpoint.created_at.desc())
+    ).all()
+    return list(rows)
 
 
 def list_org_recordings(db, org_id, limit: int = 100) -> list[tuple[LiveRecording, Event]]:

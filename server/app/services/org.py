@@ -19,7 +19,7 @@ What is genuinely measured here:
   * security / support posture <- org.security flags, Invitation and SupportTicket rows
 
 Documented gaps (no ingest in this stack — see ORG_GAPS at the bottom):
-  per-org API success/p95, windowed delivery metering, webhook delivery tracking,
+  per-org API success/p95, windowed delivery metering,
   per-application error rates, SDK-version exposure, rate-limit event history,
   ingest protocol/region per session, self-service vs managed classification,
   security findings, access-review schedule, maintenance windows.
@@ -37,6 +37,7 @@ from ..models import (
     AnalyticsSnapshot,
     BroadcastSession,
     Event,
+    EventRegistration,
     GovernanceRecord,
     Incident,
     Invitation,
@@ -46,6 +47,8 @@ from ..models import (
     Subscription,
     SupportTicket,
     User,
+    WebhookDelivery,
+    WebhookEndpoint,
 )
 from . import admin as admin_svc
 from . import ops as ops_svc
@@ -358,6 +361,69 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
     }
 
 
+def audience_attendance(db: Session, org: Organization, range_key: str = "30d") -> dict:
+    """Real cross-event attendance aggregate for /organization/audience-attendance,
+    reusing analytics()'s own summary rather than re-querying BroadcastSession/
+    AnalyticsSnapshot a second time — same range handling, same numbers underneath.
+
+    Honesty rule, same as analytics()'s own docstring and broadcast.engagement_score/
+    _watch_seconds: no table anywhere records a specific person's watch duration once a
+    room ends (moderation.feed_activity deliberately never persists joins/leaves), so
+    `unique_attendees`/`avg_watch_minutes` cannot be true per-person measurements — every
+    caller-facing figure that isn't a straight count is marked `_estimated: True` and
+    documents the real signal it's derived from, never presented as measured.
+
+    `show_rate` IS real, but only for PRIVATE events: `EventRegistration.claimed_at` is
+    only ever set when an invited viewer's browser first opens a private event's watch
+    page (routers/events.py::watch_event) — a public or registration-required-public
+    viewer never claims anything, so there is no "registered but didn't show" signal for
+    them at all. `show_rate_basis` says so explicitly rather than implying an org-wide rate.
+    """
+    since = _now() - ANALYTICS_RANGES.get(range_key, ANALYTICS_RANGES["30d"])
+    event_ids = list(db.scalars(
+        select(Event.id).where(Event.org_id == org.id, Event.deleted_at.is_(None),
+                               Event.start_time.isnot(None), Event.start_time >= since)
+    ).all())
+
+    claimed_by_email: dict[str, int] = {}
+    private_registered = private_claimed = 0
+    if event_ids:
+        rows = db.execute(
+            select(EventRegistration.email, EventRegistration.claimed_at, Event.visibility)
+            .join(Event, Event.id == EventRegistration.event_id)
+            .where(EventRegistration.event_id.in_(event_ids))
+        ).all()
+        for email, claimed_at, visibility in rows:
+            if visibility == "private":
+                private_registered += 1
+                if claimed_at is not None:
+                    private_claimed += 1
+            if claimed_at is not None:
+                claimed_by_email[email] = claimed_by_email.get(email, 0) + 1
+
+    # Reuse, don't re-derive: analytics()'s summary.viewers is the same real peak-
+    # concurrency figure /organization/analytics already shows. It's the only audience
+    # signal available at all for an open public event (no EventRegistration row exists),
+    # so it's added on top of the real claimed-registration count rather than blended
+    # into it — a private event's real count is never diluted by a rough one.
+    base = analytics(db, org, range_key)
+    peak_viewers_sum = base["summary"]["viewers"]
+    watch_hours = base["summary"]["watch_hours"]
+
+    unique_attendees = len(claimed_by_email) + peak_viewers_sum
+    returning = sum(1 for n in claimed_by_email.values() if n > 1)
+    avg_watch_minutes = round((watch_hours * 60) / unique_attendees, 1) if unique_attendees else None
+    show_rate = round(100 * private_claimed / private_registered) if private_registered else None
+
+    return {
+        "range": range_key, "since": since,
+        "unique_attendees": unique_attendees, "unique_attendees_estimated": True,
+        "returning": returning,
+        "avg_watch_minutes": avg_watch_minutes, "avg_watch_minutes_estimated": True,
+        "show_rate": show_rate, "show_rate_basis": "private_invited_events_only",
+    }
+
+
 # ── sessions and media ────────────────────────────────────────────────────────
 
 def sessions(db: Session, org_id, since: datetime, limit: int = 6) -> dict:
@@ -603,22 +669,47 @@ def security_support(db: Session, org: Organization) -> dict:
     }
 
 
+def _webhook_failure_streak(deliveries: list[WebhookDelivery]) -> int:
+    """Consecutive failures at the head of `deliveries` (must be newest-first). Stops at
+    the first delivered attempt, so a since-recovered endpoint reads 0."""
+    streak = 0
+    for d in deliveries:
+        if d.status != "delivered":
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def developer_ops(db: Session, org: Organization) -> dict:
-    """Developer-platform posture. Credential counts are real; the error/SDK/rate-limit
-    telemetry the design shows has no producer in this stack."""
+    """Developer-platform posture. Credentials and webhook delivery health are both real
+    now (services/webhooks.py logs every attempt); app-level error/SDK/rate-limit
+    telemetry still has no producer in this stack — see ORG_GAPS."""
     keys = org.api_keys or []
     active = [k for k in keys if not k.get("revoked")]
+
+    endpoints = db.scalars(
+        select(WebhookEndpoint).where(WebhookEndpoint.org_id == org.id)
+    ).all()
+    worst_streak = 0
+    for ep in endpoints:
+        recent = db.scalars(
+            select(WebhookDelivery).where(WebhookDelivery.endpoint_id == ep.id)
+            .order_by(WebhookDelivery.created_at.desc()).limit(10)
+        ).all()
+        worst_streak = max(worst_streak, _webhook_failure_streak(recent))
+
     return {
         "credentials_total": len(keys),
         "credentials_active": len(active),
-        "webhooks_configured": len(org.webhook_urls or []),
-        # Each needs a producer that does not exist yet — see ORG_GAPS.
+        "webhooks_configured": len(endpoints),
+        "webhook_failure_streaks": worst_streak,
+        # Each still needs a producer that does not exist yet — see ORG_GAPS.
         "apps_elevated_error_rate": None,
         "deprecated_sdk_exposure": None,
-        "webhook_failure_streaks": None,
         "rate_limit_events_24h": None,
-        "note": "Application error rates, SDK exposure, webhook delivery outcomes and "
-                "rate-limit history need request/delivery telemetry (not integrated).",
+        "note": "Application error rates, SDK exposure and rate-limit history need "
+                "request telemetry (not integrated).",
     }
 
 
@@ -757,8 +848,6 @@ ORG_GAPS = [
      "needs": "per-credential request attribution"},
     {"field": "entitlements.delivery_windowed",
      "needs": "bandwidth metering pipeline"},
-    {"field": "developer_ops.webhook_failure_streaks",
-     "needs": "webhook delivery attempt log"},
     {"field": "developer_ops.apps_elevated_error_rate",
      "needs": "per-application request telemetry"},
     {"field": "developer_ops.deprecated_sdk_exposure",

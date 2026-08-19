@@ -204,7 +204,7 @@ function RecordingLog({ recordings }) {
           leftIcon={FiDownload}
           onClick={() => downloadCsv("recordings.csv", recordings, [
             ["Started", (r) => r.started_at || ""], ["Stopped", (r) => r.stopped_at || ""],
-            ["Status", (r) => r.status], ["Quality", (r) => r.quality || ""],
+            ["Status", (r) => r.status], ["Role", (r) => r.role || ""], ["Quality", (r) => r.quality || ""],
             ["Duration", secs], ["Captured", (r) => (r.enforced ? "yes" : "no")],
             ["File", (r) => r.file_url || ""], ["Error", (r) => r.error || ""],
           ])}
@@ -216,6 +216,9 @@ function RecordingLog({ recordings }) {
         <div key={r.id} className="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone={RECORDING_TONE[r.status]} dot>{r.status}</Badge>
+            {/* Under dual recording (services/broadcast.py._recording_start) two rows share
+                one start-to-stop cycle — this is what tells them apart in the log. */}
+            {r.role && <Badge tone={r.role === "primary" ? "brand" : "neutral"} size="sm">{r.role === "primary" ? "Primary" : "Backup"}</Badge>}
             {r.quality && <Badge tone="neutral" size="sm">{r.quality}</Badge>}
             {r.enforced
               ? <Badge tone="success" size="sm"><FiCheck aria-hidden="true" /> captured</Badge>

@@ -29,6 +29,13 @@ ANNOUNCEMENT_PRIORITIES = ("normal", "important", "urgent")
 # Feed kinds — keep in sync with ACT_ICON in components/moderation/ModeratorSidebar.jsx.
 ACTIVITY_KINDS = ("join", "leave", "chat", "qa", "poll", "mod", "system", "role", "recording")
 
+# The canonical contributor-session state machine (BRD Section 10). "invited" is not a
+# state — it's `invited_at` non-null on a row that hasn't advanced past "waiting" yet.
+CONTRIBUTOR_STATES = (
+    "waiting", "connected", "ready", "on_standby", "live", "muted",
+    "reconnecting", "removed", "failed",
+)
+
 
 class _EventScoped(Base):
     """Shared identity + scoping columns for every live table."""
@@ -238,6 +245,85 @@ class EventFeedback(_EventScoped):
     name: Mapped[str | None] = mapped_column(String(120))
     rating: Mapped[int | None] = mapped_column(Integer)                # 1-5
     comment: Mapped[str | None] = mapped_column(Text)
+
+
+class ContributorSession(_EventScoped):
+    """One row per (event, assigned speaker) — the durable invitation + backstage state a
+    dropped LiveKit room must not lose (presence in services/bus.py is ephemeral and wiped
+    on room end; consent/preflight/rehearsal have to survive that). `EventAssignment(role=
+    "speaker")` stays the eligibility list; this is the per-event runtime record for one
+    of those assignees. `state` is one of CONTRIBUTOR_STATES above."""
+
+    __tablename__ = "contributor_sessions"
+    __table_args__ = (UniqueConstraint("event_id", "user_id", name="uq_contributor_session"),)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    identity: Mapped[str] = mapped_column(String(80), nullable=False)   # str(user_id) — matches Ctx.identity
+    state: Mapped[str] = mapped_column(String(16), default="waiting", nullable=False)
+
+    # invitation
+    invited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    join_window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    join_window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    contribution_method: Mapped[str] = mapped_column(String(20), default="livekit_browser", nullable=False)
+    consent_notice: Mapped[str | None] = mapped_column(Text)
+    support_contact: Mapped[str | None] = mapped_column(String(300))
+
+    # consent + preflight — Postgres, not presence, so a dropped room doesn't lose them
+    consent_given: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    preflight_result: Mapped[dict | None] = mapped_column(JSON)  # camera_ok/mic_ok/speaker_ok/
+                                                                  # network_quality/framing_ok/
+                                                                  # browser_supported/passed/tested_at
+    rehearsal_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    rehearsal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # operator actions
+    admitted_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    admitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    brought_live_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    removed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    removed_reason: Mapped[str | None] = mapped_column(String(200))
+    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+INGRESS_TYPES = ("rtmp", "whip")
+INGRESS_STATES = ("inactive", "buffering", "publishing", "error", "complete")
+
+
+class LiveIngressEndpoint(_EventScoped):
+    """One row per hardware/RTMP-or-WHIP ingest endpoint — the on-site primary/backup
+    encoder contribution path (BRD Section 23.1), distinct from a browser contributor's
+    app-mediated session (ContributorSession above). Mirrors LiveRecording's own reasoning
+    for existing at all: LiveKit's Ingress API (services/livekit.py) is the enforcement
+    layer, not the record-of-intent layer — list_ingress() alone has no title/description,
+    no offline fallback when LiveKit is unconfigured, and a non-reusable ingress can vanish
+    from LiveKit entirely once it completes, with nothing left to show an admin what used
+    to be there.
+
+    The raw `stream_key` is deliberately NOT a column here — it's fetched live from LiveKit
+    (services.livekit.ingress_stream_key) only when the admin opens the detail sheet, same
+    reveal-on-demand posture the old (deleted) /streams API had. Only `ingress_id` — an
+    opaque handle, not a credential — is persisted."""
+
+    __tablename__ = "live_ingress_endpoints"
+
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    input_type: Mapped[str] = mapped_column(String(16), nullable=False)   # rtmp | whip
+    ingress_id: Mapped[str | None] = mapped_column(String(80))            # null until provisioned
+    state: Mapped[str] = mapped_column(String(16), default="inactive", nullable=False)
+    participant_identity: Mapped[str | None] = mapped_column(String(120))
+    # False when LiveKit was unconfigured/unreachable at creation — same honesty flag as
+    # LiveRecording.enforced: the row still exists so the admin can see intent, but nothing
+    # will actually arrive until this is fixed and the input is recreated.
+    enforced: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class LiveActivity(_EventScoped):

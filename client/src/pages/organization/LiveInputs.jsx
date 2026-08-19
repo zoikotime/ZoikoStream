@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  FiUploadCloud, FiSearch, FiPlus, FiPlay, FiSquare, FiTrash2, FiEye, FiEyeOff,
-  FiCopy,
+  FiUploadCloud, FiSearch, FiPlus, FiTrash2, FiEye, FiEyeOff, FiCopy, FiRefreshCw,
 } from "react-icons/fi";
+import api, { errMsg } from "../../api";
 import { CONSOLE, cx, type } from "../../ui/tokens";
 import { ConsoleButton } from "../../ui/Button";
 import Badge from "../../ui/Badge";
@@ -11,73 +11,38 @@ import ConfirmDialog from "../../ui/ConfirmDialog";
 import CodeBlock from "../../ui/CodeBlock";
 import { Input, Label, Select, Textarea } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
+import useApi from "../../hooks/useApi";
 import DataTable from "../../components/admin/DataTable";
 import Panel from "../../components/admin/Panel";
 import StatRow from "../../components/admin/StatRow";
-import { timeAgo } from "../../components/admin/format";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 
-// Live Inputs — the ingest endpoints an encoder publishes into.
+// Live Inputs — RTMP/WHIP ingest endpoints an on-site encoder publishes into, backed by
+// LiveKit's own Ingress API (server/app/services/livekit.py::create_ingress et al.). This
+// used to run against a standalone /streams + /channels API that was deleted from the
+// backend (see git history for ef66f1c) — rebuilt here as EVENT-scoped rather than tied to
+// a persistent "channel" concept, matching how everything else in this app works (one
+// LiveKit room per event; an input publishes into a specific event's room as a named
+// participant, exactly the on-site primary/backup encoder path the product spec calls for).
 //
-// STATIC PAGE. This was built against /streams and /channels CRUD, both of which commit
-// ef66f1c ("Remove dead channel/stream code") deleted from the backend — there is no streams
-// router any more, so every call here could only 404. Rather than ship a page that is nothing
-// but an error banner, the list, the create form and the start/stop/delete actions all operate
-// on the in-memory sample below: they behave correctly and survive only until reload.
+// State (inactive/buffering/publishing/error/complete) is driven by the ENCODER, not a
+// button here — there is no "start/stop" action: you start an input by pointing your
+// encoder at its ingest URL, and stop it by disconnecting the encoder. LiveKit's
+// ingress_started/ingress_ended webhook (routers/live.py) keeps the state honest.
 //
-// Everything that follows is UI. Point the four handlers at a real API when an ingest
-// service exists again; the table, modals and copy need no changes when that happens.
+// The publish key is never included in the list — GET /organization/live-inputs/{id}/key
+// fetches it live from LiveKit only when the detail sheet is open, and it is never stored
+// in this app's own database at all (see models/live.py's LiveIngressEndpoint docstring).
 const PAGE_SIZE = 10;
 
-const INGEST_HOST = "rtmps://ingest.zoikostream.com/live";
-
-// A publish key is a credential, so the real API only ever returned it from the per-input read,
-// never the list (schemas.StreamListItem omitted it) — precisely so a table could not fan
-// twenty credentials across the screen at once. The sample keeps that shape: `stream_key` is
-// held here but only ever rendered in the single-input detail sheet.
-const INPUTS_SAMPLE = [
-  {
-    id: "str_9fK2xQ7mAa41", title: "Main stage — camera A", category: "Conference",
-    description: "Primary hard-wired encoder in the main auditorium. Owned by the AV team.",
-    is_live: true, started_at: new Date(Date.now() - 42 * 60_000).toISOString(),
-    stream_key: "live_a41f8c93b7e24d6fa0c5",
-  },
-  {
-    id: "str_3bT8vR2nCc90", title: "Main stage — camera B", category: "Conference",
-    description: "Wide-angle backup feed, cut to only if camera A drops.",
-    is_live: true, started_at: new Date(Date.now() - 39 * 60_000).toISOString(),
-    stream_key: "live_7d2e5b81f4a93c07be16",
-  },
-  {
-    id: "str_5cW1yU4pDd23", title: "Breakout room 2", category: "Training",
-    description: "Laptop encoder, presenter-operated. Idle between sessions.",
-    is_live: false, started_at: null,
-    stream_key: "live_c93a06f5e8d17b42a95f",
-  },
-  {
-    id: "str_8dX6zI9qEe57", title: "Sunday service — sanctuary", category: "Worship",
-    description: "Fixed rig behind the balcony; runs unattended on a schedule.",
-    is_live: false, started_at: null,
-    stream_key: "live_1f84b7d0c62e59a3fd8b",
-  },
-  {
-    id: "str_2eY4aO7rFf88", title: "Field unit — bonded cellular", category: "Broadcast",
-    description: "Mobile SRT bonding kit. Key rotated after every deployment.",
-    is_live: false, started_at: null,
-    stream_key: "live_b50d9e2a71c4f836ad07",
-  },
-];
-
-// The real create form required a channel the caller owns (POST /streams 403'd otherwise).
-// Kept as a static list so the field still demonstrates that ownership rule.
-const CHANNELS_SAMPLE = [
-  { id: "chn_prod_main", name: "Production — main" },
-  { id: "chn_prod_overflow", name: "Production — overflow" },
-  { id: "chn_staging", name: "Staging" },
-];
-
-const newKey = () =>
-  `live_${Array.from({ length: 20 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("")}`;
+const INPUT_TYPE_LABEL = { rtmp: "RTMP", whip: "WHIP" };
+const STATE_BADGE = {
+  inactive: { tone: "neutral", label: "Idle" },
+  buffering: { tone: "warning", label: "Connecting" },
+  publishing: { tone: "success", label: "Live" },
+  error: { tone: "danger", label: "Error" },
+  complete: { tone: "neutral", label: "Complete" },
+};
 
 export default function LiveInputs() {
   const [page, setPage] = useState(1);
@@ -85,13 +50,13 @@ export default function LiveInputs() {
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
-  const [detail, setDetail] = useState(null); // { stream, key } — key fetched on demand
-  const [showKey, setShowKey] = useState(false);
+  const [detail, setDetail] = useState(null); // the input row, or null
 
-  const [inputs, setInputs] = useState(INPUTS_SAMPLE);
+  const { data, loading, reload } = useApi(() =>
+    api.get("/organization/live-inputs").then((r) => r.data)
+  );
+  const inputs = useMemo(() => data || [], [data]);
 
-  // Debounce the search box, and reset to page 1 when the term changes — page 3 of the old
-  // result set is meaningless against a new one.
   useEffect(() => {
     const id = setTimeout(() => setSearch(query.trim()), 300);
     return () => clearTimeout(id);
@@ -101,42 +66,33 @@ export default function LiveInputs() {
     const q = search.toLowerCase();
     if (!q) return inputs;
     return inputs.filter((s) =>
-      `${s.title} ${s.category || ""}`.toLowerCase().includes(q)
+      `${s.title} ${s.event_title || ""}`.toLowerCase().includes(q)
     );
   }, [inputs, search]);
 
   const total = filtered.length;
-  // Clamp rather than reset in an effect: deleting the last row of page 3 should land on the
-  // new last page, not bounce the operator back to the top.
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const safePage = Math.min(page, pageCount);
   const items = useMemo(
     () => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
     [filtered, safePage]
   );
-  const liveCount = items.filter((s) => s.is_live).length;
+  const liveCount = items.filter((s) => s.state === "publishing").length;
+  const errorCount = items.filter((s) => s.state === "error").length;
+  const protocolCounts = useMemo(() => {
+    const counts = {};
+    for (const s of inputs) counts[s.input_type] = (counts[s.input_type] || 0) + 1;
+    return counts;
+  }, [inputs]);
 
-  const toggleLive = (stream) => {
-    setInputs((list) =>
-      list.map((s) =>
-        s.id === stream.id
-          ? { ...s, is_live: !s.is_live, started_at: s.is_live ? null : new Date().toISOString() }
-          : s
-      )
-    );
-    notify.success(stream.is_live ? "Input stopped" : "Input started");
-  };
-
-  const removeInput = (stream) => {
-    setInputs((list) => list.filter((s) => s.id !== stream.id));
-    notify.success("Live input deleted");
-  };
-
-  // No per-input fetch to make: the key is already on the row, and this sheet is still the
-  // only surface that renders it.
-  const openDetail = (stream) => {
-    setShowKey(false);
-    setDetail({ stream, key: stream.stream_key || null });
+  const removeInput = async (stream) => {
+    try {
+      await api.delete(`/organization/live-inputs/${stream.id}`);
+      notify.success("Live input deleted");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    }
   };
 
   const copy = async (value, what) => {
@@ -156,33 +112,34 @@ export default function LiveInputs() {
         <div className="min-w-0">
           <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>{s.title}</p>
           <p className={cx("truncate text-[11px]", CONSOLE.faint)}>
-            {s.category || "Uncategorised"}
-            {s.started_at ? ` · started ${timeAgo(s.started_at)}` : ""}
+            {s.event_title || "Untitled event"} · {INPUT_TYPE_LABEL[s.input_type] || s.input_type}
           </p>
         </div>
       ),
     },
     {
-      key: "is_live",
+      key: "state",
       header: "State",
-      render: (s) =>
-        s.is_live ? (
-          <Badge tone="success" dot>
-            Live
+      render: (s) => {
+        const b = STATE_BADGE[s.state] || STATE_BADGE.inactive;
+        return (
+          <Badge tone={b.tone} dot title={s.error || undefined}>
+            {b.label}
           </Badge>
-        ) : (
-          <Badge tone="neutral" dot>
-            Idle
-          </Badge>
-        ),
+        );
+      },
     },
     {
-      key: "id",
-      header: "Input id",
-      mono: true,
-      render: (s) => (
-        <span className={cx(type.mono, "text-[12px]", CONSOLE.faint)}>{String(s.id).slice(0, 8)}…</span>
-      ),
+      key: "enforced",
+      header: "Provisioned",
+      render: (s) =>
+        s.enforced ? (
+          <span className={cx("text-[12px]", CONSOLE.faint)}>Yes</span>
+        ) : (
+          <span className="text-[12px] text-amber-600 dark:text-amber-400" title={s.error || "LiveKit was unavailable when this was created"}>
+            Not enforced
+          </span>
+        ),
     },
   ];
 
@@ -190,13 +147,16 @@ export default function LiveInputs() {
     <div className="space-y-6">
       <OrganizationPageHeader
         title="Live Inputs"
-        subtitle="Ingest endpoints your encoder publishes into. Publish credentials are shown one input at a time, never in the list."
+        subtitle="RTMP/WHIP ingest endpoints your encoder publishes into. Publish credentials are shown one input at a time, never in the list."
         actions={
-          /* ponytail: no Refresh control — there is nothing to refetch, and an inert button
-             labelled "Refresh" is worse than no button. */
-          <ConsoleButton leftIcon={FiPlus} onClick={() => setCreating(true)}>
-            New live input
-          </ConsoleButton>
+          <>
+            <ConsoleButton variant="secondary" leftIcon={FiRefreshCw} onClick={reload} loading={loading}>
+              Refresh
+            </ConsoleButton>
+            <ConsoleButton leftIcon={FiPlus} onClick={() => setCreating(true)}>
+              New live input
+            </ConsoleButton>
+          </>
         }
       />
 
@@ -214,7 +174,7 @@ export default function LiveInputs() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 aria-label="Search live inputs"
-                placeholder="Search by title…"
+                placeholder="Search by title or event…"
                 className="pl-9"
               />
             </div>
@@ -224,33 +184,22 @@ export default function LiveInputs() {
             columns={columns}
             rows={items}
             rowKey={(s) => s.id}
-            onRowClick={openDetail}
-            /* Server mode: `items` IS one page and `total` is the full filtered count, so the
-               table must not re-slice or re-count it. */
+            onRowClick={setDetail}
+            loading={loading}
             pageSize={PAGE_SIZE}
             total={total}
             page={safePage}
             onPageChange={setPage}
             minWidth={620}
             rowActions={(s) => (
-              <>
-                <ConsoleButton
-                  variant="ghost"
-                  size="sm"
-                  iconOnly
-                  aria-label={s.is_live ? `Stop ${s.title}` : `Start ${s.title}`}
-                  leftIcon={s.is_live ? FiSquare : FiPlay}
-                  onClick={() => toggleLive(s)}
-                />
-                <ConsoleButton
-                  variant="ghost"
-                  size="sm"
-                  iconOnly
-                  aria-label={`Delete ${s.title}`}
-                  leftIcon={FiTrash2}
-                  onClick={() => setConfirmDelete(s)}
-                />
-              </>
+              <ConsoleButton
+                variant="ghost"
+                size="sm"
+                iconOnly
+                aria-label={`Delete ${s.title}`}
+                leftIcon={FiTrash2}
+                onClick={() => setConfirmDelete(s)}
+              />
             )}
             empty={{
               icon: FiUploadCloud,
@@ -269,37 +218,40 @@ export default function LiveInputs() {
 
         <div className="space-y-4">
           <Panel title="Ingest posture">
-            <StatRow label="Inputs total" value={total} reason="Loading" />
+            <StatRow label="Inputs total" value={loading ? null : total} reason="Loading" />
             <StatRow
               label="Live on this page"
-              value={liveCount}
+              value={loading ? null : liveCount}
               reason="Loading"
               tone={liveCount ? "text-green-600 dark:text-green-400" : undefined}
             />
             <StatRow
-              label="Ingest protocol in use"
-              value={null}
-              reason="Protocol and region are not recorded on a session (documented gap)"
+              label="In an error state"
+              value={loading ? null : errorCount}
+              reason="Loading"
+              tone={errorCount ? "text-rose-600 dark:text-rose-400" : undefined}
             />
             <StatRow
-              label="Connection health"
-              value={null}
-              reason="Encoder-side connection telemetry is not ingested"
+              label="RTMP inputs"
+              value={loading ? null : protocolCounts.rtmp || 0}
+              reason="Loading"
+            />
+            <StatRow
+              label="WHIP inputs"
+              value={loading ? null : protocolCounts.whip || 0}
+              reason="Loading"
             />
           </Panel>
 
           <Panel eyebrow="Encoder" title="Connecting a source">
             <ol className={cx("ml-4 list-decimal space-y-2 text-[13px]", CONSOLE.body)}>
-              <li>Create an input, then open it to reveal its publish key.</li>
-              <li>
-                Point your encoder at the ingest URL with the key as the stream name — never the
-                other way round.
-              </li>
-              <li>Start the input here, then start sending from the encoder.</li>
-              <li>Stop the input when the source disconnects so the state stays truthful.</li>
+              <li>Create an input against the event it should publish into, then open it to reveal its ingest URL and publish key.</li>
+              <li>Point your encoder at the ingest URL with the key as the stream name — never the other way round.</li>
+              <li>State updates on its own once the encoder connects — there's no separate "start" button here.</li>
+              <li>Disconnecting the encoder is what stops it; delete the input only to permanently retire it.</li>
             </ol>
             <p className={cx("mt-4 border-t pt-3 text-[12px]", CONSOLE.divider, CONSOLE.faint)}>
-              A publish key is a credential. Rotate it by replacing the input if it leaks.
+              A publish key is a credential. Delete and recreate the input to rotate it.
             </p>
           </Panel>
         </div>
@@ -308,124 +260,18 @@ export default function LiveInputs() {
       <CreateInputModal
         open={creating}
         onClose={() => setCreating(false)}
-        onCreate={(input) => {
-          setInputs((list) => [input, ...list]);
+        onCreated={() => {
           setPage(1);
-          notify.success("Live input created");
+          reload();
         }}
       />
 
-      {/* Detail sheet — the one surface allowed to show a publish key, one input at a time. */}
-      <Modal
-        open={Boolean(detail)}
-        onClose={() => {
-          setDetail(null);
-          setShowKey(false);
-        }}
-        title={detail?.stream?.title || "Live input"}
-        size="xl"
-      >
-        {detail && (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-2">
-              {detail.stream.is_live ? (
-                <Badge tone="success" dot>
-                  Live
-                </Badge>
-              ) : (
-                <Badge tone="neutral" dot>
-                  Idle
-                </Badge>
-              )}
-              {detail.stream.category && <Badge tone="brand">{detail.stream.category}</Badge>}
-            </div>
-
-            {detail.stream.description && (
-              <p className={cx("text-[13px] leading-[20px]", CONSOLE.muted)}>{detail.stream.description}</p>
-            )}
-
-            <div>
-              <Label variant="console">Ingest URL</Label>
-              <div className="mt-1 flex items-center gap-2">
-                <code
-                  className={cx(
-                    "min-w-0 flex-1 truncate rounded-lg px-3 py-2 text-[12px]",
-                    type.mono,
-                    CONSOLE.inset,
-                    CONSOLE.body
-                  )}
-                >
-                  {INGEST_HOST}
-                </code>
-                <ConsoleButton
-                  variant="secondary"
-                  size="sm"
-                  iconOnly
-                  aria-label="Copy ingest URL"
-                  leftIcon={FiCopy}
-                  onClick={() => copy(INGEST_HOST, "Ingest URL")}
-                />
-              </div>
-            </div>
-
-            <div>
-              <Label variant="console">Publish key</Label>
-              <div className="mt-1 flex items-center gap-2">
-                <code
-                  className={cx(
-                    "min-w-0 flex-1 truncate rounded-lg px-3 py-2 text-[12px]",
-                    type.mono,
-                    CONSOLE.inset,
-                    detail.key ? CONSOLE.body : CONSOLE.faint
-                  )}
-                >
-                  {!detail.key
-                    ? "Unavailable"
-                    : showKey
-                      ? detail.key
-                      : "•".repeat(Math.min(detail.key.length, 40))}
-                </code>
-                <ConsoleButton
-                  variant="secondary"
-                  size="sm"
-                  iconOnly
-                  aria-label={showKey ? "Hide publish key" : "Reveal publish key"}
-                  leftIcon={showKey ? FiEyeOff : FiEye}
-                  disabled={!detail.key}
-                  onClick={() => setShowKey((v) => !v)}
-                />
-                <ConsoleButton
-                  variant="secondary"
-                  size="sm"
-                  iconOnly
-                  aria-label="Copy publish key"
-                  leftIcon={FiCopy}
-                  disabled={!detail.key}
-                  onClick={() => copy(detail.key, "Publish key")}
-                />
-              </div>
-              <p className={cx("mt-1.5 text-[11px]", CONSOLE.faint)}>
-                Treat this like a password: it grants publish rights to this input.
-              </p>
-            </div>
-
-            <div>
-              <Label variant="console">Example encoder command</Label>
-              <div className="mt-1">
-                <CodeBlock
-                  filename="ffmpeg"
-                  code={`ffmpeg -re -i source.mp4 \\\n  -c:v libx264 -preset veryfast -b:v 4500k -g 60 \\\n  -c:a aac -b:a 128k -ar 48000 \\\n  -f flv ${INGEST_HOST}/${showKey && detail.key ? detail.key : "<publish-key>"}`}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-      </Modal>
+      <InputDetailSheet input={detail} onClose={() => setDetail(null)} onCopy={copy} />
 
       <ConfirmDialog
         open={Boolean(confirmDelete)}
         onClose={() => setConfirmDelete(null)}
-        title={`Delete “${confirmDelete?.title || ""}”?`}
+        title={`Delete "${confirmDelete?.title || ""}"?`}
         body="The input and its publish key stop working immediately. Any encoder still pointed at it will fail to connect. Recordings already produced are not affected."
         confirmLabel="Delete input"
         onConfirm={() => {
@@ -437,21 +283,166 @@ export default function LiveInputs() {
   );
 }
 
-// An input belongs to a channel the caller owns — the rule the real POST enforced, kept here so
-// the form still shows it. The channel list is static along with everything else on this page.
-function CreateInputModal({ open, onClose, onCreate }) {
-  const [form, setForm] = useState({ channel_id: "", title: "", description: "", category: "" });
-  const list = CHANNELS_SAMPLE;
-  // Render-phase reset when the dialog opens, the pattern DataTable uses — an effect that
-  // calls setState would cascade a second render on every open.
+// Detail sheet — the one surface allowed to show a publish key, fetched live from LiveKit
+// only while this is open (GET .../live-inputs/{id}/key) and never cached beyond that.
+function InputDetailSheet({ input, onClose, onCopy }) {
+  const [showKey, setShowKey] = useState(false);
+  const [creds, setCreds] = useState(null); // { ingest_url, stream_key } | null
+  const [loadingKey, setLoadingKey] = useState(false);
+
+  useEffect(() => {
+    // Resets whenever a different input is opened (or the sheet closes) — an async
+    // continuation's own .then/.catch/.finally does the rest, same pattern as
+    // EventWatch.jsx's fetchWatch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setShowKey(false);
+    setCreds(null);
+    if (!input) return;
+    setLoadingKey(true);
+    api
+      .get(`/organization/live-inputs/${input.id}/key`)
+      .then((r) => setCreds(r.data))
+      .catch(() => setCreds({ ingest_url: null, stream_key: null }))
+      .finally(() => setLoadingKey(false));
+  }, [input]);
+
+  return (
+    <Modal open={Boolean(input)} onClose={onClose} title={input?.title || "Live input"} size="xl">
+      {input && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            {(() => {
+              const b = STATE_BADGE[input.state] || STATE_BADGE.inactive;
+              return <Badge tone={b.tone} dot>{b.label}</Badge>;
+            })()}
+            <Badge tone="brand">{INPUT_TYPE_LABEL[input.input_type] || input.input_type}</Badge>
+            {input.event_title && <Badge tone="neutral">{input.event_title}</Badge>}
+          </div>
+
+          {input.description && (
+            <p className={cx("text-[13px] leading-[20px]", CONSOLE.muted)}>{input.description}</p>
+          )}
+          {input.error && (
+            <p className="text-[12px] text-rose-600 dark:text-rose-400">{input.error}</p>
+          )}
+
+          <div>
+            <Label variant="console">Ingest URL</Label>
+            <div className="mt-1 flex items-center gap-2">
+              <code
+                className={cx(
+                  "min-w-0 flex-1 truncate rounded-lg px-3 py-2 text-[12px]",
+                  type.mono, CONSOLE.inset,
+                  creds?.ingest_url ? CONSOLE.body : CONSOLE.faint
+                )}
+              >
+                {loadingKey ? "Loading…" : creds?.ingest_url || "Unavailable"}
+              </code>
+              <ConsoleButton
+                variant="secondary" size="sm" iconOnly
+                aria-label="Copy ingest URL"
+                leftIcon={FiCopy}
+                disabled={!creds?.ingest_url}
+                onClick={() => onCopy(creds.ingest_url, "Ingest URL")}
+              />
+            </div>
+          </div>
+
+          <div>
+            <Label variant="console">Publish key</Label>
+            <div className="mt-1 flex items-center gap-2">
+              <code
+                className={cx(
+                  "min-w-0 flex-1 truncate rounded-lg px-3 py-2 text-[12px]",
+                  type.mono, CONSOLE.inset,
+                  creds?.stream_key ? CONSOLE.body : CONSOLE.faint
+                )}
+              >
+                {loadingKey
+                  ? "Loading…"
+                  : !creds?.stream_key
+                    ? "Unavailable"
+                    : showKey
+                      ? creds.stream_key
+                      : "•".repeat(Math.min(creds.stream_key.length, 40))}
+              </code>
+              <ConsoleButton
+                variant="secondary" size="sm" iconOnly
+                aria-label={showKey ? "Hide publish key" : "Reveal publish key"}
+                leftIcon={showKey ? FiEyeOff : FiEye}
+                disabled={!creds?.stream_key}
+                onClick={() => setShowKey((v) => !v)}
+              />
+              <ConsoleButton
+                variant="secondary" size="sm" iconOnly
+                aria-label="Copy publish key"
+                leftIcon={FiCopy}
+                disabled={!creds?.stream_key}
+                onClick={() => onCopy(creds.stream_key, "Publish key")}
+              />
+            </div>
+            <p className={cx("mt-1.5 text-[11px]", CONSOLE.faint)}>
+              Treat this like a password: it grants publish rights to this input.
+            </p>
+          </div>
+
+          {input.input_type === "rtmp" && (
+            <div>
+              <Label variant="console">Example encoder command</Label>
+              <div className="mt-1">
+                <CodeBlock
+                  filename="ffmpeg"
+                  code={`ffmpeg -re -i source.mp4 \\\n  -c:v libx264 -preset veryfast -b:v 4500k -g 60 \\\n  -c:a aac -b:a 128k -ar 48000 \\\n  -f flv ${showKey && creds?.stream_key ? `${creds.ingest_url}/${creds.stream_key}` : "<ingest-url>/<publish-key>"}`}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function CreateInputModal({ open, onClose, onCreated }) {
+  const [form, setForm] = useState({ event_id: "", title: "", description: "", input_type: "rtmp" });
+  const [saving, setSaving] = useState(false);
+  const { data: events } = useApi(() =>
+    api.get("/events", { params: { page: 1, page_size: 100, sort_by: "start_time", order: "desc" } })
+      .then((r) => (Array.isArray(r.data) ? r.data : r.data?.items || []))
+  );
+  const list = events || [];
+
   const [wasOpen, setWasOpen] = useState(open);
   if (open !== wasOpen) {
     setWasOpen(open);
-    if (open) setForm({ channel_id: list[0]?.id || "", title: "", description: "", category: "" });
+    if (open) setForm({ event_id: list[0]?.id || "", title: "", description: "", input_type: "rtmp" });
   }
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-  const valid = form.channel_id && form.title.trim();
+  const valid = form.event_id && form.title.trim();
+
+  const create = async () => {
+    setSaving(true);
+    try {
+      const { data } = await api.post("/organization/live-inputs", {
+        event_id: form.event_id,
+        title: form.title.trim(),
+        description: form.description.trim() || null,
+        input_type: form.input_type,
+      });
+      onCreated(data);
+      onClose();
+      if (!data.enforced) {
+        notify.error(data.error || "LiveKit couldn't provision this input — it's saved, but not live yet.");
+      } else {
+        notify.success("Live input created");
+      }
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <Modal
@@ -461,24 +452,10 @@ function CreateInputModal({ open, onClose, onCreate }) {
       size="md"
       footer={
         <>
-          <ConsoleButton variant="secondary" onClick={onClose}>
+          <ConsoleButton variant="secondary" onClick={onClose} disabled={saving}>
             Cancel
           </ConsoleButton>
-          <ConsoleButton
-            disabled={!valid}
-            onClick={() => {
-              onCreate({
-                id: `str_${newKey().slice(5, 17)}`,
-                title: form.title.trim(),
-                description: form.description.trim() || null,
-                category: form.category.trim() || null,
-                is_live: false,
-                started_at: null,
-                stream_key: newKey(),
-              });
-              onClose();
-            }}
-          >
+          <ConsoleButton disabled={!valid || saving} loading={saving} onClick={create}>
             Create input
           </ConsoleButton>
         </>
@@ -486,24 +463,30 @@ function CreateInputModal({ open, onClose, onCreate }) {
     >
       <div className="space-y-4">
         <div>
-          <Label variant="console" htmlFor="li-channel">
-            Channel
+          <Label variant="console" htmlFor="li-event">
+            Event
           </Label>
-          <Select
-            variant="console"
-            id="li-channel"
-            value={form.channel_id}
-            onChange={set("channel_id")}
-          >
-            {list.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
+          <Select variant="console" id="li-event" value={form.event_id} onChange={set("event_id")}>
+            {list.length === 0 && <option value="">No events available</option>}
+            {list.map((ev) => (
+              <option key={ev.id} value={ev.id}>
+                {ev.title || "Untitled event"}
               </option>
             ))}
           </Select>
           <p className={cx("mt-1.5 text-[11px]", CONSOLE.faint)}>
-            An input belongs to a channel you own.
+            The input publishes into this event's room as a named contributor.
           </p>
+        </div>
+
+        <div>
+          <Label variant="console" htmlFor="li-type">
+            Protocol
+          </Label>
+          <Select variant="console" id="li-type" value={form.input_type} onChange={set("input_type")}>
+            <option value="rtmp">RTMP</option>
+            <option value="whip">WHIP</option>
+          </Select>
         </div>
 
         <div>
@@ -517,19 +500,6 @@ function CreateInputModal({ open, onClose, onCreate }) {
             onChange={set("title")}
             placeholder="Main stage — camera A"
             maxLength={120}
-          />
-        </div>
-
-        <div>
-          <Label variant="console" htmlFor="li-category">
-            Category
-          </Label>
-          <Input
-            variant="console"
-            id="li-category"
-            value={form.category}
-            onChange={set("category")}
-            placeholder="Conference, worship, training…"
           />
         </div>
 

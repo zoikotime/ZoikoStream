@@ -185,6 +185,47 @@ def _assignment_html(name: str, event_title: str, role: str, org_name: str, even
     </div>""")
 
 
+def _contributor_invite_html(name: str, event_title: str, org_name: str, backstage_url: str,
+                              join_window_start: datetime | None, join_window_end: datetime | None,
+                              consent_notice: str | None) -> str:
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title or "an event")
+    safe_org = html.escape(org_name or "your organization")
+    window = (
+        f"{join_window_start.strftime('%d %b %Y, %I:%M %p')} – {join_window_end.strftime('%I:%M %p')}"
+        if join_window_start and join_window_end else
+        f"Opens {join_window_start.strftime('%d %b %Y, %I:%M %p')}" if join_window_start else
+        "Open now — no scheduled window"
+    )
+    notice = f'<p style="color:#888;font-size:13px;">{html.escape(consent_notice)}</p>' if consent_notice else ""
+    return _shell(f"""
+    {_header("You're invited to contribute")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>{safe_org} has invited you to contribute to <strong>{safe_title}</strong> on ZoikoStream.
+         Join the backstage to set up your camera and microphone before you go live.</p>
+      <table style="width:100%;border-collapse:collapse;margin:24px 0;font-size:14px;">
+        <tr><td style="padding:10px 0;color:#888;">Join window</td>
+            <td style="padding:10px 0;text-align:right;">{html.escape(window)}</td></tr>
+      </table>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{backstage_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Open the backstage
+        </a>
+      </p>
+      {notice}
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
+def send_contributor_invite_email(to: str, name: str, event_title: str, org_name: str, backstage_url: str,
+                                   join_window_start: datetime | None, join_window_end: datetime | None,
+                                   consent_notice: str | None) -> None:
+    _send(to, f"You're invited to contribute to {event_title}", _contributor_invite_html(
+        name, event_title, org_name, backstage_url, join_window_start, join_window_end, consent_notice))
+
+
 def _registration_html(name: str, event_title: str, event_url: str) -> str:
     safe_name = html.escape(name or "there")
     safe_title = html.escape(event_title or "the event")

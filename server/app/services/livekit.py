@@ -297,6 +297,91 @@ async def stop_recording(egress_id: str) -> str | None:
         await lk.aclose()
 
 
+# ── ingress (RTMP/WHIP publish-in) ────────────────────────────────────────────
+# An on-site encoder (or a WHIP-capable device) publishes directly into an event's room as
+# a named participant — the hardware-contribution path, distinct from a browser
+# contributor's app-mediated WHIP session (services/contributor.py). One LiveKit room per
+# event everywhere else in this file (Ctx.room); ingress targets that same room by name,
+# no separate room concept of its own.
+#
+# The installed livekit-api SDK's IngressInput enum has RTMP_INPUT and WHIP_INPUT only —
+# no SRT_INPUT. Upgrading livekit-api (unpinned in requirements.txt) is a prerequisite if
+# SRT is ever needed; don't offer it in the console until then.
+INGRESS_TYPES = {"rtmp": api.IngressInput.RTMP_INPUT, "whip": api.IngressInput.WHIP_INPUT}
+
+
+async def create_ingress(room: str, input_type: str, name: str, identity: str):
+    """Returns (IngressInfo | None, error | None) — start_recording's shape, not
+    _with_room's: the console needs to show WHY provisioning failed, not just whether it
+    did. `IngressInfo.stream_key` is populated on this response only — it is never fetched
+    or stored again after this call (see ingress_stream_key below and models/live.py's
+    LiveIngressEndpoint docstring for why)."""
+    if not configured():
+        return None, "LiveKit is not configured"
+    kind = INGRESS_TYPES.get(input_type)
+    if kind is None:
+        return None, f"Unsupported input type: {input_type}"
+    lk = api.LiveKitAPI(settings.LIVEKIT_URL, settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+    try:
+        info = await lk.ingress.create_ingress(api.CreateIngressRequest(
+            input_type=kind, name=name, room_name=room,
+            participant_identity=identity, participant_name=name,
+        ))
+        return info, None
+    except Exception as exc:  # noqa: BLE001 — a failed provision must not fail the admin's click
+        log.warning("livekit ingress create failed: %s", exc)
+        return None, str(exc)[:400]
+    finally:
+        await lk.aclose()
+
+
+async def ingress_credentials(ingress_id: str) -> tuple[str | None, str | None]:
+    """Returns (ingest_url, stream_key) — the two fields the detail sheet needs, fetched
+    live from LiveKit rather than ever persisted locally (see create_ingress). Both None
+    — never raises — if unconfigured, the ingress is gone, or the call fails; the caller
+    shows "unavailable", same as a missing recording file elsewhere in this stack."""
+    if not configured() or not ingress_id:
+        return None, None
+    lk = api.LiveKitAPI(settings.LIVEKIT_URL, settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+    try:
+        resp = await lk.ingress.list_ingress(api.ListIngressRequest(ingress_id=ingress_id))
+        if not resp.items:
+            return None, None
+        info = resp.items[0]
+        return info.url or None, info.stream_key or None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("livekit ingress key lookup failed: %s", exc)
+        return None, None
+    finally:
+        await lk.aclose()
+
+
+def ingress_state_name(status_value: int) -> str:
+    """LiveKit's IngressState.Status enum ("ENDPOINT_PUBLISHING", ...) mapped to this app's
+    own lowercase vocabulary (models/live.py's INGRESS_STATES) — used by the ingress_started/
+    ingress_ended webhook handler (routers/live.py) to write LiveIngressEndpoint.state.
+    Looked up by name rather than a hardcoded ordinal map, so it stays correct even if the
+    SDK ever reorders the enum."""
+    name = api.IngressState.Status.Name(status_value)
+    return name.removeprefix("ENDPOINT_").lower()
+
+
+async def delete_ingress(ingress_id: str) -> bool:
+    """Same boolean/swallow/log contract as close_room — state change (the DB row) happens
+    either way; this reports whether LiveKit itself was actually told to stop it."""
+    if not configured() or not ingress_id:
+        return False
+    lk = api.LiveKitAPI(settings.LIVEKIT_URL, settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+    try:
+        await lk.ingress.delete_ingress(api.DeleteIngressRequest(ingress_id=ingress_id))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("livekit ingress delete failed: %s", exc)
+        return False
+    finally:
+        await lk.aclose()
+
+
 def webhook_receiver() -> api.WebhookReceiver | None:
     """Verifies the Authorization JWT on LiveKit webhook posts. None when unconfigured —
     the endpoint then rejects everything rather than trusting unsigned bodies."""

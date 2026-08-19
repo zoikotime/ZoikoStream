@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   FiArrowLeft, FiCalendar, FiClock, FiEye, FiUsers, FiMic, FiMail,
   FiUploadCloud, FiLink, FiTrash2, FiVideo, FiBarChart2, FiUserCheck, FiUserPlus, FiX, FiStar,
-  FiShield, FiPhoneOff,
+  FiShield, FiPhoneOff, FiSend,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
@@ -19,6 +19,7 @@ import Badge from "../../ui/Badge";
 import { cx, focusRing } from "../../ui/tokens";
 import { statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 import AssignPeopleModal, { ROLE_PATH } from "./AssignPeopleModal";
+import ContributorInviteModal from "./ContributorInviteModal";
 import InviteViewersModal from "./InviteViewersModal";
 import EventCommercial from "../../components/organization/EventCommercial";
 
@@ -40,7 +41,7 @@ function Meta({ icon: Icon, label, children }) {
 
 const initials = (name) => (name || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 
-function PeoplePanel({ people, role, onManage, onRemove }) {
+function PeoplePanel({ people, role, onManage, onRemove, onInvite }) {
   if (!people.length)
     return (
       <OrganizationEmptyState
@@ -71,6 +72,17 @@ function PeoplePanel({ people, role, onManage, onRemove }) {
               <p className="truncate font-medium text-slate-800 dark:text-slate-100">{u.full_name}</p>
               <p className="truncate text-xs text-slate-500 dark:text-slate-400">{u.email}</p>
             </div>
+            {onInvite && (
+              <button
+                type="button"
+                onClick={() => onInvite(u)}
+                aria-label={`Invite ${u.full_name} to the backstage`}
+                title="Invite to backstage"
+                className="shrink-0 rounded-lg p-1.5 text-slate-400 transition hover:bg-violet-50 hover:text-violet-600 dark:hover:bg-violet-500/10 dark:hover:text-violet-400"
+              >
+                <FiSend />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onRemove(u.id)}
@@ -93,6 +105,7 @@ export default function EventDetails() {
   const [busy, setBusy] = useState(false);
   const [manageRole, setManageRole] = useState(null); // "Host" | "Moderator" | "Speaker" | null
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteSpeaker, setInviteSpeaker] = useState(null); // speaker user object, or null
 
   const { data, loading, error, reload } = useApi(() =>
     Promise.all([
@@ -306,7 +319,12 @@ export default function EventDetails() {
         <PeoplePanel people={moderators} role="Moderator" onManage={() => setManageRole("Moderator")} onRemove={(uid) => removeFromRole("Moderator", uid)} />
       )}
       {tab === "Speakers" && (
-        <PeoplePanel people={speakers} role="Speaker" onManage={() => setManageRole("Speaker")} onRemove={(uid) => removeFromRole("Speaker", uid)} />
+        <PeoplePanel
+          people={speakers} role="Speaker"
+          onManage={() => setManageRole("Speaker")}
+          onRemove={(uid) => removeFromRole("Speaker", uid)}
+          onInvite={setInviteSpeaker}
+        />
       )}
 
       {tab === "Registration" && (
@@ -469,6 +487,14 @@ export default function EventDetails() {
         onClose={() => setInviteOpen(false)}
         eventId={event.id}
         eventVisibility={event.visibility}
+        onInvited={reload}
+      />
+
+      <ContributorInviteModal
+        open={!!inviteSpeaker}
+        onClose={() => setInviteSpeaker(null)}
+        eventId={event.id}
+        speaker={inviteSpeaker}
         onInvited={reload}
       />
     </div>

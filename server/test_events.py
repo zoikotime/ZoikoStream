@@ -1,7 +1,9 @@
 """Self-check for Phase 4 event lifecycle validation + slug + duration. Pure logic,
 no DB. Run: `python test_events.py` (or pytest)."""
+import types
 from datetime import datetime, timedelta, timezone
 
+from app.crud import commercial as commercial_crud
 from app.crud import event as crud
 from app.schemas.event import EventOut
 
@@ -103,6 +105,44 @@ def test_category_risk_tier_floor():
     assert crud.elevated_risk_tier("Webinar", "r0") == "r0"                 # no floor defined
     assert crud.elevated_risk_tier(None, "r1") == "r1"
     assert crud.elevated_risk_tier("Funeral / Memorial", "r1") == "r2"      # raises to the floor
+
+
+def _fake_session(**overrides):
+    """Same technique as test_contributor.py's _session — contributor_readiness_reasons
+    only reads a few attributes, so a SimpleNamespace stands in for a ContributorSession
+    row without a DB."""
+    base = dict(state="waiting", consent_given=False, preflight_result=None, rehearsal_complete=False)
+    base.update(overrides)
+    return types.SimpleNamespace(**base)
+
+
+def test_contributor_readiness_not_invited():
+    reasons = commercial_crud.contributor_readiness_reasons([("Sam Speaker", None)])
+    assert reasons == ["contributor 'Sam Speaker' has not been invited"]
+
+
+def test_contributor_readiness_removed_counts_as_not_invited():
+    reasons = commercial_crud.contributor_readiness_reasons([("Sam Speaker", _fake_session(state="removed"))])
+    assert reasons == ["contributor 'Sam Speaker' has not been invited"]
+
+
+def test_contributor_readiness_reports_every_missing_step():
+    reasons = commercial_crud.contributor_readiness_reasons([("Sam Speaker", _fake_session())])
+    assert reasons == [
+        "contributor 'Sam Speaker' has not given consent",
+        "contributor 'Sam Speaker' has not completed preflight",
+        "contributor 'Sam Speaker' has not completed rehearsal",
+    ]
+
+
+def test_contributor_readiness_passes_once_everything_is_done():
+    ready = _fake_session(state="ready", consent_given=True,
+                          preflight_result={"passed": True}, rehearsal_complete=True)
+    assert commercial_crud.contributor_readiness_reasons([("Sam Speaker", ready)]) == []
+
+
+def test_contributor_readiness_no_contributors_is_a_no_op():
+    assert commercial_crud.contributor_readiness_reasons([]) == []
 
 
 def test_slugify():

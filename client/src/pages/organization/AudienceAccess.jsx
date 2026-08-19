@@ -26,24 +26,17 @@ import { downloadCsv } from "../../utils/export";
 // The per-event registration counts on the left are REAL — they come from the events list
 // itself (registered_count is part of the dashboard enrichment).
 //
-// The Attendance panel on the right is STATIC. It used to read /analytics/attendees, which no
-// longer exists in this backend (there is no analytics router), so the call could only 404 and
-// paint an error banner across a page whose main table works. Until an aggregate endpoint
-// exists, these four figures are illustrative placeholders — see ATTENDANCE_SAMPLE below.
+// The Attendance panel on the right reads GET /organization/audience-attendance
+// (services/org.py::audience_attendance). Not every figure there is a true measurement —
+// see that function's own docstring — `unique_attendees_estimated`/`avg_watch_minutes_estimated`
+// flag which ones are derived from 15s concurrent-viewer sampling rather than counted, and
+// `show_rate_basis` says the show-rate is private/invited events only. The panel below
+// renders those caveats rather than hiding them, same as the "Not measured" panel beside it.
 const RANGES = [
   ["7d", "7 days"],
   ["30d", "30 days"],
   ["90d", "90 days"],
 ];
-
-// Illustrative attendance aggregates, one set per range. Static because no analytics endpoint
-// produces them — the figures grow with the window and the show rate drifts down, so the
-// numbers behave the way real ones would instead of being three copies of each other.
-const ATTENDANCE_SAMPLE = {
-  "7d": { unique_attendees: 412, returning: 168, avg_watch_minutes: 27, show_rate: 68 },
-  "30d": { unique_attendees: 1846, returning: 731, avg_watch_minutes: 24, show_rate: 61 },
-  "90d": { unique_attendees: 5093, returning: 2287, avg_watch_minutes: 22, show_rate: 57 },
-};
 
 const fillTone = (pct) => {
   if (pct == null) return "neutral";
@@ -61,9 +54,10 @@ export default function AudienceAccess() {
       .get("/events", { params: { page: 1, page_size: 100, sort_by: "start_time", order: "desc" } })
       .then((r) => r.data)
   );
-  // ponytail: static, per the note above — no analytics endpoint to call. Keyed by range so
-  // the segmented control still changes something; swap for a fetch when one lands.
-  const a = ATTENDANCE_SAMPLE[range] || ATTENDANCE_SAMPLE["30d"];
+  const attendance = useApi(() =>
+    api.get("/organization/audience-attendance", { params: { range } }).then((r) => r.data)
+  );
+  const a = attendance.data || {};
 
   const rows = useMemo(() => {
     const list = Array.isArray(events.data) ? events.data : events.data?.items || [];
@@ -192,7 +186,7 @@ export default function AudienceAccess() {
                 <button
                   key={value}
                   type="button"
-                  onClick={() => setRange(value)}
+                  onClick={() => { setRange(value); attendance.reload(); }}
                   aria-pressed={range === value}
                   className={cx(
                     "rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors duration-150 motion-reduce:transition-none",
@@ -277,24 +271,34 @@ export default function AudienceAccess() {
           <Panel title="Attendance" eyebrow={`Last ${range}`}>
             <StatRow
               label="Unique attendees"
-              value={a.unique_attendees ?? a.total ?? null}
-              reason="Not reported for this window"
+              value={attendance.loading ? null : a.unique_attendees ?? null}
+              reason="Loading"
             />
             <StatRow
               label="Returning attendees"
-              value={a.returning ?? null}
-              reason="Not reported for this window"
+              value={attendance.loading ? null : a.returning ?? null}
+              reason="Loading"
             />
             <StatRow
               label="Average watch time"
-              value={a.avg_watch_minutes != null ? `${a.avg_watch_minutes}m` : null}
-              reason="Not reported for this window"
+              value={attendance.loading || a.avg_watch_minutes == null ? null : `${a.avg_watch_minutes}m`}
+              reason="No sampled viewer data for this window"
             />
             <StatRow
               label="Registration → attendance"
-              value={a.show_rate != null ? `${a.show_rate}%` : null}
-              reason="Not reported for this window"
+              value={attendance.loading || a.show_rate == null ? null : `${a.show_rate}%`}
+              reason="No private-event registrations in this window"
             />
+            {/* Honest, not hidden: unique_attendees/avg_watch_minutes are derived from 15s
+                concurrent-viewer sampling, not counted per person — see
+                services/org.py::audience_attendance's docstring for exactly why no true
+                per-person duration exists in this stack. */}
+            {!attendance.loading && (a.unique_attendees_estimated || a.avg_watch_minutes_estimated) && (
+              <p className={cx("mt-2 border-t pt-2 text-[11px] leading-relaxed", CONSOLE.divider, CONSOLE.faint)}>
+                Attendees and watch time are estimated from sampled concurrent viewers, not counted
+                per person. Show rate only covers private, invite-only events.
+              </p>
+            )}
           </Panel>
 
           <Panel title="Not measured">

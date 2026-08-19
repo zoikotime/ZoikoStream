@@ -6,6 +6,7 @@ that a control which *renders* as "off" is actually enforced server-side, and th
 moderator cannot reach broadcast control.
 Run: `python test_broadcast.py` (or pytest)."""
 import asyncio
+import types
 import uuid
 
 from app.services import broadcast as bc
@@ -198,6 +199,28 @@ def test_session_out_tolerates_no_session():
     assert out["status"] == "preview" and out["id"] is None
     assert out["settings"]["chat_enabled"] is True          # defaults are complete
     assert set(bc.DEFAULT_SETTINGS) <= set(out["settings"])
+
+
+def _fake_recording(**overrides):
+    """recording_out only reads attributes off the row, so a SimpleNamespace stands in for
+    a LiveRecording without a DB — same technique as test_contributor.py's _session."""
+    base = dict(
+        id=uuid.uuid4(), status="recording", quality="1080p", started_at=None, paused_at=None,
+        stopped_at=None, paused_ms=0, size_bytes=None, file_url=None, auto_upload=True,
+        enforced=True, error=None, role=None,
+    )
+    base.update(overrides)
+    return types.SimpleNamespace(**base)
+
+
+def test_recording_out_carries_role():
+    """Under dual recording (services/broadcast.py._recording_start), the primary/secondary
+    role is what lets the console (and crud.event.list_replay_candidates) tell the two rows
+    apart — a plain single-path recording's role stays unset, unchanged from before dual
+    recording existed."""
+    assert bc.recording_out(_fake_recording(role="primary"))["role"] == "primary"
+    assert bc.recording_out(_fake_recording(role="secondary"))["role"] == "secondary"
+    assert bc.recording_out(_fake_recording())["role"] is None
 
 
 if __name__ == "__main__":

@@ -518,6 +518,29 @@ def _governance_record_out(r: GovernanceRecord) -> GovernanceRecordOut:
     return out
 
 
+def legal_hold_event_ids(db, event_ids) -> set:
+    """Which of these events currently have an OPEN legal-hold governance record —
+    resolved_at IS NULL is the same "still active" signal services/ops.py already uses to
+    count active legal holds for the admin dashboard. Only a super_admin can open/resolve
+    one (routers/admin.py's create/update_governance_record), matching who actually has
+    authority to place a legal hold — never the org itself. Used to block recording
+    deletion (routers/organization.py's delete_recording) in addition to the recording's
+    own `legal_hold` column, which nothing currently sets directly."""
+    if not event_ids:
+        return set()
+    return set(db.scalars(
+        select(GovernanceRecord.event_id).where(
+            GovernanceRecord.event_id.in_(event_ids),
+            GovernanceRecord.kind == "legal_hold",
+            GovernanceRecord.resolved_at.is_(None),
+        )
+    ).all())
+
+
+def event_under_legal_hold(db, event_id) -> bool:
+    return event_id in legal_hold_event_ids(db, [event_id])
+
+
 def list_governance_records(db, kind=None, status=None, org_id=None, page=1, page_size=50):
     stmt = select(GovernanceRecord)
     if kind:
@@ -569,7 +592,8 @@ def update_governance_record(db, record: GovernanceRecord, data) -> GovernanceRe
 def list_api_keys(db, org: Organization) -> list[ApiKeyOut]:
     records = org.api_keys or []
     return [ApiKeyOut(id=r["id"], label=r["label"], prefix=r["prefix"],
-                      created_at=r["created_at"], revoked=r.get("revoked", False))
+                      created_at=r["created_at"], expires_at=r.get("expires_at"),
+                      revoked=r.get("revoked", False))
             for r in records]
 
 

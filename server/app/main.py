@@ -24,20 +24,22 @@ from .services import platform_settings
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
 from .services.ops import request_stats, run_metric_sampler
+from .services.webhooks import run_webhook_retries
 from .config import settings
 from .db import DB_MAX_CONNECTIONS, SessionLocal
 
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Two background tickers, each owning its own domain (which is also what keeps
+    """Four background tickers, each owning its own domain (which is also what keeps
     moderation and broadcast from having to import each other):
       * scheduler — fires scheduled polls/announcements, closes timed-out polls
       * sampler   — writes analytics snapshots (the retention graph) and pushes live counters
       * metrics   — writes platform metric samples (the admin console's KPI sparklines)
+      * webhooks  — sends/retries pending webhook deliveries (services/webhooks.py)
     The bus releases its Redis client on the way out.
-    ponytail: both run per PROCESS. With multiple workers, run them in one worker (or a cron
-    worker) or a scheduled poll launches once per worker and snapshots are written N times.
+    ponytail: all four run per PROCESS. With multiple workers, run them in one worker (or a
+    cron worker) or a scheduled poll (or a webhook delivery) fires once per worker.
 
     The default-executor swap is the other half of the DB pool sizing in db.py: every
     socket action reaches Postgres via services.moderation.tx() -> asyncio.to_thread, which
@@ -50,7 +52,7 @@ async def lifespan(_: FastAPI):
     loop.set_default_executor(executor)
 
     tasks = [asyncio.create_task(run_scheduler()), asyncio.create_task(run_sampler()),
-             asyncio.create_task(run_metric_sampler())]
+             asyncio.create_task(run_metric_sampler()), asyncio.create_task(run_webhook_retries())]
     try:
         yield
     finally:
