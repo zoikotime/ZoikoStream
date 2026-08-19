@@ -26,6 +26,9 @@ const EMPTY = {
   canHost: false,
   livekitEnforced: false,
   participants: [],
+  // Backstage roster — every assigned speaker + their ContributorSession, if invited.
+  // [{ user_id, name, session }], session is null until an invite exists.
+  contributors: [],
   messages: [],
   questions: [],
   polls: [],
@@ -68,6 +71,7 @@ function reducer(state, env) {
         canHost: !!data.can_host,
         livekitEnforced: data.livekit_enforced,
         participants: data.participants || [],
+        contributors: data.contributors || [],
         messages: data.messages || [],
         questions: data.questions || [],
         polls: data.polls || [],
@@ -96,6 +100,16 @@ function reducer(state, env) {
       return { ...state, participants: upsert(state.participants, data, "identity") };
     case "participants/participant.leave":
       return { ...state, participants: drop(state.participants, data, "identity") };
+
+    // Backstage state transition (waiting/connected/ready/on_standby/live/muted/
+    // reconnecting/removed/failed) for one assigned speaker — see services/contributor.py.
+    case "contributor/session.update":
+      return {
+        ...state,
+        contributors: state.contributors.map((c) =>
+          c.user_id === data.user_id ? { ...c, session: data } : c
+        ),
+      };
 
     case "chat/message.new":
       return { ...state, messages: [...state.messages, data] };

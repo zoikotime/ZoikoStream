@@ -26,6 +26,7 @@ import EventRegistration from "./pages/EventRegistration";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import ModeratorDashboard from "./pages/moderator/Dashboard";
+import SpeakerBackstage from "./pages/speaker/Backstage";
 import Landing from "./pages/Landing";
 import Contact from "./pages/Contact";
 
@@ -147,6 +148,14 @@ export default function App() {
             <Route element={<RoleRoute allow={["host", "moderator", "org_admin", "super_admin"]} />}>
               <Route path="/host/dashboard" element={<HostDashboard />} />
               <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
+            </Route>
+
+            {/* Contributor (speaker) backstage — same standalone-page pattern as host/
+                moderator above. Assignment to a *specific* event as a speaker is enforced
+                server-side (can_contribute from resolve_ctx); this route gate only stops a
+                wrong-role visitor from loading the page shell. */}
+            <Route element={<RoleRoute allow={["speaker", "org_admin", "super_admin"]} />}>
+              <Route path="/speaker/backstage" element={<SpeakerBackstage />} />
             </Route>
 
             {/* Super admin (platform) area */}

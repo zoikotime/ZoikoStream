@@ -35,7 +35,9 @@ from ..models import (
     ChangeOrder,
     CommercialAccount,
     CommercialException,
+    ContributorSession,
     Event,
+    EventAssignment,
     EventIncident,
     EventOrder,
     EventOrderLine,
@@ -947,6 +949,38 @@ def record_readiness_check(db: Session, event: Event, *, check_code: str, status
     return check
 
 
+def dual_recording_required(db: Session, event: Event) -> bool:
+    """Whether this event's service profile mandates independent dual recording (doc
+    Section 14.1/17 — required for R2/R3). Read directly off the profile flag rather than
+    through required_readiness_checks' broader list: that list feeds the manual-attestation
+    ReadinessCheck gate, while this drives real egress orchestration
+    (services/broadcast.py._recording_start) and must not wait on anyone attesting anything."""
+    if event.service_profile_id is None:
+        return False
+    profile = db.get(ServiceProfile, event.service_profile_id)
+    return bool(profile and profile.requires_dual_recording)
+
+
+def contributor_readiness_reasons(rows: list[tuple[str, ContributorSession | None]]) -> list[str]:
+    """BRD Section 12: "remote contributors: invitation, consent, preflight, return feed,
+    role, and rehearsal complete" is a non-waivable arming blocker for ANY event with an
+    assigned remote contributor, not just R2/R3 tiers — unlike the ServiceProfile-gated
+    checks in the loop above, this runs unconditionally. `rows` is
+    [(display_name, session_or_none), ...]."""
+    reasons: list[str] = []
+    for name, session in rows:
+        if session is None or session.state == "removed":
+            reasons.append(f"contributor '{name}' has not been invited")
+            continue
+        if not session.consent_given:
+            reasons.append(f"contributor '{name}' has not given consent")
+        if not (session.preflight_result or {}).get("passed"):
+            reasons.append(f"contributor '{name}' has not completed preflight")
+        if not session.rehearsal_complete:
+            reasons.append(f"contributor '{name}' has not completed rehearsal")
+    return reasons
+
+
 def evaluate_readiness(db: Session, event: Event, order: EventOrder | None) -> dict:
     """doc I3: READY is computed from payment/credit, capacity, configuration, rehearsal/
     checks, contribution, recording, access and command evidence — never one flag."""
@@ -964,6 +998,21 @@ def evaluate_readiness(db: Session, event: Event, order: EventOrder | None) -> d
         check = latest_by_code.get(code)
         if check is None or check.status not in ("pass", "conditional_pass"):
             reasons.append(f"readiness check '{code}' has not passed")
+
+    speaker_rows = db.execute(
+        select(EventAssignment.user_id, User.full_name, User.email)
+        .join(User, User.id == EventAssignment.user_id)
+        .where(EventAssignment.event_id == event.id, EventAssignment.role == "speaker")
+    ).all()
+    if speaker_rows:
+        sessions = {
+            s.user_id: s for s in db.scalars(
+                select(ContributorSession).where(ContributorSession.event_id == event.id)
+            ).all()
+        }
+        reasons.extend(contributor_readiness_reasons([
+            (full_name or email, sessions.get(user_id)) for user_id, full_name, email in speaker_rows
+        ]))
 
     if not capacity_confirmed(db, event):
         reasons.append("required capacity is not hard-reserved")

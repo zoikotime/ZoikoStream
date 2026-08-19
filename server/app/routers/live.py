@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from jose import JWTError, jwt
@@ -31,10 +32,12 @@ from ..ratelimit import SlidingWindow
 from ..security import ALGORITHM, decode_registration_token
 from ..services import bus, livekit
 from ..services import moderation as mod
-# Importing this registers the host/producer actions into mod.ACTIONS, the host-only
-# permission set, and the broadcast/analytics half of the opening snapshot. Import is
-# one-way (broadcast -> moderation), which is why it happens here and not in moderation.
+# Importing these registers the host/producer actions and the contributor-backstage
+# actions into mod.ACTIONS, the host-only permission set, and their snapshot
+# contributions. Import is one-way (broadcast/contributor -> moderation), which is why it
+# happens here and not in moderation.
 from ..services import broadcast  # noqa: F401
+from ..services import contributor  # noqa: F401
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/live", tags=["live"])
@@ -141,6 +144,18 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="You have been removed from this event")
         return
 
+    if ctx.can_contribute:
+        # A backstage session is time-boxed (invite join window + expiry) and revocable
+        # independent of ban/org membership — checked once at connect, same as is_banned
+        # above, not per-frame.
+        session = await asyncio.to_thread(contributor.load_session_sync, ctx.event_id, ctx.user_id)
+        gate_error = contributor.join_window_error(session, datetime.now(timezone.utc))
+        if gate_error:
+            if not await _accept(websocket, event_id):
+                return
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=gate_error)
+            return
+
     # Rehydrate this event's live settings before anyone joins, so a freshly-booted worker
     # applies the host's waiting-room / chat state instead of serving defaults.
     state = await broadcast.ensure_state(ctx)
@@ -152,7 +167,10 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     async with bus.subscribe(ctx.event_id) as queue:
         # This connection is a participant too — one presence record per identity, so a
         # moderator watching from two tabs still counts once.
-        role = "host" if ctx.can_host else "moderator" if ctx.can_moderate else "viewer"
+        role = "host" if ctx.can_host else "moderator" if ctx.can_moderate else \
+            "speaker" if ctx.can_contribute else "viewer"
+        if ctx.can_contribute:
+            await asyncio.to_thread(contributor.mark_connected, ctx.event_id, ctx.user_id)
         # Waiting room holds plain attendees for the host to admit; staff never wait.
         waiting = bool(state.get("waiting_room")) and role == "viewer"
         rec = await bus.presence_upsert(ctx.event_id, ctx.identity, {
@@ -229,6 +247,8 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             gone = await bus.presence_remove(ctx.event_id, ctx.identity)
             if gone:
                 await bus.publish(ctx.event_id, "participants", "participant.leave", gone)
+            if ctx.can_contribute:
+                await asyncio.to_thread(contributor.mark_disconnected, ctx.event_id, ctx.user_id)
 
 
 # ── LiveKit webhooks ──────────────────────────────────────────────────────────
@@ -252,11 +272,24 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
     except Exception:  # noqa: BLE001 — a bad signature is a 401, not a 500
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid LiveKit webhook signature")
 
+    kind = evt.event
+
+    # Resolved via our own LiveIngressEndpoint row (by ingress_id), not evt.room: an
+    # ingress-only lifecycle event can fire before any publisher has connected, and
+    # IngressInfo does not reliably carry room_name until one does.
+    if kind in ("ingress_started", "ingress_ended") and evt.ingress_info:
+        updated = await asyncio.to_thread(broadcast.record_ingress_status, evt.ingress_info)
+        if updated:
+            ingress_event_id, data = updated
+            await bus.publish(ingress_event_id, "moderator", "ingress.status", data)
+            verb = "connected" if kind == "ingress_started" else "disconnected"
+            await mod.feed_activity(ingress_event_id, "system", f"Live input {data['title']} {verb}", persist=True)
+        return {"ok": True, "event": kind}
+
     event_id = mod.event_id_from_room(evt.room.name if evt.room else None)
     if not event_id:
         return {"ignored": evt.event}
 
-    kind = evt.event
     p = evt.participant
 
     if kind == "participant_joined" and p:

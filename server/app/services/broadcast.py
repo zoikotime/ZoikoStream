@@ -28,13 +28,15 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
+from ..crud import commercial as commercial_crud
 from ..crud.admin import get_feature_flag_by_key
 from ..models import (
     AnalyticsSnapshot,
     BroadcastSession,
     Event,
+    LiveIngressEndpoint,
     LiveMessage,
     LivePoll,
     LiveQuestion,
@@ -42,7 +44,7 @@ from ..models import (
     Organization,
     Subscription,
 )
-from . import bus, livekit, platform_settings
+from . import bus, livekit, platform_settings, webhooks
 from . import moderation as mod
 
 log = logging.getLogger(__name__)
@@ -145,6 +147,9 @@ def recording_out(r: LiveRecording) -> dict:
         "stopped_at": _iso(r.stopped_at), "paused_ms": r.paused_ms,
         "size_bytes": r.size_bytes, "file_url": r.file_url,
         "auto_upload": r.auto_upload, "enforced": r.enforced, "error": r.error,
+        # "primary" | "secondary" under dual recording (see _recording_start); unset for an
+        # ordinary single-path event, same as every row before dual recording existed.
+        "role": r.role,
     }
 
 
@@ -176,7 +181,44 @@ def record_egress_result(egress_info) -> dict | None:
             r.error = egress_info.error
         db.commit()
         db.refresh(r)
-        return recording_out(r)
+        out = recording_out(r)
+        webhooks.enqueue(db, r.org_id, "recording.failed" if egress_info.error else "recording.ready", {
+            "event_id": str(r.event_id), "recording_id": out["id"], "role": out["role"],
+        })
+        return out
+    finally:
+        db.close()
+
+
+def ingress_out(i: LiveIngressEndpoint) -> dict:
+    return {
+        "id": str(i.id), "event_id": str(i.event_id), "title": i.title,
+        "input_type": i.input_type, "state": i.state, "enforced": i.enforced, "error": i.error,
+    }
+
+
+def record_ingress_status(ingress_info) -> tuple[str, dict] | None:
+    """Called from the ingress_started/ingress_ended LiveKit webhook — no Ctx here, same
+    reasoning as record_egress_result: this is LiveKit talking to us server-to-server, not
+    a signed-in operator. Looked up by ingress_id, not room: IngressInfo doesn't reliably
+    carry room_name before a room exists for an ingress-only lifecycle event (no publisher
+    has connected yet), so resolving via our own row is the only reliable path.
+    Returns (event_id, ingress_out dict) for the caller to broadcast, or None if the row is
+    already gone (e.g. an admin deleted it before this webhook arrived)."""
+    db = mod.SessionLocal()
+    try:
+        row = db.scalar(
+            select(LiveIngressEndpoint).where(LiveIngressEndpoint.ingress_id == ingress_info.ingress_id)
+        )
+        if row is None:
+            return None
+        state = ingress_info.state
+        row.state = livekit.ingress_state_name(state.status) if state else "inactive"
+        if state and state.error:
+            row.error = state.error
+        db.commit()
+        db.refresh(row)
+        return str(row.event_id), ingress_out(row)
     finally:
         db.close()
 
@@ -192,14 +234,22 @@ def _current_session(db, ctx) -> BroadcastSession | None:
     )
 
 
-def _current_recording(db, ctx) -> LiveRecording | None:
-    return db.scalar(
+_RECORDING_ROLE_ORDER = case(
+    (LiveRecording.role == "primary", 0), (LiveRecording.role == "secondary", 1), else_=0
+)
+
+
+def _current_recordings(db, ctx) -> list[LiveRecording]:
+    """Every row still active for this event (one, or two under dual recording — see
+    _recording_start), primary first. Pause/resume/stop act on the whole set; callers that
+    only want "the" recording for a summary field use actives[0]."""
+    return db.scalars(
         select(LiveRecording)
         .where(LiveRecording.event_id == ctx.event_id,
                LiveRecording.org_id == ctx.org_id,
                LiveRecording.status.in_(("recording", "paused")))
-        .order_by(LiveRecording.created_at.desc())
-    )
+        .order_by(_RECORDING_ROLE_ORDER, LiveRecording.created_at)
+    ).all()
 
 
 def _feature_enabled(db, key: str, default: bool) -> bool:
@@ -323,6 +373,10 @@ async def _golive(ctx, payload):
     out = await mod.tx(work)
     session, act = out
     await bus.state_set(ctx.event_id, {"status": "live", "started_at": session["started_at"]})
+    if act:  # only the transition that actually happened, not a redundant "already live" call
+        await mod.tx(lambda db: webhooks.enqueue(db, ctx.org_id, "session.started", {
+            "event_id": str(ctx.event_id), "session_id": session["id"],
+        }))
     frames = [("broadcast", "broadcast.update", {**session, "enforced": enforced})]
     if act:
         frames.append(("activity", "activity.new", act))
@@ -345,6 +399,9 @@ async def _pause(ctx, payload):
     if not out:
         return "The broadcast isn't live"
     await bus.state_set(ctx.event_id, {"status": "paused"})
+    await mod.tx(lambda db: webhooks.enqueue(db, ctx.org_id, "session.paused", {
+        "event_id": str(ctx.event_id), "session_id": out[0]["id"],
+    }))
     return [("broadcast", "broadcast.update", out[0]), ("activity", "activity.new", out[1])]
 
 
@@ -403,10 +460,13 @@ async def _end(ctx, payload, emergency: bool = False):
     if not out:
         return "There's no broadcast to end"
     await bus.state_set(ctx.event_id, {"status": "ended"})
+    await mod.tx(lambda db: webhooks.enqueue(db, ctx.org_id, "session.ended", {
+        "event_id": str(ctx.event_id), "session_id": out[0]["id"], "reason": reason,
+    }))
     frames = [("broadcast", "broadcast.update", out[0]), ("activity", "activity.new", out[1])]
-    if stopped:
-        # So the console's recording panel reflects the auto-stop, not just the broadcast end.
-        frames.append(("recording", "recording.update", stopped))
+    # So the console's recording panel reflects the auto-stop, not just the broadcast end —
+    # one frame per row (both paths under dual recording, see _recording_start).
+    frames.extend(("recording", "recording.update", r) for r in stopped)
     return frames
 
 
@@ -451,26 +511,29 @@ async def _settings(ctx, payload):
 
 # ── recording ─────────────────────────────────────────────────────────────────
 
-async def _stop_recording_rows(ctx, now):
-    """Close out the active recording row(s) and stop the egress. Shared by the explicit
-    stop action and by ending the broadcast."""
-    rec = await mod.tx(lambda db: (lambda r: {"id": str(r.id), "egress": r.egress_id,
-                                              "paused_at": r.paused_at, "status": r.status}
-                                   if r else None)(_current_recording(db, ctx)))
-    if not rec:
-        return None
-    error = await livekit.stop_recording(rec["egress"]) if rec["egress"] else None
+async def _stop_recording_rows(ctx, now) -> list[dict]:
+    """Close out every active recording row (one, or two under dual recording — see
+    _recording_start) and stop each egress independently. Shared by the explicit stop
+    action and by ending the broadcast. A dual-recording pair is never assumed to succeed
+    or fail together: each row's own stop_recording() result and error are its own."""
+    active = await mod.tx(lambda db: [(str(r.id), r.egress_id) for r in _current_recordings(db, ctx)])
+    if not active:
+        return []
+    errors = {rid: (await livekit.stop_recording(egress_id) if egress_id else None) for rid, egress_id in active}
 
     def work(db):
-        r = db.get(LiveRecording, uuid.UUID(rec["id"]))
-        if r is None:
-            return None
-        if r.status == "paused" and r.paused_at:
-            r.paused_ms += int((now - r.paused_at).total_seconds() * 1000)
-        r.status, r.stopped_at, r.paused_at = "stopped", now, None
-        if error:
-            r.error = error
-        return recording_out(r)
+        rows = []
+        for rid, _ in active:
+            r = db.get(LiveRecording, uuid.UUID(rid))
+            if r is None:
+                continue
+            if r.status == "paused" and r.paused_at:
+                r.paused_ms += int((now - r.paused_at).total_seconds() * 1000)
+            r.status, r.stopped_at, r.paused_at = "stopped", now, None
+            if errors.get(rid):
+                r.error = errors[rid]
+            rows.append(recording_out(r))
+        return rows
 
     return await mod.tx(work)
 
@@ -481,7 +544,7 @@ async def _recording_start(ctx, payload):
     settings = state.get("settings") or DEFAULT_SETTINGS
     quality = payload.get("quality") if payload.get("quality") in RESOLUTIONS else settings.get("recording_quality", "1080p")
 
-    existing = await mod.tx(lambda db: (lambda r: recording_out(r) if r else None)(_current_recording(db, ctx)))
+    existing = await mod.tx(lambda db: bool(_current_recordings(db, ctx)))
     if existing:
         return "A recording is already running"
 
@@ -491,71 +554,96 @@ async def _recording_start(ctx, payload):
     if await mod.tx(lambda db: _storage_over_limit(db, ctx.org_id)):
         return "Storage limit reached for your plan — free up space or upgrade to keep recording"
 
-    filepath = f"zoikostream/{ctx.org_id}/{ctx.event_id}/{int(now.timestamp())}.mp4"
-    egress_id, error = await livekit.start_recording(ctx.room, quality, filepath)
+    dual = await mod.tx(lambda db: commercial_crud.dual_recording_required(db, db.get(Event, ctx.event_id)))
+    # Doc Section 14.1/17: R2/R3 events require two INDEPENDENT recording paths — same room,
+    # two separate egress jobs, two separate rows/files — so a recorder failure on one never
+    # means total loss. An ordinary event (dual False) keeps the exact single-row path this
+    # always had.
+    roles = ("primary", "secondary") if dual else (None,)
+    started: list[tuple[str | None, str, str | None, str | None]] = []   # (role, filepath, egress_id, error)
+    for role in roles:
+        suffix = f"-{role}" if role else ""
+        filepath = f"zoikostream/{ctx.org_id}/{ctx.event_id}/{int(now.timestamp())}{suffix}.mp4"
+        egress_id, error = await livekit.start_recording(ctx.room, quality, filepath)
+        started.append((role, filepath, egress_id, error))
 
     def work(db):
-        r = LiveRecording(
-            event_id=ctx.event_id, org_id=ctx.org_id, status="recording", quality=quality,
-            egress_id=egress_id, started_at=now, enforced=bool(egress_id), error=error,
-            auto_upload=bool(settings.get("auto_upload", True)),
-            file_url=filepath if egress_id else None, created_by=ctx.user_id,
-        )
+        rows = []
         session = _current_session(db, ctx)
-        if session:
-            r.session_id = session.id
-        db.add(r)
-        db.flush()
-        note = "Recording started" if egress_id else "Recording started (not captured — LiveKit egress unavailable)"
-        return recording_out(r), mod.record(db, ctx, "recording", note,
-                                           audit="live.recording.start",
-                                           target_type="live_recording", target_id=r.id,
-                                           meta={"quality": quality, "enforced": bool(egress_id)})
+        for role, filepath, egress_id, error in started:
+            r = LiveRecording(
+                event_id=ctx.event_id, org_id=ctx.org_id, status="recording", quality=quality,
+                role=role, egress_id=egress_id, started_at=now, enforced=bool(egress_id), error=error,
+                auto_upload=bool(settings.get("auto_upload", True)),
+                file_url=filepath if egress_id else None, created_by=ctx.user_id,
+            )
+            if session:
+                r.session_id = session.id
+            db.add(r)
+            db.flush()
+            rows.append(r)
+        captured = sum(1 for r in rows if r.enforced)
+        note = (
+            "Recording started" if captured == len(rows) and len(rows) == 1 else
+            "Recording started (both paths captured)" if captured == len(rows) else
+            f"Recording started (only {captured} of {len(rows)} path(s) captured — check LiveKit egress)" if captured else
+            "Recording started (not captured — LiveKit egress unavailable)"
+        )
+        act = mod.record(db, ctx, "recording", note, audit="live.recording.start",
+                         target_type="live_recording", target_id=rows[0].id,
+                         meta={"quality": quality, "enforced": captured == len(rows), "dual": dual})
+        return [recording_out(r) for r in rows], act
 
-    rec, act = await mod.tx(work)
-    return [("recording", "recording.update", rec), ("activity", "activity.new", act)]
+    recs, act = await mod.tx(work)
+    return [("recording", "recording.update", r) for r in recs] + [("activity", "activity.new", act)]
 
 
 async def _recording_pause(ctx, payload, resume: bool = False):
     now = datetime.now(timezone.utc)
 
     def work(db):
-        r = _current_recording(db, ctx)
-        if r is None:
+        recs = _current_recordings(db, ctx)
+        updated = []
+        for r in recs:
+            if resume:
+                if r.status != "paused":
+                    continue
+                if r.paused_at:
+                    r.paused_ms += int((now - r.paused_at).total_seconds() * 1000)
+                r.status, r.paused_at = "recording", None
+            else:
+                if r.status != "recording":
+                    continue
+                r.status, r.paused_at = "paused", now
+            updated.append(r)
+        if not updated:
             return None
-        if resume:
-            if r.status != "paused":
-                return None
-            if r.paused_at:
-                r.paused_ms += int((now - r.paused_at).total_seconds() * 1000)
-            r.status, r.paused_at = "recording", None
-        else:
-            if r.status != "recording":
-                return None
-            r.status, r.paused_at = "paused", now
         verb = "resumed" if resume else "paused"
-        return recording_out(r), mod.record(db, ctx, "recording", f"Recording {verb}",
-                                           audit=f"live.recording.{verb}",
-                                           target_type="live_recording", target_id=r.id)
+        text = f"Recording {verb}" if len(updated) == 1 else f"Recording {verb} (both paths)"
+        act = mod.record(db, ctx, "recording", text, audit=f"live.recording.{verb}",
+                         target_type="live_recording", target_id=updated[0].id)
+        return [recording_out(r) for r in updated], act
 
     out = await mod.tx(work)
     if not out:
         return "No recording in that state"
-    # ponytail: pause/resume is bookkeeping on OUR row — LiveKit egress has no pause API,
+    # ponytail: pause/resume is bookkeeping on OUR row(s) — LiveKit egress has no pause API,
     # so the captured file keeps rolling. The timer and logs reflect the host's intent;
     # trimming happens in post. Split into two egresses if a real gap is ever required.
-    return [("recording", "recording.update", out[0]), ("activity", "activity.new", out[1])]
+    rows, act = out
+    return [("recording", "recording.update", r) for r in rows] + [("activity", "activity.new", act)]
 
 
 async def _recording_stop(ctx, payload):
     now = datetime.now(timezone.utc)
-    rec = await _stop_recording_rows(ctx, now)
-    if not rec:
+    stopped = await _stop_recording_rows(ctx, now)
+    if not stopped:
         return "No recording is running"
-    act = await mod.tx(lambda db: mod.record(db, ctx, "recording", "Recording stopped",
+    text = "Recording stopped" if len(stopped) == 1 else "Recording stopped (both paths)"
+    act = await mod.tx(lambda db: mod.record(db, ctx, "recording", text,
                                              audit="live.recording.stop",
-                                             target_type="live_recording", target_id=rec["id"]))
-    return [("recording", "recording.update", rec), ("activity", "activity.new", act)]
+                                             target_type="live_recording", target_id=uuid.UUID(stopped[0]["id"])))
+    return [("recording", "recording.update", r) for r in stopped] + [("activity", "activity.new", act)]
 
 
 # ── stage management ──────────────────────────────────────────────────────────
@@ -802,7 +890,10 @@ async def snapshot_extra(ctx) -> dict:
 
     def work(db):
         session = _current_session(db, ctx)
-        active = _current_recording(db, ctx)
+        # Singular summary field stays pointed at the primary (or the only row) — the full
+        # pair, when dual recording is running, is in `recordings` below.
+        actives = _current_recordings(db, ctx)
+        active = actives[0] if actives else None
         recent = db.scalars(
             select(LiveRecording)
             .where(LiveRecording.event_id == ctx.event_id, LiveRecording.org_id == ctx.org_id)

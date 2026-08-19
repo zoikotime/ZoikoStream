@@ -182,6 +182,43 @@ class FeedbackOut(BaseModel):
     created_at: datetime | None = None
 
 
+class ContributorInvite(BaseModel):
+    """The invitation half of a contributor's backstage session — the runtime half
+    (state, consent, preflight) is server-owned and never set from the wire (see
+    ContributorSessionOut, and services/contributor.py's socket actions)."""
+    join_window_start: datetime | None = None
+    join_window_end: datetime | None = None
+    expires_at: datetime | None = None
+    contribution_method: str = Field("livekit_browser", max_length=20)
+    consent_notice: str | None = Field(None, max_length=4000)
+    support_contact: str | None = Field(None, max_length=300)
+
+
+class ContributorSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    state: str
+    invited_at: datetime | None = None
+    invited_by: uuid.UUID | None = None
+    join_window_start: datetime | None = None
+    join_window_end: datetime | None = None
+    expires_at: datetime | None = None
+    contribution_method: str
+    consent_notice: str | None = None
+    support_contact: str | None = None
+    consent_given: bool
+    consent_at: datetime | None = None
+    preflight_result: dict | None = None
+    rehearsal_complete: bool
+    rehearsal_at: datetime | None = None
+    admitted_at: datetime | None = None
+    brought_live_at: datetime | None = None
+    removed_at: datetime | None = None
+    removed_reason: str | None = None
+
+
 class AccessLinkCreate(BaseModel):
     label: str | None = Field(None, max_length=120)
     expires_in_days: int | None = Field(None, ge=1, le=3650)

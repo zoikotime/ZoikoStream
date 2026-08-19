@@ -18,13 +18,14 @@ import { useEffect, useState } from "react";
 import {
   FiUsers, FiMessageSquare, FiHelpCircle, FiBarChart2, FiTrendingUp, FiActivity,
   FiCheck, FiX, FiMicOff, FiClock, FiSmartphone, FiMonitor, FiGlobe,
-  FiEye, FiHeart, FiStar,
+  FiEye, FiHeart, FiStar, FiUserCheck,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { cx, ACCENT, SERIES } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
 import EmptyState from "../organization/OrganizationEmptyState";
 import ParticipantsPanel from "../moderation/ParticipantsPanel";
+import ContributorQueue from "./ContributorQueue";
 import { ChatTab, QATab } from "../moderation/ChatQAPanel";
 import { PollManagement, Announcements, ActivityFeed } from "../moderation/ModeratorSidebar";
 import { STUDIO, focus, t150 } from "./studio";
@@ -33,6 +34,7 @@ import { initials, accentFor } from "../../data/host";
 
 const TABS = [
   { key: "participants", label: "People", icon: FiUsers },
+  { key: "backstage", label: "Backstage", icon: FiUserCheck },
   { key: "chat", label: "Chat", icon: FiMessageSquare },
   { key: "qa", label: "Q&A", icon: FiHelpCircle },
   { key: "polls", label: "Polls", icon: FiBarChart2 },
@@ -424,7 +426,7 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, event
   const [muteArmed, setMuteArmed] = useState(false);
   const {
     participants = [], messages = [], questions = [], polls = [], announcements = [],
-    activity = [], speakers = [], typing = {}, analytics, health, ready,
+    activity = [], speakers = [], contributors = [], typing = {}, analytics, health, ready,
   } = state;
 
   const waiting = participants.filter((p) => p.waiting);
@@ -433,6 +435,9 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, event
     chat: visibleMessages.filter((m) => m.status === "pending").length,
     qa: questions.filter((q) => q.status === "pending").length,
     participants: waiting.length,
+    // A speaker who's finished preflight is an operator action waiting to happen — same
+    // "needs a human" signal the other pulsing badges already carry.
+    backstage: contributors.filter((c) => c.session?.state === "connected").length,
   };
 
   return (
@@ -443,7 +448,7 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, event
       <div
         role="tablist"
         aria-label="Producer panels"
-        className={cx("grid shrink-0 grid-cols-7 border-b", STUDIO.divider)}
+        className={cx("grid shrink-0 grid-cols-8 border-b", STUDIO.divider)}
       >
         {TABS.map((t) => {
           const on = tab === t.key;
@@ -519,6 +524,12 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, event
               loading={!ready}
               send={send}
             />
+          </div>
+        )}
+
+        {tab === "backstage" && (
+          <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+            <ContributorQueue contributors={contributors} canModerate={canModerate} send={send} />
           </div>
         )}
 

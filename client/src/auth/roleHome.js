@@ -10,7 +10,7 @@ const HOMES = {
   host: "/host/dashboard",
   moderator: "/moderator/dashboard",
   viewer: null,
-  speaker: "/dashboard", // ponytail: legacy role; -> "/speaker" once that dashboard lands
+  speaker: "/speaker/backstage",
 };
 
 // Known roles return their mapping (which may be null); unknown roles fall back to /dashboard.

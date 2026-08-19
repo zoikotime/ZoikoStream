@@ -112,6 +112,9 @@ class Ctx:
     # Broadcast control (go live, end, record, emergency stop) is HOST-only. A moderator
     # runs the audience; they must not be able to end the stream.
     can_host: bool = False
+    # An assigned speaker's backstage privileges (contributor.* actions, join-window gate
+    # in routers/live.py). Independent of can_moderate — a speaker is not a moderator.
+    can_contribute: bool = False
 
     @property
     def actor(self):
@@ -133,11 +136,15 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
 
         # Org admins and above moderate any event in their org. A moderator/host/speaker
         # must be ASSIGNED to this specific event — an org's moderator is not automatically
-        # a moderator of every event in it.
-        can = can_host = False
+        # a moderator of every event in it. The assignment check runs for every non-admin
+        # platform role (not just "moderator"/"host"): EventAssignment.role is independent
+        # of User.role — an org admin can assign anyone as host/moderator/speaker regardless
+        # of their platform role — so gating the query on platform role left a real "speaker"
+        # user unable to pick up their own EventAssignment(role="speaker") row at all.
+        can = can_host = can_contribute = False
         if user.role in ("org_admin", "super_admin"):
             can = can_host = True
-        elif user.role in ("moderator", "host"):
+        else:
             roles = set(db.scalars(
                 select(EventAssignment.role).where(
                     EventAssignment.event_id == ev.id,
@@ -148,6 +155,7 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
             # Only an assigned HOST gets broadcast control — being the org's host role is
             # not enough, and a moderator assignment never grants it.
             can_host = "host" in roles
+            can_contribute = "speaker" in roles
 
         return Ctx(
             event_id=ev.id,
@@ -159,6 +167,7 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
             role=user.role,
             can_moderate=can,
             can_host=can_host,
+            can_contribute=can_contribute,
         )
     finally:
         db.close()

@@ -431,7 +431,9 @@ def test_overview_payload_is_complete_on_every_range():
             assert len(out["lifecycle"]) == 8
             assert out["window"]["range"] == r
             assert out["window"]["since"] < out["window"]["until"]
-        assert len(org_svc.ORG_GAPS) == 11
+        # webhook delivery tracking stopped being a gap once services/webhooks.py shipped
+        # (see services/org.py::developer_ops) — was 11 before that landed.
+        assert len(org_svc.ORG_GAPS) == 10
     finally:
         db.rollback()
         db.close()
