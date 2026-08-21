@@ -17,17 +17,30 @@ from app.config import settings
 from app.security import hash_password
 from create_tables import ensure_schema
 
-# Default billing plans. Limits: None = unlimited. Seeded idempotently by slug.
+# Default plan IDENTITY and technical entitlement limits. Limits: None = unlimited.
+# Seeded idempotently by slug.
+#
+# Deliberately NO price_monthly (ZST-LE-COM-001 Section 26: "No hard-coded fallback price,
+# tax, discount, deposit percentage or service credit exists"). Seeding a price here would
+# make this file the source of commercial truth, which the standard forbids — the chain must
+# be: plan identity -> approved pricing registry -> versioned commercial price -> quote/order.
+# Plan.price_monthly is nullable; NULL means "no approved price published yet" and every
+# reader renders it as unset rather than as free. Populating it is a Finance/Commercial
+# action against an approved price book, not a code default.
+#
+# max_users/max_storage_gb/max_streaming_hours are technical entitlement ceilings the
+# platform actually enforces (services/org.py, services/broadcast.py) — operational
+# constants, not commercial economics, so they stay.
 DEFAULT_PLANS = [
-    {"name": "Starter", "slug": "starter", "price_monthly": 0, "max_users": 5,
+    {"name": "Starter", "slug": "starter", "max_users": 5,
      "max_storage_gb": 50, "max_streaming_hours": 20,
      "features": ["1 concurrent stream", "720p", "Community support"]},
-    {"name": "Pro", "slug": "pro", "price_monthly": 149, "max_users": 30,
+    {"name": "Pro", "slug": "pro", "max_users": 30,
      "max_storage_gb": 500, "max_streaming_hours": 200,
      "features": ["5 concurrent streams", "1080p", "Recordings", "Email support"]},
-    {"name": "Enterprise", "slug": "enterprise", "price_monthly": 999, "max_users": None,
+    {"name": "Enterprise", "slug": "enterprise", "max_users": None,
      "max_storage_gb": None, "max_streaming_hours": None,
-     "features": ["Unlimited streams", "4K", "SSO", "Dedicated support", "SLA"]},
+     "features": ["Unlimited streams", "4K", "SSO", "Dedicated support"]},
 ]
 
 # Default platform settings (key -> {value, category}). Seeded only if the key is missing.

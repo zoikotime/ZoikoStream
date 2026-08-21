@@ -18,3 +18,4 @@ httpx
 livekit-api
 google-cloud-storage
 
+stripe>=15.3,<16

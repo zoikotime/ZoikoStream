@@ -8,6 +8,7 @@ import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { notify } from "../../ui/Toast";
 import { fmtDateTime } from "../../data/events";
+import { money } from "../../utils/money";
 import {
   NewQuoteModal, NewOrderModal, AddLineModal, CapacityHoldModal,
   PaymentScheduleModal, ReadinessCheckModal, IncidentModal, RemedyModal,
@@ -18,12 +19,8 @@ import {
 // components/organization/EventCommercial.jsx for that read/accept-only counterpart.
 // Every write below is a require_super_admin route (routers/commercial.py's RBAC mapping).
 
-const money = (amount, currency = "USD") => {
-  const n = typeof amount === "string" ? parseFloat(amount) : amount;
-  if (amount == null || Number.isNaN(n)) return "—";
-  try { return new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "USD" }).format(n); }
-  catch { return `${n} ${currency || ""}`.trim(); }
-};
+// Shared with the org-side Event Commercial tab. Was a local copy that defaulted a missing
+// currency to "USD", so a GBP order could be shown to staff as dollars.
 const label = (s) => (s || "—").split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
 const ORDER_TONE = { draft: "neutral", pending_acceptance: "warning", accepted: "info", active: "success", completed: "success", canceled: "danger", terminated: "danger" };
 const QUOTE_TONE = { draft: "neutral", issued: "warning", accepted: "success", expired: "danger", withdrawn: "danger", superseded: "neutral" };

@@ -360,12 +360,22 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
     if fields.get("status"):
         title_after = fields.get("title", ev.title)
         readiness_ready, readiness_reasons = None, None
-        if fields["status"] == "armed":
-            order = commercial_crud.get_current_order(db, ev.id)
-            evaluation = commercial_crud.evaluate_readiness(db, ev, order)
+        target = fields["status"]
+        # Every escalation into a production state clears the SAME gate — not just "armed".
+        # Previously only "armed" was checked, so published/scheduled -> live (a legal
+        # transition) skipped commercial readiness entirely (CF-3).
+        if target in commercial_crud.PRODUCTION_EVENT_STATES and target != ev.status:
+            evaluation = commercial_crud.golive_readiness(db, ev)
+            commercial_crud.audit_golive_decision(db, ev, evaluation, actor=user, target_state=target)
+            db.commit()
             readiness_ready, readiness_reasons = evaluation["ready"], evaluation["blocking_reasons"]
+            if not readiness_ready:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Cannot move to '{target}' — " + "; ".join(evaluation["blocking_reasons"]),
+                )
         err = crud.status_transition_error(
-            ev.status, fields["status"], title_after,
+            ev.status, target, title_after,
             readiness_ready=readiness_ready, readiness_reasons=readiness_reasons,
         )
         if err:

@@ -128,6 +128,139 @@ _REPLAY_ENTITLEMENT_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS source_recording_id UUID",
 ]
 
+# Tax determination (ZST-LE-COM-001 L4/L6). event_orders.tax_amount was `NOT NULL DEFAULT 0`,
+# which made "not determined yet" indistinguishable from "no tax due" — and since nothing
+# ever computed it, every invoice carried zero tax structurally. Dropping NOT NULL makes NULL
+# mean UNDETERMINED, which crud.issue_invoice now refuses to invoice against.
+_EVENT_ORDER_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS tax_treatment VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS tax_jurisdiction VARCHAR(80)",
+    "ADD COLUMN IF NOT EXISTS tax_source VARCHAR(80)",
+    "ADD COLUMN IF NOT EXISTS tax_rule_version VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS tax_effective_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS tax_determined_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS tax_determined_by UUID REFERENCES users(id)",
+    "ALTER COLUMN tax_amount DROP NOT NULL",
+    "ALTER COLUMN tax_amount DROP DEFAULT",
+]
+
+# The tax facts an issued invoice snapshots off the order (immutable — see models/commercial.py
+# Invoice). invoices.tax_amount stays NOT NULL: issuance is blocked without a determination.
+_INVOICE_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS tax_treatment VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS tax_jurisdiction VARCHAR(80)",
+    "ADD COLUMN IF NOT EXISTS tax_source VARCHAR(80)",
+    "ADD COLUMN IF NOT EXISTS tax_rule_version VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS tax_effective_at TIMESTAMPTZ",
+]
+
+# Ledger-1 plan pricing. price_monthly was `NOT NULL DEFAULT 0`, so an unpriced plan looked
+# free. NULL now means "no approved price published" (doc Section 26: no hard-coded fallback
+# price exists). Existing rows keep whatever value they already hold — clearing previously
+# seeded prices is a Finance decision, not a migration's, so this only relaxes the constraint.
+# custom_pricing distinguishes "quote required / contact sales" from "not published yet".
+_PLAN_COLUMNS = [
+    "ALTER COLUMN price_monthly DROP NOT NULL",
+    "ALTER COLUMN price_monthly DROP DEFAULT",
+    "ADD COLUMN IF NOT EXISTS custom_pricing BOOLEAN NOT NULL DEFAULT FALSE",
+]
+
+# Phase 2 commercial foundation (ZST-LE-COM-001 C4, L1, L2, Section 27).
+#
+# event_order_lines.unit_basis   — freeze the price's unit basis onto the line so a line is
+#                                  self-describing (per_event vs per_hour) even if the source
+#                                  CatalogLine is later edited.
+# commercial_accounts.seller_*   — drop the "zoiko_tech_inc" default; a seller entity must now
+#                                  be an explicit, REGISTERED, ACTIVE SellerLegalEntity.
+# commercial_quotes.tax_amount   — NULL = tax not determined (was NOT NULL DEFAULT 0, i.e. a
+#                                  silent zero-tax quote).
+# capacity_reservations.*        — bind a reservation to the pool and order version it drew
+#                                  from, and record what was requested vs granted.
+# invoices — the old GLOBAL unique on `number` is replaced by unique per (seller entity,
+#            number), so each legal entity keeps its own series (doc Section 3).
+_EVENT_ORDER_LINE_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS unit_basis VARCHAR(30)",
+]
+_COMMERCIAL_ACCOUNT_COLUMNS = [
+    "ALTER COLUMN seller_legal_entity_id DROP NOT NULL",
+    "ALTER COLUMN seller_legal_entity_id DROP DEFAULT",
+]
+_QUOTE_COLUMNS = [
+    "ALTER COLUMN tax_amount DROP NOT NULL",
+    "ALTER COLUMN tax_amount DROP DEFAULT",
+]
+_CAPACITY_RESERVATION_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS capacity_pool_id UUID REFERENCES capacity_pools(id)",
+    "ADD COLUMN IF NOT EXISTS event_order_version_id UUID REFERENCES event_order_versions(id)",
+    "ADD COLUMN IF NOT EXISTS requested_quantity INTEGER",
+    "ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id)",
+]
+_INVOICE_TAX_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS tax_exemption_reason VARCHAR(200)",
+]
+_EVENT_ORDER_TAX_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS tax_exemption_reason VARCHAR(200)",
+]
+# Phase 3 payment-path correctness (ZST-LE-COM-001 P1/P4/P5, Section 25/28/30).
+#
+# payment_schedules.allocated_amount — how much captured money is attributed to a milestone,
+#   so `satisfied` requires full coverage instead of any capture at all (CF-5).
+# commercial_exceptions.*            — scope/decision/correlation fields the governed
+#   override workflow needs to answer who/what/why/when/until-when (CF-4).
+# audit_logs.correlation_id          — one id threading provider event -> payment -> invoice
+#   -> order -> event -> audit (doc Section 30).
+# provider_events / unmatched_settlements are new tables, so create_all() builds them.
+_PAYMENT_SCHEDULE_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS allocated_amount NUMERIC(12,2) NOT NULL DEFAULT 0",
+]
+_COMMERCIAL_EXCEPTION_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS overridden_gate VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS previous_state VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS decision_notes TEXT",
+    "ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(64)",
+]
+_AUDIT_LOG_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(64)",
+]
+_PHASE3_STATEMENTS = [
+    # Provider event identity is enforced by the DATABASE, not an application check — two
+    # concurrent deliveries of the same event race, and only a constraint can arbitrate (CF-1).
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_provider_event_identity "
+    "ON provider_events (provider, provider_event_id)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_correlation_id ON audit_logs (correlation_id)",
+    "CREATE INDEX IF NOT EXISTS ix_unmatched_settlements_status "
+    "ON unmatched_settlements (status, received_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_commercial_exceptions_lookup "
+    "ON commercial_exceptions (event_order_id, exception_type, status)",
+]
+
+# Phase 4F — hosted checkout reconciliation.
+#
+# A provider-hosted checkout session has no payment reference until the payer submits, so the
+# payment reference must be nullable and the SESSION becomes the correlation key until the real
+# reference is adopted from a verified provider event.
+_PHASE4F_STATEMENTS = [
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS checkout_session_ref VARCHAR(120)",
+    "ALTER TABLE payments ALTER COLUMN provider_payment_ref DROP NOT NULL",
+    # One session -> at most one payment, enforced by the database. NULLs are distinct in
+    # Postgres, so payments that never came from a hosted checkout are unaffected.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_provider_checkout_session "
+    "ON payments (provider, checkout_session_ref)",
+]
+
+# Raw statements (not single-table ALTER fragments) — constraint swaps and index creation.
+_PHASE2_STATEMENTS = [
+    "ALTER TABLE invoices DROP CONSTRAINT IF EXISTS uq_invoice_number",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_invoice_seller_number "
+    "ON invoices (seller_legal_entity_id, number)",
+    # Capacity is claimed under a row lock on its pool; this index keeps the utilisation
+    # sum that runs inside that lock cheap.
+    "CREATE INDEX IF NOT EXISTS ix_capacity_reservations_pool_state "
+    "ON capacity_reservations (capacity_pool_id, state)",
+]
+
 
 def ensure_schema():
     """Create any missing tables and add any missing columns. Idempotent — safe to re-run."""
@@ -157,6 +290,36 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE customer_deliveries {clause}"))
         for clause in _REPLAY_ENTITLEMENT_COLUMNS:
             conn.execute(text(f"ALTER TABLE replay_entitlements {clause}"))
+        for clause in _EVENT_ORDER_COLUMNS:
+            conn.execute(text(f"ALTER TABLE event_orders {clause}"))
+        for clause in _INVOICE_COLUMNS:
+            conn.execute(text(f"ALTER TABLE invoices {clause}"))
+        for clause in _PLAN_COLUMNS:
+            conn.execute(text(f"ALTER TABLE plans {clause}"))
+        for clause in _EVENT_ORDER_TAX_COLUMNS:
+            conn.execute(text(f"ALTER TABLE event_orders {clause}"))
+        for clause in _INVOICE_TAX_COLUMNS:
+            conn.execute(text(f"ALTER TABLE invoices {clause}"))
+        for clause in _EVENT_ORDER_LINE_COLUMNS:
+            conn.execute(text(f"ALTER TABLE event_order_lines {clause}"))
+        for clause in _COMMERCIAL_ACCOUNT_COLUMNS:
+            conn.execute(text(f"ALTER TABLE commercial_accounts {clause}"))
+        for clause in _QUOTE_COLUMNS:
+            conn.execute(text(f"ALTER TABLE commercial_quotes {clause}"))
+        for clause in _CAPACITY_RESERVATION_COLUMNS:
+            conn.execute(text(f"ALTER TABLE capacity_reservations {clause}"))
+        for stmt in _PHASE2_STATEMENTS:
+            conn.execute(text(stmt))
+        for clause in _PAYMENT_SCHEDULE_COLUMNS:
+            conn.execute(text(f"ALTER TABLE payment_schedules {clause}"))
+        for clause in _COMMERCIAL_EXCEPTION_COLUMNS:
+            conn.execute(text(f"ALTER TABLE commercial_exceptions {clause}"))
+        for clause in _AUDIT_LOG_COLUMNS:
+            conn.execute(text(f"ALTER TABLE audit_logs {clause}"))
+        for stmt in _PHASE3_STATEMENTS:
+            conn.execute(text(stmt))
+        for stmt in _PHASE4F_STATEMENTS:
+            conn.execute(text(stmt))
     print("Schema ready!")
 
 

@@ -70,7 +70,11 @@ const UNIT_BASES = ["per_event", "per_hour", "per_unit"];
 
 export function CatalogVersionDrawer({ version, onClose, onChanged }) {
   const [lines, setLines] = useState(version.lines || []);
-  const [form, setForm] = useState({ service_code: "", name: "", unit_price: "", currency: "USD", unit_basis: "per_event", is_addon: false });
+  // Currency starts EMPTY and is required. It used to default to "USD", which silently priced a
+  // catalog line in dollars whenever nobody touched the field — and a catalog line's currency
+  // propagates into every order and invoice built from it. The last-used code is carried over
+  // between adds below, so pricing a whole version in one currency is still one keystroke each.
+  const [form, setForm] = useState({ service_code: "", name: "", unit_price: "", currency: "", unit_basis: "per_event", is_addon: false });
   const [adding, setAdding] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -79,6 +83,11 @@ export function CatalogVersionDrawer({ version, onClose, onChanged }) {
     e.preventDefault();
     if (!form.service_code.trim() || !form.name.trim() || !form.unit_price) {
       return notify.error("Service code, name and unit price are required");
+    }
+    // A price without a currency is not a price. Refused here rather than defaulted, so the
+    // line never reaches the catalog priced in a currency nobody chose.
+    if (form.currency.trim().length !== 3) {
+      return notify.error("A 3-letter currency code is required (e.g. USD, EUR, GBP)");
     }
     setAdding(true);
     try {
@@ -164,7 +173,7 @@ export function CatalogVersionDrawer({ version, onClose, onChanged }) {
               <Input variant="console" placeholder="service_code" value={form.service_code} onChange={(e) => set("service_code", e.target.value)} />
               <Input variant="console" placeholder="Display name" value={form.name} onChange={(e) => set("name", e.target.value)} />
               <Input variant="console" type="number" min="0" step="0.01" placeholder="Unit price" value={form.unit_price} onChange={(e) => set("unit_price", e.target.value)} />
-              <Input variant="console" placeholder="Currency (USD)" value={form.currency} onChange={(e) => set("currency", e.target.value)} maxLength={3} />
+              <Input variant="console" placeholder="Currency (3-letter code)" value={form.currency} onChange={(e) => set("currency", e.target.value.toUpperCase())} maxLength={3} />
               <Select variant="console" value={form.unit_basis} onChange={(e) => set("unit_basis", e.target.value)}>
                 {UNIT_BASES.map((b) => <option key={b} value={b}>{b}</option>)}
               </Select>

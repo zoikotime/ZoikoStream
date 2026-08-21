@@ -48,13 +48,38 @@ class Settings(BaseSettings):
     GCS_BUCKET: str = ""
     GCS_CREDENTIALS_PATH: str = ""
 
-    # Payments — services/payments.py has no real provider yet (MockPaymentProvider only),
-    # so this is unset in every environment today. Once a real provider is wired, its
-    # signing secret goes here; POST /commercial/webhooks/payments refuses every call while
-    # this is blank rather than accepting unsigned payloads (routers/commercial.py).
+    # Payments — the provider-neutral webhook's signing secret. POST
+    # /commercial/webhooks/payments refuses every call while this is blank rather than
+    # accepting unsigned payloads (routers/commercial.py). Separate from STRIPE_WEBHOOK_SECRET
+    # below: that one is Stripe's own signature scheme on its own endpoint.
     PAYMENTS_WEBHOOK_SECRET: str = ""
 
+    # Stripe — blank in every environment that does not use Stripe. The application must
+    # start without these (nothing at import time touches them), but ASKING for the Stripe
+    # provider without STRIPE_SECRET_KEY is a hard configuration error, never a silent
+    # fallback to the mock provider (services/payments.get_provider).
+    #
+    # Use TEST-mode credentials only (sk_test_...). Never commit a real value: these are read
+    # from .env, which is gitignored — see .env.example for the placeholders.
+    STRIPE_SECRET_KEY: str = ""
+    # Verifies the Stripe signature header on Stripe's own webhook endpoint (Phase 4B).
+    STRIPE_WEBHOOK_SECRET: str = ""
+    # NOT a secret — Stripe publishable keys are designed to be public and can only create
+    # payment attempts, never read or move money. Held here (rather than as a VITE_ build-time
+    # var) so the API can serve it to the browser at runtime and a key rotation needs no
+    # frontend rebuild. Nothing on the server reads it; it exists for the payment UI.
+    STRIPE_PUBLISHABLE_KEY: str = ""
+
+    def stripe_configured(self) -> bool:
+        """Whether the Stripe provider can be constructed at all. Deliberately a method and
+        not a cached flag: a deployment may inject the secret after import."""
+        return bool(self.STRIPE_SECRET_KEY.strip())
+
     RESEND_API_KEY: str = ""  # blank = welcome emails skipped (logged), registration still works
+    # Where the public contact form delivers. SERVER-SIDE ONLY: the browser posts the message
+    # and never the destination, so no request can redirect an inquiry to an arbitrary inbox.
+    # Deliberately not a VITE_ variable — anything VITE_ is compiled into the JS bundle.
+    CONTACT_EMAIL: str = "info@zoikostream.com"
     # ponytail: onboarding@resend.dev only delivers to the Resend account owner. Verify
     # zoikostream.com in Resend and switch this to noreply@zoikostream.com before launch.
     MAIL_FROM: str = "ZoikoStream <onboarding@resend.dev>"

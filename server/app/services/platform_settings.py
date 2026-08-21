@@ -45,3 +45,23 @@ def max_bitrate_kbps(db: Session) -> int | None:
     row = db.get(PlatformSetting, "streaming_limits")
     value = (row.value or {}).get("max_bitrate_kbps") if row else None
     return int(value) if value is not None else None
+
+
+def audience_capacity_envelope(db: Session) -> int | None:
+    """Approved platform-wide audience qualification band — the peak concurrent-viewer count
+    an event may expect WITHOUT an explicit, hard-reserved capacity commitment.
+
+    Returns None when Operations has not published a band. None is not a licence to assume
+    one: crud/commercial.py's readiness gate fails closed and requires an approved capacity
+    reservation for any event that states an expected audience at all (ZST-LE-COM-001 C4
+    "the system must fail closed when capacity is unavailable", and Section 26's "no
+    hard-coded fallback ... exists"). This replaced a hard-coded DEFAULT_CAPACITY_ENVELOPE
+    constant, which silently qualified every event under an unapproved number.
+
+    Stored on the existing "streaming_limits" setting rather than a new row, alongside the
+    other delivery-side ceilings the Settings console already owns. Deliberately NOT seeded
+    with a value (see seed.py DEFAULT_SETTINGS) — seeding one would re-invent the constant.
+    """
+    row = db.get(PlatformSetting, "streaming_limits")
+    value = (row.value or {}).get("audience_envelope") if row else None
+    return int(value) if value is not None else None

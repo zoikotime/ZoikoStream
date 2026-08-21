@@ -81,7 +81,15 @@ export default function SubscriptionModal({ open, onClose, subscription, plans =
           <Select variant="console" value={form.plan_slug} onChange={(e) => set("plan_slug", e.target.value)}>
             <option value="">Keep current plan</option>
             {plans.map((p) => (
-              <option key={p.slug} value={p.slug}>{p.name} — ${p.price_monthly}/mo</option>
+              /* price_monthly is null until an approved price is published — don't render
+                 "$null/mo" or imply the plan is free. */
+              <option key={p.slug} value={p.slug}>
+                {p.pricing_state === "PUBLISHED"
+                  ? `${p.name} — $${p.price_monthly}/mo`
+                  : p.pricing_state === "CUSTOM"
+                    ? `${p.name} — custom pricing`
+                    : `${p.name} — price not published`}
+              </option>
             ))}
           </Select>
         </div>

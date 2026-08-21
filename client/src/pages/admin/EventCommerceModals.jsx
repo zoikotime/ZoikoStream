@@ -49,13 +49,20 @@ export function ActionModal({ title, submitLabel = "Create", onSubmit, onClose, 
 }
 
 export function NewQuoteModal({ catalogVersions, onCreate, onClose }) {
-  const [form, setForm] = useState({ catalog_version_id: catalogVersions[0]?.id || "", currency: "USD", amount: "", tax_amount: "0", valid_until: "", notes: "" });
+  // Tax starts EMPTY and is required to submit. It used to default to "0", which pre-filled a
+  // commercial assumption the person quoting never actually made (ZST-LE-COM-001 L4: tax is
+  // determined, never assumed). A genuine zero still just needs typing 0.
+  // Currency starts EMPTY and is required, for the same reason tax does: pre-filling "USD"
+  // states a commercial fact the person quoting never chose, and a mis-currencied quote is a
+  // real financial document. Typing USD is three keystrokes; a wrong currency is a wrong price.
+  const [form, setForm] = useState({ catalog_version_id: catalogVersions[0]?.id || "", currency: "", amount: "", tax_amount: "", valid_until: "", notes: "" });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   return (
-    <ActionModal title="New quote" onClose={onClose} disabled={!form.catalog_version_id || !form.amount}
+    <ActionModal title="New quote" onClose={onClose}
+      disabled={!form.catalog_version_id || !form.amount || form.tax_amount === "" || form.currency.trim().length !== 3}
       onSubmit={() => onCreate({
         catalog_version_id: form.catalog_version_id, currency: form.currency, amount: form.amount,
-        tax_amount: form.tax_amount || "0", valid_until: form.valid_until ? new Date(form.valid_until).toISOString() : null,
+        tax_amount: form.tax_amount, valid_until: form.valid_until ? new Date(form.valid_until).toISOString() : null,
         notes: form.notes.trim() || null,
       })}
     >
@@ -68,7 +75,7 @@ export function NewQuoteModal({ catalogVersions, onCreate, onClose }) {
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div><Label variant="console">Amount</Label><Input variant="console" type="number" min="0" step="0.01" value={form.amount} onChange={(e) => set("amount", e.target.value)} /></div>
-        <div><Label variant="console">Tax</Label><Input variant="console" type="number" min="0" step="0.01" value={form.tax_amount} onChange={(e) => set("tax_amount", e.target.value)} /></div>
+        <div><Label variant="console">Tax (required)</Label><Input variant="console" type="number" min="0" step="0.01" placeholder="Determined tax" value={form.tax_amount} onChange={(e) => set("tax_amount", e.target.value)} /></div>
       </div>
       <div><Label variant="console">Currency</Label><Input variant="console" value={form.currency} onChange={(e) => set("currency", e.target.value.toUpperCase())} maxLength={3} /></div>
       <div><Label variant="console">Valid until</Label><Input variant="console" type="datetime-local" value={form.valid_until} onChange={(e) => set("valid_until", e.target.value)} /></div>
@@ -80,12 +87,14 @@ export function NewQuoteModal({ catalogVersions, onCreate, onClose }) {
 export function NewOrderModal({ catalogVersions, serviceProfiles, cancellationPolicies, quotes, onCreate, onClose }) {
   const [form, setForm] = useState({
     catalog_version_id: catalogVersions[0]?.id || "", service_profile_id: "", cancellation_policy_id: "",
-    currency: "USD", billing_classification: "commercial", billing_source: "direct_zoikostream", quote_id: "",
+    // Empty, not "USD" — an order's currency is a commercial fact, not a default (see NewQuoteModal).
+    currency: "", billing_classification: "commercial", billing_source: "direct_zoikostream", quote_id: "",
   });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const acceptedQuotes = quotes.filter((q) => q.status === "accepted");
   return (
-    <ActionModal title="New order" onClose={onClose} disabled={!form.catalog_version_id}
+    <ActionModal title="New order" onClose={onClose}
+      disabled={!form.catalog_version_id || form.currency.trim().length !== 3}
       onSubmit={() => onCreate({
         catalog_version_id: form.catalog_version_id,
         service_profile_id: form.service_profile_id || null,
