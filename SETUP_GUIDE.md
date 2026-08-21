@@ -180,3 +180,86 @@ GET    /dashboard/platform/stats  → Platform-wide stats (super_admin only)
 **Backend:** ✅ Running on localhost:8000
 **Frontend:** Ready for testing on localhost:5173+
 
+
+---
+
+## Stripe Payment Provider Setup (Phase 4A/4B)
+
+Stripe is an **adapter behind the existing provider-neutral payment abstraction** — it is not
+a second billing system. The commercial domain (catalog → order → invoice → payment) stays
+authoritative; Stripe only processes an amount the domain has already approved.
+
+**Test mode only.** Do not put live credentials in any environment yet.
+
+### Environment variables
+
+All three live in `.env` (gitignored, never committed). See `.env.example` for placeholders.
+
+| Variable | Secret? | Purpose |
+|---|---|---|
+| `STRIPE_SECRET_KEY` | **Yes — server only** | `sk_test_...` Authorizes API calls to Stripe. |
+| `STRIPE_PUBLISHABLE_KEY` | No | `pk_test_...` Safe for the browser. Used by the payment UI only (Phase 4C). |
+| `STRIPE_WEBHOOK_SECRET` | **Yes — server only** | `whsec_...` Verifies webhook signatures. |
+
+Get the first two from https://dashboard.stripe.com/test/apikeys
+
+### Fail-closed behaviour
+
+The application starts fine with all three blank. But:
+
+- `STRIPE_SECRET_KEY` blank + Stripe requested → **configuration error**, never a silent
+  fallback to the simulated `mock` provider. A fake "authorized" against a real order is
+  worse than an outage.
+- `STRIPE_WEBHOOK_SECRET` blank → `POST /api/commercial/webhooks/stripe` returns **503** and
+  refuses every call rather than accepting an unverified payload.
+- An unknown provider name → **error**, never a fallback.
+
+### Webhook endpoint
+
+```
+POST /api/commercial/webhooks/stripe
+```
+
+Unauthenticated by necessity (Stripe calls it directly), so the **signature is the only trust
+boundary**. Verified against the exact raw request body via the Stripe SDK.
+
+### Local webhook testing
+
+The signing secret is produced by the Stripe CLI — you do not get it from the dashboard for
+local forwarding:
+
+```bash
+# 1. Install: https://stripe.com/docs/stripe-cli
+stripe login
+
+# 2. Forward events to the local endpoint. This prints a whsec_... value —
+#    paste it into STRIPE_WEBHOOK_SECRET in .env, then restart the backend.
+stripe listen --forward-to localhost:8000/api/commercial/webhooks/stripe
+
+# 3. In another terminal, fire test events:
+stripe trigger payment_intent.succeeded
+stripe trigger payment_intent.payment_failed
+stripe trigger charge.refunded
+```
+
+For a deployed environment: Stripe Dashboard → Developers → Webhooks → add endpoint
+`https://<your-host>/api/commercial/webhooks/stripe` → reveal the signing secret.
+
+### Running the tests
+
+The test suite needs **no Stripe credentials and no network**. Webhook tests sign their own
+payloads with a throwaway secret; adapter tests mock the SDK boundary.
+
+```bash
+cd server
+python -m pytest test_stripe_adapter.py -q     # provider adapter
+python -m pytest test_stripe_webhooks.py -q     # webhook + provider events
+python -m pytest test_payment_path.py -q        # provider-neutral payment path
+```
+
+### What Stripe deliberately does NOT decide
+
+Pricing (published `CatalogVersion`), tax (`EventOrder` tax determination), capacity
+(`CapacityPool`), seller identity (`SellerLegalEntity`), invoice totals, and event go-live
+readiness. Each is enforced by tests. A successful Stripe payment is **one input** to
+commercial readiness, never permission to set an event live.

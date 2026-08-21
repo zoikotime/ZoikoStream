@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+import api, { errMsg } from "../api";
 import {
   MessageSquare, CalendarDays, ArrowRight, UserCircle, Globe, Send, Lock,
   Building2, Code, ShieldCheck, FileText, Layers, Handshake, Headset, MoreHorizontal,
@@ -11,15 +12,10 @@ import { Logo, Dropdown } from "../ui";
 // page it comes from, and it carries the same dark hero over a light body.
 //
 // ── HOW IT SUBMITS ───────────────────────────────────────────────────────────────────────
-// There is no inquiry endpoint on this backend (routers/: admin, auth, commercial, dashboard,
-// events, live, organization — none of them accept a contact form), so the form composes a
-// mail to the events inbox and hands it to the visitor's mail client. That genuinely delivers
-// the inquiry today and adds no server surface.
-//
-// It is NOT a fake submit: nothing here shows a success state it cannot back up. If this
-// should capture leads server-side instead, the only change needed is `submit()` below — a
-// POST to a new public route that calls email.py's existing _send(). Everything else stays.
-const INBOX = "info@zoikostream.com";
+// Leads are captured SERVER-SIDE: submit() posts to POST /api/contact, which validates the
+// payload, rate-limits per IP, and hands delivery to email.py's existing Resend service. The
+// destination inbox lives in backend configuration (CONTACT_EMAIL) and is deliberately not
+// known to this file — the browser cannot name, see, or influence where an enquiry goes.
 const MAX_MESSAGE = 1500;
 
 // Topics route the inquiry to a team, so they are worded as the reason someone is writing
@@ -107,9 +103,24 @@ function Required() {
   return <span className="text-rose-500"> *</span>;
 }
 
+// Billing's plan cards link here as /contact?plan=Pro. Preselecting the commercial topic and
+// naming the plan in the message means the operator does not retype what they already clicked.
+// Read once during the first render — the query string does not change for the life of a mount.
+const seedFromPlan = (plan) => {
+  if (!plan) return EMPTY;
+  const name = plan.slice(0, 60);          // bounded: it ends up in a submitted message
+  return { ...EMPTY, topic: "procurement", message: `Requested plan: ${name}\n\n` };
+};
+
 export default function Contact() {
-  const [form, setForm] = useState(EMPTY);
+  const [params] = useSearchParams();
+  const [form, setForm] = useState(() => seedFromPlan(params.get("plan")));
   const [errors, setErrors] = useState({});
+  // Submission lifecycle. `sending` also guards against a double submit, so a second click
+  // (or an Enter keypress while the first request is in flight) cannot post twice.
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [sendError, setSendError] = useState("");
   const topicRef = useRef(null);
 
   const set = (key) => (value) => {
@@ -148,8 +159,20 @@ export default function Contact() {
     return Object.keys(next).length === 0;
   };
 
-  const submit = (e) => {
+  /** Posts the enquiry to our own API.
+   *
+   *  This used to hand the submission to the operating system's registered mail handler by
+   *  navigating to a mail-protocol URL. On a domain whose mail is hosted externally, that
+   *  dropped the visitor onto the mail host's sign-in page — from inside the product it looked
+   *  like ZoikoStream had redirected them somewhere third-party, and the enquiry was never
+   *  actually sent unless they finished composing it themselves. It now stays on our own API.
+   *
+   *  The destination inbox is NOT sent: the backend resolves it from configuration, and its
+   *  schema rejects a payload that tries to name one.
+   */
+  const submit = async (e) => {
     e.preventDefault();
+    if (sending) return;                    // belt and braces alongside the disabled button
     if (!validate()) {
       // Send focus to the first problem rather than leaving the operator to hunt for the
       // red text on a two-column form.
@@ -158,18 +181,28 @@ export default function Contact() {
     }
     const topicLabel = TOPICS.find(([v]) => v === form.topic)?.[1] || form.topic;
     const country = COUNTRIES.find(([code]) => code === form.country)?.[1] || form.country;
-    const body = [
-      `Name: ${form.first.trim()} ${form.last.trim()}`,
-      `Work email: ${form.email.trim()}`,
-      `Organization: ${form.org.trim() || "—"}`,
-      `Country / region: ${country}`,
-      `Topic: ${topicLabel}`,
-      "",
-      form.message.trim(),
-    ].join("\n");
-    window.location.href = `mailto:${INBOX}?subject=${encodeURIComponent(
-      `[${topicLabel}] Inquiry from ${form.first.trim()} ${form.last.trim()}`
-    )}&body=${encodeURIComponent(body)}`;
+    setSending(true);
+    setSendError("");
+    try {
+      await api.post("/contact", {
+        first: form.first.trim(),
+        last: form.last.trim(),
+        email: form.email.trim(),
+        org: form.org.trim(),
+        country,
+        topic: topicLabel,
+        message: form.message.trim(),
+      });
+      setSent(true);
+      setForm(EMPTY);                       // a delivered message should not sit in the form
+      setErrors({});
+    } catch (err) {
+      // errMsg surfaces the API's own detail (e.g. the 429 wait-a-moment text) and falls back
+      // to a generic line — never a raw exception or a stack.
+      setSendError(errMsg(err));
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -349,14 +382,38 @@ export default function Contact() {
 
           <button
             type="submit"
-            className="group mt-6 inline-flex w-full items-center justify-center gap-2.5 rounded-xl bg-gradient-to-r from-teal-500 to-blue-600 px-6 py-3.5 text-[15px] font-semibold text-white shadow-md shadow-blue-600/20 transition-all duration-200 hover:from-teal-400 hover:to-blue-500 hover:shadow-lg hover:shadow-blue-600/30 active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100"
+            disabled={sending}
+            data-testid="contact-submit"
+            className="group mt-6 inline-flex w-full items-center justify-center gap-2.5 rounded-xl bg-gradient-to-r from-teal-500 to-blue-600 px-6 py-3.5 text-[15px] font-semibold text-white shadow-md shadow-blue-600/20 transition-all duration-200 hover:from-teal-400 hover:to-blue-500 hover:shadow-lg hover:shadow-blue-600/30 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:from-teal-500 disabled:hover:to-blue-600 motion-reduce:transition-none motion-reduce:active:scale-100"
           >
             <Send
               className="h-[18px] w-[18px] transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none motion-reduce:group-hover:translate-x-0"
               aria-hidden="true"
             />
-            Send inquiry
+            {sending ? "Sending…" : "Send inquiry"}
           </button>
+
+          {/* Outcome, in the page. aria-live so a screen reader hears it without moving focus
+              away from the form. */}
+          {sent && (
+            <p
+              role="status"
+              aria-live="polite"
+              data-testid="contact-success"
+              className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-[13px] leading-relaxed text-emerald-800"
+            >
+              Thanks! Your message has been sent. Our team will get back to you shortly.
+            </p>
+          )}
+          {sendError && (
+            <p
+              role="alert"
+              data-testid="contact-error"
+              className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-[13px] leading-relaxed text-rose-700"
+            >
+              {sendError} Your details are still here — you can try again.
+            </p>
+          )}
 
           {/* The Privacy Notice page went with the rest of the marketing site, so this names
               the document without linking to a 404. Point it at a URL and it becomes a link. */}

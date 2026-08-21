@@ -251,7 +251,10 @@ def get_plan_by_slug(db, slug) -> Plan | None:
 
 
 def list_plans(db) -> list[PlanOut]:
-    plans = db.scalars(select(Plan).order_by(Plan.price_monthly)).all()
+    # price_monthly is nullable (no approved price published yet), and ordering by a column
+    # that is NULL for every row is non-deterministic — fall back to name so the console and
+    # the Billing page always render the tiers in a stable order.
+    plans = db.scalars(select(Plan).order_by(Plan.price_monthly.nullslast(), Plan.name)).all()
     return [PlanOut.model_validate(p) for p in plans]
 
 
@@ -271,7 +274,14 @@ def _sub_out(s: Subscription) -> SubscriptionOut:
         id=s.id, org_id=s.org_id,
         organization_name=s.organization.name if s.organization else None,
         plan=s.plan.name if s.plan else None,
-        price_monthly=float(s.plan.price_monthly) if s.plan else None,
+        # Guard the price separately from the plan: price_monthly is nullable now, and
+        # float(None) raises. None here means "no approved price", which SubscriptionOut
+        # already renders as "—".
+        price_monthly=(
+            float(s.plan.price_monthly)
+            if s.plan and s.plan.price_monthly is not None
+            else None
+        ),
         status=s.status, seats=s.seats, started_at=s.started_at,
         current_period_end=s.current_period_end, trial_ends_at=s.trial_ends_at,
     )

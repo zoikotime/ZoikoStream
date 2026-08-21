@@ -423,6 +423,55 @@ def send_refund_credit_email(to: str, name: str, event_title: str, amount: str, 
     ))
 
 
+def _contact_html(name: str, email: str, org: str, country: str, topic: str, message: str) -> str:
+    """Internal inquiry notification. EVERY field is attacker-supplied, so every field is
+    escaped — this email is read by our own staff, and an unescaped <script>/<img onerror>
+    from a public form is a stored-XSS delivery vehicle aimed at us."""
+    rows = [("Name", name), ("Work email", email), ("Organization", org or "—"),
+            ("Country / region", country), ("Topic", topic)]
+    row_html = "".join(
+        f'<tr><td style="padding:8px 0;color:#888;white-space:nowrap;">{html.escape(k)}</td>'
+        f'<td style="padding:8px 0;text-align:right;">{html.escape(v)}</td></tr>'
+        for k, v in rows
+    )
+    # Newlines become <br> AFTER escaping, so the break markup cannot be smuggled in.
+    safe_message = html.escape(message).replace("\n", "<br>")
+    return _shell(f"""
+    {_header("New contact enquiry")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <table style="width:100%;border-collapse:collapse;font-size:14px;">{row_html}</table>
+      <div style="margin-top:20px;padding:16px;background:#f7f7f9;border-radius:6px;">
+        {safe_message}
+      </div>
+      <p style="margin-bottom:0;color:#888;font-size:13px;">
+        Sent from the ZoikoStream contact form. Reply directly to {html.escape(email)}.
+      </p>
+    </div>""")
+
+
+def send_contact_message_email(*, first: str, last: str, email: str, org: str, country: str,
+                                topic: str, message: str) -> None:
+    """Deliver a public contact-form enquiry to the configured internal inbox.
+
+    The recipient is settings.CONTACT_EMAIL and is NEVER derived from the request, so no
+    payload can retarget an enquiry to an arbitrary address. The submitter's address appears
+    only as escaped body text, never as a header.
+
+    Subject is built from sanitized values: CR/LF are stripped because a newline inside a
+    header is the classic header-injection primitive (it would let a submitter append their
+    own Bcc:). Length is capped so a long name cannot push the real subject out of view.
+    """
+    name = f"{first} {last}".strip()
+    # Strip anything that could terminate a header line, then bound the length.
+    safe_subject_name = " ".join(name.replace("\r", " ").replace("\n", " ").split())[:80]
+    safe_subject_topic = " ".join(topic.replace("\r", " ").replace("\n", " ").split())[:40]
+    _send(
+        settings.CONTACT_EMAIL,
+        f"[{safe_subject_topic}] Enquiry from {safe_subject_name}",
+        _contact_html(name, email, org, country, topic, message),
+    )
+
+
 def send_welcome_email(to: str, name: str) -> None:
     _send(to, "Welcome to ZoikoStream 🎉", _welcome_html(name))
 

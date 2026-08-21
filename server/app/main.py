@@ -19,6 +19,7 @@ from .routers.events import router as events_router
 from .routers.live import router as live_router
 from .routers.commercial import router as commercial_router
 from .routers.deliveries import router as deliveries_router
+from .routers.contact import router as contact_router
 from .security import ALGORITHM
 from .services import bus
 from .services import platform_settings
@@ -160,7 +161,8 @@ async def maintenance_gate(request: Request, call_next):
 # spelled exactly like the router prefixes. Without the namespace a hard refresh on any of
 # those pages hits the API and gets JSON instead of the app.
 for router in (auth_router, dashboard_router, admin_router, organization_router,
-               events_router, live_router, commercial_router, deliveries_router):
+               events_router, live_router, commercial_router, deliveries_router,
+               contact_router):
     app.include_router(router, prefix="/api")
 
 

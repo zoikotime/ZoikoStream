@@ -96,11 +96,99 @@ EXCEPTION_TYPES = (
 )
 EXCEPTION_STATUSES = ("requested", "approved", "declined", "expired")
 
+SELLER_ENTITY_STATUSES = ("draft", "active", "suspended", "retired")
+CAPACITY_POOL_STATUSES = ("draft", "active", "suspended", "retired")
+
+# ── Provider event processing lifecycle (doc P1 "raw evidence retention") ────────────────
+# RECEIVED -> PROCESSING -> PROCESSED | REJECTED | FAILED, plus REPLAYED for a redelivery of
+# an event whose identity we have already seen. REJECTED is a deliberate refusal (illegal
+# state transition, amount/currency mismatch); FAILED is an unexpected processing error.
+# Both are retained — a provider event is never deleted (doc: financial evidence is additive).
+PROVIDER_EVENT_STATUSES = ("received", "processing", "processed", "rejected", "failed", "replayed")
+
+# ── Canonical Payment state machine (doc Section 28) ─────────────────────────────────────
+# The webhook path used to apply `payment.state = state_map[event_type]` from ANY current
+# state, so a provider event could drive failed -> paid or refunded -> paid. This graph is
+# the single authority on what may follow what; crud.payment_transition_error is the only
+# gate, used by both the human (capture/refund) and provider (webhook) paths.
+#
+# Same-state transitions are handled separately as idempotent no-ops (a redelivered
+# "captured" event must not capture twice) — they are deliberately NOT listed here, because
+# "allowed" and "already there, do nothing" are different answers.
+PAYMENT_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    # Provider needs more from the payer (3DS/SCA-style) before it can authorize.
+    "requires_action": ("pending", "failed"),
+    # Authorized but NOT settled (doc D3: authorization is not settlement).
+    "pending": ("paid", "partially_paid", "failed", "requires_action"),
+    # Settled in full.
+    "paid": ("partially_paid", "part_refunded", "refunded", "disputed", "reversed"),
+    # Settled short of the full amount (doc D6: never collapse partial into PAID).
+    "partially_paid": ("paid", "part_refunded", "refunded", "disputed", "reversed"),
+    "part_refunded": ("refunded", "disputed", "reversed"),
+    # A dispute is decided by the card network, not by us: won -> funds retained, lost ->
+    # funds clawed back (doc P4).
+    "disputed": ("paid", "part_refunded", "reversed"),
+    # Money returned or clawed back. `refunded -> disputed` stays reachable because a
+    # cardholder can still dispute a transaction that was already refunded.
+    "refunded": ("disputed",),
+    "reversed": ("disputed",),
+    # Settlement money we could not attribute to a Payment. Only a controlled reconciliation
+    # may move it (crud.match_settlement) — never a provider event.
+    "unmatched": (),
+    # Terminal: a declined authorization cannot later become a successful payment. This is
+    # the transition the old code silently permitted.
+    "failed": (),
+}
+
 _MONEY = Numeric(12, 2)
 
 
 def _id_col() -> Mapped[uuid.UUID]:
     return mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+
+# ── L. Seller legal entity registry (doc L1, P2) ────────────────────────────────────────
+
+class SellerLegalEntity(Base):
+    """The Zoiko selling entity that legally invoices a purchaser (doc L1:
+    "seller_legal_entity_id is mandatory on issued financial documents"; doc P2: "Provider
+    merchant/account ID must match seller_legal_entity_id").
+
+    Previously `seller_legal_entity_id` was a bare configuration string defaulting to
+    "zoiko_tech_inc" with no registry behind it, so the application silently assumed one
+    seller forever and nothing validated the value. This table is that registry.
+
+    `code` — not the UUID — is what CommercialAccount/Invoice reference, so the existing
+    string values ("zoiko_tech_inc") keep resolving once Finance registers them; no data
+    backfill was required to introduce this.
+
+    Ships EMPTY and rows default to status="draft". Only an ACTIVE entity may issue an
+    invoice (crud.resolve_seller_entity), so verified legal/tax/merchant identity is a
+    deliberate Finance action, never a code default (doc Section 26 "Merchant & finance":
+    "Zoiko Tech Inc. selling/merchant identity, bank/payout and invoice details verified").
+    No legal or tax facts are invented here.
+    """
+
+    __tablename__ = "seller_legal_entities"
+    __table_args__ = (UniqueConstraint("code", name="uq_seller_legal_entity_code"),)
+
+    id: Mapped[uuid.UUID] = _id_col()
+    code: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    legal_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    country: Mapped[str | None] = mapped_column(String(80))
+    # Transaction currency facts. NULL = not yet established; doc L2 requires one currency
+    # per legal financial document, so this constrains what an order under this entity may use.
+    default_currency: Mapped[str | None] = mapped_column(String(3))
+    supported_currencies: Mapped[list | None] = mapped_column(JSON)
+    # Tax registration metadata only — the identifiers themselves are Finance/Tax's to supply.
+    tax_registration_id: Mapped[str | None] = mapped_column(String(80))
+    tax_registration_country: Mapped[str | None] = mapped_column(String(80))
+    invoice_number_prefix: Mapped[str | None] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    effective_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 # ── A. Commercial account (doc Section 5/A) ─────────────────────────────────────────────
@@ -116,8 +204,11 @@ class CommercialAccount(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
     billing_classification: Mapped[str] = mapped_column(String(20), default="internal", nullable=False)
     billing_source: Mapped[str] = mapped_column(String(30), default="direct_zoikostream", nullable=False)
-    # No legal-entity registry exists yet (doc L1) — stored as a config string until one does.
-    seller_legal_entity_id: Mapped[str] = mapped_column(String(80), default="zoiko_tech_inc", nullable=False)
+    # References SellerLegalEntity.code (doc L1). Nullable with NO default: an account must
+    # be assigned a REGISTERED, ACTIVE seller entity before it can be invoiced. It used to
+    # default to the literal "zoiko_tech_inc" with no registry behind it, which silently
+    # assumed one seller forever — crud.resolve_seller_entity now fails closed instead.
+    seller_legal_entity_id: Mapped[str | None] = mapped_column(String(80), index=True)
     billing_contact_name: Mapped[str | None] = mapped_column(String(120))
     billing_contact_email: Mapped[str | None] = mapped_column(String(255))
     tax_id: Mapped[str | None] = mapped_column(String(80))
@@ -238,7 +329,12 @@ class Quote(Base):
     catalog_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("catalog_versions.id"), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     amount: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
-    tax_amount: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
+    # NULL = tax not determined for this quote (option A of doc L4's two readings: a quote is
+    # a non-binding estimate, so it may be issued before Finance determines tax — but it must
+    # then say so rather than show a silent 0.00). It previously defaulted to 0, which
+    # presented an undetermined tax as a quoted zero. Nothing downstream copies this value:
+    # the order carries its own determination, and issue_invoice gates on that.
+    tax_amount: Mapped[Decimal | None] = mapped_column(_MONEY)
     commercial_notes: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -273,7 +369,35 @@ class EventOrder(Base):
     order_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     subtotal: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
-    tax_amount: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
+
+    # ── Tax determination (doc L4/L6, Section 27) ──────────────────────────────────────
+    # tax_amount is NULL until a determination is recorded. It used to be `default=0,
+    # nullable=False`, which made "Finance has not determined tax yet" structurally
+    # indistinguishable from "no tax is due" — and since nothing ever computed it, every
+    # order and every invoice carried zero tax by construction. NULL now means UNDETERMINED
+    # and crud.issue_invoice refuses to issue against it (doc L4: "Missing tax determination
+    # blocks invoice issuance for live commercial events").
+    #
+    # A legitimate zero-tax outcome is still fully representable — but only explicitly, as a
+    # determination whose tax_amount is 0.00 with a real tax_treatment (exempt, zero-rated,
+    # reverse-charge, out-of-scope, ...). The treatment vocabulary is Finance/Tax's to define,
+    # not this module's, so no set of codes is hard-coded here (doc L6: no permanent
+    # free-text tax overrides; determination is versioned and evidenced).
+    tax_amount: Mapped[Decimal | None] = mapped_column(_MONEY)
+    tax_treatment: Mapped[str | None] = mapped_column(String(60))
+    tax_jurisdiction: Mapped[str | None] = mapped_column(String(80))
+    tax_source: Mapped[str | None] = mapped_column(String(80))       # who/what determined it
+    tax_rule_version: Mapped[str | None] = mapped_column(String(60))  # versioned rule basis
+    # Mandatory when tax_amount == 0 (crud.record_tax_determination): a zero must always
+    # carry the reason it is zero — exempt, zero-rated, reverse-charge, out-of-scope — so
+    # "0.00 because Finance determined so" can never be confused with "0.00 by omission".
+    tax_exemption_reason: Mapped[str | None] = mapped_column(String(200))
+    tax_effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tax_determined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tax_determined_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+
+    # Provisional while tax is undetermined: equals subtotal until a determination lands,
+    # then recomputed as subtotal + tax_amount (crud.record_tax_determination).
     total_amount: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
     risk_tier: Mapped[str] = mapped_column(String(4), default="r0", nullable=False)
     billing_classification: Mapped[str] = mapped_column(String(20), default="commercial", nullable=False)
@@ -310,6 +434,12 @@ class EventOrderLine(Base):
     unit_price: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
     line_total: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
     tax_treatment: Mapped[str | None] = mapped_column(String(40))
+    # Frozen alongside the price so a line's commercial basis is fully self-describing:
+    # catalog_version (via the parent order) + service_code + unit_price + currency (parent
+    # order, one per document per doc L2) + unit_basis + tax_treatment. Without this the
+    # "per_event vs per_hour" meaning of a price could only be recovered from a CatalogLine
+    # that may since have been edited.
+    unit_basis: Mapped[str | None] = mapped_column(String(30))
     is_addon: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_complimentary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     entitlement_effect: Mapped[str | None] = mapped_column(String(80))
@@ -318,27 +448,111 @@ class EventOrderLine(Base):
     event_order: Mapped["EventOrder"] = relationship(back_populates="lines")
 
 
+class EventOrderVersion(Base):
+    """Immutable snapshot of an order's commercial state at one accepted version (doc
+    Section 27 `event_order_version`; doc Section 28: "Commercial corrections create new
+    versions/change orders; do not overwrite accepted history").
+
+    EventOrder.order_version was only ever a counter on a row that got mutated in place, so
+    the economics of version N were lost the moment version N+1 was applied. Each acceptance
+    (and each applied change order) now writes one row here and never touches an earlier one.
+
+    `snapshot` holds the full order header + every line as at this version, so historical
+    truth survives even if a line row is later altered by some future code path.
+    """
+
+    __tablename__ = "event_order_versions"
+    __table_args__ = (UniqueConstraint("event_order_id", "order_version", name="uq_event_order_version"),)
+
+    id: Mapped[uuid.UUID] = _id_col()
+    event_order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_orders.id"), nullable=False, index=True)
+    order_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # NULL = the original acceptance; set = the change order that produced this version.
+    change_order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("change_orders.id"))
+    catalog_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("catalog_versions.id"))
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    subtotal: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
+    tax_amount: Mapped[Decimal | None] = mapped_column(_MONEY)
+    total_amount: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CapacityPool(Base):
+    """Finite, time-bounded inventory of one constrained resource (doc C4: "Can an event be
+    oversold? No. The system must fail closed when capacity is unavailable"; doc Section 4
+    P0 blocker #8 "Implement capacity reservation and release").
+
+    This is the missing authority the previous phase's audit flagged: CapacityReservation
+    recorded intent faithfully but had nothing to check against, so oversubscription was
+    undetectable. A reservation now requires a matching ACTIVE pool whose window contains
+    the requested window, and is granted only under a row lock on that pool.
+
+    Scoped by seller legal entity + resource type + region + time window, because live event
+    capacity is a time-specific resource (an operator booked 14:00-16:00 Tuesday is not
+    available to another event in that window). Deliberately NOT a global counter.
+
+    `total_capacity` is the only stored figure. Reserved/consumed/available are DERIVED from
+    the reservation rows (crud.pool_utilisation) rather than denormalized counters, so the
+    two can never drift apart — the reservations are the single source of truth.
+
+    Ships EMPTY with status defaulting to "draft": with no approved pool, every capacity
+    request fails closed. No capacity number is assumed anywhere (the previous
+    DEFAULT_CAPACITY_ENVELOPE = 500 constant is gone and is not replaced here).
+    """
+
+    __tablename__ = "capacity_pools"
+
+    id: Mapped[uuid.UUID] = _id_col()
+    seller_legal_entity_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    resource_type: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    region: Mapped[str | None] = mapped_column(String(20))
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    total_capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class CapacityReservation(Base):
     """UNREQUESTED -> SOFT_HELD -> HARD_RESERVED -> CONSUMED | RELEASED | EXPIRED (doc
     Section 28). CONFIRMED requires a HARD_RESERVED row for every resource_type the
     service profile requires (doc C3) — the capacity service is authoritative, not a
-    courtesy count."""
+    courtesy count.
+
+    `quantity` is the RESERVED amount (what the pool has committed); `requested_quantity`
+    records what was asked for, so a partial grant or a refusal is auditable rather than
+    silently rewritten. Rows that hold inventory are exactly those in SOFT_HELD,
+    HARD_RESERVED and CONSUMED — see crud.pool_utilisation.
+    """
 
     __tablename__ = "capacity_reservations"
 
     id: Mapped[uuid.UUID] = _id_col()
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
     event_order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("event_orders.id"))
+    # Which accepted order version authorised this reservation (doc Section 27 "source order").
+    event_order_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("event_order_versions.id"))
+    # NULL only for legacy rows created before pools existed; new reservations always bind
+    # to the pool their inventory came out of.
+    capacity_pool_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("capacity_pools.id"), index=True)
     resource_type: Mapped[str] = mapped_column(String(60), nullable=False)  # e.g. production_operator, dual_recording
     window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_quantity: Mapped[int | None] = mapped_column(Integer)
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     region: Mapped[str | None] = mapped_column(String(20))
     state: Mapped[str] = mapped_column(String(20), default="unrequested", nullable=False)
     soft_hold_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     hard_reserved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     release_reason: Mapped[str | None] = mapped_column(String(200))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped["Event"] = relationship()
@@ -359,6 +573,12 @@ class PaymentSchedule(Base):
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     amount: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
     required_before_ready: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # How much captured money is attributed to this milestone. Previously absent, so
+    # _reconcile_schedule marked the oldest milestone "satisfied" on ANY capture amount —
+    # a $1 capture satisfied a $50,000 deposit (CF-5). `satisfied` now requires
+    # allocated_amount >= amount, and a short allocation leaves the milestone unsatisfied
+    # with the partial figure visible (doc D6: outstanding balance stays explicit).
+    allocated_amount: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="not_due", nullable=False)  # FINANCIAL_READINESS_STATES
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -369,7 +589,13 @@ class Invoice(Base):
     UPDATE to `total_amount` (doc Section 26 checklist)."""
 
     __tablename__ = "invoices"
-    __table_args__ = (UniqueConstraint("number", name="uq_invoice_number"),)
+    # Unique PER SELLER ENTITY, not globally (doc Section 3 "Invoice numbering": "Do not
+    # reuse invoice sequences across platform commercial accounts, Live Event orders or
+    # organizer/audience commerce"). Each legal entity keeps its own series, which is normal
+    # multi-entity accounting practice — so the constraint is the pair, and the allocator
+    # (InvoiceNumberSequence) is keyed the same way. The old global UNIQUE(number) made
+    # per-entity series impossible.
+    __table_args__ = (UniqueConstraint("seller_legal_entity_id", "number", name="uq_invoice_seller_number"),)
 
     id: Mapped[uuid.UUID] = _id_col()
     event_order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_orders.id"), nullable=False, index=True)
@@ -378,13 +604,143 @@ class Invoice(Base):
     number: Mapped[str] = mapped_column(String(60), nullable=False)  # e.g. ZST-LE-INV-000123
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     subtotal: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
-    tax_amount: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
+    # Stays NOT NULL: an issued invoice always has a determined tax amount, because
+    # crud.issue_invoice refuses to issue while the order's determination is NULL. The
+    # accompanying facts are SNAPSHOTTED off the order rather than read through the FK — an
+    # issued invoice is immutable (doc Section 26), so a later re-determination on the order
+    # must not retroactively rewrite the tax basis of a document already sent to a customer.
+    tax_amount: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
+    tax_treatment: Mapped[str | None] = mapped_column(String(60))
+    tax_jurisdiction: Mapped[str | None] = mapped_column(String(80))
+    tax_source: Mapped[str | None] = mapped_column(String(80))
+    tax_rule_version: Mapped[str | None] = mapped_column(String(60))
+    tax_effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tax_exemption_reason: Mapped[str | None] = mapped_column(String(200))
     total_amount: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
     issue_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)  # draft|issued|paid|void
     document_reference: Mapped[str | None] = mapped_column(String(200))  # hash/pointer to rendered doc
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProviderEvent(Base):
+    """One inbound payment-provider event, with its raw evidence (doc P1: "Use provider
+    adapters with normalized payment states and raw evidence retention").
+
+    This is the idempotency boundary for everything a provider tells us. Before it existed,
+    the webhook handler deduplicated on `Payment.idempotency_key` — and then OVERWROTE that
+    column, destroying the key `authorize_payment` deduplicates on, so replaying an
+    authorization created a SECOND Payment row for the same order (CF-1).
+
+    Identity is `(provider, provider_event_id)` with a DATABASE unique constraint, not an
+    application-level existence check: two concurrent deliveries of the same event race, and
+    only the database can arbitrate. crud.ingest_provider_event uses INSERT ... ON CONFLICT
+    DO NOTHING so the loser of that race is told "already known" instead of double-applying.
+
+    Provider-neutral on purpose: no provider-specific column exists, and `payload` holds
+    whatever shape the provider sent. Nothing here assumes any particular processor's event
+    names, statuses or payload schema.
+
+    Never deleted. A rejected or failed event is retained as evidence of what was received
+    and why it was refused.
+    """
+
+    __tablename__ = "provider_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_event_id", name="uq_provider_event_identity"),
+    )
+
+    id: Mapped[uuid.UUID] = _id_col()
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    # The provider's own event identifier — the unit of idempotency. Distinct from
+    # provider_payment_ref, which identifies the PAYMENT an event is about; one payment
+    # legitimately produces many events.
+    provider_event_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    # What the payment ref in the payload pointed at, resolved at processing time. NULL when
+    # nothing matched (see UnmatchedSettlement).
+    payment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payments.id"), index=True)
+    provider_payment_ref: Mapped[str | None] = mapped_column(String(120), index=True)
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Raw provider evidence. Payment credentials are never stored (doc P6/R1) — the ingest
+    # path redacts known-sensitive keys before this is written (crud._redact_payload).
+    payload: Mapped[dict | None] = mapped_column(JSON)
+    # sha256 of the exact bytes received, computed BEFORE redaction, so the stored evidence
+    # can still be tied back to what the provider actually signed.
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    signature_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    processing_status: Mapped[str] = mapped_column(String(20), default="received", nullable=False)
+    processing_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_error: Mapped[str | None] = mapped_column(Text)
+    # What the event actually did, so a replay can return the ORIGINAL outcome rather than
+    # recomputing one: {"applied": bool, "from_state": ..., "to_state": ..., "reason": ...}
+    processing_result: Mapped[dict | None] = mapped_column(JSON)
+    # Ties this event to the Payment/Invoice/Order/Event/AuditLog chain it touched
+    # (doc Section 30 "Event correlation").
+    correlation_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class UnmatchedSettlement(Base):
+    """Provider settlement money we could not attribute to a Payment (doc P5: "Route to
+    reconciliation exception queue; never auto-allocate by guess").
+
+    Previously such an event returned None and nothing was persisted — the settlement simply
+    vanished, and `Payment.state == "unmatched"` was never written by any code path, so the
+    reconciliation queue that reads it was permanently empty (CF-8).
+
+    Deliberately its own table rather than a ReconciliationException: that model carries a
+    reference to an object that already exists, whereas the whole problem here is that no
+    such object could be found. This holds the provider's money facts until a human matches
+    them, and matching is an explicit, audited action — never a guess.
+    """
+
+    __tablename__ = "unmatched_settlements"
+
+    id: Mapped[uuid.UUID] = _id_col()
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    provider_payment_ref: Mapped[str | None] = mapped_column(String(120), index=True)
+    provider_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("provider_events.id"))
+    event_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    amount: Mapped[Decimal | None] = mapped_column(_MONEY)
+    currency: Mapped[str | None] = mapped_column(String(3))
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # open -> matched | written_off. Never auto-advanced.
+    status: Mapped[str] = mapped_column(String(20), default="open", nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    matched_payment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payments.id"))
+    matched_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    matched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_notes: Mapped[str | None] = mapped_column(Text)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class InvoiceNumberSequence(Base):
+    """Atomic invoice-number allocator, one row per (ledger, seller legal entity).
+
+    Replaces a read-then-increment over the invoices table ("SELECT the latest, parse its
+    trailing digits, add one"), which handed the same number to two concurrent callers and
+    turned the loser into an unhandled IntegrityError 500.
+
+    Allocation is a single INSERT ... ON CONFLICT DO UPDATE ... RETURNING (see
+    crud._allocate_invoice_number), so the increment and the read of the allocated value
+    happen in one atomic statement under Postgres row locking. No application-level lock,
+    no retry loop, and no gap-free guarantee (a rolled-back transaction burns a number,
+    which is normal and preferable to reusing one).
+    """
+
+    __tablename__ = "invoice_number_sequences"
+
+    # f"{ledger}:{seller_legal_entity_id}" — matches Invoice's UNIQUE(seller entity, number).
+    scope: Mapped[str] = mapped_column(String(140), primary_key=True)
+    last_value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class Payment(Base):
@@ -397,13 +753,27 @@ class Payment(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_payment_idempotency_key"),
         UniqueConstraint("provider", "provider_payment_ref", name="uq_payment_provider_ref"),
+        # A provider checkout session drives at most ONE payment. This is the correlation
+        # authority for the hosted-checkout flow, so the database — not application code —
+        # guarantees a session can never fan out to two payment rows.
+        UniqueConstraint("provider", "checkout_session_ref",
+                         name="uq_payment_provider_checkout_session"),
     )
 
     id: Mapped[uuid.UUID] = _id_col()
     event_order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_orders.id"), nullable=False, index=True)
     invoice_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("invoices.id"))
     provider: Mapped[str] = mapped_column(String(30), default="mock", nullable=False)
-    provider_payment_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    # NULLABLE on purpose. A provider-hosted checkout session legitimately has no payment
+    # reference until the payer submits — Stripe reports `payment_intent: null` on a freshly
+    # created Checkout Session. The reference is adopted later from a verified provider event.
+    # Both unique constraints above stay correct because Postgres treats NULLs as distinct,
+    # so many awaiting-payer rows coexist while a bound reference is still unique per provider.
+    provider_payment_ref: Mapped[str | None] = mapped_column(String(120))
+    # The hosted-checkout session this payment came from, when it came from one. Populated at
+    # session creation and never changed afterwards: it is how an inbound event is matched
+    # back to this payment before any payment reference exists.
+    checkout_session_ref: Mapped[str | None] = mapped_column(String(120))
     method_type: Mapped[str | None] = mapped_column(String(30))
     amount: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
@@ -594,6 +964,16 @@ class CommercialException(Base):
     status: Mapped[str] = mapped_column(String(20), default="requested", nullable=False)
     expiry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     evidence: Mapped[dict | None] = mapped_column(JSON)
+    # Which specific gate this exception overrides (e.g. "financial_readiness"). An exception
+    # is narrowly scoped by (exception_type, overridden_gate, order/event) — it is never a
+    # blanket "skip payment" switch, and the readiness evaluator only consults an exception
+    # whose scope matches the gate that is actually failing.
+    overridden_gate: Mapped[str | None] = mapped_column(String(60))
+    # Readiness verdict at request time, so the audit answers "what was overridden".
+    previous_state: Mapped[str | None] = mapped_column(String(60))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_notes: Mapped[str | None] = mapped_column(Text)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

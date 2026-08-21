@@ -7,9 +7,17 @@ import { Logo } from "../ui";
 // Create Organization / Forgot Password / Accept Invitation all share the same framing
 // without duplicating it.
 
+// Capability statements only — no numeric service commitments. The "99.99% uptime SLA"
+// that used to sit on the second row was an unsupported public promise: ZST-LE-COM-001 F5
+// ("No hard-coded SLA percentages or recovery times in product copy or code") and F2/F3
+// (public claims must not exceed the signed order and published capability). Availability
+// and recovery figures are order/service-profile controlled and need Commercial/Operations
+// approval before they may be advertised — they do not belong in a login page constant.
+// The live, MEASURED uptime figures on SupportStatus/DeveloperPlatform are a different
+// thing and stay: those render real monitoring data rather than a promise.
 const FEATURES = [
   [ShieldCheck, "Enterprise-grade security", "SOC 2 Type II · SSO · End-to-end encryption"],
-  [Globe, "Global delivery at scale", "Low-latency CDN · 99.99% uptime SLA"],
+  [Globe, "Global delivery at scale", "Low-latency CDN · Multi-region delivery"],
   [BarChart3, "Real-time analytics", "Real-time insights · Deep engagement metrics"],
 ];
 

@@ -7,6 +7,7 @@
 // pretend to run a checkout: no fake card CRUD, no fake plan-switch, no invented invoices.
 // Changing plans is still a real action, just not a self-serve one yet — contact support.
 import { useMemo } from "react";
+import { Link } from "react-router-dom";
 import {
   FiClock, FiHardDrive, FiUsers, FiCalendar, FiCreditCard, FiCheck, FiMail, FiFileText,
 } from "react-icons/fi";
@@ -104,8 +105,22 @@ export default function OrganizationBilling() {
                 <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2">
                   {currentPlan && (
                     <span>
-                      <span className="text-3xl font-bold text-violet-600 dark:text-violet-400">${currentPlan.price_monthly}</span>
-                      <span className="text-sm text-slate-400"> /month</span>
+                      {currentPlan.pricing_state === "PUBLISHED" ? (
+                        <>
+                          <span className="text-3xl font-bold text-violet-600 dark:text-violet-400">${currentPlan.price_monthly}</span>
+                          <span className="text-sm text-slate-400"> /month</span>
+                        </>
+                      ) : (
+                        /* pricing_state is derived server-side (schemas/admin.PlanOut) so the
+                           three commercial states stay distinct: CUSTOM means "quote
+                           required", NOT_PUBLISHED means no approved price exists yet.
+                           Neither is $0 — showing a number here would invent a price. */
+                        <span className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                          {currentPlan.pricing_state === "CUSTOM"
+                            ? "Custom pricing — contact sales for a quote"
+                            : "Pricing not currently published — contact sales"}
+                        </span>
+                      )}
                     </span>
                   )}
                   {(ent?.trial_ends_at || ent?.current_period_end) && (
@@ -117,12 +132,19 @@ export default function OrganizationBilling() {
                   )}
                 </div>
               </div>
-              <a
-                href="mailto:support@zoikostream.com?subject=Change%20my%20plan"
+              {/* In-app contact form. This used to be a mail-protocol link, which handed the
+                  click to whatever mail handler the operating system had registered — on a
+                  domain whose mail is hosted externally that landed the operator on the mail
+                  host's sign-in page, which from inside the product looked like ZoikoStream
+                  had redirected them somewhere unexpected. Plan changes are still a sales
+                  conversation (there is no self-service subscription billing behind this
+                  page), but the conversation now starts and stays on a ZoikoStream page. */}
+              <Link
+                to="/contact"
                 className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-100"
               >
                 <FiMail className="text-base" /> Contact sales to change plan
-              </a>
+              </Link>
             </div>
           </Card>
 
@@ -176,8 +198,16 @@ export default function OrganizationBilling() {
                       {current && <Badge status="info">Current</Badge>}
                     </div>
                     <p className="mt-3">
-                      <span className="text-2xl font-bold text-slate-900 dark:text-white">${p.price_monthly}</span>
-                      <span className="text-sm text-slate-400"> /mo</span>
+                      {p.pricing_state === "PUBLISHED" ? (
+                        <>
+                          <span className="text-2xl font-bold text-slate-900 dark:text-white">${p.price_monthly}</span>
+                          <span className="text-sm text-slate-400"> /mo</span>
+                        </>
+                      ) : (
+                        <span className="text-sm font-medium text-slate-400">
+                          {p.pricing_state === "CUSTOM" ? "Contact Sales" : "Not currently published"}
+                        </span>
+                      )}
                     </p>
                     <ul className="mt-3 flex-1 space-y-1.5">
                       {(p.features || []).map((f) => (
@@ -187,12 +217,15 @@ export default function OrganizationBilling() {
                       ))}
                     </ul>
                     {!current && (
-                      <a
-                        href={`mailto:support@zoikostream.com?subject=Switch%20to%20${encodeURIComponent(p.name)}%20plan`}
+                      <Link
+                        // Carries the plan through so the contact form opens with the
+                        // commercial topic chosen and the plan already named in the message.
+                        to={`/contact?plan=${encodeURIComponent(p.name)}`}
+                        aria-label={`Contact us to switch to the ${p.name} plan`}
                         className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
                       >
                         Contact us to switch
-                      </a>
+                      </Link>
                     )}
                   </div>
                 );

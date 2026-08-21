@@ -44,6 +44,7 @@ from ..models import (
     LiveRecording,
     Organization,
     Subscription,
+    User,
 )
 from . import bus, livekit, platform_settings, validation, webhooks
 from . import moderation as mod
@@ -357,10 +358,46 @@ async def _apply_settings(ctx, patch: dict) -> dict:
 
 # ── broadcast lifecycle ───────────────────────────────────────────────────────
 
+def _golive_gate(db, ctx) -> str | None:
+    """Commercial readiness check for the socket go-live path — the same authority the HTTP
+    lifecycle route uses. Returns a blocking message, or None to proceed.
+
+    An event already live/degraded is a reconnect or a duplicate click, not a new escalation,
+    so it is not re-gated (that would refuse a legitimate recovery mid-broadcast).
+    """
+    ev = db.get(Event, ctx.event_id)
+    if ev is None:
+        return "Event not found"
+    if ev.status in ("live", "degraded"):
+        return None
+    evaluation = commercial_crud.golive_readiness(db, ev)
+    commercial_crud.audit_golive_decision(
+        db, ev, evaluation, actor=db.get(User, ctx.user_id), target_state="live",
+    )
+    if evaluation["ready"]:
+        return None
+    return "Cannot go live — " + "; ".join(evaluation["blocking_reasons"])
+
+
 async def _golive(ctx, payload):
     """Start (or restart) the broadcast. Idempotent: clicking Go Live twice does not create
-    a second session or reset the elapsed clock."""
+    a second session or reset the elapsed clock.
+
+    Commercial readiness is enforced BEFORE anything is created (ZST-LE-COM-001 I3, CF-3).
+    This handler used to write `ev.status = "live"` straight from published/scheduled with no
+    readiness call, which meant an R2 event with an unpaid required milestone and no reserved
+    capacity could go live from the host console — bypassing the gate the PATCH lifecycle
+    route enforced. Both paths now consult the same authority,
+    crud.commercial.golive_block_reason.
+    """
     now = datetime.now(timezone.utc)
+
+    # Gate first: no LiveKit room, no BroadcastSession, no side effects at all until the
+    # event is commercially allowed to deliver.
+    gate = await mod.tx(lambda db: _golive_gate(db, ctx))
+    if gate is not None:
+        return [("host", "broadcast.error", {"error": gate, "code": "commercial_readiness_blocked"})]
+
     # Create the room first so a publisher has somewhere to join.
     enforced = await livekit.ensure_room(ctx.room)
 
@@ -379,7 +416,8 @@ async def _golive(ctx, payload):
         session.started_at = session.started_at or now
         session.paused_at = None
         # The event's own lifecycle only moves forward from a publishable (or armed) state —
-        # reuse the existing guard rather than writing "live" unconditionally.
+        # reuse the existing guard rather than writing "live" unconditionally. Readiness was
+        # already cleared by _golive_gate above.
         if ev is not None and ev.status in ("published", "scheduled", "armed"):
             ev.status = "live"
             ev.start_time = ev.start_time or now

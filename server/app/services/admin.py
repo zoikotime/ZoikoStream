@@ -34,7 +34,12 @@ def _month_series(db: Session, col, id_col) -> list[dict]:
 
 
 def _monthly_revenue(db: Session) -> float:
-    """Current MRR = sum of plan price over active + trial subscriptions."""
+    """Current MRR = sum of plan price over active + trial subscriptions.
+
+    Plans with no approved price published (Plan.price_monthly IS NULL) contribute nothing:
+    SQL SUM skips NULLs, so an unpriced plan is not counted as $0 revenue — it is simply not
+    counted. A 0 here therefore means "no priced plans", not "no subscriptions".
+    """
     total = db.scalar(
         select(func.coalesce(func.sum(Plan.price_monthly), 0))
         .select_from(Subscription).join(Plan, Subscription.plan_id == Plan.id)
@@ -109,7 +114,10 @@ def dashboard_summary(db: Session) -> dict:
 
 
 def _revenue_series(db: Session) -> list[dict]:
-    """New MRR added per month = sum of plan price over subscriptions started that month."""
+    """New MRR added per month = sum of plan price over subscriptions started that month.
+
+    Same NULL semantics as _monthly_revenue: unpriced plans are skipped, not zeroed.
+    """
     rows = db.execute(
         select(func.date_trunc("month", Subscription.started_at).label("m"),
                func.coalesce(func.sum(Plan.price_monthly), 0))

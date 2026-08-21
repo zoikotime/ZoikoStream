@@ -48,7 +48,12 @@ const GROUPS = [
     label: "Manage",
     items: [
       { to: "/organization/analytics", label: "Analytics", icon: FiBarChart2 },
-      { to: "/organization/billing", label: "Usage & Entitlements", icon: FiCreditCard },
+      // Named "Billing" to match the page's own heading. It was "Usage & Entitlements", which
+      // described one section rather than the destination, so nobody looking for billing found
+      // it. Same route, same page — this is the organization SUBSCRIPTION ledger (plan, seats,
+      // streaming hours, storage, invoices). Event order payments live on an event's own
+      // Commercial tab and deliberately never appear here.
+      { to: "/organization/billing", label: "Billing", icon: FiCreditCard },
       // Deep-links to the panel this row is named after. Without the ?tab= the row opened
       // Settings on General — a nav item labelled "Security & Governance" landing on an
       // organization-name field, which read as the rail pointing at the wrong page.
