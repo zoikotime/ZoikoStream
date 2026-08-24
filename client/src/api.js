@@ -26,5 +26,15 @@ export const errMsg = (e, fallback = "Something went wrong") => {
   const d = e?.response?.data?.detail;
   if (typeof d === "string") return d;
   if (Array.isArray(d)) return d.map((x) => x?.msg).filter(Boolean).join(", ") || fallback;
+  // Structured detail: endpoints that need the client to branch send
+  // {code, message, ...} — see /auth/login and /auth/verify-email.
+  if (d && typeof d === "object" && typeof d.message === "string") return d.message;
   return e?.message || fallback;
+};
+
+// The structured `code` from an error response, or null. Lets a caller branch on the
+// machine-readable outcome instead of matching prose.
+export const errCode = (e) => {
+  const d = e?.response?.data?.detail;
+  return d && typeof d === "object" && !Array.isArray(d) && d.code ? d.code : null;
 };

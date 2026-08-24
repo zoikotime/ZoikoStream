@@ -22,6 +22,7 @@ import Login from "./pages/auth/Login";
 import CreateOrganization from "./pages/auth/CreateOrganization";
 import ForgotPassword from "./pages/auth/ForgotPassword";
 import AcceptInvitation from "./pages/auth/AcceptInvitation";
+import VerifyEmail from "./pages/auth/VerifyEmail";
 import EventRegistration from "./pages/EventRegistration";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
@@ -130,6 +131,8 @@ export default function App() {
               <Route path="/signup" element={<CreateOrganization />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/accept-invite" element={<AcceptInvitation />} />
+              {/* IDN-001 — landing page for the emailed verification link. */}
+              <Route path="/verify-email" element={<VerifyEmail />} />
             </Route>
 
             {/* Public event registration landing (shareable link) */}

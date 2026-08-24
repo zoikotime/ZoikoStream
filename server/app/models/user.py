@@ -76,6 +76,28 @@ class User(Base):
         nullable=False,
     )
 
+    # ── Email verification (ZST-EC-001 IDN-001) ────────────────────────────────────────
+    # Registration no longer activates an account: a new user is created with
+    # email_verified=False and cannot sign in until they redeem the emailed challenge
+    # (see models/identity.py, crud/identity.py, routers/auth.py).
+    #
+    # Distinct from is_active, which an admin toggles to disable an account. A user can be
+    # active-but-unverified (just registered) or verified-but-inactive (suspended); login
+    # checks both, independently.
+    #
+    # Existing rows are backfilled to TRUE by create_tables.py — accounts that predate this
+    # column were created under the old flow and must not be locked out retroactively. New
+    # inserts get FALSE from the ORM default below.
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

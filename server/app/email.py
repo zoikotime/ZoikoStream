@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -30,13 +31,36 @@ def _logo_attachment() -> dict | None:
     return {"filename": "zoiko-logo.png", "content": content, "content_id": LOGO_CID}
 
 
-def _send(to: str, subject: str, html_body: str) -> None:
+def _send(
+    to: str,
+    subject: str,
+    html_body: str,
+    text_body: str | None = None,
+    *,
+    sender: str | None = None,
+) -> bool:
     """Post one email to Resend. Best-effort: logs and swallows failures so a mail
-    outage never breaks the request that triggered it."""
+    outage never breaks the request that triggered it.
+
+    Returns True only when Resend accepted the message, so a caller that needs to know
+    (security-class mail, where a silent drop leaves the recipient stuck) can react.
+    Existing callers ignore the return value and keep their previous behavior.
+
+    `text_body` adds the plain-text alternative required for every HTML email
+    (ZST-EC-001 doctrine rule 9). `sender` overrides the default identity for templates
+    that must ship from a specific approved sender, e.g. Zoiko Steam Security.
+    """
     if not settings.RESEND_API_KEY:
         log.warning("RESEND_API_KEY not set; skipping email to %s", to)
-        return
-    payload = {"from": settings.MAIL_FROM, "to": [to], "subject": subject, "html": html_body}
+        return False
+    payload = {
+        "from": sender or settings.MAIL_FROM,
+        "to": [to],
+        "subject": subject,
+        "html": html_body,
+    }
+    if text_body:
+        payload["text"] = text_body
     logo = _logo_attachment()
     if logo:
         payload["attachments"] = [logo]
@@ -48,10 +72,33 @@ def _send(to: str, subject: str, html_body: str) -> None:
             timeout=10,
         )
         resp.raise_for_status()
+        return True
     except httpx.HTTPError as e:
         # Resend returns the reason in the body — surface it for debugging.
         body = getattr(e, "response", None)
         log.error("Email to %s failed: %s %s", to, e, body.text if body else "")
+        return False
+
+
+# ── Approved sender identities (ZST-EC-001 Section 03) ──────────────────────────────────
+# The baseline names eleven sender identities. Only the address in MAIL_FROM is
+# domain-authenticated today, so an identity is the approved DISPLAY NAME re-wrapped
+# around that same authenticated address — changing the address instead would send from an
+# unauthenticated domain and fail SPF/DKIM alignment. When more addresses are verified in
+# Resend, this is the one place that has to change.
+SENDER_SECURITY = "Zoiko Steam Security"
+
+
+def _mail_from_address() -> str:
+    """The bare address out of MAIL_FROM, which may be `Name <addr>` or just `addr`."""
+    raw = settings.MAIL_FROM.strip()
+    if "<" in raw and ">" in raw:
+        return raw[raw.index("<") + 1 : raw.rindex(">")].strip()
+    return raw
+
+
+def _sender_identity(display_name: str) -> str:
+    return f"{display_name} <{_mail_from_address()}>"
 
 
 def _shell(inner: str) -> str:
@@ -66,6 +113,46 @@ def _shell(inner: str) -> str:
 
 def _base_url() -> str:
     return settings.APP_URL.rstrip("/")
+
+
+class UnsafeLinkError(RuntimeError):
+    """Raised instead of emailing a link that violates the secure-link standard."""
+
+
+def public_base_url() -> str:
+    """The base URL for links that leave the platform, asserted safe before use.
+
+    Outside development an emailed link must be HTTPS and must not point at localhost.
+    Both were live audit findings: APP_URL is absent from the deployed environment file, so
+    it silently falls back to http://localhost:5173 and every emailed link becomes a
+    non-TLS, unreachable address — while still carrying a single-use credential. Failing the
+    send is strictly better than delivering that, so this raises rather than degrades.
+    """
+    base = _base_url()
+    if settings.ENVIRONMENT.strip().lower() == "development":
+        return base
+    low = base.lower()
+    if not low.startswith("https://"):
+        raise UnsafeLinkError(
+            f"APP_URL must be https outside development (got {base!r}). "
+            "Set APP_URL in the environment."
+        )
+    if "localhost" in low or "127.0.0.1" in low:
+        raise UnsafeLinkError(
+            f"APP_URL must not point at localhost outside development (got {base!r})."
+        )
+    return base
+
+
+def verification_url(token: str) -> str:
+    """IDN-001 verification link.
+
+    Carries nothing but the opaque token: no email address, no username, no user id, no
+    organization id, no tracking parameters. The token is already URL-safe
+    (secrets.token_urlsafe); quoting is belt-and-braces so a future token format cannot
+    break out of the query value.
+    """
+    return f"{public_base_url()}/verify-email?token={quote(token, safe='')}"
 
 
 def _header(title: str) -> str:
@@ -100,6 +187,100 @@ def _welcome_html(name: str) -> str:
       </p>
       <p style="margin-bottom:0;">Team ZoikoStream</p>
     </div>""")
+
+
+# ── IDN-001 Email verification and passwordless sign-in ─────────────────────────────────
+# Class A (Security) · Sender: Zoiko Steam Security · Recipient: account holder.
+# Copy below is the approved production copy from ZST-EC-001 v2.0 and must not be reworded
+# without a governance decision.
+#
+# Controls applied here, per the template's own control list:
+#   * purpose-bound, single-use link (see crud/identity.py) — the link is the whole payload
+#   * no tracking pixel and no remote image: the only asset is the logo, carried as an
+#     inline cid attachment, so opening the mail makes no network request
+#   * no PII in the URL (see verification_url)
+#   * no marketing or promotional module
+#   * plain-text alternative always sent alongside the HTML
+#   * body text at 16px and a CTA at ~4.5:1 contrast, per the accessibility standard
+
+IDN_001_SUBJECT = "Verify your email for Zoiko Steam"
+IDN_001_HEADLINE = "Confirm your email address."
+IDN_001_BODY = (
+    "A request was made to verify this email address for Zoiko Steam. Use the secure "
+    "action below only on the device where you started the request."
+)
+IDN_001_CTA = "Verify email"
+IDN_001_IGNORE = "If you did not request this, you can safely ignore this email."
+
+
+def _idn_001_preheader(expiry_minutes: int) -> str:
+    return f"This secure link expires in {expiry_minutes} minutes."
+
+
+def _verification_html(verify_url: str, expiry_minutes: int, expires_at_utc: str) -> str:
+    preheader = _idn_001_preheader(expiry_minutes)
+    return _shell(f"""
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">{html.escape(preheader)}</div>
+    {_header("Verify your email")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:16px;line-height:1.6;">
+      <h2 style="margin:0 0 16px;font-size:18px;font-weight:600;color:#2e2e4d;">{IDN_001_HEADLINE}</h2>
+      <p style="margin:0 0 16px;">{IDN_001_BODY}</p>
+      <p style="margin:0 0 8px;">{html.escape(preheader)}</p>
+      <p style="margin:0 0 24px;color:#4a4a5a;font-size:14px;">
+        Expires at {html.escape(expires_at_utc)}.
+      </p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{html.escape(verify_url, quote=True)}"
+           style="background:#2e2e4d;color:#fff;text-decoration:none;padding:16px 32px;
+           border-radius:4px;font-weight:bold;font-size:16px;display:inline-block;">
+          {IDN_001_CTA}
+        </a>
+      </p>
+      <p style="margin:0 0 8px;font-size:14px;color:#4a4a5a;">
+        If the button does not work, copy this address into your browser:
+      </p>
+      <p style="margin:0 0 24px;font-size:14px;word-break:break-all;">
+        <a href="{html.escape(verify_url, quote=True)}"
+           style="color:#2e2e4d;">{html.escape(verify_url)}</a>
+      </p>
+      <p style="margin:0;color:#4a4a5a;font-size:14px;">{IDN_001_IGNORE}</p>
+    </div>""")
+
+
+def _verification_text(verify_url: str, expiry_minutes: int, expires_at_utc: str) -> str:
+    """Plain-text alternative. Same facts, same single action, no markup."""
+    return "\n".join([
+        IDN_001_HEADLINE,
+        "",
+        IDN_001_BODY,
+        "",
+        _idn_001_preheader(expiry_minutes),
+        f"Expires at {expires_at_utc}.",
+        "",
+        f"{IDN_001_CTA}: {verify_url}",
+        "",
+        IDN_001_IGNORE,
+        "",
+        "Zoiko Steam Security",
+    ])
+
+
+def send_email_verification_email(
+    to: str, verify_url: str, expiry_minutes: int, expires_at_utc: str
+) -> bool:
+    """IDN-001. Returns True only if Resend accepted the message.
+
+    No recipient name is interpolated: the address is unverified at this point, so the
+    display name supplied at registration is unattested input and has no place in a
+    security-class message.
+    """
+    return _send(
+        to,
+        IDN_001_SUBJECT,
+        _verification_html(verify_url, expiry_minutes, expires_at_utc),
+        _verification_text(verify_url, expiry_minutes, expires_at_utc),
+        sender=_sender_identity(SENDER_SECURITY),
+    )
 
 
 def _otp_html(name: str, otp: str) -> str:

@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     # zoikostream.com in Resend and switch this to noreply@zoikostream.com before launch.
     MAIL_FROM: str = "ZoikoStream <onboarding@resend.dev>"
 
+    # "development" | "production". Gates the link-safety assertion in email.py: outside
+    # development an emailed link MUST be https and MUST NOT point at localhost, and the
+    # send fails loudly rather than delivering an unusable or non-TLS credential-bearing
+    # URL (ZST-EC-001 secure-link standard; audit findings F-1/F-2).
+    ENVIRONMENT: str = "development"
+
+    # IDN-001 email-verification challenge lifetime. Short by design: the link carries a
+    # single-use credential, so minutes rather than days. Surfaced to the recipient in the
+    # email preheader and body, so changing it changes the copy automatically.
+    EMAIL_VERIFICATION_TTL_MINUTES: int = 30
+
 
 settings = Settings()
 

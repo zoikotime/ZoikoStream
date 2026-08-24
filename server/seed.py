@@ -10,6 +10,8 @@ Usage:
 import os
 import secrets
 import sys
+from datetime import datetime, timezone
+
 from sqlalchemy import func, select
 from app.models import Organization, User, Plan, PlatformSetting
 from app.db import Base, engine, get_db
@@ -118,6 +120,12 @@ def seed_database():
             password_hash=hash_password(password),
             role="super_admin",
             is_active=True,
+            # Operator-provisioned, not self-registered: the address comes from
+            # SUPER_ADMIN_EMAIL in the deployment environment, not from an untrusted form,
+            # so there is no self-asserted address for IDN-001 to verify. Without this the
+            # seeded account could never sign in (login gates on email_verified).
+            email_verified=True,
+            email_verified_at=datetime.now(timezone.utc),
         )
 
         db.add(admin_user)

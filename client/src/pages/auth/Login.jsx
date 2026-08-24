@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
-import api, { errMsg } from "../../api";
+import api, { errCode, errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import { roleHome } from "../../auth/roleHome";
 import { Field, PasswordField, SubmitButton, Checkbox } from "../../ui/forms";
@@ -25,6 +25,11 @@ export default function Login() {
   const [remember, setRemember] = useState(true);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
+  // ZST-EC-001 IDN-001: correct credentials on an unverified account grant no session.
+  // The API answers 403 with code EMAIL_VERIFICATION_REQUIRED and we render a resend
+  // action instead of a generic failure toast.
+  const [needsVerification, setNeedsVerification] = useState(null); // { email }
+  const [resending, setResending] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -35,6 +40,7 @@ export default function Login() {
     if (Object.keys(next).length) return;
 
     setLoading(true);
+    setNeedsVerification(null);
     try {
       const { data } = await api.post("/auth/login", {
         identifier: email.trim(),
@@ -46,9 +52,25 @@ export default function Login() {
       const dest = from ? `${from.pathname}${from.search || ""}` : roleHome(data.user.role) || "/";
       navigate(dest, { replace: true });
     } catch (error) {
+      if (errCode(error) === "EMAIL_VERIFICATION_REQUIRED") {
+        setNeedsVerification({ email: error?.response?.data?.detail?.email });
+        return;
+      }
       notify.error(errMsg(error, "Unable to sign in right now."));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const resendVerification = async () => {
+    setResending(true);
+    try {
+      const { data } = await api.post("/auth/resend-verification", { email: email.trim() });
+      notify.success(data?.message || "If that address needs verification, a new link has been sent.");
+    } catch (error) {
+      notify.error(errMsg(error, "Could not send a new link right now."));
+    } finally {
+      setResending(false);
     }
   };
 
@@ -94,6 +116,34 @@ export default function Login() {
             </Link>
           </div>
         </div>
+
+        {needsVerification && (
+          <div
+            role="alert"
+            className="rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10"
+          >
+            <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+              Verify your email to continue.
+            </p>
+            <p className="mt-1 text-sm text-amber-800 dark:text-amber-300/90">
+              We need to confirm{" "}
+              {needsVerification.email ? (
+                <span className="font-medium">{needsVerification.email}</span>
+              ) : (
+                "your address"
+              )}{" "}
+              before you can sign in.
+            </p>
+            <button
+              type="button"
+              onClick={resendVerification}
+              disabled={resending}
+              className="mt-3 text-sm font-semibold text-amber-900 underline hover:no-underline disabled:opacity-60 dark:text-amber-200"
+            >
+              {resending ? "Sending…" : "Resend verification email"}
+            </button>
+          </div>
+        )}
 
         <SubmitButton loading={loading}>Sign In</SubmitButton>
 
