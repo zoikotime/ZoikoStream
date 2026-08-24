@@ -3,7 +3,10 @@ import { Link } from "react-router-dom";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
-import { Field, PasswordField, SubmitButton, Checkbox } from "../../ui/forms";
+import { FiLock, FiMail } from "react-icons/fi";
+import { Field, PasswordField, SubmitButton, CheckField } from "../../ui/forms";
+import AuthTabs from "./AuthTabs";
+
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 const slugify = (s) =>
@@ -106,15 +109,19 @@ export default function CreateOrganization() {
   }
 
   return (
-    <Card padding="xl">
-      <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
+    <Card
+      padding="xl"
+      className="zk-fade-in rounded-[20px] shadow-xl shadow-slate-900/5 transition-shadow duration-300 hover:shadow-2xl hover:shadow-violet-900/10 dark:shadow-black/30"
+    >
+      <AuthTabs />
+      <h1 className="text-[26px] font-bold tracking-tight text-slate-900 dark:text-white">
         Create Your Organization
       </h1>
       <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
         Create your organization and start streaming professional live events.
       </p>
 
-      <form onSubmit={submit} noValidate className="mt-8 space-y-4">
+      <form onSubmit={submit} noValidate className="mt-6 space-y-4">
         <Field
           label="Organization Name"
           placeholder="Acme Inc."
@@ -138,6 +145,7 @@ export default function CreateOrganization() {
           error={errors.adminName}
         />
         <Field
+          icon={FiMail}
           label="Work Email"
           type="email"
           autoComplete="email"
@@ -147,6 +155,7 @@ export default function CreateOrganization() {
           error={errors.email}
         />
         <PasswordField
+          icon={FiLock}
           label="Password"
           autoComplete="new-password"
           placeholder="At least 8 characters"
@@ -155,6 +164,7 @@ export default function CreateOrganization() {
           error={errors.password}
         />
         <PasswordField
+          icon={FiLock}
           label="Confirm Password"
           autoComplete="new-password"
           placeholder="Re-enter password"
@@ -163,25 +173,21 @@ export default function CreateOrganization() {
           error={errors.confirm}
         />
 
-        <div>
-          <label className="flex items-start gap-2.5 text-sm text-slate-600 dark:text-slate-300">
-            <Checkbox
-              checked={agree}
-              onChange={(e) => setAgree(e.target.checked)}
-              className="mt-0.5 rounded accent-emerald-600"
-            />
-            <span>I agree to the Terms and Privacy Policy.</span>
-          </label>
-          {errors.agree && (
-            <p className="mt-1.5 text-xs font-medium text-rose-600 dark:text-rose-400">{errors.agree}</p>
-          )}
-        </div>
+        <CheckField
+          label="I agree to the Terms and Privacy Policy."
+          checked={agree}
+          onChange={(e) => setAgree(e.target.checked)}
+          error={errors.agree}
+        />
 
-        <SubmitButton loading={loading}>Create Organization</SubmitButton>
+        <SubmitButton loading={loading} variant="gradient">Create Organization</SubmitButton>
 
         <p className="text-center text-sm text-slate-500 dark:text-slate-400">
           Already have an account?{" "}
-          <Link to="/login" className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400">
+          <Link
+            to="/login"
+            className="rounded-lg font-semibold text-emerald-700 underline-offset-4 transition-colors duration-200 hover:text-fuchsia-600 hover:underline dark:text-emerald-400 dark:hover:text-fuchsia-400"
+          >
             Sign In
           </Link>
         </p>

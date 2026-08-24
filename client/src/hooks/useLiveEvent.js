@@ -1,10 +1,11 @@
-import { useCallback, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer } from "react";
 import { useSearchParams } from "react-router-dom";
 import api from "../api";
 import useApi from "./useApi";
 import useEventStream from "./useEventStream";
 import useInterval from "./useInterval";
 import { notify } from "../ui/Toast";
+import { playAlertChime, unlockAudio } from "../utils/sound";
 
 // The whole data layer for a live event console — event resolution, the socket, and one
 // reducer over the server's envelopes.
@@ -25,6 +26,9 @@ const EMPTY = {
   canHost: false,
   livekitEnforced: false,
   participants: [],
+  // Backstage roster — every assigned speaker + their ContributorSession, if invited.
+  // [{ user_id, name, session }], session is null until an invite exists.
+  contributors: [],
   messages: [],
   questions: [],
   polls: [],
@@ -67,6 +71,7 @@ function reducer(state, env) {
         canHost: !!data.can_host,
         livekitEnforced: data.livekit_enforced,
         participants: data.participants || [],
+        contributors: data.contributors || [],
         messages: data.messages || [],
         questions: data.questions || [],
         polls: data.polls || [],
@@ -95,6 +100,16 @@ function reducer(state, env) {
       return { ...state, participants: upsert(state.participants, data, "identity") };
     case "participants/participant.leave":
       return { ...state, participants: drop(state.participants, data, "identity") };
+
+    // Backstage state transition (waiting/connected/ready/on_standby/live/muted/
+    // reconnecting/removed/failed) for one assigned speaker — see services/contributor.py.
+    case "contributor/session.update":
+      return {
+        ...state,
+        contributors: state.contributors.map((c) =>
+          c.user_id === data.user_id ? { ...c, session: data } : c
+        ),
+      };
 
     case "chat/message.new":
       return { ...state, messages: [...state.messages, data] };
@@ -221,10 +236,41 @@ export default function useLiveEvent() {
     if (env.type === "action.result" && env.data.enforced === false) {
       notify.info("Recorded — LiveKit isn't connected, so it wasn't enforced on the stream.");
     }
+    // Live sound + toast alert for EVERY viewer-initiated action — chat, Q&A, and poll
+    // votes — so the host/moderator console doesn't have to keep every tab open to notice
+    // audience activity. `actor_role` (server/app/services/moderation.py _actor_role) is
+    // populated by the server on every chat/qa/poll envelope; it's only ever "viewer" here
+    // since a host's/moderator's own actions are never notified back to themselves.
+    //
+    // THE BUG THIS FIXES: these checks used to compare against `env.data.actor_role`
+    // before the server ever sent that field, so they silently never matched — no toast,
+    // and (for chat/polls) no sound either. The chime for Q&A used to fire unconditionally
+    // on every question.new instead of being tied to who asked, which happened to work by
+    // accident for the common case but would also have chimed for a host's own question.
+    const isViewer = env.data?.actor_role === "viewer";
+    if (env.channel === "chat" && env.type === "message.new" && isViewer) {
+      playAlertChime();
+      notify.alert(`${env.data.name}: ${env.data.text}`);
+    }
+    if (env.channel === "qa" && env.type === "question.new" && isViewer) {
+      playAlertChime();
+      notify.alert(`New question from ${env.data.name}`);
+    }
+    if (env.channel === "poll" && env.type === "poll.update" && isViewer) {
+      playAlertChime();
+      notify.alert("New vote on your poll");
+    }
     dispatch(env);
   }, []);
 
   const stream = useEventStream(resolved?.id, onEnvelope);
+
+  // Warm up the notification chime's AudioContext on this console's first click/keypress,
+  // rather than waiting for one to happen to land inside playQuestionAlert's own call —
+  // see utils/sound.js for why that race silently ate the sound before.
+  useEffect(() => {
+    unlockAudio();
+  }, []);
 
   // Expire stale typing indicators. Only ticks while somebody is typing.
   useInterval(() => dispatch({ channel: "local", type: "typing.prune" }),

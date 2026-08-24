@@ -41,6 +41,9 @@ CHANNELS = (
     "recording",   # start / pause / resume / stop + timer + storage
     "analytics",   # viewer count, peak, retention samples, engagement, distributions
     "stage",       # stage roster, hand-raise queue, waiting room admissions
+    "reactions",   # 👍 ❤️ 👏 🔥 🎉 tap counters, broadcast to every viewer of the event
+    "session",     # per-connection lifecycle (e.g. "removed") — addressed by identity;
+                   # broadcast like everything else, but only the matching socket acts on it
 )
 
 # A slow client must never stall the event loop or the other subscribers, so each
@@ -73,7 +76,13 @@ async def redis():
     if _redis is None:
         from redis import asyncio as aioredis  # imported lazily: unused without REDIS_URL
 
-        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        # Upstash (and most managed Redis) closes idle TCP connections; without
+        # retry_on_timeout + a health check, the pool keeps handing out a dead socket
+        # until it hard-fails (WinError 10054 / TimeoutError) instead of replacing it.
+        _redis = aioredis.from_url(
+            settings.REDIS_URL, decode_responses=True,
+            retry_on_timeout=True, health_check_interval=30,
+        )
     return _redis
 
 
@@ -211,8 +220,9 @@ async def presence_clear(event_id) -> None:
         _memory.pop(event_id, None)
         _state.pop(event_id, None)
         _bans.pop(event_id, None)
+        _reactions.pop(event_id, None)
     else:
-        await r.delete(_pkey(event_id), _bkey(event_id), _skey(event_id))
+        await r.delete(_pkey(event_id), _bkey(event_id), _skey(event_id), _rkey(event_id))
 
 
 # ── live session state (broadcast + chat/Q&A settings) ────────────────────────
@@ -283,3 +293,44 @@ async def is_banned(event_id, identity: str) -> bool:
     if r is None:
         return identity in _bans.get(eid(event_id), ())
     return bool(await r.sismember(_bkey(event_id), identity))
+
+
+# ── reactions (👍 ❤️ 👏 🔥 🎉 …) ─────────────────────────────────────────────────
+# Same shape as presence: ephemeral per-broadcast counters, not history. Concurrency is
+# the whole point of this store existing separately from bus.state_set's read-modify-write
+# — many viewers tap the same emoji at once, so "load count, add one, save count" WOULD
+# lose taps. Redis HINCRBY is a single atomic server-side op across every worker; the
+# in-process dict fallback increments synchronously with no `await` between the read and
+# the write, so one worker can't interleave two increments either — same guarantee the
+# no-Redis dev setup already relies on elsewhere in this module (presence, bans).
+
+_reactions: dict[str, dict[str, int]] = {}   # event_id -> reaction_key -> count (no-Redis fallback)
+
+
+def _rkey(event_id) -> str:
+    return f"live:{eid(event_id)}:reactions"
+
+
+async def reaction_incr(event_id, key: str) -> dict:
+    """Atomically add one tap to `key` and return every counter for the event (not just
+    the one that changed), so the broadcast envelope is always the full authoritative
+    state and a client never has to merge partial updates."""
+    event_id = eid(event_id)
+    r = await redis()
+    if r is None:
+        room = _reactions.setdefault(event_id, {})
+        room[key] = room.get(key, 0) + 1
+        return dict(room)
+    await r.hincrby(_rkey(event_id), key, 1)
+    raw = await r.hgetall(_rkey(event_id))
+    return {k: int(v) for k, v in raw.items()}
+
+
+async def reaction_all(event_id) -> dict:
+    """Current counters for the event — what a joining/reconnecting client's snapshot uses."""
+    event_id = eid(event_id)
+    r = await redis()
+    if r is None:
+        return dict(_reactions.get(event_id, {}))
+    raw = await r.hgetall(_rkey(event_id))
+    return {k: int(v) for k, v in raw.items()}

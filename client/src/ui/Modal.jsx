@@ -43,7 +43,7 @@ export default function Modal({ open, onClose, title, size = "md", className = "
         )}
         {/* min-h-0 is what actually lets this shrink below its content height — a flex item
             defaults to min-height:auto, which would keep the panel growing past the cap. */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 text-sm text-slate-600 dark:text-slate-300">{children}</div>
+        <div className="zk-scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4 text-sm text-slate-600 dark:text-slate-300">{children}</div>
         {footer && <div className="flex shrink-0 justify-end gap-2 border-t border-slate-100 px-5 py-4 dark:border-slate-800">{footer}</div>}
       </div>
     </Overlay>

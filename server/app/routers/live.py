@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from jose import JWTError, jwt
@@ -31,10 +32,12 @@ from ..ratelimit import SlidingWindow
 from ..security import ALGORITHM, decode_registration_token
 from ..services import bus, livekit
 from ..services import moderation as mod
-# Importing this registers the host/producer actions into mod.ACTIONS, the host-only
-# permission set, and the broadcast/analytics half of the opening snapshot. Import is
-# one-way (broadcast -> moderation), which is why it happens here and not in moderation.
+# Importing these registers the host/producer actions and the contributor-backstage
+# actions into mod.ACTIONS, the host-only permission set, and their snapshot
+# contributions. Import is one-way (broadcast/contributor -> moderation), which is why it
+# happens here and not in moderation.
 from ..services import broadcast  # noqa: F401
+from ..services import contributor  # noqa: F401
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/live", tags=["live"])
@@ -93,17 +96,18 @@ async def _accept(websocket: WebSocket, event_id: uuid.UUID) -> bool:
 
 
 @router.websocket("/events/{event_id}/ws")
-async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | None = None, reg: str | None = None):
+async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | None = None, reg: str | None = None, link: str | None = None):
     # Real device/platform mix for the host's analytics panel, straight off the handshake.
     # Nothing is inferred beyond what the UA states; unknowns stay "Unknown".
     agent = broadcast.classify_ua(websocket.headers.get("user-agent"))
     db = next(get_db())
     try:
         user = _user_from_token(token, db)
-        # No login? An anonymous visitor who self-identified with name+email (the
-        # registration_required video gate, or the chat/Q&A/polls identify prompt on any
-        # other event) gets a socket too — see mod.resolve_ctx_from_registration.
-        registration = None if user else _registration_from_reg_token(reg, event_id, db)
+        # Anonymous credentials are alternatives, not a privilege escalation: a valid
+        # registration or host-issued access link can establish a viewer socket. If a
+        # logged-in user is from the wrong org, we still allow a valid event-specific link
+        # to admit them as a guest rather than letting the unrelated JWT block the share link.
+        registration = _registration_from_reg_token(reg, event_id, db)
     finally:
         db.close()
     # Org isolation + per-event moderator check happen BEFORE any envelope is sent, so an
@@ -113,17 +117,22 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     # the browser's CloseEvent.code comes back as 1006 (spec-mandated for a failed handshake),
     # which silently defeats the client's FATAL_CODES-based reconnect-suppression
     # (useEventStream.js) and makes it retry an expired/invalid token forever.
-    if user is None and registration is None:
+    if user is None and registration is None and not link:
         if not await _accept(websocket, event_id):
             return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired session")
         return
 
-    ctx = (
-        await asyncio.to_thread(mod.resolve_ctx, event_id, user)
-        if user is not None
-        else await asyncio.to_thread(mod.resolve_ctx_from_registration, event_id, registration)
-    )
+    ctx = None
+    if user is not None:
+        ctx = await asyncio.to_thread(mod.resolve_ctx, event_id, user)
+    if ctx is None and registration is not None:
+        ctx = await asyncio.to_thread(mod.resolve_ctx_from_registration, event_id, registration)
+    if ctx is None and link:
+        # Final credential path for a private event Share URL. This is intentionally
+        # resolved server-side before accept/snapshot so a direct socket URL cannot bypass
+        # the same event-bound, revocable access-link rules as GET /events/{id}/watch.
+        ctx = await asyncio.to_thread(mod.resolve_ctx_from_access_link, event_id, link)
     if ctx is None:
         if not await _accept(websocket, event_id):
             return
@@ -134,6 +143,18 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="You have been removed from this event")
         return
+
+    if ctx.can_contribute:
+        # A backstage session is time-boxed (invite join window + expiry) and revocable
+        # independent of ban/org membership — checked once at connect, same as is_banned
+        # above, not per-frame.
+        session = await asyncio.to_thread(contributor.load_session_sync, ctx.event_id, ctx.user_id)
+        gate_error = contributor.join_window_error(session, datetime.now(timezone.utc))
+        if gate_error:
+            if not await _accept(websocket, event_id):
+                return
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=gate_error)
+            return
 
     # Rehydrate this event's live settings before anyone joins, so a freshly-booted worker
     # applies the host's waiting-room / chat state instead of serving defaults.
@@ -146,7 +167,10 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     async with bus.subscribe(ctx.event_id) as queue:
         # This connection is a participant too — one presence record per identity, so a
         # moderator watching from two tabs still counts once.
-        role = "host" if ctx.can_host else "moderator" if ctx.can_moderate else "viewer"
+        role = "host" if ctx.can_host else "moderator" if ctx.can_moderate else \
+            "speaker" if ctx.can_contribute else "viewer"
+        if ctx.can_contribute:
+            await asyncio.to_thread(contributor.mark_connected, ctx.event_id, ctx.user_id)
         # Waiting room holds plain attendees for the host to admit; staff never wait.
         waiting = bool(state.get("waiting_room")) and role == "viewer"
         rec = await bus.presence_upsert(ctx.event_id, ctx.identity, {
@@ -161,9 +185,31 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             await bus.publish(ctx.event_id, "stage", "waiting.join", rec)
 
         async def writer():
-            """Only this task writes to the socket, so sends never interleave."""
+            """Only this task writes to the socket, so sends never interleave.
+
+            One thing this loop watches for itself: a "session"/"removed" envelope
+            addressed to THIS identity (published by moderation._participant_action on
+            participant.remove / participant.ban — see services/moderation.py). It's
+            broadcast to every connection on the event like anything else on the bus, but
+            only the matching connection is meant to act on it — deliver it, then close
+            this socket from the server side with the same policy-violation code the
+            connect path already uses for a banned rejoin attempt, so a removed viewer
+            can't just keep sitting on the page with a live socket to a room they were
+            just kicked out of. useEventStream.js already treats that code as fatal and
+            does not retry."""
             while True:
-                await websocket.send_json(await queue.get())
+                env = await queue.get()
+                await websocket.send_json(env)
+                if (
+                    env.get("channel") == "session"
+                    and env.get("type") == "removed"
+                    and env.get("data", {}).get("identity") == ctx.identity
+                ):
+                    await websocket.close(
+                        code=status.WS_1008_POLICY_VIOLATION,
+                        reason=env["data"].get("reason") or "Removed from event",
+                    )
+                    return
 
         pump = asyncio.create_task(writer())
         try:
@@ -201,6 +247,8 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             gone = await bus.presence_remove(ctx.event_id, ctx.identity)
             if gone:
                 await bus.publish(ctx.event_id, "participants", "participant.leave", gone)
+            if ctx.can_contribute:
+                await asyncio.to_thread(contributor.mark_disconnected, ctx.event_id, ctx.user_id)
 
 
 # ── LiveKit webhooks ──────────────────────────────────────────────────────────
@@ -224,11 +272,24 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
     except Exception:  # noqa: BLE001 — a bad signature is a 401, not a 500
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid LiveKit webhook signature")
 
+    kind = evt.event
+
+    # Resolved via our own LiveIngressEndpoint row (by ingress_id), not evt.room: an
+    # ingress-only lifecycle event can fire before any publisher has connected, and
+    # IngressInfo does not reliably carry room_name until one does.
+    if kind in ("ingress_started", "ingress_ended") and evt.ingress_info:
+        updated = await asyncio.to_thread(broadcast.record_ingress_status, evt.ingress_info)
+        if updated:
+            ingress_event_id, data = updated
+            await bus.publish(ingress_event_id, "moderator", "ingress.status", data)
+            verb = "connected" if kind == "ingress_started" else "disconnected"
+            await mod.feed_activity(ingress_event_id, "system", f"Live input {data['title']} {verb}", persist=True)
+        return {"ok": True, "event": kind}
+
     event_id = mod.event_id_from_room(evt.room.name if evt.room else None)
     if not event_id:
         return {"ignored": evt.event}
 
-    kind = evt.event
     p = evt.participant
 
     if kind == "participant_joined" and p:
@@ -248,6 +309,18 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
     elif kind in _TRACK_EVENTS and p:
         rec = await bus.presence_upsert(event_id, p.identity, {"publishing": _TRACK_EVENTS[kind]})
         await bus.publish(event_id, "participants", "participant.update", rec)
+        # LiveKit's server-side mute (services.livekit.mute_participant) only mutes the
+        # tracks that existed at the moment it was called — it has no memory of "this
+        # identity should stay muted." A track (re)published afterward (a reconnect, an
+        # ICE restart, a renegotiation after a brief network blip, or simply the mute
+        # call landing before the track finished publishing) always starts UNMUTED at the
+        # SFU, so audio quietly starts flowing again a few seconds later while the console
+        # still shows the mute icon as on — presence, not LiveKit, is what the UI trusts.
+        # Presence is the source of truth for "should this identity be muted right now",
+        # so re-assert the enforcement on every fresh publish rather than only at the
+        # moment a moderator clicked mute.
+        if kind == "track_published" and rec.get("muted"):
+            await livekit.mute_participant(evt.room.name, p.identity, True)
 
     elif kind in ("room_started", "room_finished"):
         started = kind == "room_started"

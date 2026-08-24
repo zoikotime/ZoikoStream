@@ -12,12 +12,19 @@ import {
 import { Badge, Button, Panel } from "../../components/admin";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
+import useInterval from "../../hooks/useInterval";
 import { PageSpinner } from "../../ui/Spinner";
 import { fmtDateTime } from "../../data/events";
+import ConfirmDialog from "../../ui/ConfirmDialog";
 import EventCommerceAdmin from "./EventCommerceAdmin";
 
 const STATUS_TONE = { draft: "neutral", scheduled: "info", published: "info", live: "success", ended: "neutral", cancelled: "danger" };
 const BROADCAST_STATUS_TONE = { live: "success", paused: "warning", ended: "neutral", preview: "info" };
+
+// No WebSocket on this page either — same staleness bug as LiveEvents.jsx, worse here since
+// an admin lands on this exact page precisely to check whether one specific event is still
+// live. Same fix, same interval.
+const POLL_MS = 15000;
 
 function Meta({ icon: Icon, label, children }) {
   return (
@@ -63,10 +70,12 @@ export default function AdminEventDetail() {
   const { eventId } = useParams();
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const { data: ev, loading, error } = useApi(() =>
+  const { data: ev, loading, error, reload } = useApi(() =>
     api.get(`/admin/events/${eventId}`).then((r) => r.data)
   );
+  useInterval(reload, POLL_MS);
 
   const back = (
     <button
@@ -92,10 +101,6 @@ export default function AdminEventDetail() {
   const isLive = ev.status === "live" || ev.broadcast?.status === "live" || ev.broadcast?.status === "paused";
 
   const remove = async () => {
-    const warning = isLive
-      ? `"${ev.title}" is currently live. Deleting it will force-end the broadcast (stop recording, disconnect everyone) and then delete the event. This cannot be undone. Continue?`
-      : `Delete "${ev.title}"? This cannot be undone.`;
-    if (!window.confirm(warning)) return;
     setBusy(true);
     try {
       await api.delete(`/admin/events/${eventId}`);
@@ -104,6 +109,7 @@ export default function AdminEventDetail() {
     } catch (e) {
       toast.error(errMsg(e));
       setBusy(false);
+      setConfirmOpen(false);
     }
   };
 
@@ -121,10 +127,33 @@ export default function AdminEventDetail() {
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{ev.organization.name}</p>
           )}
         </div>
-        <Button variant="danger" size="sm" leftIcon={FiTrash2} loading={busy} onClick={remove}>
+        <Button variant="danger" size="sm" leftIcon={FiTrash2} loading={busy} onClick={() => setConfirmOpen(true)}>
           {isLive ? "Force-end & Delete" : "Delete"}
         </Button>
       </div>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        onConfirm={remove}
+        busy={busy}
+        title={isLive ? "Force-end this broadcast?" : "Delete this event?"}
+        confirmLabel={isLive ? "Force-end & delete" : "Delete"}
+        body={
+          isLive ? (
+            <>
+              <strong className="font-semibold text-slate-800 dark:text-slate-100">{ev.title}</strong>{" "}
+              is currently live. Deleting it will force-end the broadcast — stop recording and
+              disconnect every viewer — and then delete the event. This cannot be undone.
+            </>
+          ) : (
+            <>
+              <strong className="font-semibold text-slate-800 dark:text-slate-100">{ev.title}</strong>{" "}
+              will be permanently deleted. This cannot be undone.
+            </>
+          )
+        }
+      />
 
       <Panel title="Overview">
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">

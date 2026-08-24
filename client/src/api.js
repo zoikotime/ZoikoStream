@@ -8,7 +8,12 @@ export const API_BASE =
 
 // /api namespace: the SPA's own routes (/dashboard, /admin/*, /organization/*) are spelled
 // like the server's router prefixes, and same-origin serving makes that a collision.
-const api = axios.create({ baseURL: `${API_BASE}/api` });
+// withCredentials: GET /events/:id/watch sets an httpOnly claim cookie the first time a
+// private event's invite link is used (routers/events.py) — without this the browser never
+// sends or stores it, and the one-device claim silently never engages. Safe cross-origin in
+// dev too: the backend's CORS config already pins allow_credentials to specific origins,
+// never "*".
+const api = axios.create({ baseURL: `${API_BASE}/api`, withCredentials: true });
 
 // Attach the stored token to every request.
 api.interceptors.request.use((config) => {
@@ -37,4 +42,21 @@ export const errMsg = (e, fallback = "Something went wrong") => {
 export const errCode = (e) => {
   const d = e?.response?.data?.detail;
   return d && typeof d === "object" && !Array.isArray(d) && d.code ? d.code : null;
+};
+
+// A failed console load needs a diagnosis, not just "couldn't load X": a 404 means the
+// running server predates this endpoint, 401/403 means the session expired, and a missing
+// status means the API is unreachable — each sends an operator to a different fix, so an
+// ops console (where "why" matters mid-incident) should never collapse them into one
+// generic message. `endpointPath` names the route being loaded, e.g. "/admin/roles".
+export const diagnoseLoadError = (e, endpointPath) => {
+  const status = e?.response?.status;
+  if (status === 404) {
+    return `The API responded, but doesn’t have ${endpointPath} — the server is running an older build. Restart it to pick up the current code.`;
+  }
+  if (status === 401 || status === 403) {
+    return "Your session isn’t authorised for the platform console. Sign in again as a super admin.";
+  }
+  if (status) return `The platform API returned ${status}: ${errMsg(e)}`;
+  return "The platform API is unreachable — check that the API server is running and that VITE_API_URL points at it.";
 };

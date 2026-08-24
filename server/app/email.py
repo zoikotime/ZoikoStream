@@ -366,6 +366,47 @@ def _assignment_html(name: str, event_title: str, role: str, org_name: str, even
     </div>""")
 
 
+def _contributor_invite_html(name: str, event_title: str, org_name: str, backstage_url: str,
+                              join_window_start: datetime | None, join_window_end: datetime | None,
+                              consent_notice: str | None) -> str:
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title or "an event")
+    safe_org = html.escape(org_name or "your organization")
+    window = (
+        f"{join_window_start.strftime('%d %b %Y, %I:%M %p')} – {join_window_end.strftime('%I:%M %p')}"
+        if join_window_start and join_window_end else
+        f"Opens {join_window_start.strftime('%d %b %Y, %I:%M %p')}" if join_window_start else
+        "Open now — no scheduled window"
+    )
+    notice = f'<p style="color:#888;font-size:13px;">{html.escape(consent_notice)}</p>' if consent_notice else ""
+    return _shell(f"""
+    {_header("You're invited to contribute")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>{safe_org} has invited you to contribute to <strong>{safe_title}</strong> on ZoikoStream.
+         Join the backstage to set up your camera and microphone before you go live.</p>
+      <table style="width:100%;border-collapse:collapse;margin:24px 0;font-size:14px;">
+        <tr><td style="padding:10px 0;color:#888;">Join window</td>
+            <td style="padding:10px 0;text-align:right;">{html.escape(window)}</td></tr>
+      </table>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{backstage_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Open the backstage
+        </a>
+      </p>
+      {notice}
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
+def send_contributor_invite_email(to: str, name: str, event_title: str, org_name: str, backstage_url: str,
+                                   join_window_start: datetime | None, join_window_end: datetime | None,
+                                   consent_notice: str | None) -> None:
+    _send(to, f"You're invited to contribute to {event_title}", _contributor_invite_html(
+        name, event_title, org_name, backstage_url, join_window_start, join_window_end, consent_notice))
+
+
 def _registration_html(name: str, event_title: str, event_url: str) -> str:
     safe_name = html.escape(name or "there")
     safe_title = html.escape(event_title or "the event")
@@ -525,6 +566,32 @@ def send_replay_available_email(to: str, name: str, event_title: str, watch_url:
     ))
 
 
+def send_customer_export_email(to: str, name: str, event_title: str, export_url: str, expires_at) -> None:
+    """BRD LE-AC-18 'controlled customer export' — services.delivery.create_export.
+    Deliberately doesn't carry the file link itself, only a link to the token-gated page
+    that generates a fresh, short-lived signed download URL on demand."""
+    safe_title = html.escape(event_title or "your event")
+    until = expires_at.strftime("%d %b %Y") if expires_at else None
+    lines = [f"A validated recording for <strong>{safe_title}</strong> has been prepared for you."]
+    if until:
+        lines.append(f"This link is available until {until}, and only to you.")
+    _send(to, f"Your recording is ready: {event_title}", _commercial_html(
+        "Your recording is ready", name, lines, cta_label="Download recording", cta_url=export_url,
+    ))
+
+
+def send_event_report_email(to: str, name: str, event_title: str, report_url: str, expires_at) -> None:
+    """BRD 'generated post-event audience and operations report' — services.report.release_report."""
+    safe_title = html.escape(event_title or "your event")
+    until = expires_at.strftime("%d %b %Y") if expires_at else None
+    lines = [f"The event report for <strong>{safe_title}</strong> is ready to view."]
+    if until:
+        lines.append(f"This link is available until {until}, and only to you.")
+    _send(to, f"Event report: {event_title}", _commercial_html(
+        "Your event report", name, lines, cta_label="View report", cta_url=report_url,
+    ))
+
+
 def send_refund_credit_email(to: str, name: str, event_title: str, amount: str, currency: str,
                               credit_type: str, order_url: str) -> None:
     """doc Q2 'refund/credit' (crud.commercial.execute_refund_credit)."""
@@ -535,6 +602,55 @@ def send_refund_credit_email(to: str, name: str, event_title: str, amount: str, 
         [f"A {currency} {amount} {credit_type.replace('_', ' ')} for <strong>{safe_title}</strong> has been {verb}."],
         cta_label="View order", cta_url=order_url,
     ))
+
+
+def _contact_html(name: str, email: str, org: str, country: str, topic: str, message: str) -> str:
+    """Internal inquiry notification. EVERY field is attacker-supplied, so every field is
+    escaped — this email is read by our own staff, and an unescaped <script>/<img onerror>
+    from a public form is a stored-XSS delivery vehicle aimed at us."""
+    rows = [("Name", name), ("Work email", email), ("Organization", org or "—"),
+            ("Country / region", country), ("Topic", topic)]
+    row_html = "".join(
+        f'<tr><td style="padding:8px 0;color:#888;white-space:nowrap;">{html.escape(k)}</td>'
+        f'<td style="padding:8px 0;text-align:right;">{html.escape(v)}</td></tr>'
+        for k, v in rows
+    )
+    # Newlines become <br> AFTER escaping, so the break markup cannot be smuggled in.
+    safe_message = html.escape(message).replace("\n", "<br>")
+    return _shell(f"""
+    {_header("New contact enquiry")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <table style="width:100%;border-collapse:collapse;font-size:14px;">{row_html}</table>
+      <div style="margin-top:20px;padding:16px;background:#f7f7f9;border-radius:6px;">
+        {safe_message}
+      </div>
+      <p style="margin-bottom:0;color:#888;font-size:13px;">
+        Sent from the ZoikoStream contact form. Reply directly to {html.escape(email)}.
+      </p>
+    </div>""")
+
+
+def send_contact_message_email(*, first: str, last: str, email: str, org: str, country: str,
+                                topic: str, message: str) -> None:
+    """Deliver a public contact-form enquiry to the configured internal inbox.
+
+    The recipient is settings.CONTACT_EMAIL and is NEVER derived from the request, so no
+    payload can retarget an enquiry to an arbitrary address. The submitter's address appears
+    only as escaped body text, never as a header.
+
+    Subject is built from sanitized values: CR/LF are stripped because a newline inside a
+    header is the classic header-injection primitive (it would let a submitter append their
+    own Bcc:). Length is capped so a long name cannot push the real subject out of view.
+    """
+    name = f"{first} {last}".strip()
+    # Strip anything that could terminate a header line, then bound the length.
+    safe_subject_name = " ".join(name.replace("\r", " ").replace("\n", " ").split())[:80]
+    safe_subject_topic = " ".join(topic.replace("\r", " ").replace("\n", " ").split())[:40]
+    _send(
+        settings.CONTACT_EMAIL,
+        f"[{safe_subject_topic}] Enquiry from {safe_subject_name}",
+        _contact_html(name, email, org, country, topic, message),
+    )
 
 
 def send_welcome_email(to: str, name: str) -> None:

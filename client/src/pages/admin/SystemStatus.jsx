@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Panel, HealthDot } from "../../components/admin";
-import api from "../../api";
+import api, { diagnoseLoadError } from "../../api";
 import useApi from "../../hooks/useApi";
 import Skeleton from "../../ui/Skeleton";
 
@@ -32,7 +32,7 @@ export default function SystemStatus() {
   if (error) {
     return (
       <div className="mx-auto max-w-[1000px] rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
-        Couldn't load system status. Try refreshing the page.
+        {diagnoseLoadError(error, "/admin/platform-health")}
       </div>
     );
   }

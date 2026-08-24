@@ -143,7 +143,8 @@ class CommercialAccountOut(BaseModel):
     org_id: uuid.UUID
     billing_classification: str
     billing_source: str
-    seller_legal_entity_id: str
+    # None = no seller legal entity assigned yet; invoicing is blocked until one is (doc L1).
+    seller_legal_entity_id: str | None = None
     billing_contact_name: str | None = None
     billing_contact_email: str | None = None
     tax_id: str | None = None
@@ -161,7 +162,9 @@ class QuoteCreate(BaseModel):
     catalog_version_id: uuid.UUID
     currency: str = Field(..., min_length=3, max_length=3)
     amount: Decimal = Field(..., ge=0)
-    tax_amount: Decimal = Field(Decimal(0), ge=0)
+    # No default (was Decimal(0)): omitting tax now means "not determined" and is stored as
+    # NULL, never as a quoted zero. A real zero must be sent explicitly (doc L4).
+    tax_amount: Decimal | None = Field(None, ge=0)
     valid_until: datetime | None = None
     notes: str | None = None
 
@@ -174,7 +177,7 @@ class QuoteOut(BaseModel):
     catalog_version_id: uuid.UUID
     currency: str
     amount: Decimal
-    tax_amount: Decimal
+    tax_amount: Decimal | None = None  # None = tax not determined for this quote
     commercial_notes: str | None = None
     status: str
     valid_until: datetime | None = None
@@ -217,6 +220,7 @@ class OrderLineOut(BaseModel):
     unit_price: Decimal
     line_total: Decimal
     tax_treatment: str | None = None
+    unit_basis: str | None = None
     is_addon: bool
     is_complimentary: bool
     entitlement_effect: str | None = None
@@ -237,7 +241,16 @@ class OrderOut(BaseModel):
     order_version: int
     currency: str
     subtotal: Decimal
-    tax_amount: Decimal
+    # None = no tax determination recorded yet; the order cannot be invoiced in that state
+    # (crud.issue_invoice fails closed). total_amount is provisional until then.
+    tax_amount: Decimal | None = None
+    tax_treatment: str | None = None
+    tax_jurisdiction: str | None = None
+    tax_source: str | None = None
+    tax_rule_version: str | None = None
+    tax_effective_at: datetime | None = None
+    tax_exemption_reason: str | None = None
+    tax_determined_at: datetime | None = None
     total_amount: Decimal
     risk_tier: str
     billing_classification: str
@@ -260,8 +273,10 @@ class OrderAccept(BaseModel):
 
 class CapacityHoldCreate(BaseModel):
     resource_type: str = Field(..., max_length=60)
-    window_start: datetime | None = None
-    window_end: datetime | None = None
+    # Mandatory: capacity is drawn from a time-bounded CapacityPool, so an open-ended hold
+    # cannot be checked against inventory (doc C1/C5).
+    window_start: datetime
+    window_end: datetime
     quantity: int = Field(1, ge=1)
     region: str | None = Field(None, max_length=20)
     hold_minutes: int = Field(30, ge=1, le=1440)
@@ -275,7 +290,9 @@ class CapacityOut(BaseModel):
     resource_type: str
     window_start: datetime | None = None
     window_end: datetime | None = None
+    requested_quantity: int | None = None
     quantity: int
+    capacity_pool_id: uuid.UUID | None = None
     region: str | None = None
     state: str
     soft_hold_expires_at: datetime | None = None
@@ -307,10 +324,50 @@ class PaymentScheduleOut(BaseModel):
 
 
 class PaymentAuthorizeCreate(BaseModel):
-    amount: Decimal = Field(..., gt=0)
+    """Legacy authorization request. The client no longer names the amount.
+
+    `amount` is OPTIONAL and advisory: omit it to authorize the order's outstanding balance,
+    or send the exact outstanding figure to have it confirmed. Any other value is refused
+    (crud.authorize_payment) — it was previously REQUIRED and accepted unchecked, which let a
+    customer role choose what to pay.
+
+    There is deliberately no `currency`, `tax`, `discount` or `seller` field: those come from
+    the accepted order.
+
+    `provider_name` is required. It used to default to "mock", so an HTTP caller that omitted
+    it silently got the SIMULATOR against a real order.
+    """
+
     idempotency_key: str = Field(..., max_length=100)
-    provider_name: str = Field("mock", max_length=30)
+    provider_name: str = Field(..., max_length=30)
+    amount: Decimal | None = Field(None, gt=0)
     simulate_failure: bool = False
+
+
+class CheckoutSessionCreate(BaseModel):
+    """Request body for starting a hosted checkout.
+
+    Deliberately carries NO financial fields. There is no `amount`, `currency`, `tax`,
+    `discount` or `seller` to send: those come from the committed commercial record, and a
+    client that included them would simply have them ignored (extra keys are not accepted into
+    this model). The order is identified by the path parameter.
+    """
+
+    provider_name: str = Field("stripe", max_length=30)
+
+
+class CheckoutSessionOut(BaseModel):
+    """What the browser is allowed to know. No provider secret, no raw provider object, and
+    nothing that implies the payment succeeded — creating a session collects nothing."""
+
+    checkout_url: str
+    payment_id: uuid.UUID
+    amount: Decimal
+    currency: str
+    state: str
+    # True when a repeated Pay click reused the existing payment/session instead of making
+    # another one.
+    reused: bool = False
 
 
 class PaymentOut(BaseModel):
@@ -332,10 +389,233 @@ class PaymentOut(BaseModel):
 
 
 class PaymentWebhookIn(BaseModel):
+    """Provider-neutral inbound event. `event_type` uses the generic vocabulary in
+    crud.PROVIDER_EVENT_STATE_MAP — a provider adapter translates its own names onto these,
+    so no processor's event naming leaks into the domain.
+
+    `provider_event_id` replaces the old caller-supplied `idempotency_key`: identity now
+    belongs to the PROVIDER EVENT (unique per provider in the database), not to the Payment,
+    whose own idempotency key must never be rewritten by an inbound event (CF-1).
+
+    `amount`/`currency` are optional but VALIDATED when present — they can only ever confirm
+    the commercial record, never redefine it (crud._amount_mismatch_reason)."""
+
     provider_name: str = Field("mock", max_length=30)
-    provider_payment_ref: str = Field(..., max_length=120)
-    event_type: Literal["capture_succeeded", "capture_failed", "refunded", "disputed", "reversed"]
-    idempotency_key: str = Field(..., max_length=100)
+    provider_event_id: str = Field(..., min_length=1, max_length=160)
+    provider_payment_ref: str | None = Field(None, max_length=120)
+    event_type: Literal[
+        "authorization_succeeded", "authorization_failed",
+        "capture_succeeded", "capture_partial", "capture_failed",
+        "refunded", "refund_partial",
+        "disputed", "dispute_won", "dispute_lost", "reversed",
+    ]
+    amount: Decimal | None = Field(None, ge=0)
+    currency: str | None = Field(None, min_length=3, max_length=3)
+    occurred_at: datetime | None = None
+    payload: dict | None = None
+
+
+class ProviderEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    provider: str
+    provider_event_id: str
+    event_type: str
+    payment_id: uuid.UUID | None = None
+    provider_payment_ref: str | None = None
+    occurred_at: datetime | None = None
+    received_at: datetime
+    payload_hash: str
+    signature_verified: bool
+    processing_status: str
+    processing_attempts: int
+    processed_at: datetime | None = None
+    processing_error: str | None = None
+    processing_result: dict | None = None
+    correlation_id: str
+    created_at: datetime | None = None
+
+
+class UnmatchedSettlementOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    provider: str
+    provider_payment_ref: str | None = None
+    provider_event_id: uuid.UUID | None = None
+    event_type: str
+    amount: Decimal | None = None
+    currency: str | None = None
+    occurred_at: datetime | None = None
+    received_at: datetime
+    status: str
+    reason: str
+    matched_payment_id: uuid.UUID | None = None
+    matched_by: uuid.UUID | None = None
+    matched_at: datetime | None = None
+    resolution_notes: str | None = None
+    correlation_id: str | None = None
+    created_at: datetime | None = None
+
+
+class SettlementMatchCreate(BaseModel):
+    payment_id: uuid.UUID
+    notes: str | None = None
+
+
+class CommercialExceptionCreate(BaseModel):
+    """A governed override request (doc Section 25). `rationale` is mandatory and evidence is
+    mandatory for money-affecting types — enforced in crud.request_commercial_exception,
+    which also refuses a request that targets neither an event nor an order."""
+
+    exception_type: Literal[
+        "price_override", "waiver", "exceptional_cancellation",
+        "financial_hold_override", "risk_tier_reduction", "complimentary_event",
+    ]
+    rationale: str = Field(..., min_length=1)
+    event_id: uuid.UUID | None = None
+    event_order_id: uuid.UUID | None = None
+    overridden_gate: Literal["financial_readiness", "capacity", "readiness_checks",
+                              "risk_tier", "pricing"] | None = None
+    evidence: dict | None = None
+    amount_exposure: Decimal | None = Field(None, ge=0)
+    expiry_at: datetime | None = None
+
+
+class ExceptionDecisionCreate(BaseModel):
+    notes: str | None = None
+
+
+class CommercialExceptionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    event_id: uuid.UUID | None = None
+    event_order_id: uuid.UUID | None = None
+    exception_type: str
+    requested_by: uuid.UUID | None = None
+    approver_id: uuid.UUID | None = None
+    rationale: str | None = None
+    amount_exposure: Decimal | None = None
+    status: str
+    expiry_at: datetime | None = None
+    evidence: dict | None = None
+    overridden_gate: str | None = None
+    previous_state: str | None = None
+    decided_at: datetime | None = None
+    decision_notes: str | None = None
+    correlation_id: str | None = None
+    created_at: datetime | None = None
+
+
+class SellerLegalEntityCreate(BaseModel):
+    """Registers a Zoiko selling entity (doc L1). Created as `draft` — activation is a
+    separate call. No legal or tax facts are defaulted; the caller supplies them."""
+
+    code: str = Field(..., min_length=1, max_length=80)
+    legal_name: str = Field(..., min_length=1, max_length=200)
+    country: str | None = Field(None, max_length=80)
+    default_currency: str | None = Field(None, min_length=3, max_length=3)
+    supported_currencies: list[str] | None = None
+    tax_registration_id: str | None = Field(None, max_length=80)
+    tax_registration_country: str | None = Field(None, max_length=80)
+    invoice_number_prefix: str | None = Field(None, max_length=30)
+
+
+class SellerLegalEntityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    code: str
+    legal_name: str
+    country: str | None = None
+    default_currency: str | None = None
+    supported_currencies: list | None = None
+    tax_registration_id: str | None = None
+    tax_registration_country: str | None = None
+    invoice_number_prefix: str | None = None
+    status: str
+    effective_from: datetime | None = None
+    effective_to: datetime | None = None
+    created_at: datetime | None = None
+
+
+class CapacityPoolCreate(BaseModel):
+    """Approved capacity inventory (doc C4). window_start/window_end are mandatory — live
+    event capacity is time-specific and a pool with no window could not be checked against
+    an event's actual service period."""
+
+    resource_type: str = Field(..., min_length=1, max_length=60)
+    window_start: datetime
+    window_end: datetime
+    total_capacity: int = Field(..., ge=0)
+    region: str | None = Field(None, max_length=20)
+    seller_legal_entity_id: str | None = Field(None, max_length=80)
+    notes: str | None = None
+
+
+class CapacityPoolOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    seller_legal_entity_id: str | None = None
+    resource_type: str
+    region: str | None = None
+    window_start: datetime
+    window_end: datetime
+    total_capacity: int
+    status: str
+    notes: str | None = None
+    created_at: datetime | None = None
+
+
+class CapacityPoolUtilisationOut(BaseModel):
+    """Derived figures — computed from the reservation rows, never stored (see
+    crud.pool_utilisation), so available/reserved can't drift from reality."""
+
+    pool_id: uuid.UUID
+    resource_type: str
+    region: str | None = None
+    window_start: datetime
+    window_end: datetime
+    status: str
+    total_capacity: int
+    soft_held: int
+    hard_reserved: int
+    consumed: int
+    reserved_capacity: int
+    available_capacity: int
+
+
+class OrderVersionOut(BaseModel):
+    """An immutable accepted-order snapshot (doc Section 27 event_order_version)."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    event_order_id: uuid.UUID
+    order_version: int
+    change_order_id: uuid.UUID | None = None
+    catalog_version_id: uuid.UUID | None = None
+    currency: str
+    subtotal: Decimal
+    tax_amount: Decimal | None = None
+    total_amount: Decimal
+    snapshot: dict
+    created_by: uuid.UUID | None = None
+    created_at: datetime | None = None
+
+
+class TaxDeterminationCreate(BaseModel):
+    """A tax RESULT attached to an order (doc L4/L6). 0.00 is a valid amount — exempt,
+    zero-rated, reverse-charge and out-of-scope supplies are real determinations — but the
+    treatment/jurisdiction/source that justify it are mandatory, so a zero can never be
+    reached by omission. Vocabularies are Finance/Tax's; only presence is validated here."""
+
+    tax_amount: Decimal = Field(..., ge=0)
+    treatment: str = Field(..., min_length=1, max_length=60)
+    jurisdiction: str = Field(..., min_length=1, max_length=80)
+    source: str = Field(..., min_length=1, max_length=80)
+    rule_version: str | None = Field(None, max_length=60)
+    # REQUIRED when tax_amount == 0 (enforced in crud.record_tax_determination): the reason a
+    # zero is zero is what separates a determined zero from an undetermined one.
+    exemption_reason: str | None = Field(None, max_length=200)
+    effective_at: datetime | None = None
 
 
 class InvoiceCreate(BaseModel):
@@ -351,7 +631,15 @@ class InvoiceOut(BaseModel):
     number: str
     currency: str
     subtotal: Decimal
+    # Always present on an issued invoice — issuance is blocked without a determination.
+    # These are a snapshot as at issue time, not a live read of the order.
     tax_amount: Decimal
+    tax_treatment: str | None = None
+    tax_jurisdiction: str | None = None
+    tax_source: str | None = None
+    tax_rule_version: str | None = None
+    tax_effective_at: datetime | None = None
+    tax_exemption_reason: str | None = None
     total_amount: Decimal
     issue_date: datetime | None = None
     due_date: datetime | None = None
@@ -577,6 +865,11 @@ class ReplayEntitlementOut(BaseModel):
     download_permission: bool
     expires_at: datetime | None = None
     created_at: datetime | None = None
+    # Whether the watermarked file viewers will actually be served is ready yet -- distinct
+    # from publish_state, since publish_replay queues the burn without waiting for it (a
+    # real recording can run hours). See routers/events.py::watch_event's own gate.
+    watermark_status: str
+    watermark_error: str | None = None
 
 
 # ── Reconciliation ────────────────────────────────────────────────────────────────────

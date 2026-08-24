@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Invitation, Organization, User
+from ..models import Invitation, Organization, User, WebhookDelivery, WebhookEndpoint
 
 INVITE_TTL_DAYS = 7
 # Whitelisted user-list sort columns (prevents arbitrary column injection from the query string).
@@ -236,3 +236,58 @@ def accept_invitation(db, inv: Invitation, full_name, username, password_hash) -
     db.commit()
     db.refresh(user)
     return user
+
+
+# ── Webhook endpoints + delivery log (services/webhooks.py is the sender/retrier) ───────
+
+def list_webhook_endpoints(db, org_id) -> list[WebhookEndpoint]:
+    return db.scalars(
+        select(WebhookEndpoint).where(WebhookEndpoint.org_id == org_id)
+        .order_by(WebhookEndpoint.created_at.desc())
+    ).all()
+
+
+def get_webhook_endpoint(db, org_id, endpoint_id) -> WebhookEndpoint | None:
+    return db.scalar(
+        select(WebhookEndpoint).where(WebhookEndpoint.id == endpoint_id, WebhookEndpoint.org_id == org_id)
+    )
+
+
+def create_webhook_endpoint(db, org_id, url, label, events, created_by) -> WebhookEndpoint:
+    ep = WebhookEndpoint(
+        org_id=org_id, url=url, label=label, events=events,
+        # Not hash-only like an API key — see models/webhook.py's docstring for why this
+        # secret has to stay readable.
+        secret=f"whsec_{secrets.token_urlsafe(32)}",
+        created_by=created_by,
+    )
+    db.add(ep)
+    db.commit()
+    db.refresh(ep)
+    return ep
+
+
+def update_webhook_endpoint(db, ep: WebhookEndpoint, *, url=None, label=None, events=None, enabled=None) -> WebhookEndpoint:
+    if url is not None:
+        ep.url = url
+    if label is not None:
+        ep.label = label
+    if events is not None:
+        ep.events = events
+    if enabled is not None:
+        ep.enabled = enabled
+    db.commit()
+    db.refresh(ep)
+    return ep
+
+
+def delete_webhook_endpoint(db, ep: WebhookEndpoint) -> None:
+    db.delete(ep)
+    db.commit()
+
+
+def list_webhook_deliveries(db, endpoint_id, limit: int = 50) -> list[WebhookDelivery]:
+    return db.scalars(
+        select(WebhookDelivery).where(WebhookDelivery.endpoint_id == endpoint_id)
+        .order_by(WebhookDelivery.created_at.desc()).limit(limit)
+    ).all()

@@ -11,41 +11,38 @@ Permissions:
   read (list / get / view assignees)               -> any org member
 """
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..crud import commercial as commercial_crud
 from ..crud import event as crud
 from ..db import get_db
 from ..email import (
-    send_assignment_email, send_event_created_email,
+    send_assignment_email, send_contributor_invite_email, send_event_created_email,
     send_registration_confirmation_email, send_viewer_invite_email,
 )
-from ..models import Event, User
+from ..models import Event, LiveRecording, User
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
     AccessLinkCreate, AccessLinkIssued, AccessLinkOut,
-    AssignmentUpdate, EventCreate, EventOut, EventUpdate,
+    AssignmentUpdate, ContributorInvite, ContributorSessionOut, EventCreate, EventOut,
+    EventUpdate, FeedbackOut,
     RegistrantOut, RegistrationCreate, RegistrationOut, ViewerInviteCreate, WatchOut,
 )
 from ..security import (
-    create_registration_token, decode_registration_token,
+    create_registration_token, decode_registration_payload,
     get_current_user, get_current_user_optional, org_scoped, require_org_admin,
 )
 from ..services import broadcast as broadcast_svc
 from ..services import livekit
 from ..services import moderation as mod
+from ..services import webhooks
 
 router = APIRouter(prefix="/events", tags=["events"])
-
-# How long after a recording stops we tolerate its file not being in GCS yet before treating
-# that as a real failure — LiveKit's own upload finishes asynchronously after the row is
-# already "stopped". Generous on purpose: a false "failed" is permanent, a few extra minutes
-# of "no replay yet" is not.
-RECORDING_UPLOAD_GRACE = timedelta(minutes=3)
 
 
 def _get_event_or_404(db, user: User, event_id) -> Event:
@@ -132,6 +129,8 @@ def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: S
 @router.get("/{event_id}/watch", response_model=WatchOut)
 def watch_event(
     event_id: uuid.UUID,
+    request: Request,
+    response: Response,
     reg: str | None = Query(None, description="Registration access token from POST /register"),
     link: str | None = Query(None, description="Access-link token from POST /access-links"),
     user: User | None = Depends(get_current_user_optional),
@@ -149,6 +148,14 @@ def watch_event(
     Independently, a registration_required event withholds the stream token until the caller
     is registered (org members always pass; everyone else needs a valid `reg` or `link` token).
 
+    A private event's `reg` token is otherwise a plain 90-day bearer credential — anyone who
+    gets the URL (forwarded, screenshotted, ...) could use it. The first browser to present a
+    valid one claims the registration row to itself (crud.claim_registration) via an httpOnly
+    cookie; every later request for a PRIVATE event must present the matching cookie, or the
+    token is treated as not-invited. Not enforced for a merely registration_required PUBLIC
+    event — that's capacity/data collection, not a confidentiality boundary, so sharing that
+    link isn't the problem this exists to solve.
+
     A scheduled start_time/end_time also time-boxes the VIEWER link: before start_time or
     after end_time, no stream token goes out even if the host is live — this is deliberately
     independent of `status`, which the host still drives manually (going live early or
@@ -159,12 +166,42 @@ def watch_event(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
 
     is_org_member = bool(user and (user.role == "super_admin" or user.org_id == ev.org_id))
-    invited = bool(reg) and decode_registration_token(reg, ev.id) is not None
-    link_admitted = bool(link) and crud.find_access_link(db, ev.id, link) is not None
+    reg_payload = decode_registration_payload(reg, ev.id) if reg else None
+    invited = reg_payload is not None
+    link_row = crud.find_access_link(db, ev.id, link) if link else None
+    link_admitted = link_row is not None
+
+    claim_rejected = False
+    if invited and ev.visibility == "private" and not is_org_member:
+        reg_row = crud.get_registration_by_id(db, ev.id, uuid.UUID(reg_payload["reg"]))
+        if reg_row is None:
+            invited = False
+        elif reg_row.claim_token_hash is None:
+            raw_claim = crud.claim_registration(db, reg_row)
+            # Cloud Run terminates TLS and forwards to this container over plain HTTP, so
+            # request.url.scheme alone reads "http" even in production — X-Forwarded-Proto
+            # is what actually says the browser connection was HTTPS. Deriving this from
+            # settings.APP_URL instead is a trap: this project's local .env often points
+            # APP_URL at the deployed prod URL even while running against 127.0.0.1, which
+            # would mark the cookie Secure and make the browser silently refuse to ever send
+            # it back over plain http — locking out the real invitee on their own next visit.
+            is_https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+            response.set_cookie(
+                f"zk_claim_{reg_row.id}", raw_claim, httponly=True, samesite="lax",
+                secure=is_https, max_age=60 * 60 * 24 * 90,
+            )
+        elif not crud.claim_matches(reg_row, request.cookies.get(f"zk_claim_{reg_row.id}")):
+            invited = False
+            claim_rejected = True
+
     registered = is_org_member or invited or link_admitted
 
     if ev.visibility == "private" and not is_org_member and not invited and not link_admitted:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private")
+        detail = (
+            "This invite has already been used on another device — ask the host to resend it"
+            if claim_rejected else "This event is private"
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail)
 
     now = datetime.now(timezone.utc)
     not_started = bool(ev.start_time and now < ev.start_time)
@@ -178,40 +215,67 @@ def watch_event(
         and (not ev.registration_required or registered)
     )
     if can_stream:
-        identity = f"viewer-{user.id}" if user else f"viewer-{uuid.uuid4()}"
+        # This identity has to be the SAME string the live moderation socket uses as this
+        # visitor's presence identity (services/moderation.py resolve_ctx and friends) —
+        # host actions like Promote to Speaker (participant.role), Mute, and Remove all
+        # call into services/livekit.py with THAT identity to update/kick the matching
+        # LiveKit room participant. A mismatched identity here meant those calls were
+        # silently updating (or kicking) a LiveKit participant that didn't exist, so a
+        # promoted viewer's own client still held stale (no-publish) permissions and got
+        # "insufficient permissions" the moment it tried to publish its mic — the state
+        # changed everywhere except the one place (LiveKit) that actually enforces it.
+        # Mirrors routers/live.py's own resolve_ctx / resolve_ctx_from_registration /
+        # resolve_ctx_from_access_link precedence (user, then reg, then link) exactly.
+        if user:
+            identity = str(user.id)
+        elif invited and reg_payload:
+            identity = f"guest-{reg_payload['reg']}"
+        elif link_admitted and link_row:
+            identity = f"guest-link-{link_row.id}"
+        else:
+            # No credential the live socket would accept either (see live.py's own
+            # "Invalid or expired session" refusal) — this viewer can watch/listen but was
+            # never going to hold a moderation-socket identity to promote in the first
+            # place, so a disposable identity is correct here, not a bug.
+            identity = f"viewer-{uuid.uuid4()}"
         token = livekit.create_stream_token(identity, room, False)
         url = livekit.settings.LIVEKIT_URL
 
     # Replay: same access rule as the live token (registration_required gates it the same
     # way), but independent of not_started/expired — the whole point of a replay is that it
     # stays watchable after the scheduled window closes.
+    #
+    # Gated on the audience ReplayEntitlement's publish_state (BRD table 53: "never
+    # auto-publish on event end") — until an operator explicitly publishes
+    # (routers/commercial.py's publish endpoint, surfaced in pages/admin/Media.jsx),
+    # recording_url stays None here even for a fully captured, already-validated file. No
+    # row / not "published" both read as "no replay yet" — same as the pre-existing
+    # not-recorded case, so this needed no frontend change.
+    #
+    # ALSO gated on watermark_status == "ready": publish_replay queues the burn but doesn't
+    # wait for it (services/delivery.py's shared ticker — a real recording can run hours),
+    # so "published" alone isn't enough to serve the file yet. Same "publish now, deliver
+    # once ready" split the customer export's /deliveries/{token} page already uses.
+    replay_entitlement = commercial_crud.get_replay_entitlement(db, ev.id, scope="audience")
+    replay_published = (
+        replay_entitlement is not None
+        and replay_entitlement.publish_state == "published"
+        and replay_entitlement.watermark_status == "ready"
+    )
+
     recording_url = recording_duration = None
-    if not can_stream and (not ev.registration_required or registered):
-        # A "stopped" row only means the host clicked stop — LiveKit's egress can still have
-        # failed to actually produce a file (dropped publisher, network blip, ...) with no
-        # signal reaching us if the egress_ended webhook never arrives. Verify the newest
-        # candidate is really in the bucket before handing a viewer a dead link; a confirmed
-        # miss is marked failed so it's excluded (and this check skipped) from here on, and
-        # we fall back to the next-newest real recording instead of showing nothing.
-        #
-        # LiveKit's own upload can take a while to land after `stopped_at` (observed up to
-        # ~20s for a short clip), so a miss within RECORDING_UPLOAD_GRACE isn't proof of
-        # failure — it stops the search without condemning the row OR falling back to an
-        # older recording, so a still-uploading file doesn't get permanently misdiagnosed
-        # and a viewer doesn't get shown stale content in its place. A later visit re-checks.
-        for rec in crud.list_replay_candidates(db, ev.id):
-            if livekit.object_exists(rec.file_url):
-                recording_url = livekit.signed_url(rec.file_url)
-                if rec.started_at and rec.stopped_at:
-                    recording_duration = int(
-                        (rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000
-                    )
-                break
-            if rec.stopped_at and (now - rec.stopped_at) < RECORDING_UPLOAD_GRACE:
-                break
-            rec.status = "failed"
-            rec.error = "Recording file not found in storage — the egress likely failed silently"
-            db.commit()
+    if replay_published and not can_stream and (not ev.registration_required or registered):
+        # The watermarked copy is the ONLY thing ever served here — never the original
+        # recording.file_url — so every replay a viewer can reach already carries the
+        # policy watermark (BRD LE-AC-12). object_exists still guards it: the burn could
+        # have completed and then the object gone missing from storage since.
+        if livekit.object_exists(replay_entitlement.watermarked_file_key):
+            recording_url = livekit.signed_url(replay_entitlement.watermarked_file_key)
+            source = db.get(LiveRecording, replay_entitlement.source_recording_id)
+            if source and source.started_at and source.stopped_at:
+                recording_duration = int(
+                    (source.stopped_at - source.started_at).total_seconds() - source.paused_ms / 1000
+                )
 
     org_name = ev.organization.name if ev.organization else None
     hosts = crud.list_assignees(db, ev.id, "host")
@@ -221,6 +285,7 @@ def watch_event(
         visibility=ev.visibility, start_time=ev.start_time,
         organization_name=org_name, host_name=hosts[0].full_name if hosts else org_name,
         chat_enabled=ev.chat_enabled, qa_enabled=ev.qa_enabled, polls_enabled=ev.polls_enabled,
+        reactions_enabled=not crud.is_memorial_category(ev.category),
         registration_required=ev.registration_required, registered=registered or not ev.registration_required,
         not_started=not_started, expired=expired,
         livekit_url=url, livekit_token=token, room=room if token else None,
@@ -271,6 +336,9 @@ def register_for_event(
         reg.email, reg.name, ev.title or "this event",
         _registration_console_url(ev.id, create_registration_token(reg)),
     )
+    webhooks.enqueue(db, ev.org_id, "registration.created", {
+        "event_id": str(ev.id), "registration_id": str(reg.id), "email": reg.email, "name": reg.name,
+    })
     return RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=create_registration_token(reg))
 
 
@@ -286,9 +354,30 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
     if fields.get("slug") and crud.event_slug_taken(db, user.org_id, fields["slug"], exclude_id=ev.id):
         raise HTTPException(status.HTTP_409_CONFLICT, "An event with that slug already exists")
 
+    if "category" in fields:
+        fields["risk_tier"] = crud.elevated_risk_tier(fields["category"], ev.risk_tier)
+
     if fields.get("status"):
         title_after = fields.get("title", ev.title)
-        err = crud.status_transition_error(ev.status, fields["status"], title_after)
+        readiness_ready, readiness_reasons = None, None
+        target = fields["status"]
+        # Every escalation into a production state clears the SAME gate — not just "armed".
+        # Previously only "armed" was checked, so published/scheduled -> live (a legal
+        # transition) skipped commercial readiness entirely (CF-3).
+        if target in commercial_crud.PRODUCTION_EVENT_STATES and target != ev.status:
+            evaluation = commercial_crud.golive_readiness(db, ev)
+            commercial_crud.audit_golive_decision(db, ev, evaluation, actor=user, target_state=target)
+            db.commit()
+            readiness_ready, readiness_reasons = evaluation["ready"], evaluation["blocking_reasons"]
+            if not readiness_ready:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Cannot move to '{target}' — " + "; ".join(evaluation["blocking_reasons"]),
+                )
+        err = crud.status_transition_error(
+            ev.status, target, title_after,
+            readiness_ready=readiness_ready, readiness_reasons=readiness_reasons,
+        )
         if err:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
 
@@ -298,6 +387,35 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end_time must be after start_time")
 
     return crud.update_event(db, ev, fields)
+
+
+@router.post("/{event_id}/end", response_model=EventOut)
+async def end_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Force-end a live event from the org dashboard — same real teardown delete_event already
+    uses (stop recording, close the LiveKit room, publish broadcast.update so every connected
+    viewer/host updates immediately), just without also deleting the event. This is the
+    guaranteed way out of "live": if a real BroadcastSession exists, _end() drives the normal
+    live -> ended transition; if the data is inconsistent (status says live but no session
+    exists — e.g. debug/manual writes), the fallback below still forces status to ended rather
+    than leaving the event stuck live with no recovery path."""
+    ev = _get_event_or_404(db, user, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only end events you host")
+    if ev.status not in ("live", "degraded"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event is not live")
+
+    ctx = mod.Ctx(
+        event_id=ev.id, org_id=ev.org_id, room=f"event_{ev.id}",
+        user_id=user.id, name=user.full_name or user.email,
+        identity=f"host-{user.id}", role=user.role,
+        can_moderate=True, can_host=True,
+    )
+    await broadcast_svc._end(ctx, {}, emergency=True)
+    db.refresh(ev)
+
+    if ev.status in ("live", "degraded") and not crud.status_transition_error(ev.status, "ended", ev.title):
+        ev = crud.update_event(db, ev, {"status": "ended"})
+    return ev
 
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -332,7 +450,9 @@ def _console_url(role: str, event_id: uuid.UUID) -> str:
         return f"{base}/host/dashboard?event={event_id}"
     if role == "moderator":
         return f"{base}/moderator/dashboard?event={event_id}"
-    return base  # speakers have no dedicated console route yet
+    if role == "speaker":
+        return f"{base}/speaker/backstage?event={event_id}"
+    return base
 
 
 def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
@@ -389,12 +509,95 @@ def set_speakers(event_id: uuid.UUID, data: AssignmentUpdate, background: Backgr
     return _set_role(db, admin, event_id, "speaker", data.user_ids, background)
 
 
+# ── Contributor (speaker) backstage invitations ─────────────────────────────────
+# EventAssignment(role="speaker") above is only eligibility. Inviting is a separate,
+# repeatable act — its own join window/expiry/consent notice, sent as a REST call (not a
+# socket action) because it can happen well before any live socket exists, same reasoning
+# as host/moderator assignment above.
+
+def _assigned_speaker_or_404(db, admin, event_id, user_id) -> tuple[Event, User]:
+    ev = _get_event_or_404(db, admin, event_id)
+    if not crud.is_assigned(db, ev.id, user_id, "speaker"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This user is not assigned as a speaker for this event")
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return ev, user
+
+
+@router.post("/{event_id}/speakers/{user_id}/invite", response_model=ContributorSessionOut)
+def invite_contributor(
+    event_id: uuid.UUID, user_id: uuid.UUID, data: ContributorInvite, background: BackgroundTasks,
+    admin: User = Depends(require_org_admin), db: Session = Depends(get_db),
+):
+    """(Re-)send a backstage invitation. Re-inviting resets the session's runtime state
+    (consent/preflight/rehearsal) to fresh — see crud.upsert_contributor_invite."""
+    ev, user = _assigned_speaker_or_404(db, admin, event_id, user_id)
+    session = crud.upsert_contributor_invite(
+        db, ev, user, admin.id,
+        join_window_start=data.join_window_start, join_window_end=data.join_window_end,
+        expires_at=data.expires_at, contribution_method=data.contribution_method,
+        consent_notice=data.consent_notice, support_contact=data.support_contact,
+    )
+    org_name = admin.organization.name if admin.organization else None
+    background.add_task(
+        send_contributor_invite_email,
+        user.email, user.full_name, ev.title or "this event", org_name,
+        _console_url("speaker", ev.id), data.join_window_start, data.join_window_end,
+        data.consent_notice,
+    )
+    return session
+
+
+@router.get("/{event_id}/speakers/{user_id}/invite", response_model=ContributorSessionOut)
+def get_contributor_invite(
+    event_id: uuid.UUID, user_id: uuid.UUID,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    _get_event_or_404(db, user, event_id)
+    session = crud.get_contributor_session(db, event_id, user_id)
+    if session is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No invitation on record for this speaker")
+    return session
+
+
+@router.post("/{event_id}/speakers/{user_id}/revoke", response_model=ContributorSessionOut)
+def revoke_contributor_invite(
+    event_id: uuid.UUID, user_id: uuid.UUID,
+    admin: User = Depends(require_org_admin), db: Session = Depends(get_db),
+):
+    """Revoke a speaker's backstage access. "Rotate" is deliberately not offered here —
+    unlike EventAccessLink, a contributor invite has no bearer token to rotate under
+    login-based auth, only an invitation window to close."""
+    _get_event_or_404(db, admin, event_id)
+    session = crud.get_contributor_session(db, event_id, user_id)
+    if session is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No invitation on record for this speaker")
+    return crud.revoke_contributor_session(db, session)
+
+
 @router.get("/{event_id}/registrations", response_model=list[RegistrantOut])
 def get_registrations(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Who has registered for this event — self-serve or host-invited (see `invited_by`).
     Org-scoped like every other event read."""
     _get_event_or_404(db, user, event_id)
     return crud.list_registrations(db, event_id)
+
+
+@router.get("/{event_id}/feedback", response_model=list[FeedbackOut])
+def get_feedback(
+    event_id: uuid.UUID,
+    role: str | None = Query(None, pattern="^(host|viewer)$"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Feedback submitted through the end-of-event modal a VIEWER sees on leaving (see
+    moderation._feedback_submit — the host console no longer collects its own). Same
+    org-scoped read as every other event sub-resource — any org member can view it: both
+    the host dashboard and the organizer's event page pass role=viewer to see what
+    attendees said."""
+    _get_event_or_404(db, user, event_id)
+    return crud.list_feedback(db, event_id, role=role)
 
 
 @router.post("/{event_id}/invite-viewers", response_model=list[RegistrationOut])
@@ -423,6 +626,9 @@ def invite_viewers(
         reg = crud.get_registration(db, event_id, email)
         if reg is None:
             reg = crud.create_registration(db, event_id, item.name, email, invited_by=user.id)
+            webhooks.enqueue(db, ev.org_id, "registration.created", {
+                "event_id": str(ev.id), "registration_id": str(reg.id), "email": reg.email, "name": reg.name,
+            })
         token = create_registration_token(reg)
         background.add_task(
             send_viewer_invite_email,
@@ -436,7 +642,13 @@ def invite_viewers(
 # ── Access links (revocable, shareable — link-based counterpart to invite-viewers) ────────
 
 def _access_link_url(event_id: uuid.UUID, token: str) -> str:
-    base = (settings.CORS_ORIGINS.split(",")[0].strip() or "https://zoikostream.com").rstrip("/")
+    # THE BUG THIS FIXES: this used to read settings.CORS_ORIGINS (a comma-separated list
+    # of allowed browser origins, meant for CORS — not a "public URL" setting) instead of
+    # settings.APP_URL, which every other email link builder in this app uses
+    # (_invite_url, _console_url, _registration_console_url, _base_url in email.py). Since
+    # CORS_ORIGINS is commonly left at its dev default of localhost origins, access-link
+    # invite emails sent from a real deployment pointed viewers at http://localhost:5173.
+    base = settings.APP_URL.rstrip("/")
     return f"{base}/events/{event_id}/watch?link={token}"
 
 
@@ -484,7 +696,11 @@ def revoke_access_link(
     link = crud.get_access_link(db, event_id, link_id)
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
-    return crud.revoke_access_link(db, link)
+    out = crud.revoke_access_link(db, link)
+    webhooks.enqueue(db, ev.org_id, "access_link.revoked", {
+        "event_id": str(ev.id), "access_link_id": str(link.id), "label": link.label,
+    })
+    return out
 
 
 @router.delete("/{event_id}/access-links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)

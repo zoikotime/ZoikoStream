@@ -37,6 +37,7 @@ from ..security import (
     hash_password,
     verify_password,
 )
+from ..services import platform_settings
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +114,14 @@ def register(data: RegisterIn, background: BackgroundTasks, request: Request,
     exists, but the thing the caller wanted (usable access) is still pending.
     """
     email = data.email.lower()
-    
+
+    # The Settings console's "Signups enabled" switch (services.platform_settings) — off
+    # means no new organizations, full stop. The one exception is the designated super-admin
+    # email: signups being off platform-wide must never be able to lock out the account that
+    # would otherwise be the only way to turn it back on.
+    if email != settings.SUPER_ADMIN_EMAIL.lower() and not platform_settings.signups_enabled(db):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Signups are currently disabled")
+
     # Auto-generate username from email if not provided (use part before @)
     if data.username:
         username = data.username.lower()

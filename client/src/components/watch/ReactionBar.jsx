@@ -1,10 +1,12 @@
 // client/src/components/watch/ReactionBar.jsx
-// Viewer reactions under the player. FRONTEND ONLY — the live socket (server/app/routers/
-// live.py) speaks chat / qa / poll and nothing else, so there is no reaction event to send
-// and no count to read. Your taps are local UI state; the baseline each reaction starts from
-// is derived from the event id so it's stable across renders instead of reshuffling.
-// ponytail: local state. Replace `bump` with a `send("reaction", …)` the day live.py grows one.
-import { useState } from "react";
+// Viewer reactions under the player. REAL DATA — counts are the backend's authoritative
+// state (server/app/services/bus.py reaction_incr/reaction_all), delivered on the same
+// live socket as chat/Q&A/polls (see server/app/routers/live.py, moderation.py
+// `reaction.add` / `reaction.update`). A tap sends the action and waits for the
+// broadcast to come back before the number changes — the same pattern chat.send and
+// poll.vote already use in WatchPanel.jsx, so there is nothing reaction-specific to
+// reconcile and no risk of double-counting a tap.
+import { useEffect, useState } from "react";
 import { cx } from "../../ui/tokens";
 
 const REACTIONS = [
@@ -15,22 +17,43 @@ const REACTIONS = [
   { key: "party", emoji: "🎉", label: "Celebrate" },
 ];
 
-// Stable per-event baseline, same trick as data/moderation.js accentFor.
-const seed = (id = "", i) => {
-  let h = 0;
-  for (let c = 0; c < id.length; c += 1) h = (h * 31 + id.charCodeAt(c)) % 997;
-  return 20 + ((h + i * 137) % 120);
-};
+// How long a tapped emoji stays highlighted. This is purely a "you just did that" flash,
+// not a persistent "your reaction" toggle — the backend has no per-viewer reaction ledger
+// (every tap is a +1, there's nothing to un-react), so nothing here implies otherwise.
+const PULSE_MS = 900;
 
-export default function ReactionBar({ eventId, className = "" }) {
-  const [counts, setCounts] = useState(() =>
-    Object.fromEntries(REACTIONS.map((r, i) => [r.key, seed(eventId, i)]))
-  );
-  const [mine, setMine] = useState({});
+/**
+ * @param {object} props
+ * @param {Record<string, number>} props.reactions - authoritative counts keyed by
+ *   reaction key (like/heart/clap/fire/party), from the live socket snapshot/update.
+ * @param {(key: string) => void} props.onReact - sends `reaction.add` for this key.
+ * @param {boolean} [props.disabled] - true while disconnected or while the host has
+ *   turned reactions off (settings.reactions_enabled === false).
+ */
+export default function ReactionBar({ reactions, onReact, disabled = false, className = "" }) {
+  const [pulsing, setPulsing] = useState({});
 
-  const bump = (key) => {
-    setCounts((c) => ({ ...c, [key]: c[key] + (mine[key] ? -1 : 1) }));
-    setMine((m) => ({ ...m, [key]: !m[key] }));
+  // Clear a pulse automatically so a tap's highlight is always transient, without
+  // leaking one setTimeout per click into an ever-growing set of pending timers.
+  useEffect(() => {
+    const keys = Object.keys(pulsing);
+    if (!keys.length) return undefined;
+    const timers = keys.map((key) =>
+      setTimeout(() => {
+        setPulsing((p) => {
+          const { [key]: _drop, ...rest } = p;
+          return rest;
+        });
+      }, PULSE_MS)
+    );
+    return () => timers.forEach(clearTimeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pulsing]);
+
+  const tap = (key) => {
+    if (disabled) return;
+    setPulsing((p) => ({ ...p, [key]: true }));
+    onReact(key);
   };
 
   return (
@@ -40,25 +63,30 @@ export default function ReactionBar({ eventId, className = "" }) {
         className
       )}
     >
-      {REACTIONS.map((r) => (
-        <button
-          key={r.key}
-          onClick={() => bump(r.key)}
-          aria-pressed={!!mine[r.key]}
-          aria-label={`${r.label} (${counts[r.key]})`}
-          title={r.label}
-          className={cx(
-            "inline-flex min-h-11 items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
-            mine[r.key]
-              ? "border-emerald-400 bg-emerald-50 text-emerald-700 dark:border-emerald-500/50 dark:bg-emerald-500/15 dark:text-emerald-300"
-              : "border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:border-slate-700 dark:hover:bg-slate-800/60"
-          )}
-        >
-          {/* key on the count so every tap restarts the pop animation */}
-          <span key={counts[r.key]} className="zk-pop text-base leading-none" aria-hidden>{r.emoji}</span>
-          <span className="zk-tnum text-xs">{counts[r.key]}</span>
-        </button>
-      ))}
+      {REACTIONS.map((r) => {
+        const count = reactions?.[r.key] ?? 0;
+        return (
+          <button
+            key={r.key}
+            type="button"
+            onClick={() => tap(r.key)}
+            disabled={disabled}
+            aria-pressed={!!pulsing[r.key]}
+            aria-label={`${r.label} (${count})`}
+            title={r.label}
+            className={cx(
+              "inline-flex min-h-11 items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
+              pulsing[r.key]
+                ? "border-emerald-400 bg-emerald-50 text-emerald-700 dark:border-emerald-500/50 dark:bg-emerald-500/15 dark:text-emerald-300"
+                : "border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:border-slate-700 dark:hover:bg-slate-800/60"
+            )}
+          >
+            {/* key on the count so every authoritative change restarts the pop animation */}
+            <span key={count} className="zk-pop text-base leading-none" aria-hidden>{r.emoji}</span>
+            <span className="zk-tnum text-xs">{count}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

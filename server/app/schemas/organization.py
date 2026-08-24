@@ -70,11 +70,59 @@ class OrgBrandingUpdate(BaseModel):
 
 # ── Developer (read-only this phase) ──────────────────────────────────────────
 
+class WebhookEndpointOut(BaseModel):
+    """One registered endpoint. Never carries `secret` — see WebhookEndpointCreated for
+    the one moment it's visible, and GET .../webhooks/{id}/secret for re-viewing it later
+    (models/webhook.py's docstring explains why this secret, unlike an API key, has to
+    stay re-viewable)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    url: str
+    label: str | None = None
+    events: list[str] = []
+    enabled: bool = True
+    created_at: datetime
+
+
+class WebhookEndpointCreated(WebhookEndpointOut):
+    secret: str
+
+
+class WebhookEndpointCreate(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+    label: str | None = Field(None, max_length=120)
+    events: list[str] = Field(..., min_length=1)
+
+
+class WebhookEndpointUpdate(BaseModel):
+    url: str | None = Field(None, min_length=1, max_length=2000)
+    label: str | None = Field(None, max_length=120)
+    events: list[str] | None = None
+    enabled: bool | None = None
+
+
+class WebhookSecretOut(BaseModel):
+    secret: str
+
+
+class WebhookDeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    event_type: str
+    status: str
+    attempt_count: int
+    last_response_code: int | None = None
+    last_error: str | None = None
+    delivered_at: datetime | None = None
+    created_at: datetime
+
+
 class OrgDeveloperOut(BaseModel):
-    """API keys and webhook URLs. No management endpoints yet, so these are empty
-    until a later phase writes them. list[dict] keeps key shape open until then."""
+    """API keys and registered webhook endpoints."""
     api_keys: list[dict] = []
-    webhook_urls: list[str] = []
+    webhooks: list[WebhookEndpointOut] = []
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
@@ -179,4 +227,94 @@ class RecordingOut(BaseModel):
     started_at: datetime | None = None
     duration_seconds: int | None = None
     size_bytes: int | None = None
+    # True on the recording's own column, or when its event has an open legal-hold
+    # governance record (crud.admin.event_under_legal_hold) — either blocks deletion.
+    legal_hold: bool = False
+    # captured|validating|valid|degraded|failed, or None — nothing in this stack sets this
+    # yet (no dual-recording comparison pipeline exists), so it's shown as an honest
+    # "Validation pending" label, not used to gate anything.
+    validation_status: str | None = None
     url: str | None = None
+
+
+# ── Live Inputs (LiveKit Ingress) ─────────────────────────────────────────────
+
+class LiveInputCreate(BaseModel):
+    event_id: uuid.UUID
+    title: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(None, max_length=2000)
+    # "rtmp" | "whip" — no "srt" until the installed livekit-api SDK adds SRT_INPUT
+    # (see services/livekit.py's INGRESS_TYPES).
+    input_type: str = Field(pattern="^(rtmp|whip)$")
+
+
+class LiveInputOut(BaseModel):
+    """One live input, org-wide (GET /organization/live-inputs). Never carries the raw
+    publish key — that's fetched on demand via GET .../live-inputs/{id}/key, and only
+    while the detail sheet is open (see LiveIngressEndpoint's model docstring)."""
+    id: uuid.UUID
+    event_id: uuid.UUID
+    event_title: str | None = None
+    title: str
+    description: str | None = None
+    input_type: str
+    state: str
+    enforced: bool
+    error: str | None = None
+    created_at: datetime
+
+
+class LiveInputKeyOut(BaseModel):
+    ingest_url: str | None = None
+    stream_key: str | None = None
+
+
+# ── Customer export & post-event reports ──────────────────────────────────────
+# CustomerDelivery is the shared mechanism for both (models/live.py's docstring explains
+# why). Never carries `token_hash`, and the raw token itself only ever appears once, in
+# DeliveryCreated below — see EventAccessLink's reveal-once precedent.
+
+class DeliveryCreate(BaseModel):
+    recipient_name: str = Field(min_length=1, max_length=200)
+    recipient_email: EmailStr
+    expires_in_days: int | None = Field(14, ge=1, le=365)
+
+
+class DeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: str
+    recipient_name: str
+    recipient_email: str
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    delivered_at: datetime | None = None
+    last_accessed_at: datetime | None = None
+    access_count: int
+    created_at: datetime
+    # kind="export" only — pending|ready|failed (models.live.WATERMARK_STATUSES).
+    watermark_status: str | None = None
+
+
+class DeliveryCreated(DeliveryOut):
+    """Returned once, at creation — the raw /deliveries/{token} URL. Never reconstructable
+    afterward, same posture as an API key or an event access link."""
+    delivery_url: str
+
+
+class RecordingExportEligibility(BaseModel):
+    eligible: bool
+    reason: str | None = None
+    validation_status: str | None = None
+
+
+class EventReportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    event_id: uuid.UUID
+    version: int
+    data: dict
+    created_at: datetime
+    released_at: datetime | None = None

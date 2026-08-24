@@ -21,11 +21,12 @@ const MAX_BACKOFF_MS = 15000;
 // just loops, so we stop and surface it.
 const FATAL_CODES = new Set([1008]);
 
-const wsUrl = (eventId, token, reg) => {
+const wsUrl = (eventId, token, reg, link) => {
   const origin = API_BASE.replace(/^http/, "ws").replace(/\/$/, "");
   const params = new URLSearchParams();
   if (token) params.set("token", token);
   if (reg) params.set("reg", reg);
+  if (link) params.set("link", link);
   return `${origin}/api/live/events/${eventId}/ws?${params.toString()}`;
 };
 
@@ -33,12 +34,16 @@ const wsUrl = (eventId, token, reg) => {
 // POST /events/:id/register (self-serve name+email — see RegistrationGate / IdentifyForm).
 // Either one is enough to open the socket; the server resolves whichever it gets into a
 // Ctx (routers/live.py, moderation.resolve_ctx / resolve_ctx_from_registration).
-export default function useEventStream(eventId, onEnvelope, regToken) {
+export default function useEventStream(eventId, onEnvelope, regToken, linkToken) {
   // Read the session once at init: with no token there is nothing to connect to, and
   // starting in "unauthorized" avoids a pointless "connecting" flash.
   const [token] = useState(() => localStorage.getItem("token"));
-  const authKey = token || regToken;
+  const authKey = token || regToken || linkToken;
   const [status, setStatus] = useState(authKey ? "connecting" : "unauthorized"); // connecting | open | reconnecting | offline | unauthorized
+  // The server's close reason (e.g. a join-window/ban/invalid-session message) — only
+  // meaningful alongside status === "unauthorized". Every other caller ignores it, so this
+  // is purely additive.
+  const [closeReason, setCloseReason] = useState(null);
   const [latency, setLatency] = useState(null);
   const [attempt, setAttempt] = useState(0);          // surfaces "retrying…" in the header
 
@@ -61,7 +66,7 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
     let retries = 0;
 
     const connect = () => {
-      const ws = new WebSocket(wsUrl(eventId, token, regToken));
+      const ws = new WebSocket(wsUrl(eventId, token, regToken, linkToken));
       socket.current = ws;
 
       ws.onopen = () => {
@@ -95,6 +100,7 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
         setLatency(null);
         if (closed || manuallyClosed.current) return;
         if (FATAL_CODES.has(e.code)) {
+          setCloseReason(e.reason || null);
           setStatus("unauthorized");
           return;
         }
@@ -121,7 +127,7 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
       socket.current?.close();
       socket.current = null;
     };
-  }, [eventId, token, regToken, authKey]);
+  }, [eventId, token, regToken, linkToken, authKey]);
 
   const send = useCallback((action, payload = {}) => {
     const ws = socket.current;
@@ -146,5 +152,5 @@ export default function useEventStream(eventId, onEnvelope, regToken) {
     setStatus("offline");
   }, []);
 
-  return { status, latency, attempt, send, disconnect };
+  return { status, closeReason, latency, attempt, send, disconnect };
 }

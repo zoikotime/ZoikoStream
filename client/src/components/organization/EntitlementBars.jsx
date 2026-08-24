@@ -36,7 +36,10 @@ export default function EntitlementBars({ entitlements }) {
     >
       <div className="grid gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((it) => (
-          <div key={it.label}>
+          <div
+            key={it.label}
+            className="group -mx-2 rounded-lg px-2 py-1.5 transition-colors duration-150 hover:bg-slate-50 motion-reduce:transition-none dark:hover:bg-white/[0.03]"
+          >
             <div className="flex items-baseline justify-between gap-2">
               <p className={cx("text-[12px] font-medium", CONSOLE.body)}>{it.label}</p>
               <p className={cx("text-[11px]", type.mono, CONSOLE.faint)}>
@@ -51,13 +54,19 @@ export default function EntitlementBars({ entitlements }) {
               aria-valuemin={0}
               aria-valuemax={100}
               aria-label={`${it.label} usage`}
+              title={it.percent == null ? "No limit set — usage is tracked, not capped" : `${it.percent}% of allotment`}
             >
-              {/* No limit means no meaningful fill — the track stays empty rather than
-                  implying a proportion we can't compute. */}
-              {it.percent != null && (
+              {/* No limit means no meaningful fill. An empty track reads as 0% used, which is a
+                  different claim, so an unmetered row gets a dashed rule instead of a bar. */}
+              {it.percent != null ? (
                 <span
                   className={cx("block h-full rounded-full transition-all", fill(it.percent))}
                   style={{ width: `${Math.min(it.percent, 100)}%` }}
+                />
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="block h-full w-full bg-[repeating-linear-gradient(90deg,currentColor_0_3px,transparent_3px_7px)] text-slate-400/70 dark:text-white/25"
                 />
               )}
             </div>

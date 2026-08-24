@@ -6,9 +6,12 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import asc, desc, func, or_, select
+from sqlalchemy import asc, case, desc, func, or_, select
 
-from ..models import Event, EventAccessLink, EventAssignment, EventRegistration, LiveRecording, User
+from ..models import (
+    ContributorSession, Event, EventAccessLink, EventAssignment, EventFeedback,
+    EventRegistration, LiveIngressEndpoint, LiveRecording, User,
+)
 
 _EVENT_SORTS = {
     "created_at": Event.created_at,
@@ -20,20 +23,107 @@ _EVENT_SORTS = {
 
 # ── Lifecycle validation (pure — unit-testable without a DB) ──────────────────
 
-def status_transition_error(current: str, new: str, title) -> str | None:
+def status_transition_error(
+    current: str, new: str, title,
+    *, readiness_ready: bool | None = None, readiness_reasons: list[str] | None = None,
+) -> str | None:
     """Return an error message if current -> new is not allowed, else None.
-    Encodes exactly the four spec rules; other transitions are permitted."""
+    Encodes the base spec rules plus the optional v1.1 canonical-spec chain
+    (rehearsal -> ready_to_arm -> armed -> live -> degraded -> ending -> processing ->
+    replay_ready -> ended); other transitions are permitted. Ordinary events that skip
+    straight from published/scheduled to live are unaffected — that path is untouched.
+
+    `readiness_ready` gates armed and MUST be explicitly True (not just not-False) for the
+    caller to arm — this is the spec's "non-waivable" guard, so an omitted/None value blocks
+    rather than silently passing."""
     if new == current:
         return None
     if new in ("published", "scheduled") and not (title and str(title).strip()):
         return "Cannot publish an event without a title"
-    if new == "live" and current not in ("published", "scheduled"):
-        return "Cannot go live unless the event is published"
-    if new == "ended" and current != "live":
+    if new == "ready_to_arm" and current not in ("published", "scheduled", "rehearsal"):
+        return "Must be published or rehearsed before marking ready to arm"
+    if new == "armed":
+        if current != "ready_to_arm":
+            return "Must be ready_to_arm before arming"
+        if readiness_ready is not True:
+            reasons = f": {'; '.join(readiness_reasons)}" if readiness_reasons else ""
+            return f"Cannot arm — readiness checks have not passed{reasons}"
+    if new == "live" and current not in ("published", "scheduled", "armed"):
+        return "Cannot go live unless the event is published or armed"
+    if new == "degraded" and current != "live":
+        return "Only a live event can be marked degraded"
+    if new == "ending" and current not in ("live", "degraded"):
+        return "Can only end from live or degraded"
+    if new == "processing" and current != "ending":
+        return "Must be ending before processing"
+    if new == "replay_ready" and current != "processing":
+        return "Must be processing before replay is ready"
+    if new == "ended" and current not in ("live", "degraded", "replay_ready"):
         return "Cannot end an event that is not live"
-    if new == "archived" and current == "live":
-        return "Cannot archive a live event"
+    if new == "archived" and current in ("live", "armed", "degraded", "ending", "processing"):
+        return "Cannot archive an active event"
     return None
+
+
+# Category -> minimum risk tier (doc Sec. 4.1/4.2: "Category sets the minimum risk class...
+# Memorials default here and cannot be downgraded"). Only the memorial category has a
+# defined floor in the current registry; every other category stays at the r0 baseline
+# until later categories get their own entries.
+CATEGORY_MIN_RISK_TIER = {"Funeral / Memorial": "r2"}
+_RISK_ORDER = {"r0": 0, "r1": 1, "r2": 2, "r3": 3}
+
+
+_CATEGORY_MIN_RISK_TIER_NORMALIZED = {k.strip().lower(): v for k, v in CATEGORY_MIN_RISK_TIER.items()}
+
+
+def _normalize_category(category: str | None) -> str:
+    return (category or "").strip().lower()
+
+
+def category_min_risk_tier(category: str | None) -> str:
+    return _CATEGORY_MIN_RISK_TIER_NORMALIZED.get(_normalize_category(category), "r0")
+
+
+def is_memorial_category(category: str | None) -> bool:
+    """Whether this event falls under the BRD's memorial-launch restriction on audience
+    interaction (no chat, Q&A, polls, raise-hand, or reactions — doc Sec. 11.3/19,
+    non-waivable LE-AC-16). Keys off the same registry category_min_risk_tier reads, so a
+    category that earns the memorial risk floor is treated as memorial everywhere — see
+    services/broadcast.py's _seed_settings and _settings handler for the enforcement side.
+
+    Case/whitespace-insensitive: `category` is free text (CreateEventModal.jsx's dropdown
+    writes the exact registry string, but nothing server-side stops a direct API call from
+    sending "funeral / memorial" or " Funeral / Memorial " instead) — a casing or
+    whitespace difference must not silently bypass the memorial restrictions. This does NOT
+    catch a genuine synonym ("Celebration of Life", "Funeral") — the registry only has one
+    entry today; widening it to a curated alias list is a separate, deliberate product
+    decision, not something to infer here."""
+    return _normalize_category(category) in _CATEGORY_MIN_RISK_TIER_NORMALIZED
+
+
+# Feature flags a memorial-category event is never allowed to enable, applied on every
+# create/update below — belt-and-suspenders with the live-socket enforcement in
+# services/broadcast.py, so the restriction holds even if a caller bypasses this layer.
+_MEMORIAL_DISABLED_FEATURES = ("chat_enabled", "qa_enabled", "polls_enabled", "raise_hand_enabled")
+
+
+def _enforce_memorial_features(category: str | None, fields: dict) -> dict:
+    """Forces the disabled features False whenever the EFFECTIVE category (after this
+    update) is memorial — not just when the caller happened to touch one of those keys —
+    so switching an existing event's category to memorial can't leave a stale
+    chat_enabled=True sitting on the row from before the switch."""
+    if is_memorial_category(category):
+        for key in _MEMORIAL_DISABLED_FEATURES:
+            fields[key] = False
+    return fields
+
+
+def elevated_risk_tier(category: str | None, proposed: str) -> str:
+    """The risk tier to actually store: never below the category's floor. Category alone
+    can only raise a tier, never lower one an operator or commercial order explicitly set
+    higher — so this is safe to apply unconditionally on every write."""
+    minimum = category_min_risk_tier(category)
+    return minimum if _RISK_ORDER[minimum] > _RISK_ORDER.get(proposed, 0) else proposed
 
 
 # ── Slugs (unique within org) ─────────────────────────────────────────────────
@@ -103,8 +193,10 @@ def get_event_unscoped(db, event_id) -> Event | None:
 
 
 def create_event(db, org_id, created_by, data, slug) -> Event:
-    ev = Event(org_id=org_id, created_by=created_by, slug=slug,
-               **data.model_dump(exclude={"slug"}))
+    fields = data.model_dump(exclude={"slug"})
+    fields["risk_tier"] = elevated_risk_tier(fields.get("category"), "r0")
+    fields = _enforce_memorial_features(fields.get("category"), fields)
+    ev = Event(org_id=org_id, created_by=created_by, slug=slug, **fields)
     db.add(ev)
     db.commit()
     db.refresh(ev)
@@ -112,6 +204,8 @@ def create_event(db, org_id, created_by, data, slug) -> Event:
 
 
 def update_event(db, event: Event, fields: dict) -> Event:
+    effective_category = fields.get("category", event.category)
+    fields = _enforce_memorial_features(effective_category, fields)
     for key, value in fields.items():
         setattr(event, key, value)
     db.commit()
@@ -201,17 +295,125 @@ def list_registrations(db, event_id) -> list[EventRegistration]:
     ).all()
 
 
+def list_feedback(db, event_id, role: str | None = None) -> list[EventFeedback]:
+    """Feedback rows for an event, newest first. `role` filters to "host" or "viewer" —
+    the host dashboard only wants viewer feedback, and the organizer's event page only
+    wants the host's own; leaving it unset returns everything."""
+    stmt = select(EventFeedback).where(EventFeedback.event_id == event_id)
+    if role:
+        stmt = stmt.where(EventFeedback.role == role)
+    return db.scalars(stmt.order_by(EventFeedback.created_at.desc())).all()
+
+
+# ── Contributor (speaker) backstage invitations ────────────────────────────────
+# EventAssignment(role="speaker") stays the eligibility list; ContributorSession is the
+# per-event invitation + runtime backstage state for one of those assignees (see
+# models/live.py's ContributorSession docstring — presence in services/bus.py is
+# ephemeral and can't hold consent/preflight/rehearsal across a dropped room).
+
+def get_contributor_session(db, event_id, user_id) -> ContributorSession | None:
+    return db.scalar(
+        select(ContributorSession).where(
+            ContributorSession.event_id == event_id, ContributorSession.user_id == user_id,
+        )
+    )
+
+
+def upsert_contributor_invite(db, event: Event, user: User, invited_by_id, *, join_window_start,
+                              join_window_end, expires_at, contribution_method, consent_notice,
+                              support_contact) -> ContributorSession:
+    """(Re-)invite an assigned speaker. Re-inviting resets `state` to "waiting" — a fresh
+    invite means a fresh backstage session, not a resumption of whatever the last one
+    reached (consent/preflight from a stale invite must not silently carry over)."""
+    s = get_contributor_session(db, event.id, user.id)
+    if s is None:
+        s = ContributorSession(event_id=event.id, org_id=event.org_id, user_id=user.id,
+                               identity=str(user.id))
+        db.add(s)
+    s.state = "waiting"
+    s.invited_at = datetime.now(timezone.utc)
+    s.invited_by = invited_by_id
+    s.join_window_start = join_window_start
+    s.join_window_end = join_window_end
+    s.expires_at = expires_at
+    s.contribution_method = contribution_method or "livekit_browser"
+    s.consent_notice = consent_notice
+    s.support_contact = support_contact
+    s.consent_given, s.consent_at = False, None
+    s.preflight_result = None
+    s.rehearsal_complete, s.rehearsal_at = False, None
+    s.removed_by, s.removed_at, s.removed_reason = None, None, None
+    db.commit()
+    db.refresh(s)
+    return s
+
+
+def revoke_contributor_session(db, session: ContributorSession) -> ContributorSession:
+    session.state = "removed"
+    session.expires_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def get_registration_by_id(db, event_id, registration_id) -> EventRegistration | None:
+    return db.scalar(
+        select(EventRegistration).where(
+            EventRegistration.id == registration_id, EventRegistration.event_id == event_id,
+        )
+    )
+
+
+# One-device claim on a private event's personal invite token — see EventRegistration's
+# docstring. Reuses _hash_link_token's sha256 scheme further down this file.
+
+def claim_registration(db, reg: EventRegistration) -> str:
+    """First successful use of a private event's invite token claims this row to one
+    device. Returns the raw claim secret to set as an httpOnly cookie; only its hash is
+    stored, so a leaked DB row alone can't forge a claim."""
+    raw = secrets.token_urlsafe(32)
+    reg.claim_token_hash = _hash_link_token(raw)
+    reg.claimed_at = datetime.now(timezone.utc)
+    db.commit()
+    return raw
+
+
+def claim_matches(reg: EventRegistration, raw: str | None) -> bool:
+    return bool(raw) and reg.claim_token_hash == _hash_link_token(raw)
+
+
 def list_replay_candidates(db, event_id) -> list[LiveRecording]:
-    """Finished, actually-captured recordings for this event, newest first — what a viewer's
-    replay link points at. `enforced=False` rows (LiveKit egress unavailable) are excluded:
-    there is no file behind them. Returns every candidate, not just the newest, because the
-    caller verifies each against GCS and a "stopped" row can still turn out to have no real
-    file behind it (see services.livekit.object_exists) — the next-newest one is the fallback."""
+    """Finished, actually-captured recordings for this event, primary-role first and newest
+    within each role — what a viewer's replay link points at. `enforced=False` rows (LiveKit
+    egress unavailable) are excluded: there is no file behind them. Returns every candidate,
+    not just the newest, because the caller verifies each against GCS and a "stopped" row can
+    still turn out to have no real file behind it (see services.livekit.object_exists) — the
+    next candidate (secondary, or the next-newest) is the fallback.
+
+    Under dual recording (services/broadcast.py._recording_start), `role` distinguishes the
+    canonical primary path from its secondary/backup — a viewer should always land on the
+    primary's file when it's actually there, not whichever egress happened to finish first.
+
+    `validation_status="failed"` rows are excluded outright — services/validation.py only
+    marks a path failed when it genuinely couldn't be read back, so serving it would hand a
+    viewer a broken file even though `enforced`/a stopped status say a row exists.
+    `validation_status="valid"` sorts ahead of `degraded`/unset (single-path events, which
+    are never run through comparison at all) — the confirmed-good source wins over an
+    unverified one, same tie-break precedence the role ordering already established."""
+    role_order = case((LiveRecording.role == "primary", 0), (LiveRecording.role == "secondary", 1), else_=0)
+    validation_order = case((LiveRecording.validation_status == "valid", 0), else_=1)
     return db.scalars(
         select(LiveRecording)
-        .where(LiveRecording.event_id == event_id, LiveRecording.status == "stopped",
-               LiveRecording.enforced.is_(True))
-        .order_by(LiveRecording.stopped_at.desc())
+        .where(
+            LiveRecording.event_id == event_id, LiveRecording.status == "stopped",
+            LiveRecording.enforced.is_(True),
+            # NOT `!= "failed"` — SQL's three-valued logic makes that silently drop every
+            # NULL row too (i.e. every single-path event, which never gets a
+            # validation_status at all), which would have broken replay for the common
+            # case while looking like it only excluded the rare failed-validation one.
+            or_(LiveRecording.validation_status.is_(None), LiveRecording.validation_status != "failed"),
+        )
+        .order_by(validation_order, role_order, LiveRecording.stopped_at.desc())
     ).all()
 
 
@@ -307,6 +509,28 @@ def get_org_recording(db, org_id, recording_id) -> LiveRecording | None:
         .join(Event, Event.id == LiveRecording.event_id)
         .where(LiveRecording.id == recording_id, Event.org_id == org_id)
     )
+
+
+def get_org_ingress_endpoint(db, org_id, endpoint_id) -> LiveIngressEndpoint | None:
+    """A single live input, scoped through its event's org_id — same posture as
+    get_org_recording."""
+    return db.scalar(
+        select(LiveIngressEndpoint)
+        .join(Event, Event.id == LiveIngressEndpoint.event_id)
+        .where(LiveIngressEndpoint.id == endpoint_id, Event.org_id == org_id)
+    )
+
+
+def list_org_ingress_endpoints(db, org_id) -> list[tuple[LiveIngressEndpoint, Event]]:
+    """Every live input across the org, newest first — the org-wide Live Inputs page.
+    Joined to Event for title, same reasoning as list_org_recordings."""
+    rows = db.execute(
+        select(LiveIngressEndpoint, Event)
+        .join(Event, Event.id == LiveIngressEndpoint.event_id)
+        .where(Event.org_id == org_id)
+        .order_by(LiveIngressEndpoint.created_at.desc())
+    ).all()
+    return list(rows)
 
 
 def list_org_recordings(db, org_id, limit: int = 100) -> list[tuple[LiveRecording, Event]]:

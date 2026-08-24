@@ -22,19 +22,22 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from ..crud.admin import create_audit_log
 from ..db import SessionLocal
 from ..models import (
     Event,
     EventAssignment,
+    EventFeedback,
     EventRegistration,
     LiveActivity,
     LiveAnnouncement,
     LiveMessage,
     LivePoll,
+    LivePollVote,
     LiveQuestion,
+    LiveQuestionVote,
     User,
 )
 from . import bus, livekit
@@ -109,6 +112,9 @@ class Ctx:
     # Broadcast control (go live, end, record, emergency stop) is HOST-only. A moderator
     # runs the audience; they must not be able to end the stream.
     can_host: bool = False
+    # An assigned speaker's backstage privileges (contributor.* actions, join-window gate
+    # in routers/live.py). Independent of can_moderate — a speaker is not a moderator.
+    can_contribute: bool = False
 
     @property
     def actor(self):
@@ -130,11 +136,15 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
 
         # Org admins and above moderate any event in their org. A moderator/host/speaker
         # must be ASSIGNED to this specific event — an org's moderator is not automatically
-        # a moderator of every event in it.
-        can = can_host = False
+        # a moderator of every event in it. The assignment check runs for every non-admin
+        # platform role (not just "moderator"/"host"): EventAssignment.role is independent
+        # of User.role — an org admin can assign anyone as host/moderator/speaker regardless
+        # of their platform role — so gating the query on platform role left a real "speaker"
+        # user unable to pick up their own EventAssignment(role="speaker") row at all.
+        can = can_host = can_contribute = False
         if user.role in ("org_admin", "super_admin"):
             can = can_host = True
-        elif user.role in ("moderator", "host"):
+        else:
             roles = set(db.scalars(
                 select(EventAssignment.role).where(
                     EventAssignment.event_id == ev.id,
@@ -145,6 +155,7 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
             # Only an assigned HOST gets broadcast control — being the org's host role is
             # not enough, and a moderator assignment never grants it.
             can_host = "host" in roles
+            can_contribute = "speaker" in roles
 
         return Ctx(
             event_id=ev.id,
@@ -156,6 +167,7 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
             role=user.role,
             can_moderate=can,
             can_host=can_host,
+            can_contribute=can_contribute,
         )
     finally:
         db.close()
@@ -190,6 +202,47 @@ def resolve_ctx_from_registration(event_id: uuid.UUID, registration: EventRegist
         db.close()
 
 
+
+
+def resolve_ctx_from_access_link(event_id: uuid.UUID, raw_token: str) -> Ctx | None:
+    """Resolve a host-issued private-event access link into an anonymous viewer context.
+
+    The token is validated against BOTH the requested event id and the stored hash, and
+    revoked/expired links are rejected by ``find_access_link``.  This mirrors the HTTP
+    ``/events/{id}/watch?link=...`` gate so the WebSocket cannot become a side door into a
+    private event.
+
+    ``user_id`` deliberately stays as the access-link row's id rather than using a shared
+    anonymous identity: it keeps presence, slow-mode and moderation state isolated per
+    shared-link viewer without creating a User account.
+    """
+    if not raw_token:
+        return None
+    from ..crud import event as event_crud
+
+    db = SessionLocal()
+    try:
+        ev = db.scalar(select(Event).where(Event.id == event_id, Event.deleted_at.is_(None)))
+        if ev is None or ev.visibility != "private":
+            return None
+        link = event_crud.find_access_link(db, ev.id, raw_token)
+        if link is None:
+            return None
+        identity = f"guest-link-{link.id}"
+        return Ctx(
+            event_id=ev.id,
+            org_id=ev.org_id,
+            room=f"event_{ev.id}",
+            user_id=link.id,
+            name=link.label or "Viewer",
+            identity=identity,
+            role="viewer",
+            can_moderate=False,
+            can_host=False,
+        )
+    finally:
+        db.close()
+
 # ── serializers ───────────────────────────────────────────────────────────────
 # Keys match what the console components already render, so no client-side mapping layer.
 
@@ -197,31 +250,57 @@ def _iso(dt):
     return dt.isoformat() if dt else None
 
 
-def message_out(m: LiveMessage) -> dict:
+def _actor_role(ctx: "Ctx") -> str:
+    """Two-bucket role label for live-event notification routing (see useLiveEvent.js and
+    EventWatch.jsx on the client): "host" for anyone who can moderate this event (host,
+    moderator, org_admin, super_admin), "viewer" for everyone else — an anonymous guest, a
+    self-registered attendee, or a logged-in member with no moderation rights on THIS
+    event. This is deliberately coarser than ctx.role (which carries the platform role
+    verbatim): the client only ever needs to know which side of the console/watch-page
+    divide an action came from, not the actor's exact title.
+
+    THE BUG THIS FIXES: message_out/question_out/poll_out never included this field at
+    all, so every `env.data.actor_role === "viewer"` / `"host"` check on the client was
+    always comparing against `undefined` — the host console's chat/poll notifications and
+    the viewer page's chat notification silently never fired, in every environment, since
+    the fields being checked never existed on the wire.
+    """
+    return "host" if ctx.can_moderate else "viewer"
+
+
+def message_out(m: LiveMessage, actor_role: str | None = None) -> dict:
     return {
         "id": str(m.id), "name": m.author_name, "user_id": str(m.user_id) if m.user_id else None,
         "text": m.text, "status": m.status, "pinned": m.pinned,
         "flags": m.flags or [], "flagged": bool(m.flags), "reactions": m.reactions or {},
         "reply_to": str(m.reply_to) if m.reply_to else None, "note": m.note,
-        "created_at": _iso(m.created_at),
+        "created_at": _iso(m.created_at), "actor_role": actor_role,
     }
 
 
-def question_out(q: LiveQuestion) -> dict:
+def question_out(q: LiveQuestion, actor_role: str | None = None) -> dict:
     return {
         "id": str(q.id), "name": q.author_name, "text": q.text, "votes": q.votes,
         "status": q.status, "pinned": q.pinned, "assigned_name": q.assigned_name,
-        "flags": q.flags or [], "created_at": _iso(q.created_at),
+        "flags": q.flags or [], "created_at": _iso(q.created_at), "actor_role": actor_role,
     }
 
 
-def poll_out(p: LivePoll) -> dict:
+def poll_out(p: LivePoll, your_vote: int | None = None, actor_role: str | None = None) -> dict:
+    """`your_vote` is the CALLER's own option index (or None if they haven't voted) —
+    always per-connection, never broadcast-derived, since it would leak one viewer's
+    ballot to every other viewer if it were. Callers that build a public broadcast
+    (poll.new/update/delete) simply omit it and every viewer gets `your_vote: None`,
+    which is correct for them. Only `_snapshot` (below), which runs once per socket
+    with that socket's own Ctx, passes a real value — that's what lets a refreshed
+    page know it already voted instead of showing the vote buttons again."""
     return {
         "id": str(p.id), "question": p.question, "options": p.options or [], "status": p.status,
         "scheduled_at": _iso(p.scheduled_at), "closes_at": _iso(p.closes_at),
         "launched_at": _iso(p.launched_at), "closed_at": _iso(p.closed_at),
         "votes": sum(o.get("votes", 0) for o in (p.options or [])),
-        "created_at": _iso(p.created_at),
+        "your_vote": your_vote,
+        "created_at": _iso(p.created_at), "actor_role": actor_role,
     }
 
 
@@ -344,6 +423,22 @@ def _snapshot(db, ctx: Ctx) -> dict:
     def recent(model, limit=HISTORY_LIMIT):
         return list(reversed(db.scalars(_scoped(model, ctx).order_by(model.created_at.desc()).limit(limit)).all()))
 
+    # Newest-first, same as the old inline `reversed(recent(LivePoll, 50))` — kept as its
+    # own list so the vote lookup below can reuse it instead of querying twice.
+    polls = list(reversed(recent(LivePoll, 50)))
+    # This viewer's own ballots, so a refreshed/reconnected page can show "you voted for
+    # X" and disable the buttons instead of re-offering a vote the server will just no-op
+    # (see _poll_vote's already_voted check) — without this the poll LOOKED like it reset.
+    my_poll_votes: dict = {}
+    if ctx.user_id and polls:
+        rows = db.scalars(
+            select(LivePollVote).where(
+                LivePollVote.poll_id.in_([p.id for p in polls]),
+                LivePollVote.user_id == ctx.user_id,
+            )
+        ).all()
+        my_poll_votes = {r.poll_id: r.option for r in rows}
+
     started = ev.start_time if ev.status == "live" else None
     return {
         "event": {
@@ -359,11 +454,18 @@ def _snapshot(db, ctx: Ctx) -> dict:
         "speakers": [{"id": str(s.id), "name": s.full_name or s.email} for s in speakers],
         "messages": [message_out(m) for m in recent(LiveMessage) if m.status != "deleted"],
         "questions": [question_out(q) for q in recent(LiveQuestion)],
-        "polls": [poll_out(p) for p in reversed(recent(LivePoll, 50))],
+        "polls": [poll_out(p, my_poll_votes.get(p.id)) for p in polls],
         "announcements": [announcement_out(a) for a in reversed(recent(LiveAnnouncement, 50))],
         "activity": [activity_out(a) for a in reversed(recent(LiveActivity, 100))],
         "can_moderate": ctx.can_moderate,
         "livekit_enforced": livekit.configured(),
+        # This connection's own identity. The snapshot's `participants` list (added by
+        # snapshot() below) already carries everyone's role/on_stage/muted — clients that
+        # need to know "is THIS ME" (a promoted viewer deciding whether to start
+        # publishing its mic, a removed viewer's own socket recognizing a broadcast
+        # session.removed envelope is about them) match on this rather than the console
+        # needing its own separate notion of identity.
+        "you": {"identity": ctx.identity, "can_moderate": ctx.can_moderate, "can_host": ctx.can_host},
     }
 
 
@@ -376,6 +478,7 @@ SNAPSHOT_EXTRAS: list = []
 async def snapshot(ctx: Ctx) -> dict:
     snap = await tx(lambda db: _snapshot(db, ctx))
     snap["participants"] = await bus.presence_all(ctx.event_id)
+    snap["reactions"] = _reaction_snapshot(await bus.reaction_all(ctx.event_id))
     for extra in SNAPSHOT_EXTRAS:
         snap.update(await extra(ctx))
     return snap
@@ -388,8 +491,19 @@ async def snapshot(ctx: Ctx) -> dict:
 # Actions any authenticated attendee may perform. Everything else needs can_moderate.
 VIEWER_ACTIONS = frozenset({
     "chat.send", "chat.typing", "chat.react", "qa.ask", "qa.vote", "poll.vote",
-    "participant.hand", "participant.state",
+    "participant.hand", "participant.state", "reaction.add", "feedback.submit",
 })
+
+# The viewer reaction bar under the player (components/watch/ReactionBar.jsx) — a fixed,
+# whole-event tap counter per emoji, distinct from chat.react above (which tags one chat
+# message). Keys match the frontend's REACTIONS list 1:1 so no mapping layer is needed.
+REACTION_KEYS = ("like", "heart", "clap", "fire", "party")
+
+
+def _reaction_snapshot(counts: dict) -> dict:
+    """Zero-fill every known key so the envelope is always the complete state (a viewer
+    who has never seen a `fire` tap this session still needs to know it's 0, not missing)."""
+    return {k: counts.get(k, 0) for k in REACTION_KEYS}
 
 
 def _text(payload, key="text", limit=2000) -> str:
@@ -490,7 +604,7 @@ async def _chat_send(ctx, payload):
             return record(db, ctx, "mod", f"Auto-moderation removed a message from {ctx.name}",
                           audit="live.message.auto_removed", target_type="live_message",
                           target_id=msg.id, meta={"flags": flags}), True
-        return message_out(msg), False
+        return message_out(msg, actor_role=_actor_role(ctx)), False
 
     out = await tx(work)
     if isinstance(out, str):
@@ -519,7 +633,7 @@ async def _chat_react(ctx, payload):
         counts = dict(m.reactions or {})
         counts[emoji] = counts.get(emoji, 0) + 1
         m.reactions = counts
-        return message_out(m)
+        return message_out(m, actor_role=_actor_role(ctx))
 
     msg = await tx(work)
     return [("chat", "message.update", msg)] if msg else []
@@ -551,7 +665,7 @@ async def _chat_moderate(ctx, payload, op: str):
             text = f"Deleted a message from {m.author_name}"
         act = record(db, ctx, "chat", text, audit=f"live.message.{op}",
                      target_type="live_message", target_id=m.id)
-        return message_out(m), act
+        return message_out(m, actor_role=_actor_role(ctx)), act
 
     out = await tx(work)
     if not out:
@@ -579,7 +693,7 @@ async def _chat_bulk(ctx, payload):
                 m.status, m.flags = "approved", []
             else:
                 m.status, m.deleted_at, m.deleted_by = "deleted", datetime.now(timezone.utc), ctx.user_id
-            rows.append(message_out(m))
+            rows.append(message_out(m, actor_role=_actor_role(ctx)))
         act = record(db, ctx, "mod", f"Bulk {op}d {len(rows)} message(s)", audit=f"live.message.bulk_{op}",
                      target_type="live_message", meta={"count": len(rows)})
         return rows, act
@@ -601,21 +715,39 @@ async def _qa_ask(ctx, payload):
                          author_name=ctx.name, text=text, flags=flag_text(text))
         db.add(q)
         db.flush()
-        return question_out(q), record(db, ctx, "qa", f"New question from {ctx.name}")
+        return question_out(q, actor_role=_actor_role(ctx)), record(db, ctx, "qa", f"New question from {ctx.name}")
 
     q, act = await tx(work)
     return [("qa", "question.new", q), ("activity", "activity.new", act)]
 
 
 async def _qa_vote(ctx, payload):
+    """Upvote is a toggle (see WatchPanel.jsx's toggleVote), enforced server-side via a
+    (question, voter) ledger row rather than trusting the client's local `voted` state —
+    that state is only ever in memory, so a page refresh reset it to "not voted" with
+    nothing stopping a repeat upvote from being counted again. `down` here means "remove
+    my upvote", not "downvote"; it's a no-op if this voter never had one."""
+    down = bool(payload.get("down"))
+
     def work(db):
         q = _row(db, LiveQuestion, ctx, payload.get("id"))
         if not q:
             return None
-        # ponytail: no per-user vote ledger — one upvote row per person needs its own
-        # table; add live_question_votes if vote-stuffing shows up.
-        q.votes = max(0, q.votes + (-1 if payload.get("down") else 1))
-        return question_out(q)
+        existing = db.scalar(
+            select(LiveQuestionVote).where(
+                LiveQuestionVote.question_id == q.id, LiveQuestionVote.user_id == ctx.user_id,
+            )
+        )
+        if down:
+            if existing is not None:
+                db.delete(existing)
+                q.votes = max(0, q.votes - 1)
+        elif existing is None:
+            db.add(LiveQuestionVote(
+                event_id=ctx.event_id, org_id=ctx.org_id, question_id=q.id, user_id=ctx.user_id,
+            ))
+            q.votes += 1
+        return question_out(q, actor_role=_actor_role(ctx))
 
     q = await tx(work)
     return [("qa", "question.update", q)] if q else []
@@ -668,7 +800,7 @@ async def _qa_moderate(ctx, payload, op: str):
             return {"id": qid}, act, True
         act = record(db, ctx, "qa", text, audit=f"live.question.{op}",
                      target_type="live_question", target_id=q.id)
-        return question_out(q), act, False
+        return question_out(q, actor_role=_actor_role(ctx)), act, False
 
     out = await tx(work)
     if not out:
@@ -733,7 +865,7 @@ async def _poll_create(ctx, payload):
         verb = "Launched" if launch_now else "Scheduled" if scheduled else "Drafted"
         act = record(db, ctx, "poll", f"{verb} poll: {question}", audit="live.poll.create",
                      target_type="live_poll", target_id=p.id)
-        return poll_out(p), act
+        return poll_out(p, actor_role=_actor_role(ctx)), act
 
     p, act = await tx(work)
     return [("poll", "poll.new", p), ("activity", "activity.new", act)]
@@ -756,7 +888,7 @@ async def _poll_update(ctx, payload):
             p.status = "scheduled" if p.scheduled_at else p.status
         act = record(db, ctx, "poll", f"Edited poll: {p.question}", audit="live.poll.update",
                      target_type="live_poll", target_id=p.id)
-        return poll_out(p), act
+        return poll_out(p, actor_role=_actor_role(ctx)), act
 
     out = await tx(work)
     if not out:
@@ -783,13 +915,18 @@ async def _poll_lifecycle(ctx, payload, op: str):
             # Capture before the delete — record() flushes, and a deleted instance's
             # attributes are unavailable after that.
             pid, question = str(p.id), p.question
+            # LivePollVote rows FK onto live_polls.id with no ON DELETE CASCADE (see
+            # models/live.py), so deleting a poll that already has votes would otherwise
+            # hit a foreign-key violation and silently fail the whole action. Clear the
+            # ledger first so a poll with votes can still be deleted.
+            db.execute(delete(LivePollVote).where(LivePollVote.poll_id == p.id))
             db.delete(p)
             act = record(db, ctx, "poll", f"Deleted poll: {question}", audit="live.poll.delete",
                          target_type="live_poll", target_id=pid)
             return {"id": pid}, act, True
         act = record(db, ctx, "poll", text, audit=f"live.poll.{op}",
                      target_type="live_poll", target_id=p.id)
-        return poll_out(p), act, False
+        return poll_out(p, actor_role=_actor_role(ctx)), act, False
 
     out = await tx(work)
     if not out:
@@ -799,6 +936,15 @@ async def _poll_lifecycle(ctx, payload, op: str):
 
 
 async def _poll_vote(ctx, payload):
+    """A (poll, voter) ledger row is how a page refresh knows this voter already has a
+    ballot in (see poll_out's `your_vote`, filled from the snapshot's per-viewer lookup) —
+    without it the option index alone gated nothing, and a refresh reset the client's
+    local `voted` flag with nothing server-side remembering the vote.
+
+    A voter CAN change their mind while the poll is still live: re-voting moves their
+    existing ledger row to the new option (decrementing the old tally, incrementing the
+    new one) instead of being rejected as a second vote. Once the poll closes the ledger
+    row — and so the tally — is frozen, same as before."""
     index = payload.get("option")
 
     def work(db):
@@ -808,8 +954,25 @@ async def _poll_vote(ctx, payload):
         options = [dict(o) for o in (p.options or [])]
         if not isinstance(index, int) or not 0 <= index < len(options):
             return None
+        already_voted = db.scalar(
+            select(LivePollVote).where(LivePollVote.poll_id == p.id, LivePollVote.user_id == ctx.user_id)
+        )
+        if already_voted is not None:
+            if already_voted.option == index:
+                return poll_out(p, actor_role=_actor_role(ctx))  # no-op: re-picking the same option
+            if 0 <= already_voted.option < len(options):
+                options[already_voted.option]["votes"] = max(0, options[already_voted.option].get("votes", 0) - 1)
+            already_voted.option = index
+        else:
+            db.add(LivePollVote(
+                event_id=ctx.event_id, org_id=ctx.org_id, poll_id=p.id, user_id=ctx.user_id, option=index,
+            ))
         options[index]["votes"] = options[index].get("votes", 0) + 1
         p.options = options  # reassign: JSON columns don't track in-place mutation
+        # `your_vote` is intentionally omitted here (see poll_out's docstring) — this
+        # dict is broadcast to EVERY viewer, and it must not leak this voter's ballot
+        # to the rest of the room. The voter's own UI already updated optimistically
+        # in WatchPanel.jsx's Poll before this round trip returned.
         return poll_out(p)
 
     p = await tx(work)
@@ -894,6 +1057,68 @@ async def _participant_state(ctx, payload):
     return [("participants", "participant.update", rec)]
 
 
+# reactions ---------------------------------------------------------------------
+
+async def _reaction_add(ctx, payload):
+    """One tap on the viewer reaction bar. `key` is validated against the fixed set the
+    frontend renders (never trust a wire value into a dict key that gets broadcast).
+    The increment itself is bus.reaction_incr, which is atomic (Redis HINCRBY / a bare
+    dict bump with no intervening await) — concurrent taps from different viewers never
+    clobber each other the way a read-count/add-one/save-count round trip would."""
+    key = payload.get("key")
+    if key not in REACTION_KEYS:
+        return "Unsupported reaction"
+
+    # Same toggle the host console already exposes (data/host.js "Reactions"); chat_gate
+    # reads the equivalent chat_enabled flag the same way, from the bus's hot settings
+    # copy rather than a query per tap.
+    settings = await bus.state_get(ctx.event_id)
+    if settings.get("reactions_enabled") is False:
+        return "Reactions are turned off for this event"
+
+    counts = await bus.reaction_incr(ctx.event_id, key)
+    return [("reactions", "reaction.update", {
+        "event_id": str(ctx.event_id), "reactions": _reaction_snapshot(counts),
+    })]
+
+
+def _user_id_from_identity(identity: str) -> uuid.UUID | None:
+    """Presence identities are either the signed-in user's id verbatim (resolve_ctx) or
+    `guest-<registration id>` for an anonymous viewer (resolve_ctx_from_registration /
+    resolve_ctx_from_access_link) — see routers/live.py. Only the former maps to a real
+    `users` row, so only the former can hold a persisted event role."""
+    try:
+        return uuid.UUID(identity)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _grant_event_role(db, event_id: uuid.UUID, user_id: uuid.UUID, role: str) -> None:
+    """Persist a moderator/host promotion. resolve_ctx() (this module) decides can_moderate
+    / can_host by reading event_assignments — NOT the live presence "role" label — so
+    writing only the presence patch would make the button cosmetic: the badge would say
+    "moderator" but the person still couldn't moderate anything, and the label itself would
+    disappear the moment they reconnect. This is what actually grants the access the
+    console claims to grant. Replaces any prior moderator/host grant for this person on
+    this event, since a participant holds one standing elevated role at a time."""
+    db.execute(delete(EventAssignment).where(
+        EventAssignment.event_id == event_id,
+        EventAssignment.user_id == user_id,
+        EventAssignment.role.in_(("moderator", "host")),
+    ))
+    db.add(EventAssignment(event_id=event_id, user_id=user_id, role=role))
+
+
+def _revoke_event_role(db, event_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    """Demote: drop any standing moderator/host grant so a demoted participant can't just
+    reconnect (or open a second tab) and keep the access they were just stripped of."""
+    db.execute(delete(EventAssignment).where(
+        EventAssignment.event_id == event_id,
+        EventAssignment.user_id == user_id,
+        EventAssignment.role.in_(("moderator", "host")),
+    ))
+
+
 async def _participant_action(ctx, payload, op: str):
     identity = str(payload.get("identity") or "")
     if not identity:
@@ -919,7 +1144,36 @@ async def _participant_action(ctx, payload, op: str):
         text = "{name} was " + ("invited to the stage" if on else "removed from the stage")
     elif op == "role":
         role = payload.get("role") if payload.get("role") in ("host", "speaker", "moderator", "viewer") else "viewer"
-        patch = {"role": role}
+
+        # Granting "host" hands over broadcast control (go live / end / record / emergency
+        # stop) — a moderator running the audience must not be able to grant that, only the
+        # host themself can. Promoting to "moderator" is a normal moderation action and
+        # stays available to any moderator, same as every other action in this table.
+        if role == "host" and not ctx.can_host:
+            return "Only the event host can grant host access"
+
+        target_user_id = _user_id_from_identity(identity)
+        if role in ("host", "moderator"):
+            if target_user_id is None:
+                return "Only a signed-in participant can be promoted — this person joined as a guest"
+            await tx(lambda db: _grant_event_role(db, ctx.event_id, target_user_id, role))
+        elif target_user_id is not None:
+            # Demoted to viewer/speaker: revoke any standing moderator/host grant they held.
+            await tx(lambda db: _revoke_event_role(db, ctx.event_id, target_user_id))
+
+        # "speaker" IS the stage role — becoming one has to be a real LiveKit publish
+        # grant (same call participant.stage makes), not just a badge that says
+        # "speaker" while the person still has no mic. Symmetrically, moving OFF speaker
+        # revokes it. Promoting/demoting moderator or host doesn't touch stage rights —
+        # those are about the console, not the room.
+        if role == "speaker":
+            enforced = await livekit.set_stage(ctx.room, identity, True)
+            patch = {"role": role, "on_stage": True}
+        elif role == "viewer":
+            enforced = await livekit.set_stage(ctx.room, identity, False)
+            patch = {"role": role, "on_stage": False}
+        else:
+            patch = {"role": role}
         text = "{name} is now " + role
     elif op == "ban":
         patch = {"banned": True}
@@ -943,9 +1197,73 @@ async def _participant_action(ctx, payload, op: str):
         target_type="participant", target_id=identity,
         meta={"enforced_in_livekit": enforced, **patch},
     ))
-    kind = "participant.leave" if op == "remove" else "participant.update"
-    return [("participants", kind, rec), ("activity", "activity.new", act),
-            ("moderator", "action.result", {"op": op, "identity": identity, "enforced": enforced})]
+    # A ban also has to drop out of everyone else's roster, same as a remove — it wasn't
+    # doing that before (it published "participant.update", which every OTHER console's
+    # reducer treats as an upsert, so the banned person's stale row just sat there instead
+    # of disappearing).
+    kind = "participant.leave" if op in ("remove", "ban") else "participant.update"
+    out = [("participants", kind, rec), ("activity", "activity.new", act),
+           ("moderator", "action.result", {"op": op, "identity": identity, "enforced": enforced})]
+
+    if op in ("remove", "ban"):
+        # Kicking someone off the room's media (livekit.remove_participant, above) doesn't
+        # touch their console/watch-page WEBSOCKET at all — without this, a removed
+        # viewer's page just sits there, live socket still open, none the wiser that they
+        # were removed. This targeted envelope is what routers/live.py's socket loop
+        # watches for: it's broadcast to the whole event (like everything else here), but
+        # only the ONE connection whose identity matches acts on it — showing the removal
+        # notice and then closing that socket itself, on the server side, so the person
+        # can't just keep watching after being removed.
+        reason = "You were banned from this event by the host." if op == "ban" \
+            else "You were removed from this event by the host."
+        out.append(("session", "removed", {"identity": identity, "reason": reason}))
+
+    return out
+
+
+# feedback ----------------------------------------------------------------------
+
+async def _feedback_submit(ctx, payload):
+    """Sent once, by the modal shown when a viewer leaves the event — right before the
+    socket disconnects, which is why this is a socket action rather than a REST call: the
+    connection (and the ctx/identity it carries) is still open at that moment, and
+    everything else the console does already goes through here.
+
+    Feedback is a viewer-only signal: it's what the organization dashboard's event detail
+    page averages to show how the audience felt about the event, not how the host felt
+    running it. The host console no longer shows the modal at all (see
+    pages/host/Dashboard.jsx), but this guard keeps a stray/legacy `feedback.submit` from
+    a host or moderator connection from landing in that same average.
+
+    Both fields are optional on their own (a submitter can rate without commenting, or
+    comment without rating), but a submission with neither is a no-op, not an empty row —
+    that's what lets the modal's "Skip" button just close without a network call."""
+
+    if ctx.can_moderate:
+        return []
+
+    rating = payload.get("rating")
+    try:
+        rating = int(rating) if rating is not None else None
+    except (TypeError, ValueError):
+        rating = None
+    if rating is not None:
+        rating = max(1, min(rating, 5))
+    comment = _text(payload, "comment", 2000) or None
+    if rating is None and not comment:
+        return []
+
+    role = "host" if ctx.can_host else "viewer"
+
+    def work(db):
+        db.add(EventFeedback(
+            event_id=ctx.event_id, org_id=ctx.org_id, role=role,
+            user_id=ctx.user_id, identity=ctx.identity, name=ctx.name,
+            rating=rating, comment=comment,
+        ))
+
+    await tx(work)
+    return []
 
 
 # dispatcher ------------------------------------------------------------------
@@ -983,6 +1301,8 @@ ACTIONS: dict[str, callable] = {
     "participant.role": lambda c, p: _participant_action(c, p, "role"),
     "participant.ban": lambda c, p: _participant_action(c, p, "ban"),
     "participant.remove": lambda c, p: _participant_action(c, p, "remove"),
+    "reaction.add": _reaction_add,
+    "feedback.submit": _feedback_submit,
 }
 
 # Broadcast-control actions, filled in by services/broadcast.py at import (which is
@@ -1028,12 +1348,16 @@ def _due(db) -> list[tuple[str, str, dict]]:
     for p in db.scalars(select(LivePoll).where(LivePoll.status == "scheduled",
                                                LivePoll.scheduled_at <= now)).all():
         p.status, p.launched_at = "live", now
-        out.append((str(p.event_id), "poll.update", poll_out(p)))
+        # No Ctx here — this is a scheduler tick, not a live socket action — but a
+        # scheduled poll going live is conceptually a host/moderator action (they're the
+        # only ones who can schedule one), so it's labeled "host" for the same viewer-side
+        # "poll.new"-style alert a manually-launched poll gets.
+        out.append((str(p.event_id), "poll.update", poll_out(p, actor_role="host")))
     for p in db.scalars(select(LivePoll).where(LivePoll.status == "live",
                                                LivePoll.closes_at.isnot(None),
                                                LivePoll.closes_at <= now)).all():
         p.status, p.closed_at, p.closes_at = "closed", now, None
-        out.append((str(p.event_id), "poll.update", poll_out(p)))
+        out.append((str(p.event_id), "poll.update", poll_out(p, actor_role="host")))
     for a in db.scalars(select(LiveAnnouncement).where(LiveAnnouncement.sent_at.is_(None),
                                                        LiveAnnouncement.scheduled_at.isnot(None),
                                                        LiveAnnouncement.scheduled_at <= now)).all():

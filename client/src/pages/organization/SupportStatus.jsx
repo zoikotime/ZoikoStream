@@ -46,8 +46,10 @@ const SERVICE_NAME = {
 // Trust surfaces. Informational by design — the source documents live outside this app, so
 // nothing here links to a route that doesn't exist.
 const TRUST = [
-  { icon: FiShield, title: "Security overview", desc: "Practices, certifications, and reporting.", to: "/organization/settings" },
-  { icon: FiGlobe, title: "Data residency", desc: "Where data is processed and stored.", to: "/organization/settings" },
+  // Both land on the Security panel — the governance surface these two describe. Without the
+  // ?tab= they opened the General profile form, which answers neither question.
+  { icon: FiShield, title: "Security overview", desc: "Practices, certifications, and reporting.", to: "/organization/settings?tab=security" },
+  { icon: FiGlobe, title: "Data residency", desc: "Where data is processed and stored.", to: "/organization/settings?tab=security" },
   { icon: FiFileText, title: "Compliance documents", desc: "Request access under NDA." },
   { icon: FiAlertOctagon, title: "Report a vulnerability", desc: "Coordinated disclosure and security.txt." },
 ];
@@ -191,7 +193,13 @@ export default function SupportStatus() {
           Service health by lifecycle stage
         </h2>
 
-        <LifecycleRail stages={stages} eyebrow="Contribute → Preserve, plus cross-cutting Platform" />
+        {/* dimUnused moved here with the rail: this is now the org console's only platform-health
+            surface, and a confident tick for a stage this org never touches is noise. */}
+        <LifecycleRail
+          stages={stages}
+          eyebrow="Contribute → Preserve, plus cross-cutting Platform"
+          dimUnused
+        />
 
         <Panel flush>
           <div className="overflow-x-auto">
@@ -328,13 +336,15 @@ export default function SupportStatus() {
           {["Privacy", "Terms"].map((label) => (
             <span key={label} className={cx("text-[12px]", CONSOLE.faint)}>{label}</span>
           ))}
-          <Link to="/organization/settings" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
+          <Link to="/organization/settings?tab=security" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
             Trust Center
           </Link>
           <Link to="/organization/dashboard" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
             Incident History
           </Link>
-          <Link to="/organization/settings" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
+          {/* The real contact form, not the settings page — this footer link has pointed at
+              Settings since before /contact existed. */}
+          <Link to="/contact" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
             Contact
           </Link>
         </nav>

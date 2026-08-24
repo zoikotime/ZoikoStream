@@ -13,7 +13,7 @@
 import { FiEye, FiTrendingUp, FiUsers, FiMic, FiActivity, FiClock } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import Counter from "../../ui/Counter";
-import { STUDIO, KPI_ACCENT } from "./studio";
+import { STUDIO, KPI_CHIP, KPI_GLOW } from "./studio";
 
 const fmtDuration = (s) => {
   if (s == null) return "—";
@@ -28,16 +28,38 @@ function Kpi({ title, value, icon: Icon, accent = "slate", suffix, context, live
   return (
     <div
       className={cx(
-        "flex min-h-[92px] flex-col justify-between gap-2 p-3",
+        "group relative isolate flex min-h-[92px] flex-col justify-between gap-2 overflow-hidden p-3",
         STUDIO.card,
         STUDIO.cardHover
       )}
     >
+      {/* Accent bloom, revealed on hover. -z-10 keeps it strictly behind the readout. */}
+      <span
+        aria-hidden="true"
+        className={cx(
+          "pointer-events-none absolute -right-5 -top-5 -z-10 h-20 w-20 rounded-full bg-gradient-to-br to-transparent opacity-0 blur-2xl",
+          "transition-opacity duration-200 group-hover:opacity-100 motion-reduce:transition-none",
+          KPI_GLOW[accent]
+        )}
+      />
+
       <div className="flex items-start justify-between gap-2">
         <p className={cx("min-w-0 truncate", STUDIO.eyebrow, STUDIO.muted)} title={title}>
           {title}
         </p>
-        <Icon aria-hidden="true" className={cx("shrink-0 text-[15px]", KPI_ACCENT[accent])} />
+        {/* The icon gained a tinted chip: bare 15px glyphs in six corners read as scattered
+            marks, while six chips read as one instrument strip. */}
+        <span
+          aria-hidden="true"
+          className={cx(
+            "grid h-7 w-7 shrink-0 place-items-center rounded-lg",
+            "transition-transform duration-200 ease-out group-hover:scale-110",
+            "motion-reduce:transition-none motion-reduce:group-hover:scale-100",
+            KPI_CHIP[accent]
+          )}
+        >
+          <Icon className="text-[14px]" />
+        </span>
       </div>
 
       <p className={cx("flex items-baseline gap-0.5", STUDIO.heading)}>
@@ -53,10 +75,12 @@ function Kpi({ title, value, icon: Icon, accent = "slate", suffix, context, live
           non-colour signal for "live" — the dot alone would be colour-only status. */}
       <p className={cx("flex items-center gap-1.5 truncate text-[11px] leading-none", live ? "text-green-600 dark:text-green-400" : STUDIO.faint)}>
         {live && (
-          <span
-            aria-hidden="true"
-            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-green-500 motion-reduce:animate-none"
-          />
+          // Dot plus an expanding halo — the same live-indicator idiom as HealthDot, which
+          // reads as "transmitting" where a fading dot reads as "loading".
+          <span aria-hidden="true" className="relative flex h-1.5 w-1.5 shrink-0">
+            <span className="zk-pulse-ring absolute inset-0 rounded-full bg-green-500" />
+            <span className="relative h-1.5 w-1.5 rounded-full bg-green-500" />
+          </span>
         )}
         {live ? "Live now" : context}
       </p>

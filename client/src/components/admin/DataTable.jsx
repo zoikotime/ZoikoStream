@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FiChevronDown, FiChevronLeft, FiChevronRight, FiChevronUp, FiSearch } from "react-icons/fi";
 import { CONSOLE, cx, focusRing } from "../../ui/tokens";
 
@@ -90,6 +90,12 @@ export default function DataTable({
   searchKeys,
   getSearchText,
   searchPlaceholder = "Search…",
+  // Show a ⌘K / Ctrl K hint that actually focuses the field. Opt-in, because the shortcut
+  // is global: two tables mounted at once would both claim the same chord.
+  searchShortcut = false,
+  // Extra controls (filter dropdowns, segmented toggles) rendered in the toolbar beside
+  // the search field. Filtering itself stays the caller's — this is layout only.
+  toolbar,
   // bulk selection (opt-in)
   selectable = false,
   onSelectionChange,
@@ -99,6 +105,26 @@ export default function DataTable({
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(() => new Set());
+  const searchRef = useRef(null);
+
+  // ⌘K on Apple keyboards, Ctrl K elsewhere. The hint is only rendered when the listener is
+  // registered, so the UI never advertises a chord that does nothing.
+  const isApple =
+    typeof navigator !== "undefined" &&
+    /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+  const shortcutOn = searchable && searchShortcut;
+  useEffect(() => {
+    if (!shortcutOn) return;
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key?.toLowerCase() === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [shortcutOn]);
 
   // Built-in search: narrow rows before sort/paginate.
   const q = query.trim().toLowerCase();
@@ -163,19 +189,35 @@ export default function DataTable({
 
   return (
     <div>
-      {searchable && (
-        <div className="px-4 pb-3 pt-1">
-          <div className="relative max-w-xs">
-            <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-            <input
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={searchPlaceholder}
-              aria-label="Search table"
-              className={cx(CONSOLE.search, focusRing)}
-            />
-          </div>
+      {(searchable || toolbar) && (
+        <div className="flex flex-wrap items-center gap-2 px-4 pb-3 pt-1">
+          {searchable && (
+            <div className="relative min-w-0 flex-1 sm:max-w-xs">
+              <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+              <input
+                ref={searchRef}
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={searchPlaceholder}
+                aria-label="Search table"
+                className={cx(CONSOLE.search, shortcutOn && "pr-16", focusRing)}
+              />
+              {shortcutOn && (
+                <kbd
+                  aria-hidden="true"
+                  className={cx(
+                    "pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border px-1.5 py-0.5 sm:flex",
+                    "border-slate-200 bg-slate-50 text-[10px] font-semibold text-slate-400",
+                    "dark:border-white/10 dark:bg-white/[0.05] dark:text-neutral-500"
+                  )}
+                >
+                  {isApple ? "⌘" : "Ctrl"} K
+                </kbd>
+              )}
+            </div>
+          )}
+          {toolbar && <div className="flex flex-wrap items-center gap-2">{toolbar}</div>}
         </div>
       )}
 
@@ -209,7 +251,9 @@ export default function DataTable({
                   key={c.key}
                   style={c.width ? { width: c.width } : undefined}
                   className={cx(
-                    "px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400",
+                    // A step darker than the old slate-400: at 11px uppercase, 400 on a tinted
+                    // header row sat under the contrast floor in light mode.
+                    "px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-500",
                     alignCls(c.align),
                     c.headerClassName
                   )}
@@ -247,18 +291,20 @@ export default function DataTable({
             {loading &&
               Array.from({ length: skeletonRows }).map((_, i) => (
                 <tr key={`sk-${i}`}>
-                  {selectable && <td className="px-4 py-3" />}
-                  {columns.map((c) => (
-                    <td key={c.key} className="px-4 py-3">
+                  {selectable && <td className="px-4 py-3.5" />}
+                  {columns.map((c, ci) => (
+                    <td key={c.key} className="px-4 py-3.5">
+                      {/* Widths vary per column so a loading table reads as rows of content
+                          rather than a uniform grey grid. */}
                       <div
                         className={cx(
                           "zk-skeleton h-4 rounded bg-slate-200 dark:bg-white/[0.07]",
-                          c.align === "right" ? "ml-auto w-12" : "w-24"
+                          c.align === "right" ? "ml-auto w-12" : ci === 0 ? "w-40" : "w-24"
                         )}
                       />
                     </td>
                   ))}
-                  {rowActions && <td className="px-4 py-3" />}
+                  {rowActions && <td className="px-4 py-3.5" />}
                 </tr>
               ))}
 
@@ -284,7 +330,7 @@ export default function DataTable({
                     )}
                   >
                     {selectable && (
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3.5">
                         <CheckBox checked={isSelected} onChange={() => toggleRow(key)} label="Select row" />
                       </td>
                     )}
@@ -292,7 +338,7 @@ export default function DataTable({
                       <td
                         key={c.key}
                         className={cx(
-                          "px-4 py-3 text-sm text-slate-600 dark:text-neutral-300",
+                          "px-4 py-3.5 text-sm text-slate-600 dark:text-neutral-300",
                           alignCls(c.align),
                           c.mono ? "font-mono tabular-nums" : c.align === "right" && "tabular-nums",
                           c.className
@@ -302,7 +348,7 @@ export default function DataTable({
                       </td>
                     ))}
                     {rowActions && (
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
                           {rowActions(row)}
                         </div>
@@ -314,19 +360,37 @@ export default function DataTable({
 
             {!loading && sorted.length === 0 && (
               <tr>
-                <td colSpan={colCount} className="px-4 py-16 text-center">
+                <td colSpan={colCount} className="px-4 py-20 text-center">
                   {empty ? (
-                    <div className="mx-auto max-w-sm">
+                    <div className="zk-fade-in mx-auto max-w-sm">
                       {empty.icon && (
-                        <div className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-full bg-slate-100 text-slate-400 dark:bg-white/[0.07]">
-                          <empty.icon className="text-lg" />
+                        // Concentric rings behind the glyph give the state a centre of gravity
+                        // instead of a small grey dot floating in a large empty table.
+                        <div className="relative mx-auto mb-5 grid h-20 w-20 place-items-center">
+                          <span
+                            aria-hidden="true"
+                            className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-500/10 to-indigo-500/5 blur-xl"
+                          />
+                          <span
+                            aria-hidden="true"
+                            className="absolute inset-2 rounded-full border border-slate-200 dark:border-white/10"
+                          />
+                          <span
+                            aria-hidden="true"
+                            className="zk-float absolute inset-5 rounded-full border border-slate-200 dark:border-white/[0.14]"
+                          />
+                          <span className="relative grid h-11 w-11 place-items-center rounded-full bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400">
+                            <empty.icon className="text-xl" aria-hidden="true" />
+                          </span>
                         </div>
                       )}
-                      <p className="text-sm font-semibold text-slate-700 dark:text-neutral-200">{empty.title}</p>
+                      <p className="text-[15px] font-semibold text-slate-900 dark:text-white">{empty.title}</p>
                       {empty.description && (
-                        <p className="mt-1 text-sm text-slate-500 dark:text-neutral-400">{empty.description}</p>
+                        <p className="mx-auto mt-1.5 max-w-xs text-[13px] leading-relaxed text-slate-500 dark:text-neutral-400">
+                          {empty.description}
+                        </p>
                       )}
-                      {empty.action && <div className="mt-4 flex justify-center">{empty.action}</div>}
+                      {empty.action && <div className="mt-5 flex justify-center">{empty.action}</div>}
                     </div>
                   ) : (
                     <p className="text-sm text-slate-400">No results.</p>

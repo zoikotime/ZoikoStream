@@ -25,7 +25,7 @@ import {
   FiPause, FiPlay, FiSettings, FiAlertOctagon, FiSquare, FiEye,
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
-import { STUDIO, DECK, TRANSPORT, focus, t150, disabled as disabledCls } from "./studio";
+import { STUDIO, DECK, TRANSPORT, focus, t150, t200, press, disabled as disabledCls } from "./studio";
 import { COUNTDOWN_PRESETS } from "../../data/host";
 
 // A deck button: icon over an 11px label, identical dimensions in all three tool groups so
@@ -48,14 +48,24 @@ function DeckButton({
       title={title || label}
       aria-pressed={active}
       className={cx(
-        "flex h-14 w-16 shrink-0 flex-col items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium leading-none",
+        "group flex h-14 w-16 shrink-0 flex-col items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium leading-none",
         active ? DECK[tone] : DECK.rest,
-        t150,
+        t200,
+        press,
         focus,
         disabledCls
       )}
     >
-      <Icon aria-hidden="true" className="text-[17px]" />
+      {/* The glyph grows slightly on hover — the key itself stays put (see studio.js `t150`),
+          so the row can never re-wrap, but the control still answers the pointer. */}
+      <Icon
+        aria-hidden="true"
+        className={cx(
+          "text-[17px] transition-transform duration-200 ease-out",
+          "group-hover:scale-110 group-disabled:group-hover:scale-100",
+          "motion-reduce:transition-none motion-reduce:group-hover:scale-100"
+        )}
+      />
       <span className="max-w-full truncate px-0.5">{label}</span>
     </button>
   );
@@ -85,7 +95,8 @@ function DangerButton({
         "inline-flex h-10 items-center justify-center gap-2 rounded-lg text-[13px] font-semibold",
         iconOnly ? "w-10" : "px-3.5",
         armed ? TRANSPORT.dangerArmed : TRANSPORT.danger,
-        t150,
+        t200,
+        press,
         focus,
         disabledCls,
         className
@@ -276,7 +287,7 @@ export default function ControlBar({
               title={!canHost ? "Only the event host can resume the broadcast" : "Resume the broadcast"}
               className={cx(
                 "inline-flex h-10 items-center gap-2 rounded-lg px-4 text-[13px] font-semibold",
-                TRANSPORT.primary, t150, focus, disabledCls
+                TRANSPORT.primary, t200, press, focus, disabledCls
               )}
             >
               <FiPlay aria-hidden="true" className="text-base" /> Resume
@@ -292,12 +303,22 @@ export default function ControlBar({
               className={cx(
                 "inline-flex h-10 items-center gap-2 rounded-lg px-4 text-[13px] font-semibold",
                 live ? TRANSPORT.hold : TRANSPORT.primary,
-                t150, focus, disabledCls
+                t200, press, focus, disabledCls
               )}
             >
               {live
                 ? <><FiPause aria-hidden="true" className="text-base" /> Pause</>
-                : <><FiRadio aria-hidden="true" className="text-base" /> {ended ? "Ended" : "Go Live"}</>}
+                : (
+                  <>
+                    {/* Go Live is the one action the whole deck exists for, so its glyph
+                        transmits while the broadcast is still idle. */}
+                    <FiRadio
+                      aria-hidden="true"
+                      className={cx("text-base", !ended && "animate-pulse motion-reduce:animate-none")}
+                    />
+                    {ended ? "Ended" : "Go Live"}
+                  </>
+                )}
             </button>
           )}
 

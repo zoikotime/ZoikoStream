@@ -3,7 +3,18 @@
 // live socket EventWatch opens (see its `liveReducer`) — same backend the host/moderator
 // consoles use. An unidentified visitor (no login, no self-serve registration) sees the
 // IdentifyForm instead of dead controls — never a "sign in" prompt; a name+email is enough.
-import { useEffect, useRef, useState } from "react";
+//
+// Chat/QA/Polls are memoized: EventWatch's liveReducer keeps every live-panel slice
+// (messages, typing, questions, polls, participants, reactions) in ONE state object, so a
+// reaction tap or a presence update from ANY viewer produces a new top-level object and
+// re-renders this whole tree for EVERY connected viewer, even though messages/questions/
+// polls didn't change. With a couple dozen concurrent viewers tapping reactions, that
+// cascades into the chat feeling laggy purely from unrelated re-renders, not real load.
+// React.memo on each tab breaks the cascade at this boundary: since messages/typing/
+// questions/polls only get NEW references from the reducer cases that actually touch
+// them, a reaction-only or presence-only update leaves those references unchanged and
+// these three skip re-rendering entirely.
+import { memo, useEffect, useRef, useState } from "react";
 import { FiSend, FiChevronUp, FiCheckCircle, FiMessageSquare } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
 import { initials } from "../../data/watch";
@@ -32,7 +43,7 @@ const TABS = [
 // Real chat, wired to the same live socket the host/moderator consoles use. Reaching this
 // component at all means the caller (WatchPanel) has already confirmed the visitor is
 // identified — logged in or self-registered — so there's no gate to check here.
-function Chat({ messages = [], typing = {}, send, connected }) {
+const Chat = memo(function Chat({ messages = [], typing = {}, send, connected }) {
   const [text, setText] = useState("");
   const scroller = useRef(null);
 
@@ -102,12 +113,12 @@ function Chat({ messages = [], typing = {}, send, connected }) {
       </form>
     </div>
   );
-}
+});
 
 // Real Q&A. No per-user vote ledger on the server (see moderation._qa_vote), so the "voted"
 // highlight is purely local — it survives this tab session, not a reload, same as the mock
 // it replaced.
-function QA({ questions = [], send, connected }) {
+const QA = memo(function QA({ questions = [], send, connected }) {
   const [voted, setVoted] = useState({});
   const [text, setText] = useState("");
 
@@ -182,17 +193,38 @@ function QA({ questions = [], send, connected }) {
       </form>
     </div>
   );
-}
+});
 
 // Options are index-addressed on the server (moderation._poll_vote takes `option` as an
 // array index, not an id — see poll_out), so voting sends the option's position, not a key.
+//
+// `poll.your_vote` is the server's own memory of this ballot (server/app/services/
+// moderation.py poll_out, filled in from the snapshot's per-viewer vote lookup) — it's
+// what makes a refreshed or reconnected page open already showing "you voted for X"
+// instead of the vote buttons again. `choice` still exists as local state so a vote cast
+// THIS session updates the UI instantly, without waiting on a round trip; it's seeded
+// from your_vote on mount so a returning viewer starts in the right state.
+//
+// A vote can still be CHANGED while the poll is live — the ledger row moves to the new
+// option server-side (see moderation._poll_vote) instead of being rejected as a second
+// vote, so re-picking here is just another `poll.vote` send. Once the poll closes, or on
+// reconnect, `your_vote` is what's trusted — that's the option a refresh will show.
 function Poll({ poll, send }) {
-  const [choice, setChoice] = useState(null);
+  const [choice, setChoice] = useState(() => (poll.your_vote ?? null));
+  // The server is the source of truth once it has an opinion — if this poll object came
+  // back from a fresh snapshot (reconnect) with your_vote set, trust it over whatever
+  // stale local choice this component instance happened to hold.
+  useEffect(() => {
+    if (poll.your_vote != null && poll.your_vote !== choice) setChoice(poll.your_vote);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poll.your_vote]);
   const voted = choice !== null;
+  const canChange = poll.status === "live";
   const opts = poll.options || [];
   const total = opts.reduce((s, o) => s + (o.votes || 0), 0);
 
   const vote = (index) => {
+    if (index === choice) return; // already this option — nothing to send
     setChoice(index);
     send("poll.vote", { id: poll.id, option: index });
   };
@@ -218,8 +250,19 @@ function Poll({ poll, send }) {
                 {o.label}
               </button>
             );
+          // Already voted: still clickable while the poll is live, so a viewer can
+          // change their mind — locked to a static bar once the poll closes.
+          const Row = canChange ? "button" : "div";
           return (
-            <div key={i} className="relative overflow-hidden rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-700">
+            <Row
+              key={i}
+              type={canChange ? "button" : undefined}
+              onClick={canChange ? () => vote(i) : undefined}
+              className={cx(
+                "relative w-full overflow-hidden rounded-lg border border-slate-200 px-3 py-2 text-left dark:border-slate-700",
+                canChange && "transition duration-150 hover:border-emerald-400 active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100 dark:hover:border-emerald-500/50"
+              )}
+            >
               <div
                 className={cx(
                   "absolute inset-y-0 left-0 transition-[width] duration-500 ease-out motion-reduce:transition-none",
@@ -233,18 +276,19 @@ function Poll({ poll, send }) {
                 </span>
                 <span className="zk-tnum text-slate-500 dark:text-slate-400">{pct}%</span>
               </div>
-            </div>
+            </Row>
           );
         })}
       </div>
       <p className="mt-2 text-xs text-slate-400">
-        {total.toLocaleString()} votes{voted ? " · thanks for voting" : poll.status !== "live" ? " · closed" : ""}
+        {total.toLocaleString()} votes
+        {voted && canChange ? " · thanks for voting — tap another option to change it" : voted ? " · thanks for voting" : poll.status !== "live" ? " · closed" : ""}
       </p>
     </div>
   );
 }
 
-function Polls({ polls = [], send }) {
+const Polls = memo(function Polls({ polls = [], send }) {
   const visible = polls.filter((p) => p.status === "live" || p.status === "closed");
 
   if (!visible.length) return <EmptyState>No polls yet.</EmptyState>;
@@ -256,7 +300,7 @@ function Polls({ polls = [], send }) {
       ))}
     </div>
   );
-}
+});
 
 const IDENTIFY_LABEL = {
   chat: "Enter your name and email to join the chat.",
@@ -264,11 +308,21 @@ const IDENTIFY_LABEL = {
   polls: "Enter your name and email to vote in polls.",
 };
 
-export default function WatchPanel({
+// Memoized too: without it, EventWatch re-rendering for an unrelated panel change (a
+// reaction tap, a 15s ping/pong) still re-runs this wrapper's own badge/tab-bar JSX even
+// though Chat/QA/Polls below correctly bail out — cheap on its own, but free to skip.
+const WatchPanel = memo(function WatchPanel({
   className = "", messages, typing, questions, polls, send, connected,
-  identified, eventId, onIdentified,
+  identified, eventId, onIdentified, alerts = {}, onTabView,
+  // Per-event enablement (GET /events/{id}/watch — chat_enabled/qa_enabled/polls_enabled).
+  // A memorial-category event has all three False (crud.event.is_memorial_category,
+  // doc Sec. 11.3/19, non-waivable LE-AC-16) — EventWatch.jsx doesn't render this
+  // component at all in that case, but the individual flags are still honored here so a
+  // non-memorial event that only disabled e.g. polls shows just Chat/Q&A, not a dead tab.
+  enabledTabs = { chat: true, qa: true, polls: true },
 }) {
-  const [tab, setTab] = useState("chat");
+  const visibleTabs = TABS.filter((t) => enabledTabs[t.key]);
+  const [tab, setTab] = useState(visibleTabs[0]?.key || "chat");
 
   // Real counts, straight off the socket state — so a viewer sitting on Chat can still see
   // that questions or polls are waiting.
@@ -276,6 +330,21 @@ export default function WatchPanel({
     qa: questions?.length || 0,
     polls: (polls || []).filter((p) => p.status === "live").length,
   };
+
+  const openTab = (key) => {
+    setTab(key);
+    onTabView?.(key); // clears that tab's "new activity" alert dot — see EventWatch.jsx
+  };
+
+  // enabledTabs can only narrow between renders (the /watch fetch that supplies it is
+  // static per event, not a live toggle) — this keeps `tab` from pointing at a now-hidden
+  // tab. Diffed during render rather than an effect, same pattern this codebase already
+  // uses for prop-driven resets (e.g. Credentials.jsx's CreateKeyModal `wasOpen` check).
+  if (visibleTabs.length && !visibleTabs.some((t) => t.key === tab)) {
+    setTab(visibleTabs[0].key);
+  }
+
+  if (visibleTabs.length === 0) return null;
 
   return (
     <div
@@ -285,10 +354,10 @@ export default function WatchPanel({
       )}
     >
       <div className="flex shrink-0 items-center border-b border-slate-200 dark:border-slate-800">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t.key}
-            onClick={() => setTab(t.key)}
+            onClick={() => openTab(t.key)}
             aria-current={tab === t.key ? "true" : undefined}
             className={cx(
               "relative flex flex-1 items-center justify-center gap-1.5 border-b-2 px-3 py-3.5 text-sm font-semibold transition duration-150 motion-reduce:transition-none",
@@ -302,6 +371,20 @@ export default function WatchPanel({
               <span className="zk-tnum rounded-full bg-slate-100 px-1.5 text-[10px] font-bold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                 {badges[t.key]}
               </span>
+            )}
+            {/* New-activity alert symbol — a viewer-facing counterpart to the host
+                console's pending-count badge. Lights up the moment a host action lands
+                for a tab that isn't the active one (see EventWatch.jsx's `alerts`/
+                `markAlert`) and disappears the instant the viewer opens that tab, so it
+                only ever means "something happened since you last looked". Pulses for
+                the same reason the host console's own badge does: a static dot on a busy
+                page gets missed. */}
+            {alerts[t.key] && tab !== t.key && (
+              <span
+                className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-rose-500 shadow-sm shadow-rose-500/50 motion-reduce:animate-none"
+                aria-label={`New activity in ${t.label}`}
+                role="status"
+              />
             )}
           </button>
         ))}
@@ -328,4 +411,6 @@ export default function WatchPanel({
       </div>
     </div>
   );
-}
+});
+
+export default WatchPanel;

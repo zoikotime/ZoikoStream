@@ -142,6 +142,38 @@ p { text-wrap: pretty; }
 .zk-spin { animation: zk-spin .7s linear infinite; }
 .zk-drift { animation: zk-drift 14s ease-in-out infinite; }
 
+/* ui/TimeField supplies its own scrollable slot list, so Chromium's native time dropdown is
+   suppressed by hiding the only thing that opens it. Scoped to this class on purpose: date
+   inputs elsewhere keep their native calendar. Clicking the field still focuses it for typing,
+   and browsers without the indicator (Firefox, Safari) are unaffected. */
+.zk-time-field::-webkit-calendar-picker-indicator {
+  display: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* Overlay entrance for dropdowns, menus and popovers — fast and small, so a panel
+   appears to open from its trigger rather than animating into place. */
+@keyframes zk-pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.zk-pop-in { animation: zk-pop-in .15s ease-out both; }
+
+/* Collapsed-sidebar tooltips: same entrance, sliding in from the rail. */
+@keyframes zk-tip-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.zk-tip-in { animation: zk-tip-in .12s ease-out both; }
+
+/* Landing hero badge: border and halo breathe so the pill reads as a live indicator. */
+@keyframes zk-badge-glow {
+  0%, 100% { border-color: rgba(255, 255, 255, 0.22); box-shadow: 0 0 0 0 rgba(56, 189, 248, 0); }
+  50% { border-color: rgba(56, 189, 248, 0.7); box-shadow: 0 0 20px 2px rgba(56, 189, 248, 0.28); }
+}
+.zk-badge-glow { animation: zk-badge-glow 2.6s ease-in-out infinite; }
+
 /* Brand panel flourishes: panning gradient + slow-rotating conic glow. */
 @keyframes zk-gradient { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
 .zk-gradient-pan { background-size: 200% 200%; animation: zk-gradient 16s ease infinite; }
@@ -190,6 +222,7 @@ p { text-wrap: pretty; }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift,
-  .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow, .zk-pop { animation: none; }
+  .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift, .zk-badge-glow,
+  .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow, .zk-pop,
+  .zk-pop-in, .zk-tip-in { animation: none; }
 }

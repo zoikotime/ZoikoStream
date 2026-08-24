@@ -10,7 +10,10 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
 Visibility = Literal["public", "private", "unlisted"]
 CreateStatus = Literal["draft", "published", "scheduled"]  # other states only via transitions
-EventStatus = Literal["draft", "published", "scheduled", "live", "ended", "cancelled", "archived"]
+EventStatus = Literal[
+    "draft", "published", "scheduled", "rehearsal", "ready_to_arm", "armed", "live",
+    "degraded", "ending", "processing", "replay_ready", "ended", "cancelled", "archived", "blocked",
+]
 
 _SLUG = r"^[a-z0-9][a-z0-9-]*$"
 
@@ -30,6 +33,7 @@ class _EventBase(BaseModel):
     start_time: datetime | None = None
     end_time: datetime | None = None
     registration_limit: int | None = Field(None, ge=0)
+    expected_audience: int | None = Field(None, ge=0)
 
 
 class EventCreate(_EventBase):
@@ -37,8 +41,8 @@ class EventCreate(_EventBase):
     registration_required: bool = False
     waiting_room_enabled: bool = False
     recording_enabled: bool = False
-    chat_enabled: bool = True
-    qa_enabled: bool = True
+    chat_enabled: bool = False
+    qa_enabled: bool = False
     polls_enabled: bool = False
     raise_hand_enabled: bool = True
     allow_screen_share: bool = True
@@ -83,6 +87,7 @@ class EventOut(BaseModel):
     visibility: str
     registration_required: bool
     registration_limit: int | None = None
+    expected_audience: int | None = None
     waiting_room_enabled: bool
     recording_enabled: bool
     chat_enabled: bool
@@ -126,6 +131,11 @@ class WatchOut(BaseModel):
     chat_enabled: bool
     qa_enabled: bool
     polls_enabled: bool
+    # No persisted Event column (it's a live-only BroadcastSession setting — see
+    # services/broadcast.py's DEFAULT_SETTINGS) — True except for a memorial-category
+    # event, computed the same way _seed_settings computes it (crud.event.
+    # is_memorial_category), so the player never shows a reaction bar it can't use.
+    reactions_enabled: bool = True
     registration_required: bool = False
     registered: bool = True
     not_started: bool = False
@@ -160,6 +170,58 @@ class RegistrantOut(BaseModel):
     email: str
     invited_by: uuid.UUID | None = None
     created_at: datetime | None = None
+
+
+class FeedbackOut(BaseModel):
+    """One feedback submission. Feedback is viewer-only (see moderation._feedback_submit)
+    — `role` is kept for backward compatibility with existing rows, but every reader
+    (the host dashboard and the organizer's event page alike) now filters this to
+    role="viewer"."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    role: str
+    name: str | None = None
+    rating: int | None = None
+    comment: str | None = None
+    created_at: datetime | None = None
+
+
+class ContributorInvite(BaseModel):
+    """The invitation half of a contributor's backstage session — the runtime half
+    (state, consent, preflight) is server-owned and never set from the wire (see
+    ContributorSessionOut, and services/contributor.py's socket actions)."""
+    join_window_start: datetime | None = None
+    join_window_end: datetime | None = None
+    expires_at: datetime | None = None
+    contribution_method: str = Field("livekit_browser", max_length=20)
+    consent_notice: str | None = Field(None, max_length=4000)
+    support_contact: str | None = Field(None, max_length=300)
+
+
+class ContributorSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    state: str
+    invited_at: datetime | None = None
+    invited_by: uuid.UUID | None = None
+    join_window_start: datetime | None = None
+    join_window_end: datetime | None = None
+    expires_at: datetime | None = None
+    contribution_method: str
+    consent_notice: str | None = None
+    support_contact: str | None = None
+    consent_given: bool
+    consent_at: datetime | None = None
+    preflight_result: dict | None = None
+    rehearsal_complete: bool
+    rehearsal_at: datetime | None = None
+    admitted_at: datetime | None = None
+    brought_live_at: datetime | None = None
+    removed_at: datetime | None = None
+    removed_reason: str | None = None
 
 
 class AccessLinkCreate(BaseModel):

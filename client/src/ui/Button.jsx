@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { cx, focusRing } from "./tokens";
+import { brandButton, cx, focusRing } from "./tokens";
 
 // ONE Button for the whole app, two appearances so both surfaces keep their exact look:
 //   appearance="marketing" (default) — emerald, rounded-xl, hover-lift (homepage + public/org marketing).
@@ -18,6 +18,11 @@ const M_VARIANTS = {
   dark: "bg-slate-900 text-white hover:bg-slate-800 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-100",
   outlineLight: "border border-white/25 text-white hover:bg-white/10 hover:border-white/40 focus-visible:ring-offset-slate-950",
   danger: "bg-rose-600 text-white shadow-sm hover:bg-rose-500",
+  // The auth pages' primary. Same brand ramp as the console (blue → violet → magenta), but
+  // painted at 2× width and slid on hover, so the button warms toward magenta under the
+  // cursor instead of just changing shade.
+  gradient:
+    "bg-gradient-to-r from-blue-600 via-violet-600 to-fuchsia-600 bg-[length:200%_auto] bg-[position:0%_50%] text-white shadow-lg shadow-violet-600/30 hover:bg-[position:100%_50%] hover:shadow-[0_14px_34px_-10px_rgba(217,70,239,0.6)] active:shadow-md dark:focus-visible:ring-offset-slate-950",
 };
 
 // ── console appearance (was components/admin/Button) ─────────────────────────
@@ -31,10 +36,16 @@ const C_BASE = cx(
 const C_SIZES = { sm: "h-8 px-3 text-[13px]", md: "h-9 px-3.5 text-sm", lg: "h-10 px-4 text-sm" };
 // Every variant gains a hover shadow so a console button reads as a raised control rather than a
 // bordered label — the secondary variant in particular was near-invisible on a white filter row.
+// Primary is a violet→indigo gradient rather than a flat fill, so the one action a screen
+// wants you to take is unmistakably the brightest thing on it. The gradient shifts lighter on
+// hover and the shadow deepens; `active:` returns it to the resting shadow so a press reads as
+// a press. Danger keeps a flat fill — a gradient on a destructive action reads as decoration.
 const C_VARIANTS = {
-  primary: "bg-violet-600 text-white shadow-sm hover:bg-violet-700 hover:shadow-md active:bg-violet-800 active:shadow-sm",
+  // The brand ramp (tokens' `brandButton`) — same fill as the rail's active row, the topbar
+  // CTA and the selected segment, and brighter in dark mode.
+  primary: `${brandButton} active:shadow-sm`,
   secondary:
-    "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800",
+    "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:text-slate-200 dark:hover:border-white/20 dark:hover:bg-white/[0.07]",
   ghost:
     "text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white",
   danger: "bg-rose-600 text-white shadow-sm hover:bg-rose-700 hover:shadow-md active:bg-rose-800 active:shadow-sm",
@@ -91,7 +102,21 @@ export default function Button({
   const cls = cx(M_BASE, M_SIZES[size], M_VARIANTS[variant], className);
   if (href && href.startsWith("/")) return <Link to={href} className={cls} {...rest}>{children}</Link>;
   if (href) return <a href={href} className={cls} {...rest}>{children}</a>;
-  return <button type="button" onClick={onClick} className={cls} {...rest}>{children}</button>;
+  // `disabled` has to reach the element: M_BASE already styles disabled: state, and callers
+  // pass disabled={loading} to stop a double submit. Swallowing it here left every marketing
+  // button clickable while it looked (and was meant to be) inert.
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cls}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
+      {...rest}
+    >
+      {children}
+    </button>
+  );
 }
 
 // Console default — import this in dashboard code so callers don't repeat appearance="console".

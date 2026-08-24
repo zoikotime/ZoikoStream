@@ -17,7 +17,7 @@ import { Link } from "react-router-dom";
 import {
   FiSun, FiMoon, FiLogOut, FiClock, FiEye, FiUsers, FiTrendingUp, FiMic,
   FiShield, FiVideo, FiActivity, FiWifi, FiWifiOff, FiRefreshCw, FiCpu,
-  FiHardDrive, FiHeart, FiMonitor,
+  FiHardDrive, FiMonitor, FiCheckCircle, FiAlertTriangle, FiAlertOctagon,
 } from "react-icons/fi";
 import useInterval from "../../hooks/useInterval";
 import useSystemStats from "../../hooks/useSystemStats";
@@ -43,6 +43,13 @@ const CONNECTION = {
   offline: { icon: FiWifiOff, label: "Offline", tone: SIGNAL.bad },
   unauthorized: { icon: FiWifiOff, label: "Not authorized", tone: SIGNAL.bad },
 };
+
+// Health carries a glyph keyed to the LEVEL, like CONNECTION above. It used to be FiHeart at
+// every level — Feather's heart is the romantic ♡, so a degraded broadcast rendered as a "like"
+// next to the word "At risk", and a single glyph told an operator nothing the label didn't.
+// FiActivity is deliberately not reused here: it is already the UI-load readout below, and one
+// glyph meaning two things on the same bar is worse than no glyph.
+const HEALTH_ICON = { ok: FiCheckCircle, warn: FiAlertTriangle, down: FiAlertOctagon };
 
 const latencyTone = (ms) =>
   ms == null ? SIGNAL.neutral : ms < 200 ? SIGNAL.good : ms < 600 ? SIGNAL.warn : SIGNAL.bad;
@@ -194,16 +201,25 @@ export default function HostHeader({
           </Badge>
         )}
 
-        {health && (
-          <Badge
-            tone={HEALTH_TONE[health.level]}
-            dot
-            className="hidden xl:inline-flex"
-            title={health.issues?.length ? health.issues.join(" · ") : "All broadcast signals normal"}
-          >
-            <FiHeart aria-hidden="true" /> {HEALTH_LABEL[health.level] || health.level}
-          </Badge>
-        )}
+        {health && (() => {
+          const HealthIcon = HEALTH_ICON[health.level] || FiAlertTriangle;
+          return (
+            <Badge
+              tone={HEALTH_TONE[health.level]}
+              dot
+              className="hidden xl:inline-flex"
+              // The reasons ARE the useful part of a non-ok verdict, so they lead the tooltip
+              // instead of sitting behind a generic label.
+              title={
+                health.issues?.length
+                  ? `${HEALTH_LABEL[health.level] || health.level}: ${health.issues.join(" · ")}`
+                  : "All broadcast signals normal"
+              }
+            >
+              <HealthIcon aria-hidden="true" /> {HEALTH_LABEL[health.level] || health.level}
+            </Badge>
+          );
+        })()}
 
         {!canHost && (
           <Badge tone="warning" dot title="You aren't assigned as host, so broadcast controls are disabled">

@@ -25,6 +25,18 @@ export const BROADCAST_LABEL = {
 export const HEALTH_TONE = { ok: "success", warn: "warning", down: "danger" };
 export const HEALTH_LABEL = { ok: "Healthy", warn: "Degraded", down: "At risk" };
 
+// ── contributor backstage (see services/contributor.py's CONTRIBUTOR_STATES) ──────────
+export const CONTRIBUTOR_STATE_TONE = {
+  waiting: "neutral", connected: "info", ready: "info", on_standby: "warning",
+  live: "success", muted: "warning", reconnecting: "warning", removed: "neutral", failed: "danger",
+};
+
+export const CONTRIBUTOR_STATE_LABEL = {
+  waiting: "Awaiting preflight", connected: "Preflight done", ready: "Ready backstage",
+  on_standby: "On standby", live: "Live", muted: "Muted", reconnecting: "Reconnecting",
+  removed: "Removed", failed: "Preflight failed",
+};
+
 export const COUNTDOWN_PRESETS = [5, 10, 30, 60];
 
 // ── media ─────────────────────────────────────────────────────────────────────

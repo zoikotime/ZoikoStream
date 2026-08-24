@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { FiArrowRight, FiLock, FiMail } from "react-icons/fi";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
 import api, { errCode, errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import { roleHome } from "../../auth/roleHome";
-import { Field, PasswordField, SubmitButton, Checkbox } from "../../ui/forms";
+import { Field, PasswordField, SubmitButton, CheckField } from "../../ui/forms";
+import AuthTabs from "./AuthTabs";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
@@ -75,47 +77,52 @@ export default function Login() {
   };
 
   return (
-    <Card padding="xl">
-      <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Welcome Back</h1>
-      <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">Sign in to continue to ZoikoStream.</p>
+    <div className="zk-fade-in space-y-4">
+      <Card
+        padding="xl"
+        className="rounded-[20px] shadow-xl shadow-slate-900/5 transition-shadow duration-300 hover:shadow-2xl hover:shadow-violet-900/10 dark:shadow-black/30"
+      >
+        <AuthTabs />
 
-      <form onSubmit={submit} noValidate className="mt-8 space-y-5">
-        <Field
-          label="Work Email"
-          type="email"
-          autoComplete="email"
-          placeholder="you@company.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          error={errors.email}
-        />
+        <h1 className="text-[26px] font-bold tracking-tight text-slate-900 dark:text-white">Welcome back</h1>
+        <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">Sign in to your ZoikoStream account</p>
 
-        <div>
-          <PasswordField
-            label="Password"
-            autoComplete="current-password"
-            placeholder="Enter your password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            error={errors.password}
+        <form onSubmit={submit} noValidate className="mt-6 space-y-4">
+          <Field
+            icon={FiMail}
+            label="Work Email"
+            type="email"
+            autoComplete="email"
+            placeholder="you@company.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            error={errors.email}
           />
-          <div className="mt-3 flex items-center justify-between">
-            <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-              <Checkbox
+
+          <div>
+            <PasswordField
+              icon={FiLock}
+              label="Password"
+              autoComplete="current-password"
+              placeholder="Enter your password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              error={errors.password}
+            />
+            <div className="mt-4 flex items-center justify-between gap-4">
+              <CheckField
+                label="Remember Me"
                 checked={remember}
                 onChange={(e) => setRemember(e.target.checked)}
-                className="rounded accent-emerald-600"
               />
-              Remember Me
-            </label>
-            <Link
-              to="/forgot-password"
-              className="text-sm font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
-            >
-              Forgot Password?
-            </Link>
+              <Link
+                to="/forgot-password"
+                className="rounded-lg text-sm font-semibold text-emerald-700 underline-offset-4 transition-colors duration-200 hover:text-fuchsia-600 hover:underline dark:text-emerald-400 dark:hover:text-fuchsia-400"
+              >
+                Forgot Password?
+              </Link>
+            </div>
           </div>
-        </div>
 
         {needsVerification && (
           <div
@@ -145,19 +152,37 @@ export default function Login() {
           </div>
         )}
 
-        <SubmitButton loading={loading}>Sign In</SubmitButton>
-
-        <p className="text-center text-sm text-slate-500 dark:text-slate-400">
-          New Organization?{" "}
-          <Link to="/signup" className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400">
-            Create Organization
-          </Link>
-        </p>
+        <SubmitButton loading={loading} variant="gradient">
+          Sign In
+        </SubmitButton>
       </form>
 
-      <p className="mt-6 text-center text-xs text-slate-400 dark:text-slate-500">
-        By signing in you agree to the Terms and Privacy Policy.
+      </Card>
+
+      <p className="text-center text-sm text-slate-500 dark:text-slate-400">
+        New to ZoikoStream?{" "}
+        <Link
+          to="/signup"
+          className="group inline-flex items-center gap-1.5 rounded-lg font-semibold text-emerald-700 underline-offset-4 transition-colors duration-200 hover:text-fuchsia-600 hover:underline dark:text-emerald-400 dark:hover:text-fuchsia-400"
+        >
+          Create an organization
+          <FiArrowRight
+            aria-hidden="true"
+            className="transition-transform duration-200 group-hover:translate-x-1 motion-reduce:transition-none motion-reduce:group-hover:translate-x-0"
+          />
+        </Link>
       </p>
-    </Card>
+
+      {/* ponytail: Terms / Privacy are emphasised text, not links — neither page exists yet,
+          and a dead <a> is worse than none. Wrap them in <Link> when the routes land. */}
+      <div className="flex items-start gap-3 rounded-2xl border border-slate-200/70 bg-slate-100/60 p-3.5 text-[11.5px] leading-relaxed text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
+        <FiLock className="mt-px shrink-0 text-sm text-slate-400 dark:text-slate-500" aria-hidden="true" />
+        <p>
+          We take security seriously. Your data is encrypted and never shared. By signing in, you
+          agree to our <span className="font-semibold text-emerald-700 dark:text-emerald-400">Terms of Service</span> and{" "}
+          <span className="font-semibold text-emerald-700 dark:text-emerald-400">Privacy Policy</span>.
+        </p>
+      </div>
+    </div>
   );
 }

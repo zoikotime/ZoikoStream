@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
 # ── Generic ────────────────────────────────────────────────────────────────
 
@@ -95,13 +95,27 @@ class PlanOut(BaseModel):
     id: uuid.UUID
     name: str
     slug: str
-    price_monthly: float
+    # None = no approved price published yet (models/plan.py) — distinct from 0.00.
+    price_monthly: float | None = None
+    custom_pricing: bool = False
     currency: str
     max_users: int | None = None
     max_storage_gb: int | None = None
     max_streaming_hours: int | None = None
     features: list | None = None
     is_active: bool
+
+    @computed_field
+    @property
+    def pricing_state(self) -> str:
+        """PUBLISHED | CUSTOM | NOT_PUBLISHED — the one place the three states are derived,
+        so the console and the Billing page cannot disagree, and so no caller has to infer
+        "unpriced" from a null and risk rendering it as 0 (doc Section 26: no invented
+        price). This is a PLATFORM subscription price (Ledger 1); it is never a Live Event
+        price, which comes only from a published CatalogVersion (Ledger 2)."""
+        if self.price_monthly is not None:
+            return "PUBLISHED"
+        return "CUSTOM" if self.custom_pricing else "NOT_PUBLISHED"
 
 
 class SubscriptionOut(BaseModel):
@@ -226,6 +240,86 @@ class SupportTicketCreate(BaseModel):
 class SupportTicketUpdate(BaseModel):
     status: str | None = None
     priority: str | None = None
+
+
+# ── Incidents (Trust & Safety console) ───────────────────────────────────────
+# Same `incidents` table the Command Center's own Incidents panel and action queues
+# already read (services/ops.py) — these are the write side that table never had.
+
+class IncidentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    ref: str
+    title: str
+    detail: str | None = None
+    severity: str
+    kind: str
+    stage: str | None = None
+    region: str | None = None
+    org_id: uuid.UUID | None = None
+    organization_name: str | None = None
+    status: str
+    commander: str | None = None
+    started_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class IncidentCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    detail: str | None = None
+    severity: str = "sev3"
+    kind: str = "security"
+    org_id: uuid.UUID | None = None
+    commander: str | None = None
+
+
+class IncidentUpdate(BaseModel):
+    status: str | None = None
+    severity: str | None = None
+    commander: str | None = None
+
+
+# ── Governance records (Governance console) ──────────────────────────────────
+# One generic obligation-tracking table already read by services/ops.py for two kinds
+# ("single_path_override", "break_glass") — this is the write side + the other kinds
+# (dpia, legal_hold, privacy_request, access_review, exception, obligation) the Governance
+# console needs. `kind` is free-text on the model; GOVERNANCE_KINDS below is this API's own
+# closed list, not a DB constraint, so the two ops.py-owned kinds keep working unmodified.
+
+GOVERNANCE_KINDS = (
+    "dpia", "legal_hold", "privacy_request", "access_review", "exception", "obligation",
+    "single_path_override", "break_glass",
+)
+
+
+class GovernanceRecordOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: str
+    org_id: uuid.UUID | None = None
+    organization_name: str | None = None
+    event_id: uuid.UUID | None = None
+    status: str
+    detail: str | None = None
+    opened_at: datetime | None = None
+    due_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class GovernanceRecordCreate(BaseModel):
+    kind: str = Field(min_length=1, max_length=30)
+    org_id: uuid.UUID | None = None
+    event_id: uuid.UUID | None = None
+    detail: str | None = Field(None, max_length=300)
+    due_at: datetime | None = None
+
+
+class GovernanceRecordUpdate(BaseModel):
+    status: str | None = None
+    detail: str | None = Field(None, max_length=300)
+    due_at: datetime | None = None
 
 
 # ── Developer / API keys ─────────────────────────────────────────────────────

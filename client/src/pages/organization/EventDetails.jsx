@@ -2,10 +2,12 @@ import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   FiArrowLeft, FiCalendar, FiClock, FiEye, FiUsers, FiMic, FiMail,
-  FiUploadCloud, FiLink, FiTrash2, FiVideo, FiBarChart2, FiUserCheck, FiUserPlus, FiX,
+  FiUploadCloud, FiLink, FiTrash2, FiVideo, FiBarChart2, FiUserCheck, FiUserPlus, FiX, FiStar,
+  FiShield, FiPhoneOff, FiSend, FiFileText, FiPlus, FiCopy,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
+import { tzShort } from "../../data/timezones";
 import { notify } from "../../ui/Toast";
 import { PageSpinner } from "../../ui/Spinner";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
@@ -14,13 +16,16 @@ import SectionCard from "../../components/admin/SectionCard";
 import StatCard from "../../components/admin/StatCard";
 import { ConsoleButton as Button } from "../../ui/Button";
 import Badge from "../../ui/Badge";
+import Modal from "../../ui/Modal";
+import { Input, Label } from "../../ui/forms";
 import { cx, focusRing } from "../../ui/tokens";
 import { statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 import AssignPeopleModal, { ROLE_PATH } from "./AssignPeopleModal";
+import ContributorInviteModal from "./ContributorInviteModal";
 import InviteViewersModal from "./InviteViewersModal";
 import EventCommercial from "../../components/organization/EventCommercial";
 
-const TABS = ["Overview", "Hosts", "Moderators", "Speakers", "Registration", "Billing", "Recording", "Analytics", "Settings"];
+const TABS = ["Overview", "Hosts", "Moderators", "Speakers", "Registration", "Feedback", "Billing", "Recording", "Reports", "Analytics", "Settings"];
 
 function Meta({ icon: Icon, label, children }) {
   return (
@@ -38,7 +43,7 @@ function Meta({ icon: Icon, label, children }) {
 
 const initials = (name) => (name || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
 
-function PeoplePanel({ people, role, onManage, onRemove }) {
+function PeoplePanel({ people, role, onManage, onRemove, onInvite }) {
   if (!people.length)
     return (
       <OrganizationEmptyState
@@ -69,6 +74,17 @@ function PeoplePanel({ people, role, onManage, onRemove }) {
               <p className="truncate font-medium text-slate-800 dark:text-slate-100">{u.full_name}</p>
               <p className="truncate text-xs text-slate-500 dark:text-slate-400">{u.email}</p>
             </div>
+            {onInvite && (
+              <button
+                type="button"
+                onClick={() => onInvite(u)}
+                aria-label={`Invite ${u.full_name} to the backstage`}
+                title="Invite to backstage"
+                className="shrink-0 rounded-lg p-1.5 text-slate-400 transition hover:bg-violet-50 hover:text-violet-600 dark:hover:bg-violet-500/10 dark:hover:text-violet-400"
+              >
+                <FiSend />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onRemove(u.id)}
@@ -84,6 +100,159 @@ function PeoplePanel({ people, role, onManage, onRemove }) {
   );
 }
 
+// Post-event report (BRD §18.2) — a generated audience + operations snapshot, released
+// to the customer/family contact via the same controlled-delivery mechanism as recording
+// export (services/report.py, services/delivery.py). Self-contained (own fetch), same
+// posture as EventCommercial above: only takes `event`.
+function ReleaseReportModal({ report, onClose }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [expires, setExpires] = useState("14");
+  const [sending, setSending] = useState(false);
+  const [created, setCreated] = useState(null);
+
+  const send = async () => {
+    setSending(true);
+    try {
+      const { data } = await api.post(`/organization/reports/${report.id}/release`, {
+        recipient_name: name.trim(), recipient_email: email.trim(),
+        expires_in_days: expires ? Number(expires) : null,
+      });
+      setCreated(data);
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(created.delivery_url);
+      notify.success("Report link copied");
+    } catch {
+      notify.error("Couldn't copy — select the link and copy it manually");
+    }
+  };
+
+  return (
+    <Modal
+      open={!!report}
+      onClose={onClose}
+      title={created ? "Report released" : `Release report v${report.version}`}
+      size="md"
+      footer={
+        created ? (
+          <>
+            <Button variant="secondary" size="sm" onClick={onClose}>Done</Button>
+            <Button size="sm" leftIcon={FiCopy} onClick={copy}>Copy link</Button>
+          </>
+        ) : (
+          <>
+            <Button variant="secondary" size="sm" onClick={onClose} disabled={sending}>Cancel</Button>
+            <Button size="sm" leftIcon={FiSend} disabled={!name.trim() || !email.trim() || sending} loading={sending} onClick={send}>
+              Release
+            </Button>
+          </>
+        )
+      }
+    >
+      {created ? (
+        <div className="space-y-3 text-sm text-slate-600 dark:text-slate-300">
+          <p>
+            An email was sent to <strong className="text-slate-800 dark:text-slate-100">{created.recipient_email}</strong>{" "}
+            with this link. It won't be shown again after you close this dialog.
+          </p>
+          <code className="block break-all rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs dark:border-slate-700 dark:bg-white/[0.03]">
+            {created.delivery_url}
+          </code>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div>
+            <Label variant="console" htmlFor="rep-name">Recipient name</Label>
+            <Input variant="console" id="rep-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Family contact name" />
+          </div>
+          <div>
+            <Label variant="console" htmlFor="rep-email">Recipient email</Label>
+            <Input variant="console" id="rep-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" />
+          </div>
+          <div>
+            <Label variant="console" htmlFor="rep-days">Expires in (days)</Label>
+            <Input variant="console" id="rep-days" type="number" min="1" max="365" value={expires} onChange={(e) => setExpires(e.target.value)} />
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function ReportsPanel({ event }) {
+  const { data, loading, error, reload } = useApi(() =>
+    api.get(`/organization/events/${event.id}/reports`).then((r) => r.data)
+  );
+  const reports = data || [];
+  const [generating, setGenerating] = useState(false);
+  const [releasing, setReleasing] = useState(null);
+
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      await api.post(`/organization/events/${event.id}/reports`);
+      notify.success("Report generated");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <SectionCard
+      title="Reports"
+      subtitle="Generated audience + operations snapshots — released to the event's customer contact."
+      icon={FiFileText}
+      action={
+        <Button size="sm" leftIcon={FiPlus} loading={generating} onClick={generate}>
+          Generate report
+        </Button>
+      }
+    >
+      {error ? (
+        <OrganizationErrorState error={error} onRetry={reload} title="Couldn't load reports" />
+      ) : !loading && reports.length === 0 ? (
+        <OrganizationEmptyState
+          icon={FiFileText}
+          title="No reports yet"
+          description="Generate a report once the event has run to see its audience and operations summary."
+        />
+      ) : (
+        <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+          {reports.map((r) => (
+            <li key={r.id} className="flex items-center justify-between gap-3 py-3">
+              <div className="min-w-0">
+                <p className="font-medium text-slate-800 dark:text-slate-100">Version {r.version}</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Generated {fmtDateTime(r.created_at)}
+                  {r.released_at ? ` · Released ${fmtDateTime(r.released_at)}` : ""}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {r.released_at && <Badge tone="success" dot>Released</Badge>}
+                <Button variant="secondary" size="sm" leftIcon={FiSend} onClick={() => setReleasing(r)}>
+                  Release
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {releasing && <ReleaseReportModal report={releasing} onClose={() => { setReleasing(null); reload(); }} />}
+    </SectionCard>
+  );
+}
+
 export default function EventDetails() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -91,6 +260,7 @@ export default function EventDetails() {
   const [busy, setBusy] = useState(false);
   const [manageRole, setManageRole] = useState(null); // "Host" | "Moderator" | "Speaker" | null
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteSpeaker, setInviteSpeaker] = useState(null); // speaker user object, or null
 
   const { data, loading, error, reload } = useApi(() =>
     Promise.all([
@@ -99,7 +269,15 @@ export default function EventDetails() {
       api.get(`/events/${id}/moderators`).then((r) => r.data),
       api.get(`/events/${id}/speakers`).then((r) => r.data),
       api.get(`/events/${id}/registrations`).then((r) => r.data),
-    ]).then(([event, hosts, moderators, speakers, viewers]) => ({ event, hosts, moderators, speakers, viewers }))
+      // Feedback is a viewer-only signal (the host console no longer collects its own —
+      // see pages/host/Dashboard.jsx and services/moderation._feedback_submit), and this
+      // is where the organization reads what its audience thought of the event, with the
+      // same average-rating rollup the host's own console shows (components/host/
+      // HostPanel's Feedback tab).
+      api.get(`/events/${id}/feedback`, { params: { role: "viewer" } }).then((r) => r.data),
+    ]).then(([event, hosts, moderators, speakers, viewers, feedback]) => ({
+      event, hosts, moderators, speakers, viewers, feedback,
+    }))
   );
 
   const back = (
@@ -114,7 +292,7 @@ export default function EventDetails() {
   if (loading) return <div className="space-y-4">{back}<PageSpinner label="Loading event…" /></div>;
   if (error) return <div className="space-y-4">{back}<OrganizationErrorState error={error} onRetry={reload} title="Couldn't load this event" /></div>;
 
-  const { event, hosts, moderators, speakers, viewers } = data;
+  const { event, hosts, moderators, speakers, viewers, feedback } = data;
   const st = statusMeta(event.status);
 
   const copyLink = () => {
@@ -124,13 +302,22 @@ export default function EventDetails() {
     notify.success("Event link copied");
   };
 
+  const STATUS_TOAST = {
+    published: "Event published",
+    ready_to_arm: "Marked ready to arm",
+    armed: "Event armed",
+  };
+
   const setStatus = async (status) => {
     setBusy(true);
     try {
       await api.patch(`/events/${event.id}`, { status });
-      notify.success(status === "published" ? "Event published" : "Event updated");
+      notify.success(STATUS_TOAST[status] || "Event updated");
       reload();
     } catch (e) {
+      // For "armed" specifically, the backend's 400 message already carries the
+      // non-waivable readiness gate's actual blocker list (crud.event.status_transition_error)
+      // — surfacing it as-is is the operator's "authoritative blocker list", not a generic error.
       notify.error(errMsg(e));
     } finally {
       setBusy(false);
@@ -150,7 +337,38 @@ export default function EventDetails() {
     }
   };
 
+  // The real teardown (stops recording, closes the LiveKit room, notifies every connected
+  // viewer/host immediately) — never a raw status PATCH, which would leave the room running
+  // and every already-connected viewer stuck on a stale "live" view. Exists specifically as a
+  // guaranteed way out of "live" from the org dashboard, not just from the host console.
+  const endEvent = async () => {
+    if (!window.confirm(`End "${event.title || "this event"}" now? Viewers will be disconnected immediately.`)) return;
+    setBusy(true);
+    try {
+      await api.post(`/events/${event.id}/end`);
+      notify.success("Event ended");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const canPublish = ["draft", "scheduled"].includes(event.status);
+  const canEnd = ["live", "degraded"].includes(event.status);
+
+  // Progressive arm step: one button whose label/target advances the event through the
+  // optional v1.1 canonical pre-live chain (published/scheduled/rehearsal -> ready_to_arm ->
+  // armed), mirroring how the Publish button above already advances draft -> published.
+  // Nothing shows once armed (or beyond) — the banner badge above already reads "Armed".
+  const ARM_STEP = {
+    published: { label: "Mark Ready to Arm", next: "ready_to_arm" },
+    scheduled: { label: "Mark Ready to Arm", next: "ready_to_arm" },
+    rehearsal: { label: "Mark Ready to Arm", next: "ready_to_arm" },
+    ready_to_arm: { label: "Arm Event", next: "armed" },
+  };
+  const armStep = ARM_STEP[event.status];
 
   const ROLE_LIST = { Host: hosts, Moderator: moderators, Speaker: speakers };
 
@@ -193,6 +411,14 @@ export default function EventDetails() {
           {canPublish && (
             <Button variant="primary" size="sm" leftIcon={FiUploadCloud} loading={busy} onClick={() => setStatus("published")}>Publish</Button>
           )}
+          {armStep && (
+            <Button variant="secondary" size="sm" leftIcon={FiShield} loading={busy} onClick={() => setStatus(armStep.next)}>
+              {armStep.label}
+            </Button>
+          )}
+          {canEnd && (
+            <Button variant="danger" size="sm" leftIcon={FiPhoneOff} loading={busy} onClick={endEvent}>End Event</Button>
+          )}
           <Button variant="secondary" size="sm" leftIcon={FiLink} onClick={copyLink}>Copy Link</Button>
           <Button variant="danger" size="sm" leftIcon={FiTrash2} disabled={busy} onClick={del}>Delete</Button>
         </div>
@@ -230,7 +456,9 @@ export default function EventDetails() {
             </p>
             <div className="mt-4 flex flex-wrap gap-2 text-xs">
               {event.category && <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{event.category}</span>}
-              {event.timezone && <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{event.timezone}</span>}
+              {/* Abbreviation + live offset, matching how the scheduler labels it. `title`
+                  keeps the IANA identifier reachable — it is the unambiguous value. */}
+              {event.timezone && <span title={event.timezone} className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{tzShort(event.timezone)}</span>}
               {(event.tags || []).map((t) => (
                 <span key={t} className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">#{t}</span>
               ))}
@@ -246,7 +474,12 @@ export default function EventDetails() {
         <PeoplePanel people={moderators} role="Moderator" onManage={() => setManageRole("Moderator")} onRemove={(uid) => removeFromRole("Moderator", uid)} />
       )}
       {tab === "Speakers" && (
-        <PeoplePanel people={speakers} role="Speaker" onManage={() => setManageRole("Speaker")} onRemove={(uid) => removeFromRole("Speaker", uid)} />
+        <PeoplePanel
+          people={speakers} role="Speaker"
+          onManage={() => setManageRole("Speaker")}
+          onRemove={(uid) => removeFromRole("Speaker", uid)}
+          onInvite={setInviteSpeaker}
+        />
       )}
 
       {tab === "Registration" && (
@@ -290,6 +523,62 @@ export default function EventDetails() {
         </div>
       )}
 
+      {tab === "Feedback" && (
+        <div className="space-y-4">
+          {feedback.length === 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50">
+              <OrganizationEmptyState
+                icon={FiStar}
+                title="No viewer feedback yet"
+                description="Ratings and comments viewers leave when they exit this event will show up here."
+              />
+            </div>
+          ) : (
+            <>
+              {(() => {
+                const rated = feedback.filter((f) => f.rating != null);
+                const avg = rated.length ? rated.reduce((s, f) => s + f.rating, 0) / rated.length : null;
+                return avg != null ? (
+                  <div className="flex items-center gap-4 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/50">
+                    <FiStar className="h-6 w-6 shrink-0 fill-amber-400 text-amber-400" aria-hidden="true" />
+                    <div>
+                      <p className="text-lg font-semibold text-slate-800 dark:text-slate-100">{avg.toFixed(1)} / 5</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Average across {feedback.length} submission{feedback.length === 1 ? "" : "s"}
+                      </p>
+                    </div>
+                  </div>
+                ) : null;
+              })()}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {feedback.map((f) => (
+                  <div key={f.id} className="space-y-2 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/50">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-0.5" aria-label={f.rating ? `${f.rating} out of 5 stars` : "No rating"}>
+                        {f.rating
+                          ? [1, 2, 3, 4, 5].map((n) => (
+                              <FiStar
+                                key={n}
+                                aria-hidden="true"
+                                className={cx("h-3.5 w-3.5", n <= f.rating ? "fill-amber-400 text-amber-400" : "text-slate-300 dark:text-slate-700")}
+                              />
+                            ))
+                          : <span className="text-xs text-slate-400 dark:text-slate-500">No rating</span>}
+                      </div>
+                      <span className="shrink-0 text-[11px] text-slate-400 dark:text-slate-500">
+                        {f.created_at ? new Date(f.created_at).toLocaleString() : ""}
+                      </span>
+                    </div>
+                    {f.name && <p className="text-xs font-medium text-slate-500 dark:text-slate-400">{f.name}</p>}
+                    {f.comment && <p className="text-sm text-slate-600 dark:text-slate-300">{f.comment}</p>}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {tab === "Billing" && <EventCommercial event={event} />}
 
       {tab === "Recording" && (
@@ -301,6 +590,8 @@ export default function EventDetails() {
           />
         </div>
       )}
+
+      {tab === "Reports" && <ReportsPanel event={event} />}
 
       {tab === "Analytics" && (
         <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50">
@@ -320,7 +611,7 @@ export default function EventDetails() {
               ["Category", event.category || "—"],
               ["Visibility", visLabel(event.visibility)],
               ["Registration", event.registration_required ? "Required" : "Open"],
-              ["Timezone", event.timezone || "—"],
+              ["Timezone", tzShort(event.timezone) || "—"],
               ["Chat", event.chat_enabled ? "On" : "Off"],
               ["Q&A", event.qa_enabled ? "On" : "Off"],
               ["Recording", event.recording_enabled ? "On" : "Off"],
@@ -353,6 +644,14 @@ export default function EventDetails() {
         onClose={() => setInviteOpen(false)}
         eventId={event.id}
         eventVisibility={event.visibility}
+        onInvited={reload}
+      />
+
+      <ContributorInviteModal
+        open={!!inviteSpeaker}
+        onClose={() => setInviteSpeaker(null)}
+        eventId={event.id}
+        speaker={inviteSpeaker}
         onInvited={reload}
       />
     </div>

@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
@@ -24,12 +24,13 @@ import ForgotPassword from "./pages/auth/ForgotPassword";
 import AcceptInvitation from "./pages/auth/AcceptInvitation";
 import VerifyEmail from "./pages/auth/VerifyEmail";
 import EventRegistration from "./pages/EventRegistration";
+import CustomerDelivery from "./pages/CustomerDelivery";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import ModeratorDashboard from "./pages/moderator/Dashboard";
-
-// Public marketing homepage — code-split from the app bundle.
-const Home = lazy(() => import("./pages/Home/Home"));
+import SpeakerBackstage from "./pages/speaker/Backstage";
+import Landing from "./pages/Landing";
+import Contact from "./pages/Contact";
 
 // Super Admin console — code-split as one area. Only super admins can reach /admin/*, so
 // shipping these 14 pages (plus their charts and tables) in the main bundle made every
@@ -54,6 +55,7 @@ const AdminMedia = lazy(() => import("./pages/admin/Media"));
 const TrustSafety = lazy(() => import("./pages/admin/Security"));
 const AdminGovernance = lazy(() => import("./pages/admin/Governance"));
 const Commerce = lazy(() => import("./pages/admin/Commerce"));
+const Infrastructure = lazy(() => import("./pages/admin/Infrastructure"));
 
 // Organization console — the eight Build/Operate/Manage pages, code-split for the same reason
 // as the admin console above: only org admins reach /organization/*, so shipping them in the
@@ -90,23 +92,19 @@ function RootRedirect() {
   return <Navigate to={roleHome(user.role) || "/"} replace />;
 }
 
-// "/" shows the public homepage to visitors and to roles without an app dashboard
+// "/" shows the public landing page to visitors and to roles without an app dashboard
 // (viewers); logged-in staff/admins go to their dashboard.
 function LandingOrDashboard() {
   const { user, loading } = useAuth();
   if (loading) return null;
   const home = user && roleHome(user.role);
   if (home) return <Navigate to={home} replace />;
-  return (
-    <Suspense fallback={<div className="min-h-screen bg-slate-950" />}>
-      <Home />
-    </Suspense>
-  );
+  return <Landing />;
 }
 
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
 // so the console nav never 404s. Everything else in the sidebar is a real page below.
-const adminStubs = [["infrastructure", "Media Infrastructure"]];
+const adminStubs = [];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
 const legacyStubs = [
@@ -121,8 +119,13 @@ export default function App() {
       <AuthProvider>
         <BrowserRouter>
           <Routes>
-            {/* Public marketing homepage */}
+            {/* Public landing page */}
             <Route path="/" element={<LandingOrDashboard />} />
+
+            {/* Public contact form — where the landing page's "Talk to an expert" goes.
+                Deliberately NOT behind LandingOrDashboard: a signed-in operator should still
+                be able to reach it without being bounced to their dashboard. */}
+            <Route path="/contact" element={<Contact />} />
 
             {/* Authentication — one login for every role; brand panel shared via AuthLayout.
                 All dummy: no API calls. After login, roleHome() picks the dashboard. */}
@@ -138,6 +141,10 @@ export default function App() {
             {/* Public event registration landing (shareable link) */}
             <Route path="/e/:id" element={<EventRegistration />} />
 
+            {/* Controlled customer export / post-event report — token-gated, unauthenticated.
+                The recipient is never a platform user (BRD LE-AC-18). */}
+            <Route path="/deliveries/:token" element={<CustomerDelivery />} />
+
             {/* Viewer Portal — attendee watch page from an invite link (public) */}
             <Route path="/events/:eventId/watch" element={<EventWatch />} />
 
@@ -149,6 +156,14 @@ export default function App() {
             <Route element={<RoleRoute allow={["host", "moderator", "org_admin", "super_admin"]} />}>
               <Route path="/host/dashboard" element={<HostDashboard />} />
               <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
+            </Route>
+
+            {/* Contributor (speaker) backstage — same standalone-page pattern as host/
+                moderator above. Assignment to a *specific* event as a speaker is enforced
+                server-side (can_contribute from resolve_ctx); this route gate only stops a
+                wrong-role visitor from loading the page shell. */}
+            <Route element={<RoleRoute allow={["speaker", "org_admin", "super_admin"]} />}>
+              <Route path="/speaker/backstage" element={<SpeakerBackstage />} />
             </Route>
 
             {/* Super admin (platform) area */}
@@ -174,6 +189,7 @@ export default function App() {
                 <Route path="/admin/security" element={<TrustSafety />} />
                 <Route path="/admin/governance" element={<AdminGovernance />} />
                 <Route path="/admin/commerce" element={<Commerce />} />
+                <Route path="/admin/infrastructure" element={<Infrastructure />} />
                 {adminStubs.map(([path, title]) => (
                   <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
                 ))}
