@@ -11,9 +11,13 @@ from .auth import (
     ForgotPasswordIn,
     LoginIn,
     RegisterIn,
+    RegistrationPendingOut,
+    ResendVerificationIn,
     ResetPasswordIn,
     TokenOut,
     UserOut,
+    VerificationResultOut,
+    VerifyEmailIn,
     VerifyOtpIn,
 )
 
@@ -21,8 +25,12 @@ __all__ = [
     "ForgotPasswordIn",
     "LoginIn",
     "RegisterIn",
+    "RegistrationPendingOut",
+    "ResendVerificationIn",
     "ResetPasswordIn",
     "TokenOut",
     "UserOut",
+    "VerificationResultOut",
+    "VerifyEmailIn",
     "VerifyOtpIn",
 ]

@@ -5,6 +5,7 @@ from .subscription import Subscription, SUBSCRIPTION_STATUSES
 from .audit_log import AuditLog
 from .platform_setting import PlatformSetting
 from .invitation import Invitation, INVITATION_STATUSES
+from .identity import IdentityChallenge, CHALLENGE_PURPOSES, EMAIL_VERIFICATION
 from .event import (
     Event,
     EventAccessLink,

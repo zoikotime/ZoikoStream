@@ -1,13 +1,12 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
-import { useAuth } from "../../auth/AuthContext";
-import { roleHome } from "../../auth/roleHome";
 import { FiLock, FiMail } from "react-icons/fi";
 import { Field, PasswordField, SubmitButton, CheckField } from "../../ui/forms";
 import AuthTabs from "./AuthTabs";
+
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 const slugify = (s) =>
@@ -16,8 +15,12 @@ const slugify = (s) =>
 // New organizations only. The creator automatically becomes the Organization Admin —
 // no role/username field. Hosts/Moderators/Viewers never land here (they're invited).
 export default function CreateOrganization() {
-  const { setSession } = useAuth();
-  const navigate = useNavigate();
+  // ZST-EC-001 IDN-001: registration no longer returns a session. The API answers
+  // 202 EMAIL_VERIFICATION_REQUIRED with a masked address, and the account stays
+  // unverified until the emailed link is redeemed — so there is nothing to sign in with
+  // here and no roleHome() redirect to make.
+  const [pending, setPending] = useState(null);   // { email, expires_in_minutes }
+  const [resending, setResending] = useState(false);
 
   const [form, setForm] = useState({
     name: "",
@@ -52,15 +55,58 @@ export default function CreateOrganization() {
         email: form.email.trim(),
         password: form.password,
       });
-      setSession(data);
-      notify.success("Organization created! Welcome to ZoikoStream.");
-      navigate(roleHome(data.user.role) || "/", { replace: true });
+      setPending({ email: data.email, expires_in_minutes: data.expires_in_minutes });
     } catch (error) {
       notify.error(errMsg(error, "Could not create your organization."));
     } finally {
       setLoading(false);
     }
   };
+
+  // Uses the address the person just typed, not the masked one echoed back — the server
+  // never returns the full address and the client must not reconstruct it.
+  const resend = async () => {
+    setResending(true);
+    try {
+      const { data } = await api.post("/auth/resend-verification", { email: form.email.trim() });
+      notify.success(data?.message || "If that address needs verification, a new link has been sent.");
+    } catch (error) {
+      notify.error(errMsg(error, "Could not send a new link right now."));
+    } finally {
+      setResending(false);
+    }
+  };
+
+  if (pending) {
+    return (
+      <Card padding="xl">
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
+          Check your email
+        </h1>
+        <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
+          We sent a verification link to{" "}
+          <span className="font-semibold text-slate-700 dark:text-slate-200">{pending.email}</span>.
+        </p>
+        <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
+          The link expires in {pending.expires_in_minutes} minutes. Open it on this device to
+          finish setting up your organization. You will not be able to sign in until your
+          address is verified.
+        </p>
+
+        <div className="mt-8 space-y-4">
+          <SubmitButton loading={resending} onClick={resend}>
+            Resend verification email
+          </SubmitButton>
+          <p className="text-center text-sm text-slate-500 dark:text-slate-400">
+            Already verified?{" "}
+            <Link to="/login" className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400">
+              Sign In
+            </Link>
+          </p>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card

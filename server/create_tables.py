@@ -52,6 +52,26 @@ _USER_COLUMNS = [
     # sub-role for commercial actions; NULL keeps every existing account's unrestricted
     # behavior unchanged. See models/user.py STAFF_COMMERCIAL_ROLES, security.commercial_can.
     "ADD COLUMN IF NOT EXISTS staff_commercial_role VARCHAR(20)",
+    # Email verification (ZST-EC-001 IDN-001).
+    #
+    # DEFAULT TRUE here is deliberate and is the whole point of the two-step below: Postgres
+    # backfills every EXISTING row with the column default, and those accounts were created
+    # under the old flow where registration implied activation. Defaulting them to FALSE
+    # would lock every current user out of login the moment this runs.
+    #
+    # The default is then flipped to FALSE so INSERTs made outside the ORM are unverified by
+    # default too. New accounts get FALSE from models/user.py and routers/auth.py.
+    "ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE",
+    "ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ",
+    "ALTER COLUMN email_verified SET DEFAULT FALSE",
+]
+
+# Backfill the timestamp for the grandfathered rows above so `email_verified` is never
+# TRUE with an unexplained NULL date. created_at is the honest approximation: it is when
+# the account was activated under the previous flow.
+_USER_BACKFILL = [
+    "UPDATE users SET email_verified_at = created_at "
+    "WHERE email_verified IS TRUE AND email_verified_at IS NULL",
 ]
 
 # Blast-radius class for an event. Drives which readiness gates are mandatory and which
@@ -274,6 +294,8 @@ def ensure_schema():
             conn.execute(text(stmt))
         for clause in _USER_COLUMNS:
             conn.execute(text(f"ALTER TABLE users {clause}"))
+        for stmt in _USER_BACKFILL:
+            conn.execute(text(stmt))
         for clause in _EVENT_COLUMNS:
             conn.execute(text(f"ALTER TABLE events {clause}"))
         for clause in _LIVE_RECORDING_COLUMNS:

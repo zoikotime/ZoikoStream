@@ -215,14 +215,24 @@ def find_invitation_by_token(db, raw: str) -> Invitation | None:
 
 def accept_invitation(db, inv: Invitation, full_name, username, password_hash) -> User:
     """Create the member and mark the invite accepted, atomically. Caller has already
-    validated the token/status/expiry and that email + username are free."""
+    validated the token/status/expiry and that email + username are free.
+
+    The new member is created ALREADY email-verified (ZST-EC-001 IDN-001). That is not a
+    shortcut: redeeming an invitation token proves control of the invited address, which is
+    exactly the proof an IDN-001 challenge collects, and the token was delivered to that
+    address and nowhere else. Sending a second verification email for an address we just
+    proved would be a redundant Class A message. The invitee never chooses this address —
+    an authorized administrator did — so there is no self-asserted address to verify.
+    """
+    now = datetime.now(timezone.utc)
     user = User(
         org_id=inv.org_id, email=inv.email, role=inv.role, full_name=full_name,
         username=username, password_hash=password_hash, is_active=True,
+        email_verified=True, email_verified_at=now,
     )
     db.add(user)
     inv.status = "accepted"
-    inv.accepted_at = datetime.now(timezone.utc)
+    inv.accepted_at = now
     db.commit()
     db.refresh(user)
     return user

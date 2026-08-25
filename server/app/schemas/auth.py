@@ -32,6 +32,33 @@ class ResetPasswordIn(BaseModel):
     password: str = Field(min_length=8, max_length=72)
 
 
+# ── IDN-001 email verification ──────────────────────────────────────────────────────────
+
+class VerifyEmailIn(BaseModel):
+    # Opaque, single-use token from the emailed link. Bounded so a huge body can't be
+    # pushed through the hash path; secrets.token_urlsafe(32) renders to 43 characters.
+    token: str = Field(min_length=16, max_length=512)
+
+
+class ResendVerificationIn(BaseModel):
+    email: EmailStr
+
+
+class RegistrationPendingOut(BaseModel):
+    """Registration no longer returns a session. The account exists but is unverified,
+    so the only thing handed back is what the client needs to render "check your email"."""
+
+    status: str = "EMAIL_VERIFICATION_REQUIRED"
+    email: str                      # masked, never the full address
+    expires_in_minutes: int
+    message: str
+
+
+class VerificationResultOut(BaseModel):
+    status: str                     # "verified"
+    message: str
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
