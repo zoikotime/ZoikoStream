@@ -5,7 +5,37 @@ from .subscription import Subscription, SUBSCRIPTION_STATUSES
 from .audit_log import AuditLog
 from .platform_setting import PlatformSetting
 from .invitation import Invitation, INVITATION_STATUSES
-from .identity import IdentityChallenge, CHALLENGE_PURPOSES, EMAIL_VERIFICATION
+from .identity import (
+    IdentityChallenge,
+    ACCOUNT_RECOVERY,
+    CHALLENGE_PURPOSES,
+    EMAIL_VERIFICATION,
+    RECOVERY_CONTACT,
+)
+from .identity_lifecycle import (
+    AccountRecovery,
+    AccountStateEvent,
+    ACCOUNT_STATES,
+    RECOVERY_ADDITIONAL_VERIFICATION,
+    RECOVERY_CANCELED,
+    RECOVERY_COMPLETED,
+    RECOVERY_MAX_ATTEMPTS,
+    RECOVERY_STARTED,
+    RECOVERY_STATES,
+    RECOVERY_VERIFIED,
+    STATE_DELETION_COMPLETED,
+    STATE_REACTIVATED,
+    STATE_RESTRICTED,
+)
+from .identity_security import (
+    SignInEvent,
+    ALLOW,
+    ALLOW_NEW_CONTEXT,
+    AUTH_METHOD_PASSWORD,
+    BLOCK_SUSPICIOUS,
+    RISK_DECISIONS,
+    SIGN_IN_OUTCOMES,
+)
 from .event import (
     Event,
     EventAccessLink,

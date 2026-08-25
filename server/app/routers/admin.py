@@ -5,13 +5,14 @@ mutation writes an audit log."""
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..crud import admin as crud
 from ..crud import event as event_crud
 from ..db import get_db
+from ..services import account_lifecycle as lifecycle
 from ..models import ElevationSession, Event, Organization, PlatformSetting, User
 from ..schemas.admin import (
     ApiKeyCreate,
@@ -241,6 +242,7 @@ def user_summary(db: Session = Depends(get_db)):
 
 @router.patch("/users/{user_id}")
 def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
+               background: BackgroundTasks,
                db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     user = db.get(User, user_id)
     if not user:
@@ -248,17 +250,27 @@ def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
     # Guard against self-lockout: can't deactivate or demote your own account.
     if user.id == admin.id and (data.is_active is False or (data.role and data.role != "super_admin")):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot deactivate or demote yourself")
+    was_active = user.is_active
     try:
         out = crud.update_user(db, user, data)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     _audit(db, admin, request, "user.update", target_type="user", target_id=user.id,
            org_id=user.org_id, meta=data.model_dump(exclude_none=True))
+
+    # IDN-008 — only when the ACTIVE state actually flipped, and only after the change is
+    # committed. A rename or role edit is not a restriction and must not notify.
+    if data.is_active is not None and data.is_active != was_active:
+        lifecycle.announce(
+            db, background, user=user, email=user.email, org_id=user.org_id,
+            state=lifecycle.STATE_RESTRICTED if not user.is_active else lifecycle.STATE_REACTIVATED,
+            reason_category="administrative_action",
+        )
     return out
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_user(user_id: uuid.UUID, request: Request,
+def delete_user(user_id: uuid.UUID, request: Request, background: BackgroundTasks,
                db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     user = db.get(User, user_id)
     if not user:
@@ -269,6 +281,12 @@ def delete_user(user_id: uuid.UUID, request: Request,
     crud.delete_user(db, user)
     _audit(db, admin, request, "user.delete", target_type="user", target_id=user_id,
            org_id=org_id, meta={"email": email})
+    # IDN-008 "Deletion completed", after the delete is committed. The address was captured
+    # above because this is a hard delete — there is no row left to read it from. user=None
+    # for the same reason: AccountStateEvent must outlive the identity it describes.
+    lifecycle.announce(db, background, user=None, email=email, org_id=org_id,
+                       state=lifecycle.STATE_DELETION_COMPLETED,
+                       reason_category="administrative_action")
 
 
 # ── Plans & Subscriptions ────────────────────────────────────────────────────

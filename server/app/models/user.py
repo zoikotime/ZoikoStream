@@ -98,6 +98,33 @@ class User(Base):
         DateTime(timezone=True),
     )
 
+    # ── IDN-002 "Account ready" send marker ────────────────────────────────────────────
+    # Set once, in the same transaction that consumes the verification challenge, by
+    # crud.identity.claim_account_ready(). Its only job is duplicate prevention: exactly one
+    # caller can transition NULL -> timestamp, so a reused link, a retried request, a double
+    # click or a worker restart cannot produce a second "your access is ready" email.
+    #
+    # NULL on every pre-existing row and never backfilled. That is deliberate — writing a
+    # timestamp would assert we sent a message we did not. Those accounts simply have no
+    # unconsumed challenge, so nothing can trigger a send for them.
+    #
+    # Not an audit record: it says "a send was attempted", not "a message was delivered".
+    # Real delivery evidence needs the communication record that ZST-EC-001 Section 02
+    # requires and this platform does not yet have.
+    account_ready_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+
+    # --- Recovery contact (ZST-EC-001 IDN-006 / IDN-007) --------------------------------
+    # An alternate address the account holder nominates for recovery. It is only ever
+    # honoured once VERIFIED: an unverified value is an attacker-supplied address, and
+    # treating it as a recovery destination would turn "set recovery email" into account
+    # takeover. `recovery_email_pending` holds the nominated address until the challenge
+    # sent to it is redeemed, at which point it is promoted to `recovery_email`.
+    recovery_email: Mapped[str | None] = mapped_column(String(255))
+    recovery_email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovery_email_pending: Mapped[str | None] = mapped_column(String(255))
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

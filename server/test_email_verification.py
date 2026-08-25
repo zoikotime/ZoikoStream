@@ -28,7 +28,7 @@ from app import ratelimit
 from app.config import settings
 from app.crud import identity as identity_crud
 from app.db import SessionLocal
-from app.models import EMAIL_VERIFICATION, IdentityChallenge, Organization, User
+from app.models import EMAIL_VERIFICATION, IdentityChallenge, Organization, SignInEvent, User
 
 TTL = settings.EMAIL_VERIFICATION_TTL_MINUTES
 
@@ -115,6 +115,10 @@ def _cleanup(email):
         user = db.query(User).filter(User.email == email.lower()).one_or_none()
         if user is None:
             return
+        # Sign-in history now exists for any test that logs in (IDN-003/004) and is
+        # FK-bound to the user, so it must go first. Production never hard-deletes a
+        # user -- deletion there is a soft delete -- so this is test hygiene only.
+        db.query(SignInEvent).filter(SignInEvent.user_id == user.id).delete()
         db.query(IdentityChallenge).filter(IdentityChallenge.user_id == user.id).delete()
         org_id = user.org_id
         db.delete(user)
@@ -197,11 +201,16 @@ def test_template_copy_is_the_approved_idn_001_copy():
 
     assert email_mod.IDN_001_SUBJECT == "Verify your email for Zoiko Steam"
     for body in (html, text):
-        assert "Confirm your email address." in body
-        assert "A request was made to verify this email address for Zoiko Steam." in body
-        assert "only on the device where you started the request" in body
+        assert "Welcome to Zoiko Steam" in body
+        assert "Thanks for creating your Zoiko Stream account." in body
+        assert "Before you can sign in, please verify your email address" in body
+        # The message must never imply the account is usable yet — that claim belongs to
+        # IDN-002 and only after verification succeeds.
+        assert "Once your email is verified, you can sign in using the email address" in body
+        for forbidden in ("account is active", "ready to go", "access is active"):
+            assert forbidden not in body, f"{forbidden!r} must not appear before verification"
         assert f"This secure link expires in {TTL} minutes." in body
-        assert "If you did not request this, you can safely ignore this email." in body
+        assert "If you did not create this account, you can safely ignore this email." in body
         assert url in body
     assert "Verify email" in html and "Verify email" in text
     # No marketing or promotional module in a Class A message.
@@ -369,7 +378,7 @@ def test_07_html_version_exists():
         _, cap = _register(client, email)
         html = cap.payload["html"]
         assert html and "<" in html, "HTML body must be present"
-        assert "Confirm your email address." in html
+        assert "Welcome to Zoiko Steam" in html
         assert "font-size:16px" in html, "body text must be at least 16px"
     finally:
         _cleanup(email)
@@ -383,7 +392,7 @@ def test_08_plain_text_version_exists():
         text = cap.payload.get("text")
         assert text, "a plain-text alternative is mandatory — never send HTML-only"
         assert "<" not in text.replace("<", "") or "</" not in text, "text must not be markup"
-        assert "Confirm your email address." in text
+        assert "Welcome to Zoiko Steam" in text
         assert "token=" in text, "the link must be reachable from the text part too"
     finally:
         _cleanup(email)
@@ -615,25 +624,29 @@ def test_19_security_email_is_not_suppressed_by_organization_preferences():
 
 
 def test_20_idn_002_does_not_fire_before_successful_verification():
-    """The welcome/account-ready message must not claim an active account pre-verification."""
+    """IDN-002 must not claim an active account before verification succeeds.
+
+    Updated when IDN-002 landed: the old `send_welcome_email` symbol was removed outright
+    (it fired at registration), so this asserts on the IDN-002 subject line instead.
+    """
     email = _new_email()
     client = TestClient(m.app)
     try:
-        with patch.object(email_mod, "send_welcome_email") as welcome:
-            _, cap = _register(client, email)
-            assert welcome.call_count == 0, \
-                "IDN-002 must not fire on unverified registration"
+        _, cap = _register(client, email)
 
-            # Only IDN-001 went out.
-            assert len(cap.calls) == 1
-            assert cap.payload["subject"] == "Verify your email for Zoiko Steam"
+        # Registration sends IDN-001 and nothing else.
+        assert len(cap.calls) == 1
+        assert cap.payload["subject"] == email_mod.IDN_001_SUBJECT
+        subjects = [c["payload"]["subject"] for c in cap.calls]
+        assert email_mod.IDN_002_SUBJECT not in subjects,             "IDN-002 must not fire on unverified registration"
 
-            raw = _token_from(cap)
-            _reset_limits()
+        # After verification it is allowed to fire — and only then.
+        raw = _token_from(cap)
+        _reset_limits()
+        cap2, ctx2 = _capture()
+        with ctx2:
             assert client.post("/api/auth/verify-email", json={"token": raw}).status_code == 200
-            # IDN-002 is out of scope for this change, so it must not fire here either —
-            # what matters is that it can never precede verification.
-            assert welcome.call_count == 0
+        assert [c["payload"]["subject"] for c in cap2.calls] == [email_mod.IDN_002_SUBJECT]
     finally:
         _cleanup(email)
 
