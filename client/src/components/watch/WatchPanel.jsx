@@ -15,7 +15,7 @@
 // them, a reaction-only or presence-only update leaves those references unchanged and
 // these three skip re-rendering entirely.
 import { memo, useEffect, useRef, useState } from "react";
-import { FiSend, FiChevronUp, FiCheckCircle, FiMessageSquare } from "react-icons/fi";
+import { FiSend, FiChevronUp, FiCheckCircle, FiMessageSquare, FiMapPin, FiX, FiInfo, FiSmile } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
 import { initials } from "../../data/watch";
 import { hhmm, accentFor } from "../../data/moderation";
@@ -40,11 +40,100 @@ const TABS = [
   { key: "polls", label: "Polls" },
 ];
 
+// A fixed, common-emoji picker — not a full emoji-mart/library dependency, just a small
+// popover that inserts a glyph into the composer. Matches the emoji vocabulary the
+// reaction bar already uses elsewhere on this same page.
+const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "👏", "😮", "🙌"];
+
+function EmojiPicker({ onPick }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Insert an emoji"
+        aria-expanded={open}
+        className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-slate-400 transition duration-150 hover:bg-slate-100 hover:text-slate-600 motion-reduce:transition-none dark:hover:bg-slate-800 dark:hover:text-slate-200"
+      >
+        <FiSmile aria-hidden />
+      </button>
+      {open && (
+        <div className="absolute bottom-12 right-0 z-20 grid w-40 grid-cols-4 gap-1 rounded-xl border border-slate-200 bg-white p-2 shadow-lg dark:border-slate-800 dark:bg-slate-900">
+          {QUICK_EMOJI.map((e) => (
+            <button
+              key={e}
+              type="button"
+              onClick={() => { onPick(e); setOpen(false); }}
+              className="grid h-9 w-9 place-items-center rounded-lg text-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              {e}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// "Pinned by host" banner above the message list — additive to, not a replacement for,
+// the inline highlighted row already rendered for a pinned message below. Purely a local
+// dismiss: there's no viewer-facing "unpin" action (chat.pin is host-only), so closing
+// this just hides it for this session. Comparing against the pinned message's OWN id
+// (rather than a plain dismissed=true flag) means a new pin from the host — a different
+// id — reappears even if a previous pin was dismissed.
+function PinnedBanner({ pinned, dismissedId, onDismiss }) {
+  if (!pinned || pinned.id === dismissedId) return null;
+  return (
+    <div className="mb-2 flex items-start gap-2 rounded-xl border border-violet-200 bg-violet-50 p-3 dark:border-violet-500/20 dark:bg-violet-500/10">
+      <FiMapPin className="mt-0.5 shrink-0 text-violet-600 dark:text-violet-400" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-violet-600 dark:text-violet-400">Pinned by host</p>
+        <p className="mt-0.5 break-words text-sm text-slate-700 dark:text-slate-200">{pinned.text}</p>
+      </div>
+      <button
+        type="button"
+        onClick={() => onDismiss(pinned.id)}
+        aria-label="Dismiss pinned message"
+        className="shrink-0 rounded-lg p-1 text-violet-400 transition duration-150 hover:bg-violet-100 hover:text-violet-600 motion-reduce:transition-none dark:hover:bg-violet-500/15"
+      >
+        <FiX aria-hidden />
+      </button>
+    </div>
+  );
+}
+
+// Read-only — slow mode is a host moderation setting (server/app/services/broadcast.py
+// DEFAULT_SETTINGS.slow_mode_seconds), not something a random viewer's own socket can
+// flip. This mirrors the reference design's toggle shape without pretending it's
+// interactive: no onClick, disabled-look track, a tooltip explaining what it means.
+function SlowModeIndicator({ seconds }) {
+  if (!seconds) return null;
+  return (
+    <div className="mt-2 flex items-center justify-end gap-2 text-xs text-slate-500 dark:text-slate-400">
+      <span>Slow mode</span>
+      <FiInfo
+        aria-hidden
+        title={`Messages are limited to one every ${seconds}s — set by the host`}
+      />
+      <span
+        role="status"
+        aria-label={`Slow mode is on, set by the host (${seconds}s)`}
+        title={`Set by the host — one message every ${seconds}s`}
+        className="inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-violet-600 p-0.5"
+      >
+        <span className="h-4 w-4 translate-x-4 rounded-full bg-white shadow-sm" />
+      </span>
+    </div>
+  );
+}
+
 // Real chat, wired to the same live socket the host/moderator consoles use. Reaching this
 // component at all means the caller (WatchPanel) has already confirmed the visitor is
 // identified — logged in or self-registered — so there's no gate to check here.
-const Chat = memo(function Chat({ messages = [], typing = {}, send, connected }) {
+const Chat = memo(function Chat({ messages = [], typing = {}, send, connected, slowModeSeconds = null }) {
   const [text, setText] = useState("");
+  const [dismissedPinId, setDismissedPinId] = useState(null);
   const scroller = useRef(null);
 
   useEffect(() => {
@@ -61,9 +150,11 @@ const Chat = memo(function Chat({ messages = [], typing = {}, send, connected })
   };
 
   const typists = Object.values(typing).map((t) => t.name);
+  const pinned = messages.find((m) => m.pinned) || null;
 
   return (
     <div className="flex h-full flex-col">
+      <PinnedBanner pinned={pinned} dismissedId={dismissedPinId} onDismiss={setDismissedPinId} />
       <div ref={scroller} className="zk-scroll-thin flex-1 space-y-1 overflow-y-auto pr-1">
         {messages.map((m) => (
           <div
@@ -80,6 +171,9 @@ const Chat = memo(function Chat({ messages = [], typing = {}, send, connected })
                 {initials(m.name)}
               </span>
               <span className="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">{m.name}</span>
+              {m.actor_role === "host" && (
+                <span className="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-violet-600 dark:bg-violet-500/15 dark:text-violet-400">Host</span>
+              )}
               {m.pinned && (
                 <span className="shrink-0 rounded bg-emerald-600/10 px-1.5 text-[10px] font-semibold uppercase text-emerald-600 dark:text-emerald-400">Pinned</span>
               )}
@@ -101,16 +195,18 @@ const Chat = memo(function Chat({ messages = [], typing = {}, send, connected })
           aria-label="Chat message"
           className={FIELD}
         />
+        <EmojiPicker onPick={(e) => setText((t) => t + e)} />
         <button
           type="submit"
           disabled={!connected}
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-emerald-600 text-white transition duration-150 hover:bg-emerald-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 motion-reduce:transition-none motion-reduce:active:scale-100"
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-violet-600 text-white transition duration-150 hover:bg-violet-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 motion-reduce:transition-none motion-reduce:active:scale-100"
           aria-label="Send message"
           title={connected ? "Send" : "Reconnecting…"}
         >
           <FiSend aria-hidden />
         </button>
       </form>
+      <SlowModeIndicator seconds={slowModeSeconds} />
     </div>
   );
 });
@@ -320,6 +416,9 @@ const WatchPanel = memo(function WatchPanel({
   // component at all in that case, but the individual flags are still honored here so a
   // non-memorial event that only disabled e.g. polls shows just Chat/Q&A, not a dead tab.
   enabledTabs = { chat: true, qa: true, polls: true },
+  // Current slow_mode_seconds off the moderator/snapshot envelope — display-only, see
+  // SlowModeIndicator above.
+  slowModeSeconds = null,
 }) {
   const visibleTabs = TABS.filter((t) => enabledTabs[t.key]);
   const [tab, setTab] = useState(visibleTabs[0]?.key || "chat");
@@ -403,7 +502,9 @@ const WatchPanel = memo(function WatchPanel({
           <IdentifyForm eventId={eventId} label={IDENTIFY_LABEL[tab]} onIdentified={onIdentified} />
         ) : (
           <>
-            {tab === "chat" && <Chat messages={messages} typing={typing} send={send} connected={connected} />}
+            {tab === "chat" && (
+              <Chat messages={messages} typing={typing} send={send} connected={connected} slowModeSeconds={slowModeSeconds} />
+            )}
             {tab === "qa" && <QA questions={questions} send={send} connected={connected} />}
             {tab === "polls" && <Polls polls={polls} send={send} />}
           </>

@@ -126,11 +126,14 @@ class WatchOut(BaseModel):
     status: str
     visibility: str
     start_time: datetime | None = None
+    end_time: datetime | None = None
+    category: str | None = None
     organization_name: str | None = None
     host_name: str | None = None
     chat_enabled: bool
     qa_enabled: bool
     polls_enabled: bool
+    raise_hand_enabled: bool = True
     # No persisted Event column (it's a live-only BroadcastSession setting — see
     # services/broadcast.py's DEFAULT_SETTINGS) — True except for a memorial-category
     # event, computed the same way _seed_settings computes it (crud.event.

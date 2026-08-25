@@ -136,6 +136,17 @@ p { text-wrap: pretty; }
 }
 .zk-pop { animation: zk-pop .32s cubic-bezier(0.22, 1, 0.36, 1); }
 
+/* Floating reaction burst over the video (components/watch/FloatingReactions.jsx) — one
+   emoji rises and fades, then its own JS timer removes the node from the DOM. Driven by
+   real reaction-count deltas over the socket, so every viewer sees the same taps float
+   up, not just the person who tapped. */
+@keyframes zk-rise-fade {
+  0% { transform: translateY(0) scale(0.6); opacity: 0; }
+  15% { opacity: 1; transform: translateY(-12px) scale(1); }
+  100% { transform: translateY(-170px) scale(1.05); opacity: 0; }
+}
+.zk-rise-fade { animation: zk-rise-fade 2.2s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
 .zk-flow-dot { animation: zk-flow 2.4s linear infinite; }
 .zk-float { animation: zk-float 6s ease-in-out infinite; }
 .zk-pulse-ring { animation: zk-pulse-ring 2s ease-out infinite; }
@@ -225,4 +236,7 @@ p { text-wrap: pretty; }
   .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift, .zk-badge-glow,
   .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow, .zk-pop,
   .zk-pop-in, .zk-tip-in { animation: none; }
+  /* A static, full-opacity emoji stuck on the video for its full 2.2s is worse than no
+     effect at all — hide the burst outright rather than leave it motionless. */
+  .zk-rise-fade { display: none; }
 }

@@ -9,6 +9,7 @@ import { FiCalendar, FiClock, FiUsers, FiShare2, FiHeart, FiCheck, FiDownload } 
 import { cx } from "../../ui/tokens";
 import { fmtDate } from "../../data/events";
 import { initials } from "../../data/watch";
+import RocketIllustration from "./RocketIllustration";
 
 // Literal gradient per accent — Tailwind JIT can't compile interpolated names. These stay
 // dark in both themes on purpose: it's cover art, like every other streaming platform's, and
@@ -43,7 +44,10 @@ function downloadIcs(event) {
   const start = event.startISO ? new Date(event.startISO) : null;
   if (!start || isNaN(start)) return;
   const stamp = (d) => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-  const end = new Date(start.getTime() + 60 * 60 * 1000); // ponytail: no end_time on the watch payload — 1h block
+  const endFromPayload = event.endISO ? new Date(event.endISO) : null;
+  const end = endFromPayload && !isNaN(endFromPayload) && endFromPayload > start
+    ? endFromPayload
+    : new Date(start.getTime() + 60 * 60 * 1000); // no end_time on this event — 1h block
   const body = [
     "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//ZoikoStream//Viewer//EN", "BEGIN:VEVENT",
     `UID:${event.id}@zoikostream`, `DTSTAMP:${stamp(new Date())}`,
@@ -92,6 +96,7 @@ export default function WatchHeader({ event, viewers }) {
       {/* Ambient light + a soft brand glow. Both are pointer-events-none decoration. */}
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.18),transparent_55%)]" />
       <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-fuchsia-500/25 blur-3xl" />
+      <RocketIllustration className="pointer-events-none absolute right-6 top-2 hidden h-32 w-32 opacity-70 sm:block lg:right-10 lg:h-40 lg:w-40" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
 
       <div className="relative mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8">
@@ -118,6 +123,7 @@ export default function WatchHeader({ event, viewers }) {
                   {initials(event.host)}
                 </span>
                 <span className="font-semibold text-white">{event.host}</span>
+                <span className="rounded-full bg-white/15 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-white/90 backdrop-blur">Host</span>
               </span>
               {event.date && (
                 <span className="inline-flex items-center gap-2"><FiCalendar aria-hidden /> {fmtDate(event.date)}</span>

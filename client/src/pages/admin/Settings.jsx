@@ -14,6 +14,14 @@ const DEFAULTS = {
   global: { signups_enabled: true, maintenance_mode: false },
 };
 
+// audience_envelope is deliberately absent from streaming_limits' defaults above (see
+// services/platform_settings.py::audience_capacity_envelope): unset is a real, intentional
+// state — "no approved band, every stated audience needs an explicit capacity approval" —
+// not a value to seed. The form below has to represent "unset" as an empty field, not as
+// some numeric default, or saving the page with this field untouched would silently
+// configure a band that Operations never approved.
+const parseEnvelope = (value) => (value === "" || value == null ? null : Number(value));
+
 function useSettingsData() {
   return useApi(() => api.get("/admin/settings").then((r) => r.data));
 }
@@ -45,7 +53,15 @@ export default function Settings() {
         values: {
           brand: form.brand,
           storage_limits: { default_gb: Number(form.storage_limits.default_gb), max_gb: Number(form.storage_limits.max_gb) },
-          streaming_limits: { default_hours: Number(form.streaming_limits.default_hours), max_bitrate_kbps: Number(form.streaming_limits.max_bitrate_kbps) },
+          streaming_limits: {
+            default_hours: Number(form.streaming_limits.default_hours),
+            max_bitrate_kbps: Number(form.streaming_limits.max_bitrate_kbps),
+            // Explicitly included (even as null) on every save — streaming_limits is stored
+            // and replaced as one JSON blob (routers/admin.py update_settings), so omitting
+            // this key here would silently drop it the next time anything else in the panel
+            // is saved.
+            audience_envelope: parseEnvelope(form.streaming_limits.audience_envelope),
+          },
           global: form.global,
         },
       });
@@ -130,6 +146,24 @@ export default function Settings() {
           <div>
             <Label>Max bitrate (kbps)</Label>
             <Input variant="console" type="number" min={0} value={form.streaming_limits.max_bitrate_kbps} onChange={(e) => setField("streaming_limits", "max_bitrate_kbps", e.target.value)} />
+          </div>
+          <div className="sm:col-span-2">
+            <Label>Approved audience capacity envelope (peak concurrent viewers)</Label>
+            <Input
+              variant="console"
+              type="number"
+              min={0}
+              placeholder="Not configured — every stated audience requires manual approval"
+              value={form.streaming_limits.audience_envelope ?? ""}
+              onChange={(e) => setField("streaming_limits", "audience_envelope", e.target.value)}
+            />
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              An event whose organizer states an expected audience at or under this number goes
+              live without further approval. Left blank (the default), EVERY event that states an
+              expected audience — any number — is blocked from going live until Operations
+              approves its capacity directly on the event. This is a fail-closed rule and cannot
+              be bypassed here; it only decides whether that manual step is required.
+            </p>
           </div>
         </div>
       </Panel>

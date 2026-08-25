@@ -8,14 +8,7 @@
 // reconcile and no risk of double-counting a tap.
 import { useEffect, useState } from "react";
 import { cx } from "../../ui/tokens";
-
-const REACTIONS = [
-  { key: "like", emoji: "👍", label: "Like" },
-  { key: "heart", emoji: "❤️", label: "Love" },
-  { key: "clap", emoji: "👏", label: "Applaud" },
-  { key: "fire", emoji: "🔥", label: "Fire" },
-  { key: "party", emoji: "🎉", label: "Celebrate" },
-];
+import { REACTIONS } from "../../data/reactions";
 
 // How long a tapped emoji stays highlighted. This is purely a "you just did that" flash,
 // not a persistent "your reaction" toggle — the backend has no per-viewer reaction ledger
@@ -29,8 +22,15 @@ const PULSE_MS = 900;
  * @param {(key: string) => void} props.onReact - sends `reaction.add` for this key.
  * @param {boolean} [props.disabled] - true while disconnected or while the host has
  *   turned reactions off (settings.reactions_enabled === false).
+ * @param {boolean} [props.handRaised] - this viewer's own `hand` presence flag (see
+ *   EventWatch.jsx, derived from panel.you/panel.participants).
+ * @param {() => void} [props.onToggleHand] - sends `participant.hand` for this viewer.
+ * @param {boolean} [props.raiseHandVisible] - gated on watch.raise_hand_enabled.
  */
-export default function ReactionBar({ reactions, onReact, disabled = false, className = "" }) {
+export default function ReactionBar({
+  reactions, onReact, disabled = false, className = "",
+  handRaised = false, onToggleHand, raiseHandVisible = false,
+}) {
   const [pulsing, setPulsing] = useState({});
 
   // Clear a pulse automatically so a tap's highlight is always transient, without
@@ -87,6 +87,25 @@ export default function ReactionBar({ reactions, onReact, disabled = false, clas
           </button>
         );
       })}
+
+      {raiseHandVisible && (
+        <button
+          type="button"
+          onClick={onToggleHand}
+          disabled={disabled}
+          aria-pressed={handRaised}
+          aria-label={handRaised ? "Lower your hand" : "Raise your hand"}
+          title={handRaised ? "Lower your hand" : "Raise your hand"}
+          className={cx(
+            "ml-auto inline-flex min-h-11 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
+            handRaised
+              ? "border-transparent bg-violet-600 text-white hover:bg-violet-500"
+              : "border-violet-300 text-violet-600 hover:bg-violet-50 dark:border-violet-500/40 dark:text-violet-400 dark:hover:bg-violet-500/10"
+          )}
+        >
+          <span aria-hidden>✋</span> Raise Hand
+        </button>
+      )}
     </div>
   );
 }

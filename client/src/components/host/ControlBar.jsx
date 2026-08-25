@@ -22,7 +22,7 @@ import { useEffect, useState } from "react";
 import {
   FiMic, FiMicOff, FiVideo, FiVideoOff, FiMonitor, FiRefreshCw, FiUserPlus,
   FiRadio, FiPhoneOff, FiCircle,
-  FiPause, FiPlay, FiSettings, FiAlertOctagon, FiSquare, FiEye,
+  FiPause, FiPlay, FiSettings, FiAlertOctagon, FiSquare, FiEye, FiLoader,
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import { STUDIO, DECK, TRANSPORT, focus, t150, t200, press, disabled as disabledCls } from "./studio";
@@ -115,6 +115,10 @@ export default function ControlBar({
   onGoLive, onPause, onResume, onEnd, onEmergencyStop, onCountdown,
   onRecord, onPauseRecord, onStopRecord,
   onInvite, onSettings,
+  // Go Live click -> server round trip. goLiveError is the last readiness rejection (see
+  // hooks/useLiveEvent.js "host/broadcast.error") — shown here, next to the control that
+  // failed, rather than only as a toast that scrolls away.
+  goLivePending = false, goLiveError = null,
 }) {
   const status = broadcast?.status || "preview";
   const live = status === "live";
@@ -296,10 +300,13 @@ export default function ControlBar({
             <button
               type="button"
               onClick={live ? onPause : onGoLive}
-              disabled={!canHost || ended}
+              disabled={!canHost || ended || (!live && goLivePending)}
               title={!canHost
                 ? "Only the event host can start or pause the broadcast"
-                : live ? "Pause the broadcast" : ended ? "This event has ended" : "Start broadcasting"}
+                : live ? "Pause the broadcast"
+                  : ended ? "This event has ended"
+                    : goLivePending ? "Waiting for the server to confirm…"
+                      : "Start broadcasting"}
               className={cx(
                 "inline-flex h-10 items-center gap-2 rounded-lg px-4 text-[13px] font-semibold",
                 live ? TRANSPORT.hold : TRANSPORT.primary,
@@ -308,17 +315,19 @@ export default function ControlBar({
             >
               {live
                 ? <><FiPause aria-hidden="true" className="text-base" /> Pause</>
-                : (
-                  <>
-                    {/* Go Live is the one action the whole deck exists for, so its glyph
-                        transmits while the broadcast is still idle. */}
-                    <FiRadio
-                      aria-hidden="true"
-                      className={cx("text-base", !ended && "animate-pulse motion-reduce:animate-none")}
-                    />
-                    {ended ? "Ended" : "Go Live"}
-                  </>
-                )}
+                : goLivePending
+                  ? <><FiLoader aria-hidden="true" className="text-base animate-spin" /> Starting…</>
+                  : (
+                    <>
+                      {/* Go Live is the one action the whole deck exists for, so its glyph
+                          transmits while the broadcast is still idle. */}
+                      <FiRadio
+                        aria-hidden="true"
+                        className={cx("text-base", !ended && "animate-pulse motion-reduce:animate-none")}
+                      />
+                      {ended ? "Ended" : "Go Live"}
+                    </>
+                  )}
             </button>
           )}
 
@@ -341,6 +350,22 @@ export default function ControlBar({
           />
         </div>
       </div>
+
+      {/* Hidden while a fresh attempt is in flight — the pending state above already covers
+          "trying again", and re-showing the previous rejection mid-retry reads as if the new
+          attempt already failed. */}
+      {!goLivePending && !live && goLiveError && (
+        // goLiveError.message is the server's own readiness-gate string (already reads
+        // "Cannot go live — <reason>; <reason>...", see services/broadcast.py::_golive_gate)
+        // — shown verbatim, never replaced with a generic message, so the host sees the
+        // actual blocking_reasons rather than a guess.
+        <p
+          role="alert"
+          className="border-t border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-medium text-rose-700 sm:px-4 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
+        >
+          {goLiveError.message}
+        </p>
+      )}
 
       {media?.error && (
         <p

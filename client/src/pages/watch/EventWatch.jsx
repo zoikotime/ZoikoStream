@@ -22,6 +22,8 @@ import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
 import EventInfo from "../../components/watch/EventInfo";
 import ReactionBar from "../../components/watch/ReactionBar";
+import FloatingReactions from "../../components/watch/FloatingReactions";
+import { REACTIONS } from "../../data/reactions";
 import RegistrationGate from "../../components/watch/RegistrationGate";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import FeedbackModal from "../../components/common/FeedbackModal";
@@ -50,7 +52,8 @@ function watchToMockEvent(watch) {
     host: watch.host_name || watch.organization_name || "Host",
     moderators: [],
     speakers: [],
-    category: null,
+    category: watch.category || null,
+    endISO: watch.end_time || null, // raw, for the countdown card and the .ics DTEND
     visibility: watch.visibility,
     registration: "Open",
     registered: null,
@@ -76,6 +79,9 @@ const LIVE_EMPTY = {
   // keyed like ReactionBar's REACTIONS list. Empty until the snapshot/first update
   // arrives — ReactionBar defaults any missing key to 0 rather than a fake baseline.
   reactions: {},
+  // Read-only for a viewer — the value the host set via the moderation console, surfaced
+  // so the chat panel can show a status pill. Never sent by this socket, only received.
+  slowModeSeconds: null,
   // This connection's own identity (server/app/services/moderation.py snapshot's "you") —
   // how this viewer recognizes ITS OWN row in `participants` (am I on stage right now?)
   // and matches a broadcast session.removed envelope against itself rather than reacting
@@ -105,6 +111,7 @@ function liveReducer(state, env) {
         // 0/0/0/0/0 waiting for the next tap — same guarantee the rest of the snapshot
         // gives messages/questions/polls.
         reactions: data.reactions || {},
+        slowModeSeconds: data.slow_mode_seconds || null,
         you: data.you || null,
       };
 
@@ -240,6 +247,13 @@ export default function EventWatch() {
   const [alerts, setAlerts] = useState({ chat: false, qa: false, polls: false });
   const markAlert = useCallback((tabKey) => setAlerts((a) => ({ ...a, [tabKey]: true })), []);
   const clearAlert = useCallback((tabKey) => setAlerts((a) => (a[tabKey] ? { ...a, [tabKey]: false } : a)), []);
+  // Floating reaction bursts over the video (components/watch/FloatingReactions.jsx) —
+  // ephemeral visual events, not "state" the reducer needs to carry, so they live in
+  // their own array rather than inside `panel`. Spawned from real count deltas in
+  // onLiveEnvelope below (every viewer's tap, not just this one's), removed by the
+  // FloatingReactions component itself once their rise-and-fade animation finishes.
+  const [bursts, setBursts] = useState([]);
+  const removeBurst = useCallback((id) => setBursts((bs) => bs.filter((b) => b.id !== id)), []);
   // Real viewers only — staff and waiting-room entries never count as "watching".
   const viewers = Object.values(panel.participants || {}).filter(
     (participant) =>
@@ -315,8 +329,37 @@ export default function EventWatch() {
       if (nowOnStage && !wasOnStage) notify.success("The host invited you on stage — your mic is now live.");
       else if (!nowOnStage && wasOnStage) notify.info("You're no longer on stage.");
     }
+    // Turns the reaction bar's numbers into something that reads as alive: every viewer
+    // who tapped since the LAST update shows up here as a rising emoji, for every viewer
+    // watching — not just a local "I just tapped" flourish (ReactionBar's own pulse
+    // already covers that). Comparing against `panel.reactions` (still the PRE-update
+    // value here, since dispatchPanel hasn't run yet this tick) turns the server's
+    // always-authoritative totals into a delta without a second counter anywhere.
+    // Skipped on the initial moderator/snapshot (different channel/type) so a page
+    // load/reconnect never replays every pre-existing tap as a fresh burst.
+    if (env.channel === "reactions" && env.type === "reaction.update" && env.data?.reactions) {
+      const spawned = [];
+      for (const [key, count] of Object.entries(env.data.reactions)) {
+        const prev = panel.reactions?.[key] || 0;
+        const delta = count - prev;
+        if (delta <= 0) continue;
+        const emoji = REACTIONS.find((r) => r.key === key)?.emoji;
+        if (!emoji) continue;
+        // Capped per key so one enthusiastic viewer (or a big jump on reconnect) doesn't
+        // flood the video with dozens of identical emoji at once.
+        for (let i = 0; i < Math.min(delta, 4); i++) {
+          spawned.push({
+            id: `${key}-${count}-${i}-${Math.random().toString(36).slice(2, 8)}`,
+            emoji,
+            left: 10 + Math.random() * 70,
+            delayMs: Math.round(Math.random() * 250),
+          });
+        }
+      }
+      if (spawned.length) setBursts((bs) => [...bs, ...spawned].slice(-24));
+    }
     dispatchPanel(env);
-  }, [fetchWatch, markAlert, panel.you, panel.participants]);
+  }, [fetchWatch, markAlert, panel.you, panel.participants, panel.reactions]);
   const {
     status: liveStatus,
     send: sendLive,
@@ -329,6 +372,16 @@ export default function EventWatch() {
   const isOnStage = Boolean(
     panel.you && panel.participants[panel.you.identity]?.on_stage
   );
+  // Same "derive my own state from panel.you + panel.participants" pattern as isOnStage
+  // above. `participant.hand` is an existing viewer-callable action (server/app/services/
+  // moderation.py VIEWER_ACTIONS/_participant_hand) already displayed on the moderator
+  // console's participants panel — this just gives viewers a button that calls it.
+  const handRaised = Boolean(
+    panel.you && panel.participants[panel.you.identity]?.hand
+  );
+  const toggleHand = useCallback(() => {
+    sendLive("participant.hand", { raised: !handRaised });
+  }, [sendLive, handRaised]);
 
   useEffect(() => {
     // fetchWatch only sets state inside its own .then/.catch/.finally (an async
@@ -512,7 +565,9 @@ export default function EventWatch() {
             ) : watch.not_started ? (
               <AccessWindowNotice variant="not_started" startTime={watch.start_time} />
             ) : (
-              <VideoPlayer event={event} viewers={viewers} watch={watch} onStage={isOnStage} />
+              <VideoPlayer event={event} viewers={viewers} watch={watch} onStage={isOnStage}>
+                {watch.reactions_enabled && <FloatingReactions bursts={bursts} onExpire={removeBurst} />}
+              </VideoPlayer>
             )}
             {/* reactions_enabled is False only for a memorial-category event (doc Sec.
                 11.3/19, non-waivable LE-AC-16) — computed server-side in routers/events.py's
@@ -522,6 +577,9 @@ export default function EventWatch() {
                 reactions={panel.reactions}
                 onReact={(key) => sendLive("reaction.add", { key })}
                 disabled={liveStatus !== "open"}
+                handRaised={handRaised}
+                onToggleHand={toggleHand}
+                raiseHandVisible={Boolean(watch.raise_hand_enabled)}
               />
             )}
           </div>
@@ -545,11 +603,12 @@ export default function EventWatch() {
               alerts={alerts}
               onTabView={clearAlert}
               enabledTabs={{ chat: watch.chat_enabled, qa: watch.qa_enabled, polls: watch.polls_enabled }}
+              slowModeSeconds={panel.slowModeSeconds}
             />
           )}
 
           <div className="min-w-0 lg:col-start-1 lg:row-start-2">
-            <EventInfo event={event} />
+            <EventInfo event={event} endISO={event.endISO} viewers={live ? viewers : null} />
           </div>
         </div>
       </main>

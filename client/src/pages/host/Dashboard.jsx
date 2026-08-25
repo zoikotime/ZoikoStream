@@ -29,7 +29,7 @@ import FeatureModal from "../../components/host/FeatureModal";
 import StartMeetingPrompt from "../../components/host/StartMeetingPrompt";
 export default function HostDashboard() {
   const navigate = useNavigate();
-  const { state, resolved, loading, error, status, latency, attempt, send } = useLiveEvent();
+  const { state, resolved, loading, error, status, latency, attempt, send, sendGoLive } = useLiveEvent();
 
   // Local capture state. Deliberately NOT server state: whether this host's camera is on is
   // a property of this machine, not of the broadcast.
@@ -59,6 +59,17 @@ export default function HostDashboard() {
   const canHost = state.canHost;
   const live = state.broadcast?.status === "live";
   const ended = state.broadcast?.status === "ended";
+
+  // Idle -> pending -> (live | goLiveError). Owned by hooks/useLiveEvent's reducer (state.
+  // goLivePending) and driven entirely by dispatched actions — sendGoLive sets it the
+  // moment the click fires, and it's cleared by whichever resolution actually arrives
+  // (broadcast.update, host/broadcast.error, or its own internal timeout). See that hook
+  // for why: this used to be tracked here with a ref + effect, which is exactly the
+  // "adjust state when a prop changes" pattern React normally documents for this — but
+  // this project's stricter hook lint (react-hooks/refs) forbids reading a ref during
+  // render at all, so the resolution logic has to live where the real transitions already
+  // are (the reducer), not be reconstructed from watching this component's own props.
+  const goLivePending = state.goLivePending;
 
   // Ask the server to reserve the room the first time the host opens the preview, so the
   // check happens against real infrastructure rather than just locally.
@@ -138,8 +149,11 @@ export default function HostDashboard() {
   }, []);
 
   const clearCountdown = useCallback(() => {
-    if (canHost && state.broadcast?.status !== "live") send("broadcast.golive", {});
-  }, [canHost, state.broadcast?.status, send]);
+    // Same action as the Go Live button (a shared countdown just fires it automatically at
+    // zero), so it goes through the same sendGoLive — the pending state, dedupe guard, and
+    // readiness-error surfacing all apply here too, not only to the manual click.
+    if (canHost && state.broadcast?.status !== "live") sendGoLive();
+  }, [canHost, state.broadcast?.status, sendGoLive]);
 
   // Producer keyboard shortcuts. Skipped while typing so chat input never fires a control.
   useEffect(() => {
@@ -239,11 +253,15 @@ export default function HostDashboard() {
             onFlipCamera={media.flipCamera}
             onToggleMic={() => setMic((v) => !v)}
             onToggleScreen={toggleScreen}
+            goLivePending={goLivePending}
+            goLiveError={state.goLiveError}
             onGoLive={() => {
               // A host who never clicked "Preview" still needs a live stream to publish —
               // arm it now so useLiveKitPublish has tracks to grab once `live` flips true.
               if (!previewOn) togglePreview();
-              send("broadcast.golive", {});
+              // Double-click / duplicate-send guarding lives in sendGoLive itself (state.
+              // goLivePending), not here.
+              sendGoLive();
             }}
             onPause={() => send("broadcast.pause", {})}
             onResume={() => send("broadcast.resume", {})}
