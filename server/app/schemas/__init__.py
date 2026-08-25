@@ -8,6 +8,8 @@ from their module directly, so they are deliberately not re-exported here.
 """
 
 from .auth import (
+    ChangeRecoveryContactIn,
+    ConfirmRecoveryContactIn,
     ForgotPasswordIn,
     LoginIn,
     RegisterIn,
@@ -22,6 +24,8 @@ from .auth import (
 )
 
 __all__ = [
+    "ChangeRecoveryContactIn",
+    "ConfirmRecoveryContactIn",
     "ForgotPasswordIn",
     "LoginIn",
     "RegisterIn",

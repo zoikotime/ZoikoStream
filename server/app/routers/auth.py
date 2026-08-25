@@ -3,21 +3,27 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..crud import identity as identity_crud
+from ..crud import recovery as recovery_crud
 from ..db import get_db
+from .. import email as email_mod
 from ..email import (
     UnsafeLinkError,
     send_email_verification_email,
     send_reset_otp_email,
     verification_url,
 )
-from ..models import Organization, User
+from ..models import ALLOW, ALLOW_NEW_CONTEXT, BLOCK_SUSPICIOUS, Organization, User
+from ..services import identity_security as idsec
 from ..ratelimit import rate_limit
 from ..schemas import (
+    ChangeRecoveryContactIn,
+    ConfirmRecoveryContactIn,
     ForgotPasswordIn,
     LoginIn,
     RegisterIn,
@@ -103,6 +109,56 @@ def _issue_verification(db: Session, user: User, ip: str | None, background: Bac
     return ttl
 
 
+# --- IDN-003 / IDN-004 / IDN-005 dispatch ------------------------------------------------
+# The auth router does not decide who gets email. It hands the authoritative event to the
+# identity-security layer, which owns the rules, and these three helpers translate a
+# committed event into one queued message. Every one of them is fire-and-forget by design:
+# the security fact is already committed, and a mail outage must never undo it.
+
+def _utc_stamp(moment: datetime) -> str:
+    """Timezone-aware display stamp. Security mail is audit-sensitive, so it shows UTC."""
+    return moment.astimezone(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
+
+
+def _notify_new_sign_in(db: Session, user: User, event, background: BackgroundTasks) -> None:
+    """IDN-003. Only for a sign-in already recorded as a new context."""
+    if not event.is_new_context:
+        return
+    if not idsec.claim_notification(db, event):
+        return                      # already notified for this exact event
+    try:
+        background.add_task(
+            email_mod.send_new_sign_in_email,
+            user.email,
+            signed_in_at=_utc_stamp(event.occurred_at),
+            authentication_method=event.authentication_method,
+            device=idsec.describe_device(event.browser_family, event.platform_family),
+            location=idsec.describe_location(event.approximate_location),
+            session_reference=event.session_reference,
+        )
+    except UnsafeLinkError:
+        log.exception("IDN-003 not sent: APP_URL unsafe for this environment")
+
+
+def _notify_blocked_sign_in(db: Session, user: User, event, background: BackgroundTasks) -> None:
+    """IDN-004. One message per security episode, not per blocked attempt."""
+    if idsec.block_notice_already_sent(db, user):
+        return                      # a burst of identical attempts is one event to a human
+    if not idsec.claim_notification(db, event):
+        return
+    try:
+        background.add_task(
+            email_mod.send_suspicious_sign_in_email,
+            user.email,
+            attempted_at=_utc_stamp(event.occurred_at),
+            device=idsec.describe_device(event.browser_family, event.platform_family),
+            location=idsec.describe_location(event.approximate_location),
+            session_reference=event.session_reference,
+        )
+    except UnsafeLinkError:
+        log.exception("IDN-004 not sent: APP_URL unsafe for this environment")
+
+
 @router.post("/register", response_model=RegistrationPendingOut,
              status_code=status.HTTP_202_ACCEPTED, dependencies=[_REGISTER_LIMIT])
 def register(data: RegisterIn, background: BackgroundTasks, request: Request,
@@ -176,12 +232,37 @@ def register(data: RegisterIn, background: BackgroundTasks, request: Request,
 
 
 @router.post("/login", response_model=TokenOut, dependencies=[_LOGIN_LIMIT])
-def login(data: LoginIn, db: Session = Depends(get_db)):
+def login(data: LoginIn, background: BackgroundTasks, request: Request,
+          db: Session = Depends(get_db)):
     ident = data.identifier.strip().lower()
+    ip, agent = client_ip(request), request.headers.get("user-agent")
     user = db.scalar(
         select(User).where(or_(User.email == ident, func.lower(User.username) == ident))
     )
+
+    # Risk decision BEFORE the password is checked, so a correct password offered during an
+    # active guessing run still does not grant access. An unknown address is always ALLOW:
+    # branching on it would leak whether the account exists.
+    if user is not None and idsec.evaluate_sign_in(db, user) == BLOCK_SUSPICIOUS:
+        event = idsec.record_event(db, user=user, outcome="blocked", ip=ip, user_agent=agent,
+                                   risk_decision=BLOCK_SUSPICIOUS)
+        _notify_blocked_sign_in(db, user, event, background)
+        # Returned, not raised. `background` is attached to the RESPONSE object, and raising
+        # HTTPException makes FastAPI build a fresh response through the exception handler --
+        # which silently discards every queued task, so the IDN-004 notice would never send.
+        # Constructing the response here keeps the task attached while emitting exactly the
+        # same body and status as a wrong password: a caller must not be able to tell a block
+        # from a bad credential, or the block becomes an oracle.
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Invalid credentials"},
+            background=background,
+        )
+
     if user is None or not verify_password(data.password, user.password_hash):
+        # Recorded even for an unknown address (user_id stays NULL) so the failure counter
+        # is durable rather than living only in the per-process rate limiter.
+        idsec.record_event(db, user=user, outcome="failed", ip=ip, user_agent=agent)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is disabled")
@@ -200,6 +281,15 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
         )
 
 
+    # Authoritative sign-in record, committed before any mail is queued.
+    browser, platform = idsec.parse_user_agent(agent)
+    is_new = idsec.is_new_context(db, user, browser, platform)
+    event = idsec.record_event(
+        db, user=user, outcome="success", ip=ip, user_agent=agent,
+        risk_decision=ALLOW_NEW_CONTEXT if is_new else ALLOW, is_new=is_new,
+    )
+    _notify_new_sign_in(db, user, event, background)
+
     # Include organization name in response
     user_out = UserOut.model_validate(user)
     user_out.organization_name = user.organization.name if user.organization else None
@@ -212,9 +302,43 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
 
 # ── IDN-001 email verification ──────────────────────────────────────────────────────────
 
+def _send_account_ready(db: Session, user: User, background: BackgroundTasks) -> None:
+    """Queue IDN-002 if — and only if — the account is genuinely ready.
+
+    Every exit here is silent to the caller by design: verification has already been
+    committed, and nothing about delivering a courtesy notice may undo or fail that
+    (ZST-EC-001: email communicates confirmed state, it never creates it).
+
+    Three gates, in order:
+      1. access actually active — otherwise "your access is active" would be false
+      2. the send slot is claimable — one message per account, ever
+      3. the link base is safe — a bad base releases the claim so a retry stays possible
+    """
+    if not identity_crud.access_is_active(db, user):
+        # Verified identity, restricted account. Correct outcome: verification stands, no
+        # message. Telling a suspended tenant their access is ready is worse than silence.
+        log.info("IDN-002 suppressed for %s: access not active", user.id)
+        return
+
+    if not identity_crud.claim_account_ready(db, user):
+        # Another request already claimed it — a reused link, a double click, a retry.
+        return
+
+    try:
+        url = email_mod.account_ready_url()
+    except UnsafeLinkError:
+        # Never attempted, so the claim must not stand or the message is lost forever.
+        identity_crud.release_account_ready(db, user)
+        log.exception("IDN-002 not sent for %s: APP_URL is unsafe for this environment", user.id)
+        return
+
+    background.add_task(email_mod.send_account_ready_email, user.email, url)
+
+
 @router.post("/verify-email", response_model=VerificationResultOut,
              dependencies=[_VERIFY_EMAIL_LIMIT])
-def verify_email(data: VerifyEmailIn, db: Session = Depends(get_db)):
+def verify_email(data: VerifyEmailIn, background: BackgroundTasks,
+                 db: Session = Depends(get_db)):
     """Redeem an IDN-001 challenge.
 
     Deliberately does NOT return a session. The emailed link is a proof-of-control
@@ -243,7 +367,7 @@ def verify_email(data: VerifyEmailIn, db: Session = Depends(get_db)):
         )
 
     try:
-        identity_crud.consume_email_verification(db, _challenge)
+        user = identity_crud.consume_email_verification(db, _challenge)
     except ValueError:
         # Lost a race with a concurrent redemption of the same link. Single-use held; the
         # other request won. Report it as already used rather than as a server fault.
@@ -252,6 +376,10 @@ def verify_email(data: VerifyEmailIn, db: Session = Depends(get_db)):
             {"code": TOKEN_ALREADY_USED,
              "message": "This verification link has already been used."},
         )
+
+    # IDN-002 "Account ready" — the one legitimate trigger point. Identity is now verified
+    # against authoritative backend state, so the message can truthfully say so.
+    _send_account_ready(db, user, background)
 
     return VerificationResultOut(
         status="verified",
@@ -276,48 +404,186 @@ def resend_verification(data: ResendVerificationIn, background: BackgroundTasks,
     return generic
 
 
+# --- IDN-007 Account recovery lifecycle -------------------------------------------------
+# Replaces the previous reset flow entirely. The old one stored a 4-digit code in cleartext
+# on users.reset_token with no attempt counter; the code is now 6 digits, hashed, purpose-
+# bound, single-use, and backed by a durable AccountRecovery record with a lockout.
+#
+# Recipients follow the canonical contract: the account holder, plus an APPROVED (verified)
+# recovery contact when one exists. An unverified nomination is never copied.
+
+def _recovery_notice(db, user, recovery, background, column, send, **kwargs):
+    """Claim one transition's notification, then queue it to every approved recipient."""
+    if not recovery_crud.claim_notice(db, recovery, column):
+        return                                  # already sent for this transition
+    for address in recovery_crud.recovery_recipients(user):
+        background.add_task(send, address, **kwargs)
+
+
 @router.post("/forgot-password", dependencies=[_OTP_REQUEST_LIMIT])
-def forgot_password(data: ForgotPasswordIn, background: BackgroundTasks, db: Session = Depends(get_db)):
+def forgot_password(data: ForgotPasswordIn, background: BackgroundTasks,
+                    db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == data.email.lower()))
-    # Always return 200 so the endpoint can't be used to probe which emails exist.
-    resp = {"message": "If that email exists, a 4-digit code has been sent."}
+    # Unchanged property: always the same answer, so this cannot probe which addresses exist.
+    resp = {"message": "If that email exists, a verification code has been sent."}
     if user is None:
         return resp
 
-    otp = f"{secrets.randbelow(10000):04d}"  # zero-padded 4-digit code
-    user.reset_token = otp
-    user.reset_token_expires = datetime.now(timezone.utc) + timedelta(minutes=OTP_TTL_MINUTES)
-    db.commit()
-    # ponytail: 4-digit OTP = 10k combos; the short TTL is the only brute-force guard.
-    # Add an attempt counter (lock after ~5 tries) before this is a production reset path.
-    background.add_task(send_reset_otp_email, user.email, user.full_name, otp)
+    recovery, code, _is_new = recovery_crud.start_recovery(db, user)
+    started = _utc_stamp(recovery.started_at)
+    expires = _utc_stamp(datetime.now(timezone.utc)
+                         + timedelta(minutes=recovery_crud.RECOVERY_TTL_MINUTES))
+
+    # Two distinct messages, per the canonical variants: "recovery started" is the
+    # notice-of-record, "additional verification" carries the code. The first is claimed
+    # once per recovery, so a resend rotates the code without re-announcing the recovery.
+    _recovery_notice(db, user, recovery, background, "started_notified_at",
+                     email_mod.send_recovery_started_email,
+                     started_at=started, security_reference=str(recovery.id)[:8])
+    for address in recovery_crud.recovery_recipients(user):
+        background.add_task(email_mod.send_recovery_verification_email, address,
+                            code=code, expires_at=expires)
     return resp
 
 
-def _valid_otp_user(db: Session, email: str, otp: str) -> User:
-    """Look up the user by email and check the OTP is correct and unexpired.
-    Same generic error for wrong-email / wrong-otp / expired so nothing leaks."""
+def _load_recovery_user(db: Session, email: str) -> User:
     user = db.scalar(select(User).where(User.email == email.lower()))
-    expires = user.reset_token_expires if user else None
-    if user is None or user.reset_token != otp or expires is None or expires < datetime.now(timezone.utc):
+    if user is None:
+        # Same error as a wrong code: nothing here may reveal whether the address exists.
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
     return user
 
 
+def _check_code(db: Session, user: User, code: str):
+    outcome, recovery = recovery_crud.verify_code(db, user, code)
+    if outcome == recovery_crud.LOCKED:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many incorrect codes. Recovery is locked; request a new code later.",
+        )
+    if outcome != recovery_crud.VALID:
+        # Wrong, expired and unknown all answer identically.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
+    return recovery
+
+
 @router.post("/verify-otp", dependencies=[_OTP_VERIFY_LIMIT])
 def verify_otp(data: VerifyOtpIn, db: Session = Depends(get_db)):
-    _valid_otp_user(db, data.email, data.otp)  # raises 400 if bad — code stays valid for the reset step
+    """Check the code without spending it -- the reset step still needs it."""
+    user = _load_recovery_user(db, data.email)
+    _check_code(db, user, data.otp)
     return {"message": "Code verified."}
 
 
 @router.post("/reset-password", dependencies=[_OTP_VERIFY_LIMIT])
-def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
-    user = _valid_otp_user(db, data.email, data.otp)
+def reset_password(data: ResetPasswordIn, background: BackgroundTasks,
+                   db: Session = Depends(get_db)):
+    user = _load_recovery_user(db, data.email)
+    recovery = _check_code(db, user, data.otp)
+
+    # Spend the code BEFORE committing the credential: single-use must hold even if the
+    # write below fails.
+    if not recovery_crud.consume_code(db, user, data.otp):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
+
     user.password_hash = hash_password(data.password)
-    user.reset_token = None  # single-use: consume the OTP
+    # Retire the legacy columns as recovery now owns this flow.
+    user.reset_token = None
     user.reset_token_expires = None
     db.commit()
+
+    recovery_crud.complete_recovery(db, recovery)
+    changed_at = _utc_stamp(datetime.now(timezone.utc))
+
+    # IDN-005 -- the credential itself changed. Fires only here, after the commit.
+    background.add_task(
+        email_mod.send_credential_changed_email,
+        user.email,
+        credential_type="password",
+        changed_at=changed_at,
+        session_effect=email_mod.SESSION_EFFECT_NOT_REVOKED,
+        security_reference=str(recovery.id)[:8],
+    )
+    # IDN-007 "Completed" -- a different family with a different trigger and a wider
+    # recipient set (it also reaches the approved recovery contact). Both are correct:
+    # one reports the credential change, the other closes the recovery lifecycle.
+    _recovery_notice(db, user, recovery, background, "completed_notified_at",
+                     email_mod.send_recovery_completed_email,
+                     completed_at=changed_at,
+                     credentials_reset="Password",
+                     session_effect=email_mod.SESSION_EFFECT_NOT_REVOKED,
+                     security_reference=str(recovery.id)[:8])
     return {"message": "Password updated. You can now log in."}
+
+
+@router.post("/recovery/cancel")
+def cancel_recovery(background: BackgroundTasks, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """Cancel a recovery in flight.
+
+    Authenticated on purpose: being able to sign in is itself proof the account is not lost,
+    which is exactly who should be able to call off a recovery. An unauthenticated cancel
+    would let an attacker suppress the victim's recovery attempt.
+    """
+    recovery = recovery_crud.active_recovery(db, user)
+    if recovery is None:
+        return {"message": "No recovery request is in progress."}
+    recovery_crud.cancel_recovery(db, recovery, reason="canceled_by_account_holder")
+    _recovery_notice(db, user, recovery, background, "canceled_notified_at",
+                     email_mod.send_recovery_canceled_email,
+                     canceled_at=_utc_stamp(datetime.now(timezone.utc)),
+                     account_state="Active and secured",
+                     security_reference=str(recovery.id)[:8])
+    return {"message": "Recovery request canceled."}
+
+
+# --- IDN-006 Recovery-method changes ----------------------------------------------------
+# Only the "recovery method changed" variant exists. The MFA variants are not implemented:
+# require_2fa is stored and reported but nothing enforces it, so announcing "MFA enabled"
+# would assert a protection the platform does not provide. See the reported gap.
+
+@router.post("/recovery-contact", dependencies=[_RESEND_VERIFICATION_LIMIT])
+def set_recovery_contact(data: ChangeRecoveryContactIn, background: BackgroundTasks,
+                         db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """Nominate a recovery address. Verification is sent to THAT address, not this one."""
+    new_address = data.recovery_email.lower()
+    if new_address == user.email.lower():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Use an address different from your sign-in email.")
+    raw = recovery_crud.start_recovery_contact_change(db, user, new_address)
+    try:
+        url = email_mod.recovery_contact_url(raw)
+    except UnsafeLinkError:
+        log.exception("Recovery-contact confirmation not sent: APP_URL unsafe")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            "Recovery contact is not configured correctly. Contact support.")
+    expires = _utc_stamp(datetime.now(timezone.utc) + timedelta(minutes=60))
+    background.add_task(email_mod.send_recovery_contact_verification_email,
+                        new_address, confirm_url=url, expires_at=expires)
+    return {"message": "Confirm the new address from the email we just sent to it.",
+            "pending": recovery_crud.mask_destination(new_address)}
+
+
+@router.post("/recovery-contact/confirm", dependencies=[_VERIFY_EMAIL_LIMIT])
+def confirm_recovery_contact(data: ConfirmRecoveryContactIn, background: BackgroundTasks,
+                             db: Session = Depends(get_db)):
+    """Redeem the confirmation and commit the change, then fire IDN-006."""
+    user = recovery_crud.confirm_recovery_contact(db, data.token)
+    if user is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "This confirmation link is not valid or has expired.")
+    # IDN-006 goes to the ACCOUNT HOLDER, not the new address: the holder is the party who
+    # needs to know their recovery destination moved. Destination is masked.
+    background.add_task(
+        email_mod.send_security_setting_changed_email,
+        user.email,
+        change_description=email_mod.IDN_006_RECOVERY_METHOD_CHANGED,
+        changed_at=_utc_stamp(user.recovery_email_verified_at),
+        masked_destination=recovery_crud.mask_destination(user.recovery_email),
+    )
+    return {"message": "Recovery address confirmed.",
+            "recovery_email": recovery_crud.mask_destination(user.recovery_email)}
 
 
 @router.get("/me", response_model=UserOut)

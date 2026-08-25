@@ -27,9 +27,13 @@ from app.db import Base
 
 # Purpose-bound: a challenge is only ever valid for the job it was issued for. IDN-001 is
 # the only purpose in scope; IDN-003..IDN-008 are explicitly out of scope for this change.
-CHALLENGE_PURPOSES = ("email_verification",)
-
 EMAIL_VERIFICATION = "email_verification"
+# IDN-007: the recovery code. Replaces the plaintext 4-digit `users.reset_token`.
+ACCOUNT_RECOVERY = "account_recovery"
+# IDN-006: proves control of a nominated recovery address before it is honoured.
+RECOVERY_CONTACT = "recovery_contact"
+
+CHALLENGE_PURPOSES = (EMAIL_VERIFICATION, ACCOUNT_RECOVERY, RECOVERY_CONTACT)
 
 
 class IdentityChallenge(Base):
@@ -62,6 +66,10 @@ class IdentityChallenge(Base):
     # requested_ip is the issuing caller's address (never the redeemer's, which would make
     # the row a movement log). Both exist for abuse investigation, not for authorization.
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Set once a challenge has absorbed too many wrong answers. Distinct from expiry: an
+    # expired challenge simply aged out, a locked one was attacked.
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     requested_ip: Mapped[str | None] = mapped_column(String(64))
 

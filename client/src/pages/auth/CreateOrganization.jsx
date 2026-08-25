@@ -6,6 +6,7 @@ import api, { errMsg } from "../../api";
 import { FiLock, FiMail } from "react-icons/fi";
 import { Field, PasswordField, SubmitButton, CheckField } from "../../ui/forms";
 import AuthTabs from "./AuthTabs";
+import VerificationSentModal from "./VerificationSentModal";
 
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
@@ -77,38 +78,16 @@ export default function CreateOrganization() {
     }
   };
 
-  if (pending) {
-    return (
-      <Card padding="xl">
-        <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
-          Check your email
-        </h1>
-        <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-          We sent a verification link to{" "}
-          <span className="font-semibold text-slate-700 dark:text-slate-200">{pending.email}</span>.
-        </p>
-        <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
-          The link expires in {pending.expires_in_minutes} minutes. Open it on this device to
-          finish setting up your organization. You will not be able to sign in until your
-          address is verified.
-        </p>
-
-        <div className="mt-8 space-y-4">
-          <SubmitButton loading={resending} onClick={resend}>
-            Resend verification email
-          </SubmitButton>
-          <p className="text-center text-sm text-slate-500 dark:text-slate-400">
-            Already verified?{" "}
-            <Link to="/login" className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400">
-              Sign In
-            </Link>
-          </p>
-        </div>
-      </Card>
-    );
-  }
-
   return (
+    <>
+      {pending && (
+        <VerificationSentModal
+          maskedEmail={pending.email}
+          expiresInMinutes={pending.expires_in_minutes}
+          onResend={resend}
+          resending={resending}
+        />
+      )}
     <Card
       padding="xl"
       className="zk-fade-in rounded-[20px] shadow-xl shadow-slate-900/5 transition-shadow duration-300 hover:shadow-2xl hover:shadow-violet-900/10 dark:shadow-black/30"
@@ -193,5 +172,6 @@ export default function CreateOrganization() {
         </p>
       </form>
     </Card>
+    </>
   );
 }

@@ -18,6 +18,7 @@ from ..crud import event as event_crud
 from ..crud import organization as crud
 from ..db import get_db
 from ..email import send_invitation_email
+from ..services import account_lifecycle as lifecycle
 from ..models import Event, LiveIngressEndpoint, Organization, User, WEBHOOK_EVENTS
 from ..schemas.admin import (
     AdminUserOut,
@@ -677,7 +678,7 @@ def get_org_user(user_id: uuid.UUID, admin: User = Depends(require_org_admin), d
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserOut)
-def update_org_user(user_id: uuid.UUID, data: UserUpdate,
+def update_org_user(user_id: uuid.UUID, data: UserUpdate, background: BackgroundTasks,
                     admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
     u = crud.get_org_user(db, admin.org_id, user_id)
     if u is None:
@@ -689,12 +690,21 @@ def update_org_user(user_id: uuid.UUID, data: UserUpdate,
     # Self-lockout guard: an admin can't demote or deactivate their own account.
     if u.id == admin.id and (data.is_active is False or (data.role and data.role != admin.role)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot demote or deactivate yourself")
+    was_active = u.is_active
     crud.update_org_user(db, u, data)
+    # IDN-008 only on a real active-state flip, after commit.
+    if data.is_active is not None and data.is_active != was_active:
+        lifecycle.announce(
+            db, background, user=u, email=u.email, org_id=u.org_id,
+            state=lifecycle.STATE_RESTRICTED if not u.is_active else lifecycle.STATE_REACTIVATED,
+            reason_category="organization_administrative_action",
+        )
     return _user_out(u, admin.organization.name if admin.organization else None)
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_org_user(user_id: uuid.UUID, admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
+def delete_org_user(user_id: uuid.UUID, background: BackgroundTasks,
+                    admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
     u = crud.get_org_user(db, admin.org_id, user_id)
     if u is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
@@ -703,6 +713,12 @@ def delete_org_user(user_id: uuid.UUID, admin: User = Depends(require_org_admin)
     if u.role == "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot delete a super admin")
     crud.soft_delete_user(db, u)  # retained in DB, hidden from listings, sessions killed
+    # IDN-008 "Deletion completed". Truthful for a soft delete: active access really is
+    # removed, and the record really is retained — which is exactly what the residual-records
+    # wording says, rather than claiming erasure.
+    lifecycle.announce(db, background, user=u, email=u.email, org_id=u.org_id,
+                       state=lifecycle.STATE_DELETION_COMPLETED,
+                       reason_category="organization_administrative_action")
 
 
 # ── Invitations (admin management) ───────────────────────────────────────────────

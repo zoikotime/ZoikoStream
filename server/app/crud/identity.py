@@ -17,11 +17,11 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import EMAIL_VERIFICATION, IdentityChallenge, User
+from ..models import EMAIL_VERIFICATION, IdentityChallenge, Organization, User
 
 # Same construction as crud/organization.py::_hash_token — a 256-bit random token needs a
 # fast digest, not a password KDF. Kept local rather than imported so the two token families
@@ -159,6 +159,72 @@ def consume_email_verification(db: Session, challenge: IdentityChallenge) -> Use
     db.commit()
     db.refresh(user)
     return user
+
+
+# ── IDN-002 "Account ready" gating ──────────────────────────────────────────────────────
+
+def access_is_active(db: Session, user: User) -> bool:
+    """True only when the account really can be used right now.
+
+    IDN-002 states "your Zoiko Steam access is active". Sending that to a deactivated,
+    soft-deleted or suspended-organization account would be a false statement, so this is
+    checked before the message is queued rather than after.
+
+    Only conditions the platform ACTUALLY enforces are consulted:
+      * user.is_active   — flipped by admin deactivation
+      * user.deleted_at  — soft delete
+      * organization.status — "suspended" blocks the tenant
+
+    Deliberately NOT consulted: organizations.security.require_2fa and .enforce_sso. Those
+    flags are stored and reported (services/org.py) but nothing enforces them — there is no
+    MFA, policy-acceptance or step-up subsystem in this codebase. Gating on an unenforced
+    flag would invent a restriction that does not exist, exactly as claiming unrestricted
+    access would invent a permission that does not exist.
+    """
+    if not user.is_active or user.deleted_at is not None:
+        return False
+    org = db.get(Organization, user.org_id)
+    if org is None or org.status == "suspended":
+        return False
+    return True
+
+
+def claim_account_ready(db: Session, user: User) -> bool:
+    """Atomically claim the right to send this user their one IDN-002 message.
+
+    Returns True for exactly one caller, ever. Implemented as a conditional UPDATE rather
+    than read-then-write so two concurrent verifications cannot both observe NULL and both
+    decide to send: the database arbitrates, and the loser sees rowcount 0.
+
+    The claim is taken BEFORE the message is handed to the provider. That ordering makes a
+    duplicate impossible and a lost message possible — the right trade for a Class C
+    transactional notice, and the reason a real transactional outbox is still needed.
+    """
+    now = _now()
+    updated = db.execute(
+        update(User)
+        .where(User.id == user.id, User.account_ready_sent_at.is_(None))
+        .values(account_ready_sent_at=now)
+    ).rowcount
+    db.commit()
+    if updated:
+        db.refresh(user)
+        return True
+    return False
+
+
+def release_account_ready(db: Session, user: User) -> None:
+    """Undo an unused claim so a later verification can retry.
+
+    Called only when the send was never attempted (for example an unsafe link base), never
+    when the provider merely returned an error — clearing the claim after a real attempt
+    would reopen the duplicate window this whole mechanism exists to close.
+    """
+    db.execute(
+        update(User).where(User.id == user.id).values(account_ready_sent_at=None)
+    )
+    db.commit()
+    db.refresh(user)
 
 
 def mark_verified(db: Session, user: User, when: datetime | None = None) -> User:

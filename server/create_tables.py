@@ -64,6 +64,16 @@ _USER_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE",
     "ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ",
     "ALTER COLUMN email_verified SET DEFAULT FALSE",
+    # IDN-002 duplicate-prevention marker. Left NULL on every existing row and deliberately
+    # NOT backfilled: a timestamp here would assert a message was sent that never was.
+    # Adding a NULL column cannot itself trigger mail — IDN-002 fires only from a consumed
+    # verification challenge, and pre-existing accounts have none.
+    "ADD COLUMN IF NOT EXISTS account_ready_sent_at TIMESTAMPTZ",
+    # Recovery contact (IDN-006/IDN-007). All NULL on existing rows: nobody has
+    # nominated one, and inventing a recovery destination would be a security defect.
+    "ADD COLUMN IF NOT EXISTS recovery_email VARCHAR(255)",
+    "ADD COLUMN IF NOT EXISTS recovery_email_verified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS recovery_email_pending VARCHAR(255)",
 ]
 
 # Backfill the timestamp for the grandfathered rows above so `email_verified` is never
@@ -282,6 +292,12 @@ _PHASE2_STATEMENTS = [
 ]
 
 
+_IDENTITY_CHALLENGE_COLUMNS = [
+    # IDN-007 lockout. The table predates it, so create_all() alone will not add it.
+    "ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ",
+]
+
+
 def ensure_schema():
     """Create any missing tables and add any missing columns. Idempotent — safe to re-run."""
     print("Creating tables...")
@@ -294,6 +310,8 @@ def ensure_schema():
             conn.execute(text(stmt))
         for clause in _USER_COLUMNS:
             conn.execute(text(f"ALTER TABLE users {clause}"))
+        for clause in _IDENTITY_CHALLENGE_COLUMNS:
+            conn.execute(text(f"ALTER TABLE identity_challenges {clause}"))
         for stmt in _USER_BACKFILL:
             conn.execute(text(stmt))
         for clause in _EVENT_COLUMNS:

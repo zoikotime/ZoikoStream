@@ -23,12 +23,12 @@ class ForgotPasswordIn(BaseModel):
 
 class VerifyOtpIn(BaseModel):
     email: EmailStr
-    otp: str = Field(pattern=r"^\d{4}$")
+    otp: str = Field(pattern=r"^\d{6}$")
 
 
 class ResetPasswordIn(BaseModel):
     email: EmailStr
-    otp: str = Field(pattern=r"^\d{4}$")
+    otp: str = Field(pattern=r"^\d{6}$")
     password: str = Field(min_length=8, max_length=72)
 
 
@@ -57,6 +57,15 @@ class RegistrationPendingOut(BaseModel):
 class VerificationResultOut(BaseModel):
     status: str                     # "verified"
     message: str
+
+
+class ChangeRecoveryContactIn(BaseModel):
+    """Nominate a recovery address. Not honoured until the address proves control."""
+    recovery_email: EmailStr
+
+
+class ConfirmRecoveryContactIn(BaseModel):
+    token: str = Field(min_length=16, max_length=512)
 
 
 class UserOut(BaseModel):

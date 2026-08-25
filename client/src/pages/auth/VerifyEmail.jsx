@@ -16,8 +16,8 @@ const STATES = {
     body: "One moment while we confirm your address.",
   },
   success: {
-    title: "Email verified",
-    body: "Email verified successfully. You can now continue to Zoiko Steam.",
+    title: "Email verified successfully",
+    body: "Your Zoiko Stream account is verified. You can now sign in with your email and password.",
   },
   expired: {
     title: "This link has expired",
@@ -102,8 +102,8 @@ export default function VerifyEmail() {
 
       {state === "success" && (
         <div className="mt-8 space-y-4">
-          <SubmitButton onClick={() => navigate("/login", { replace: true })}>
-            Continue to sign in
+          <SubmitButton type="button" onClick={() => navigate("/login", { replace: true })}>
+            Continue to Sign In
           </SubmitButton>
         </div>
       )}

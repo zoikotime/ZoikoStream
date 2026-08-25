@@ -240,6 +240,13 @@ def delete_user(db, user: User) -> None:
     # `memberships` predates the current org_id-on-User model and isn't SQLAlchemy-mapped,
     # but it still FK-references users — clean it up raw or the delete 500s.
     db.execute(text("DELETE FROM memberships WHERE user_id = :uid"), {"uid": user.id})
+    # Identity tables added for IDN-001/IDN-003/IDN-007 also FK-reference users, and this
+    # is a HARD delete (unlike the org-level soft delete), so every one of them would block
+    # it. Removing them is correct: a spent verification challenge or a sign-in history row
+    # has no meaning once the identity is gone. The lasting record of the deletion lives in
+    # audit_logs and account_state_events, neither of which is FK-bound to the user.
+    for table in ("identity_challenges", "sign_in_events", "account_recoveries"):
+        db.execute(text(f"DELETE FROM {table} WHERE user_id = :uid"), {"uid": user.id})
     db.delete(user)
     db.commit()
 
