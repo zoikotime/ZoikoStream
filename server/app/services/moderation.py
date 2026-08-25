@@ -479,6 +479,10 @@ async def snapshot(ctx: Ctx) -> dict:
     snap = await tx(lambda db: _snapshot(db, ctx))
     snap["participants"] = await bus.presence_all(ctx.event_id)
     snap["reactions"] = _reaction_snapshot(await bus.reaction_all(ctx.event_id))
+    settings = await bus.state_get(ctx.event_id)
+    # Read-only for a viewer — slow mode is a host moderation setting, not something the
+    # viewer's own socket can flip, so only the current value is exposed here.
+    snap["slow_mode_seconds"] = int(settings.get("slow_mode_seconds") or 0) or None
     for extra in SNAPSHOT_EXTRAS:
         snap.update(await extra(ctx))
     return snap

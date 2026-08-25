@@ -45,6 +45,15 @@ const EMPTY = {
   publishToken: null,
   livekitUrl: null,
   recovering: false,
+  // The most recent reason the server refused a broadcast lifecycle action (go-live's
+  // commercial/capacity/contributor readiness gate — see services/broadcast.py::_golive_gate).
+  // Null once a broadcast.update lands, so a later successful transition clears a stale
+  // rejection instead of leaving it displayed forever.
+  goLiveError: null,
+  // Idle -> pending -> (live, via broadcast.update | rejected, via goLiveError). Set by
+  // sendGoLive (below) the moment the click fires, cleared by whichever resolution actually
+  // arrives — driven entirely by dispatched actions, never by an effect watching this state.
+  goLivePending: false,
 };
 
 const TYPING_TTL = 4000;
@@ -86,6 +95,36 @@ function reducer(state, env) {
         publishToken: data.publish_token || null,
         livekitUrl: data.livekit_url || null,
       };
+    // A broadcast lifecycle action the server refused outright — e.g. go-live's readiness
+    // gate (services/broadcast.py::_golive_gate / commercial_readiness_blocked). Published
+    // as its own channel/type (not the generic "moderator/error" a rejected chat/mod action
+    // gets) because it carries a stable `code` alongside the human-readable `error` string,
+    // for a caller that wants to branch on the reason rather than just display it.
+    //
+    // THE BUG THIS FIXES: this envelope reached the client already (the server has sent it
+    // since the readiness gate was added), but nothing here or in the reducer matched
+    // "host"/"broadcast.error", so it fell through to `default: return state` — a blocked
+    // Go Live produced no toast, no state change, and no visible error at all. The console
+    // just sat on "preview" with no explanation.
+    case "host/broadcast.error":
+      return { ...state, goLiveError: { message: data.error, code: data.code || null }, goLivePending: false };
+
+    // Local, client-only actions — never sent over the wire (see sendGoLive below). Kept in
+    // the same reducer/switch as everything else rather than a second little state machine,
+    // since "pending" is just another field of the same live-event state.
+    case "local/golive.start":
+      // Idempotent: a second dispatch while already pending is a no-op, not a second
+      // "attempt" — this is what stops a double-click from being treated as two requests.
+      return state.goLivePending ? state : { ...state, goLivePending: true, goLiveError: null };
+    case "local/golive.timeout":
+      // Neither a broadcast.update nor a host/broadcast.error ever arrived (a dropped frame,
+      // a server that never got the message) — don't leave the control stuck disabled
+      // forever. Only fires if still pending; a real resolution that landed first wins.
+      return state.goLivePending
+        ? { ...state, goLivePending: false, goLiveError: state.goLiveError || {
+            message: "Didn't hear back from the server — try Go Live again.", code: "timeout" } }
+        : state;
+
     case "moderator/recording.status":
       return { ...state, event: { ...state.event, recording: data.recording } };
     case "moderator/room.status":
@@ -159,6 +198,14 @@ function reducer(state, env) {
         ...state,
         broadcast: { ...state.broadcast, ...data },
         recovering: false,
+        // Any real lifecycle transition supersedes a previous rejection (see
+        // "host/broadcast.error" above) — a stale "cannot go live" must not keep showing
+        // once the broadcast has actually moved. Also resolves a pending Go Live click,
+        // whatever status it landed on (a pause/resume broadcast.update while some other
+        // pending state was somehow still set clears it too — that's fine, it just means
+        // the broadcast moved by other means).
+        goLiveError: null,
+        goLivePending: false,
         // Keep the event badge in step with the broadcast. A PAUSE leaves the event live
         // (it's still running, just held), but an END must stop showing LIVE.
         event: {
@@ -236,6 +283,12 @@ export default function useLiveEvent() {
     if (env.type === "action.result" && env.data.enforced === false) {
       notify.info("Recorded — LiveKit isn't connected, so it wasn't enforced on the stream.");
     }
+    // A broadcast lifecycle action the server refused (go-live's readiness gate is the only
+    // producer of this today). The reducer also stores it on `goLiveError` so a console can
+    // show it inline next to the control that failed, not just as a toast that scrolls away.
+    if (env.channel === "host" && env.type === "broadcast.error") {
+      notify.error(env.data?.error || "This event cannot go live yet.");
+    }
     // Live sound + toast alert for EVERY viewer-initiated action — chat, Q&A, and poll
     // votes — so the host/moderator console doesn't have to keep every tab open to notice
     // audience activity. `actor_role` (server/app/services/moderation.py _actor_role) is
@@ -265,6 +318,32 @@ export default function useLiveEvent() {
 
   const stream = useEventStream(resolved?.id, onEnvelope);
 
+  // The one call sites should use to go live, instead of `send("broadcast.golive", {})`
+  // directly — it owns the pending/dedupe bookkeeping (state.goLivePending) so a caller
+  // (e.g. the Go Live button) never needs its own effect or ref to track "is this in
+  // flight". Guards against a double-click firing a second `broadcast.golive` over the
+  // wire, and — if the socket isn't even open right now — synthesizes the same
+  // "host"/"broadcast.error" envelope a server-side rejection would produce, through the
+  // same onEnvelope path (so it gets the same toast and the same stored goLiveError),
+  // rather than a second, parallel notion of "why did this fail".
+  const sendGoLive = useCallback(() => {
+    if (state.goLivePending) return;
+    dispatch({ channel: "local", type: "golive.start" });
+    const sent = stream.send("broadcast.golive", {});
+    if (!sent) {
+      onEnvelope({
+        channel: "host", type: "broadcast.error",
+        data: { error: "Not connected to the server right now — reconnecting. Try again once the connection is back.",
+                code: "socket_not_open" },
+      });
+      return;
+    }
+    // Not a React effect — a plain timer armed by this event handler, cleaned up by the
+    // reducer itself (the "local/golive.timeout" case is a no-op once already resolved), so
+    // there's nothing to cancel on unmount.
+    setTimeout(() => dispatch({ channel: "local", type: "golive.timeout" }), 12000);
+  }, [state.goLivePending, stream, onEnvelope]);
+
   // Warm up the notification chime's AudioContext on this console's first click/keypress,
   // rather than waiting for one to happen to land inside playQuestionAlert's own call —
   // see utils/sound.js for why that race silently ate the sound before.
@@ -276,5 +355,5 @@ export default function useLiveEvent() {
   useInterval(() => dispatch({ channel: "local", type: "typing.prune" }),
     1000, Object.keys(state.typing).length > 0);
 
-  return { state, resolved, loading, error, ...stream };
+  return { state, resolved, loading, error, ...stream, sendGoLive };
 }

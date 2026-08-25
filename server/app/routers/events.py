@@ -286,6 +286,8 @@ def watch_event(
         organization_name=org_name, host_name=hosts[0].full_name if hosts else org_name,
         chat_enabled=ev.chat_enabled, qa_enabled=ev.qa_enabled, polls_enabled=ev.polls_enabled,
         reactions_enabled=not crud.is_memorial_category(ev.category),
+        raise_hand_enabled=False if crud.is_memorial_category(ev.category) else ev.raise_hand_enabled,
+        category=ev.category, end_time=ev.end_time,
         registration_required=ev.registration_required, registered=registered or not ev.registration_required,
         not_started=not_started, expired=expired,
         livekit_url=url, livekit_token=token, room=room if token else None,

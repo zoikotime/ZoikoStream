@@ -534,8 +534,8 @@ async def _preview(ctx, payload):
     return [("broadcast", "broadcast.preview", {
         "status": "preview", "enforced": enforced,
         "settings": state.get("settings", DEFAULT_SETTINGS),
-        # A publisher token is issued here so wiring a real publisher is a drop-in; nothing
-        # in this app publishes yet (no livekit-client on the frontend).
+        # Consumed by hooks/useLiveKitPublish.js: the host studio connects and publishes the
+        # already-acquired camera/mic tracks with this token once the broadcast goes live.
         "publish_token": livekit.create_stream_token(ctx.identity, ctx.room, True)
         if livekit.configured() else None,
         "livekit_url": livekit.settings.LIVEKIT_URL or None,
@@ -987,8 +987,10 @@ async def snapshot_extra(ctx) -> dict:
         "countdown_until": state.get("countdown_until"),
         "health": health_of(split, session["status"], recording["enforced"] if recording else None),
         "livekit_url": livekit.settings.LIVEKIT_URL or None,
-        # Present only for hosts, and only when LiveKit is configured. Nothing publishes
-        # yet (the frontend has no livekit-client) — this is here so that wiring is a drop-in.
+        # Present only for hosts, and only when LiveKit is configured. This is the token
+        # hooks/useLiveKitPublish.js connects and publishes with once `live` is true — see
+        # that hook and _preview's own publish_token above for the same token on the
+        # pre-go-live path.
         "publish_token": livekit.create_stream_token(ctx.identity, ctx.room, True)
         if (ctx.can_host and livekit.configured()) else None,
     }

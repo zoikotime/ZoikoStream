@@ -17,6 +17,7 @@ export default function StatsCard({
   delta,
   up = true,
   live = false,
+  liveLabel = "Live now",
   className = "",
 }) {
   const isNumber = typeof value === "number";
@@ -40,7 +41,7 @@ export default function StatsCard({
         <div className="mt-3 flex items-center gap-1 text-xs font-medium">
           {live ? (
             <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" /> Live now
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" /> {liveLabel}
             </span>
           ) : (
             <span className={cx("inline-flex items-center gap-0.5", up ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>

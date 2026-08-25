@@ -113,6 +113,38 @@ def test_no_schedule_set_is_never_time_gated():
         _cleanup(db, org, user, ev)
 
 
+def test_watch_out_exposes_category_end_time_and_raise_hand():
+    db = SessionLocal()
+    client = TestClient(m.app)
+    org = _org(db)
+    user = _user(db, org)
+    ev = _event(db, org, user, start_time=NOW - timedelta(hours=1), end_time=NOW + timedelta(hours=1),
+                category="Technology", raise_hand_enabled=True)
+    db.commit()
+    try:
+        body = client.get(f"/api/events/{ev.id}/watch").json()
+        assert body["category"] == "Technology", body
+        assert body["end_time"] is not None, body
+        assert body["raise_hand_enabled"] is True, body
+    finally:
+        _cleanup(db, org, user, ev)
+
+
+def test_watch_out_raise_hand_forced_off_for_memorial_category():
+    db = SessionLocal()
+    client = TestClient(m.app)
+    org = _org(db)
+    user = _user(db, org)
+    ev = _event(db, org, user, category="Funeral / Memorial", raise_hand_enabled=True)
+    db.commit()
+    try:
+        body = client.get(f"/api/events/{ev.id}/watch").json()
+        assert body["raise_hand_enabled"] is False, body
+        assert body["reactions_enabled"] is False, body
+    finally:
+        _cleanup(db, org, user, ev)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

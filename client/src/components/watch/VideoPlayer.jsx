@@ -26,6 +26,7 @@ import {
 import { cx } from "../../ui/tokens";
 import { initials } from "../../data/watch";
 import useLiveKitViewer from "../../hooks/useLiveKitViewer";
+import Logo from "../../ui/Logo";
 
 const STAGE = {
   violet: "from-violet-900 via-slate-900 to-black",
@@ -59,7 +60,7 @@ const fmtTime = (secs) => {
     : `${m}:${String(r).padStart(2, "0")}`;
 };
 
-export default function VideoPlayer({ event, viewers, watch, onStage = false }) {
+export default function VideoPlayer({ event, viewers, watch, onStage = false, children }) {
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
   const canStream = Boolean(watch?.status === "live" && watch?.livekit_token);
@@ -325,6 +326,21 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false }) 
           blank black rectangle. */}
       {showPlaceholder && (
         <div className="absolute inset-0 grid place-items-center px-4 text-center">
+          {/* Decorative brand watermark + wave lines — sits behind the host-avatar
+              placeholder content below, never replaces it. Purely cosmetic, so it's
+              skipped entirely once real video is attached (showPlaceholder is false). */}
+          <div className="pointer-events-none absolute inset-0 overflow-hidden">
+            <div className="absolute inset-x-0 top-[18%] flex flex-col items-center gap-2 opacity-40">
+              <Logo height="h-5" />
+              <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/70">
+                Secure · Scalable · Reliable
+              </p>
+            </div>
+            <svg viewBox="0 0 400 220" preserveAspectRatio="none" className="absolute inset-x-0 bottom-0 h-2/5 w-full" aria-hidden>
+              <path d="M0 150 C70 120 110 170 190 145 C270 120 310 165 400 140 L400 220 L0 220 Z" fill="#8b5cf6" opacity="0.18" />
+              <path d="M0 180 C90 160 150 195 230 175 C310 155 350 190 400 175 L400 220 L0 220 Z" fill="#6d28d9" opacity="0.22" />
+            </svg>
+          </div>
           {isEnded && !playing ? (
             canReplay ? (
               <div className="flex flex-col items-center gap-3">
@@ -627,6 +643,10 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false }) 
           </div>
         </div>
       </div>
+
+      {/* Floating reaction bursts (EventWatch.jsx) sit above every other layer,
+          including the control bar, so a tap never gets hidden behind it. */}
+      {children}
     </div>
   );
 }
