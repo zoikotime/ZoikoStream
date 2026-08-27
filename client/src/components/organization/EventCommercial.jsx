@@ -63,16 +63,79 @@ function useCommercialData(eventId) {
       api.get(`/commercial/events/${eventId}/readiness`).then((r) => r.data),
       api.get(`/commercial/events/${eventId}/incidents`).then((r) => r.data),
     ]);
-    let schedule = [], payments = [], invoices = [];
+    let schedule = [], payments = [], invoices = [], refunds = [], changeOrders = [];
+    // Assigned in both branches below — the order path fetches it with the rest, the
+    // no-order path fetches the event-scoped view.
+    let lifecycle;
     if (order) {
-      [schedule, payments, invoices] = await Promise.all([
+      [schedule, payments, invoices, refunds, lifecycle, changeOrders] = await Promise.all([
         api.get(`/commercial/orders/${order.id}/payment-schedule`).then((r) => r.data),
         api.get(`/commercial/orders/${order.id}/payments`).then((r) => r.data),
         api.get(`/commercial/orders/${order.id}/invoices`).then((r) => r.data),
+        // Read-only for the customer: they can see the refund history on their own order,
+        // but approving or executing one is a Finance action with no customer-side control.
+        api.get(`/commercial/orders/${order.id}/refund-credits`).then((r) => r.data),
+        api.get(`/commercial/orders/${order.id}/lifecycle`).then((r) => r.data),
+        // Accepting a change order is gated on the `accept` authority, which org_admin holds —
+        // so this is the one step in the amendment workflow only the customer can take.
+        api.get(`/commercial/orders/${order.id}/change-orders`).then((r) => r.data),
       ]);
+    } else {
+      lifecycle = await api.get(`/commercial/events/${eventId}/lifecycle`).then((r) => r.data);
     }
-    return { quotes, order, capacity, readiness, incidents, schedule, payments, invoices };
+    return { quotes, order, capacity, readiness, incidents, schedule, payments, invoices, refunds, lifecycle, changeOrders };
   });
+}
+
+// ── Commercial status (doc Section 28) ────────────────────────────────────────────────────
+// The customer-facing view of the derived lifecycle. Deliberately shows the STATE and what is
+// outstanding, with no controls: the state is computed from committed facts server-side and
+// there is no endpoint that could move it directly. Internal finance detail (write-offs,
+// exception approvals, reconciliation) is never surfaced here.
+const LIFECYCLE_TONE = {
+  draft: "neutral", quoted: "info", order_accepted: "info",
+  financial_hold: "warning", capacity_held: "warning",
+  confirmed: "success", ready: "success", live: "success",
+  completed: "success", canceled: "danger",
+};
+
+const LIFECYCLE_BLURB = {
+  draft: "Nothing has been quoted for this event yet.",
+  quoted: "A quote is on the table for your team to accept.",
+  order_accepted: "Your order is accepted. Zoiko is assembling the delivery.",
+  financial_hold: "A required payment is outstanding.",
+  capacity_held: "Production capacity is being committed.",
+  confirmed: "Confirmed — paid and resourced.",
+  ready: "Ready to go live.",
+  live: "This event is live.",
+  completed: "Delivered.",
+  canceled: "This order has been cancelled.",
+};
+
+function CommercialStatus({ lifecycle }) {
+  if (!lifecycle) return null;
+  return (
+    <SectionCard icon={FiActivity} title="Commercial status">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-base font-semibold text-slate-900 dark:text-white">
+            {statusLabel(lifecycle.state)}
+          </p>
+          <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
+            {LIFECYCLE_BLURB[lifecycle.state] || ""}
+          </p>
+        </div>
+        <Badge tone={LIFECYCLE_TONE[lifecycle.state] || "neutral"}>{statusLabel(lifecycle.state)}</Badge>
+      </div>
+      {lifecycle.blocking_reasons?.length > 0 && (
+        <ul className="mt-3 space-y-1 border-t border-slate-100 pt-3 dark:border-slate-800">
+          {lifecycle.blocking_reasons.map((r, i) => (
+            <li key={i} className="text-sm text-amber-700 dark:text-amber-400">• {r}</li>
+          ))}
+        </ul>
+      )}
+    </SectionCard>
+  );
 }
 
 // ── Cancel-order dialog: reason is required, the refund/charge is policy-computed server
@@ -257,7 +320,7 @@ export default function EventCommercial({ event }) {
   }
   if (error) return <ErrorState error={error} onRetry={reload} title="Couldn't load billing details" />;
 
-  const { quotes, order, capacity, readiness, incidents, schedule, payments, invoices } = data;
+  const { quotes, order, capacity, readiness, incidents, schedule, payments, invoices, refunds, lifecycle, changeOrders } = data;
 
   const acceptQuote = (quote) =>
     mutate.run(() => api.post(`/commercial/events/${eventId}/quotes/${quote.id}/accept`), {
@@ -267,6 +330,13 @@ export default function EventCommercial({ event }) {
   const acceptOrder = () =>
     mutate.run(() => api.post(`/commercial/events/${eventId}/orders/${order.id}/accept`, {}), {
       success: "Order accepted",
+    });
+
+  // The one step in the amendment workflow only the customer can take: staff raise a change
+  // order, the customer accepts it, and only then do the lines and the total move.
+  const acceptChangeOrder = (co) =>
+    mutate.run(() => api.post(`/commercial/change-orders/${co.id}/accept`), {
+      success: "Change order accepted — your order total has been updated",
     });
 
   const cancelOrder = async (reason) => {
@@ -325,7 +395,7 @@ export default function EventCommercial({ event }) {
 
       {/* Summary */}
       <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
-        <StatCard label="Order status" value={order ? statusLabel(order.status) : "No order"} />
+        <StatCard label="Commercial state" value={lifecycle ? statusLabel(lifecycle.state) : "—"} />
         <StatCard label="Order total" value={order ? money(order.total_amount, order.currency) : "—"} />
         <StatCard label="Risk tier" value={order ? order.risk_tier.toUpperCase() : "—"} />
         <StatCard
@@ -333,6 +403,8 @@ export default function EventCommercial({ event }) {
           value={readiness.ready ? "Ready" : readiness.blocking_reasons.length ? `${readiness.blocking_reasons.length} blocking` : "Not started"}
         />
       </div>
+
+      <CommercialStatus lifecycle={lifecycle} />
 
       {!order && quotes.length === 0 && (
         <SectionCard title="No commercial order yet" icon={FiPackage}>
@@ -498,6 +570,100 @@ export default function EventCommercial({ event }) {
                     {statusLabel(inv.state)}
                   </Badge>
                 </span>
+              </li>
+            ))}
+          </ul>
+        </SectionCard>
+      )}
+
+      {/* Change orders. Staff propose an amendment; nothing moves until your team accepts it.
+          Deliberately shows the price impact and the resulting total BEFORE the button, because
+          accepting changes what you owe. */}
+      {order && changeOrders.length > 0 && (
+        <SectionCard
+          title="Proposed changes"
+          subtitle="An amendment to your order — nothing changes until you accept"
+          icon={FiFileText}
+          padding="none"
+        >
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {changeOrders.map((co) => {
+              const delta = Number(co.price_delta);
+              const pending = co.status !== "accepted" && co.status !== "rejected";
+              const added = co.applied_lines?.added || co.changes?.add_lines || [];
+              const removed = co.applied_lines?.removed || co.changes?.remove_line_ids || [];
+              return (
+                <li key={co.id} className="px-5 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-medium text-slate-800 dark:text-slate-100">
+                        {co.reason || "Scope change"}
+                      </p>
+                      <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                        {added.length > 0 && `${added.length} item${added.length === 1 ? "" : "s"} added`}
+                        {added.length > 0 && removed.length > 0 && " · "}
+                        {removed.length > 0 && `${removed.length} removed`}
+                      </p>
+                      <p className="mt-1.5 text-sm">
+                        <span className={delta < 0 ? "text-emerald-600" : "text-slate-700 dark:text-slate-200"}>
+                          {delta >= 0 ? "Additional " : "Reduction of "}
+                          <strong>{money(Math.abs(delta), order.currency)}</strong>
+                        </span>
+                        {pending && (
+                          <span className="text-slate-500 dark:text-slate-400">
+                            {" "}— new total{" "}
+                            <strong>{money(Number(order.total_amount) + delta, order.currency)}</strong>
+                          </span>
+                        )}
+                      </p>
+                      {pending && (
+                        <p className="mt-1 text-xs text-slate-400">
+                          Accepting confirms the revised scope and total. Your tax will be
+                          re-determined before the amended amount is invoiced.
+                        </p>
+                      )}
+                    </div>
+                    <span className="flex shrink-0 items-center gap-2">
+                      <Badge tone={co.status === "accepted" ? "success" : co.status === "rejected" ? "danger" : "warning"}>
+                        {statusLabel(co.status)}
+                      </Badge>
+                      {pending && (
+                        <Button size="sm" leftIcon={FiCheckCircle} loading={mutate.busy}
+                                disabled={mutate.busy} onClick={() => acceptChangeOrder(co)}>
+                          Accept change
+                        </Button>
+                      )}
+                    </span>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </SectionCard>
+      )}
+
+      {/* Refunds & credits — read-only. Approval is a Zoiko Finance action, never surfaced
+          here, but the customer must be able to see what was returned or credited to them. */}
+      {order && refunds.length > 0 && (
+        <SectionCard title="Refunds & credits" icon={FiDollarSign} padding="none">
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {refunds.map((rc) => (
+              <li key={rc.id} className="flex items-center justify-between px-5 py-3 text-sm">
+                <div className="min-w-0">
+                  <p className="font-medium text-slate-800 dark:text-slate-100">
+                    {money(rc.amount, order.currency)} · {statusLabel(rc.type)}
+                  </p>
+                  <p className="truncate text-xs text-slate-500 dark:text-slate-400">
+                    {statusLabel(rc.reason_code)}
+                    {rc.created_at ? ` · ${fmtDateTime(rc.created_at)}` : ""}
+                  </p>
+                </div>
+                <Badge
+                  tone={rc.status === "executed" ? "success" : rc.status === "declined" ? "neutral" : "warning"}
+                  size="sm"
+                >
+                  {statusLabel(rc.status)}
+                </Badge>
               </li>
             ))}
           </ul>

@@ -98,6 +98,7 @@ class TestCaptureCommand:
                 ("DELETE FROM payment_schedules WHERE event_order_id=:o", {"o": ids.order_id}),
                 ("DELETE FROM event_order_versions WHERE event_order_id=:o", {"o": ids.order_id}),
                 ("DELETE FROM event_order_lines WHERE event_order_id=:o", {"o": ids.order_id}),
+                ("DELETE FROM commercial_state_transitions WHERE event_order_id=:o", {"o": ids.order_id}),
                 ("DELETE FROM event_orders WHERE id=:o", {"o": ids.order_id}),
                 ("DELETE FROM catalog_lines WHERE id=:l", {"l": ids.line_id}),
                 ("DELETE FROM events WHERE id=:e", {"e": ids.event_id}),

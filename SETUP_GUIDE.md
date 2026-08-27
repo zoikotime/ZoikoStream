@@ -263,3 +263,79 @@ Pricing (published `CatalogVersion`), tax (`EventOrder` tax determination), capa
 (`CapacityPool`), seller identity (`SellerLegalEntity`), invoice totals, and event go-live
 readiness. Each is enforced by tests. A successful Stripe payment is **one input** to
 commercial readiness, never permission to set an event live.
+
+### Disputes / chargebacks
+
+`charge.dispute.*` events are applied, not merely filed. Stripe's own `dispute.status` is
+mapped through `STRIPE_DISPUTE_STATUS_MAP` and handed to `crud.ingest_dispute_event`, which
+owns the `PaymentDispute` case and moves the payment:
+
+| Stripe status | Case status | Payment |
+|---|---|---|
+| `needs_response`, `warning_needs_response` | `evidence_required` | `disputed` |
+| `under_review`, `warning_under_review` | `evidence_submitted` | `disputed` |
+| `won` | `won` | back to `paid` |
+| `lost` | `lost` | `reversed` |
+| `warning_closed` | `withdrawn` | back to `paid` |
+
+The won/lost outcome always comes from the card network — nothing here invents one. A dispute
+for a payment this deployment does not have becomes an **unmatched settlement** rather than
+being guessed onto an order, and a decided case is never reopened by a redelivered event.
+Disputes can only arrive inbound: `StripePaymentProvider.open_dispute` refuses, because Stripe
+exposes no create-dispute API.
+
+---
+
+## Scheduled commercial maintenance
+
+There is **no in-process scheduler** and that is deliberate: on Cloud Run a background thread
+runs once per instance, dies mid-sweep on a scale-down, and cannot be observed. Instead all
+five jobs live behind one endpoint for an external scheduler to drive.
+
+```
+POST /api/commercial/maintenance/run
+```
+
+Requires the Section-25 `reconcile` authority (Finance, or an unscoped super admin). Idempotent
+— a double fire is harmless. Returns per-job results, including any job that failed, rather
+than a 500 that would hide the jobs that succeeded.
+
+| Job | What it does | Needs configuration? |
+|---|---|---|
+| `expire_capacity_holds` | lapsed soft holds → `expired`, inventory returned | no |
+| `release_stale_reservations` | hard reservations whose window passed on an event that never delivered → `released` | no |
+| `expire_replay_entitlements` | published replays past `expires_at` → `expired` (state only, media is never deleted) | no |
+| `report_stale_payments` | payment attempts stuck mid-flight — **reported, never deleted** | yes |
+| `report_unmatched_settlements` | unattributed provider money, aged and alerted | yes |
+
+### Configuring the two windows
+
+The two reporting jobs need a threshold and **will report `skipped` until one is set** — an
+unconfigured window is never assumed, because how long an abandoned checkout may sit before a
+human looks at it is a business decision, not a default (ZST-LE-COM-001 Section 26). Set them
+on the `maintenance_windows` platform setting:
+
+```json
+{ "stale_payment_hours": 24, "unmatched_settlement_hours": 48 }
+```
+
+(Values above are illustrative — pick your own.) Related switch on `streaming_limits`:
+`require_media_plane: true` makes readiness refuse a commercial event when no LiveKit
+credentials are configured. It defaults off so dev and CI, which legitimately run without a
+media plane, do not fail every go-live check.
+
+### Driving it on Cloud Run
+
+Cloud Scheduler with an OIDC token against the service, hourly:
+
+```bash
+gcloud scheduler jobs create http zoikostream-commercial-maintenance \
+  --schedule="0 * * * *" \
+  --uri="https://<your-service-url>/api/commercial/maintenance/run" \
+  --http-method=POST \
+  --oidc-service-account-email=<scheduler-sa>@<project>.iam.gserviceaccount.com
+```
+
+Any cron that can hold a Finance-authorised session works equally well; nothing about the jobs
+assumes Google. Check the response body — `failed` lists any job that errored, and the others
+still ran.

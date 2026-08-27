@@ -60,17 +60,34 @@ _PAYMENT_INTENT_EVENTS = {
 # partial one, so the generic event is chosen from the payload rather than the name.
 _REFUND_EVENTS = frozenset({"charge.refunded"})
 
-# Dispute events are recorded as EVIDENCE ONLY in this phase.
+# Dispute (chargeback) events. Previously evidence-only, which meant a real chargeback left
+# the ledger reading `paid` — the PaymentDispute case workflow existed and nothing reached it.
 #
-# The payment state machine could represent `disputed`/`reversed`, but the PaymentDispute
-# case workflow (evidence packages, reserve amounts, case ownership) is deliberately not wired
-# up yet. Moving a Payment to `disputed` with no corresponding dispute case would leave a
-# half-state that nothing owns, and inventing a won/lost outcome from a webhook is exactly
-# what the standard forbids. So: retain the evidence, flag it for follow-up, mutate nothing.
+# Now translated into dispute FACTS and handed to crud.ingest_dispute_event, which owns the
+# case record and the payment transition. This module still decides nothing: it reports the
+# network's own status and lets the commercial layer map it, because a won/lost outcome is the
+# card network's determination and inventing one is exactly what the standard forbids.
 _DISPUTE_EVENTS = frozenset({
     "charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed",
     "charge.dispute.funds_withdrawn", "charge.dispute.funds_reinstated",
 })
+
+# Stripe's dispute.status -> our DISPUTE_STATES (models.commercial). Stripe's `warning_*`
+# statuses are early-warning notices (an inquiry, not yet a formal chargeback); they are
+# tracked as the same case so the timeline is continuous.
+#
+# `warning_closed` maps to `withdrawn`: the network dropped the inquiry without it becoming a
+# chargeback, which is a withdrawal of the challenge, NOT a win — a win means we contested a
+# real dispute and kept the funds, and conflating the two would overstate our dispute record.
+STRIPE_DISPUTE_STATUS_MAP = {
+    "warning_needs_response": "evidence_required",
+    "warning_under_review": "evidence_submitted",
+    "warning_closed": "withdrawn",
+    "needs_response": "evidence_required",
+    "under_review": "evidence_submitted",
+    "won": "won",
+    "lost": "lost",
+}
 
 # Informational refund lifecycle events. `refund.updated` fires for transitions that are not
 # themselves money movement; the authoritative refund evidence is `charge.refunded`, so these
@@ -122,10 +139,20 @@ class TranslatedEvent:
     # creation. Lets an out-of-order payment_intent.* event find its payment by EXACT unique
     # key instead of a guess. Never a value the payer's browser can influence.
     idempotency_key_hint: str | None = None
+    # ── Dispute (chargeback) facts, when this event is about one ──────────────────────────
+    # Kept as its own payload rather than squeezed into generic_event_type/amount, because a
+    # dispute is not a payment state instruction (doc P4: "a chargeback is not the same as a
+    # refund"). The commercial layer decides what a dispute status means for the payment; this
+    # module only reports what the network said.
+    dispute: dict | None = None
 
     @property
     def is_financial(self) -> bool:
         return self.generic_event_type is not None
+
+    @property
+    def is_dispute(self) -> bool:
+        return self.dispute is not None
 
 
 class StripeSignatureError(Exception):
@@ -274,12 +301,26 @@ def translate(event: dict) -> TranslatedEvent:
             amount=None, currency=None, **common,
         )
 
-    # ── Disputes: evidence only, this phase ──────────────────────────────────────────────
+    # ── Disputes: translated into case facts, applied by the commercial layer ────────────
     if event_type in _DISPUTE_EVENTS:
+        dispute = _dispute_fields(obj)
+        if dispute is None:
+            # A dispute event we cannot identify (no dispute id) cannot be attached to a case.
+            # Retained as evidence rather than guessed onto a payment (doc P5).
+            return TranslatedEvent(
+                generic_event_type=None, provider_payment_ref=_intent_ref(obj),
+                amount=None, currency=None,
+                evidence_reason="dispute_event_without_identifier", follow_up_required=True,
+                **common,
+            )
         return TranslatedEvent(
-            generic_event_type=None, provider_payment_ref=_intent_ref(obj),
-            amount=None, currency=None,
-            evidence_reason="dispute_event_requires_follow_up", follow_up_required=True,
+            # Still None: the payment's resulting state is derived from the DISPUTE status by
+            # crud.ingest_dispute_event, not from the generic event map. A dispute is a case
+            # with an outcome, not a payment instruction (doc P4).
+            generic_event_type=None,
+            provider_payment_ref=dispute["provider_payment_ref"],
+            amount=dispute["amount"], currency=dispute["currency"],
+            dispute=dispute, evidence_reason=f"dispute:{dispute['provider_status']}",
             **common,
         )
 
@@ -324,6 +365,66 @@ def _session_amount_currency(obj: dict) -> tuple[Decimal | None, str | None]:
     `amount`, so it needs its own reader rather than a shared one that would silently return
     None and skip the agreement check."""
     return _amount_currency({"amount": obj.get("amount_total"), "currency": obj.get("currency")})
+
+
+def _dispute_fields(obj: dict) -> dict | None:
+    """Extract the dispute facts from a `charge.dispute.*` event object, or None.
+
+    Returns None when the object carries no dispute id — without one there is no case identity
+    to be idempotent against, so the caller retains it as evidence rather than attaching it to
+    a guessed payment.
+
+    Everything here is REPORTED, not interpreted. `provider_status` is Stripe's own string and
+    `status` is its mapping into our vocabulary; the payment consequence is decided in
+    crud.ingest_dispute_event. `reserve_amount` is what the network is holding back — on a
+    `funds_withdrawn` event that is the full disputed amount, and before withdrawal it is zero,
+    which is a materially different fact from the disputed amount itself (doc P4 "financial
+    reserve/adjustment").
+    """
+    dispute_ref = obj.get("id")
+    if not isinstance(dispute_ref, str) or not dispute_ref:
+        return None
+
+    currency = obj.get("currency")
+    currency = currency.upper() if isinstance(currency, str) else None
+    amount = None
+    minor = obj.get("amount")
+    if isinstance(minor, int) and currency:
+        try:
+            amount = from_minor_units(minor, currency)
+        except ProviderInvalidRequest:
+            amount = None
+
+    provider_status = obj.get("status") if isinstance(obj.get("status"), str) else None
+
+    # Stripe reports the deadline on the evidence_details sub-object.
+    evidence_due_by = None
+    details = obj.get("evidence_details")
+    if isinstance(details, dict) and isinstance(details.get("due_by"), int):
+        evidence_due_by = datetime.fromtimestamp(details["due_by"], tz=timezone.utc)
+
+    # `payment_intent` is the reference our Payment rows are keyed on; `charge` is the fallback
+    # Stripe still populates on older API versions.
+    payment_ref = obj.get("payment_intent")
+    if not isinstance(payment_ref, str) or not payment_ref:
+        payment_ref = _intent_ref(obj)
+
+    # Funds are withheld once the network actually pulls them. Before that the dispute is open
+    # but nothing has moved.
+    withdrawn = bool(obj.get("balance_transactions")) or provider_status in ("lost",)
+    reserve_amount = amount if (withdrawn and amount is not None) else None
+
+    return {
+        "provider_dispute_ref": dispute_ref,
+        "provider_payment_ref": payment_ref,
+        "provider_status": provider_status,
+        "status": STRIPE_DISPUTE_STATUS_MAP.get(provider_status or ""),
+        "reason_code": obj.get("reason") if isinstance(obj.get("reason"), str) else None,
+        "amount": amount,
+        "currency": currency,
+        "reserve_amount": reserve_amount,
+        "evidence_due_by": evidence_due_by,
+    }
 
 
 def _refund_generic_event(charge_obj: dict) -> str:

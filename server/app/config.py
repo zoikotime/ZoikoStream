@@ -9,9 +9,16 @@ log = logging.getLogger(__name__)
 ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
 
 # Anyone holding this value can forge a JWT for any user id and role, so it must never
-# survive into a deployed environment. Kept as a default (rather than a required field) so
-# a fresh clone still boots, but loudly flagged at startup — see the warning below.
+# survive into a deployed environment. Kept as a default (rather than a required field) so a
+# fresh clone still boots in development — but production REFUSES to start on it, see the
+# validation below.
 DEV_SECRET_KEY = "dev-secret-change-me"
+
+# ENVIRONMENT values that mean "this is a real deployment serving real users". Matched
+# case-insensitively after stripping, because a stray "Production " in a deployment config
+# must not silently fall through to development behaviour — that would defeat every guard
+# keyed off this list.
+PRODUCTION_ENVIRONMENTS = ("production", "prod")
 
 
 class Settings(BaseSettings):
@@ -95,11 +102,104 @@ class Settings(BaseSettings):
     # email preheader and body, so changing it changes the copy automatically.
     EMAIL_VERIFICATION_TTL_MINUTES: int = 30
 
+    def is_production(self) -> bool:
+        """Whether this process is a real deployment serving real users.
+
+        A method rather than a cached flag, matching stripe_configured() above: a deployment
+        may inject the environment after import.
+        """
+        return self.ENVIRONMENT.strip().lower() in PRODUCTION_ENVIRONMENTS
+
 
 settings = Settings()
 
-if settings.SECRET_KEY == DEV_SECRET_KEY:
-    log.warning(
-        "SECRET_KEY is the built-in development default. Every JWT this process issues can "
-        "be forged by anyone with the source. Set SECRET_KEY in .env before deploying."
-    )
+
+class InsecureProductionConfig(RuntimeError):
+    """A production deployment is missing a secret it cannot safely run without.
+
+    Raised at IMPORT time, so the process dies before it can bind a port and start signing
+    tokens. A warning was not enough: the previous behaviour logged and carried on, so a
+    deployment that forgot SECRET_KEY came up healthy and served forgeable JWTs — the log line
+    scrolled past and nothing else ever objected.
+    """
+
+
+_LOCAL_HOSTS = ("localhost", "127.0.0.1")
+
+
+def _validate_production_config() -> None:
+    """Fail closed on settings whose wrong value is silently exploitable or silently broken.
+
+    Deliberately narrow. Only three things RAISE, each because the default is actively unsafe
+    in a deployment and the failure would otherwise surface far from its cause:
+
+      SECRET_KEY    — the default is public, so every JWT would be forgeable.
+      CORS_ORIGINS  — the default is localhost, and with allow_credentials that lets any page
+                      on a user's own machine call the live API and read the response.
+      APP_URL       — the default is http://localhost, which becomes Stripe return URLs the
+                      payer cannot reach and credential-bearing email links that email.py
+                      then refuses to send.
+
+    Everything else WARNS. Stripe, LiveKit, GCS and Redis each already fail closed at their own
+    point of use, and refusing to boot without them would make the API un-deployable for a
+    tenant that does not use that feature — or for the deliberate "production infrastructure,
+    test payments" stage of a rollout.
+    """
+    if not settings.is_production():
+        if settings.SECRET_KEY.strip() in ("", DEV_SECRET_KEY):
+            log.warning(
+                "SECRET_KEY is the built-in development default. Every JWT this process issues "
+                "can be forged by anyone with the source. Set SECRET_KEY before deploying "
+                "(production refuses to start without it)."
+            )
+        return
+
+    if settings.SECRET_KEY.strip() in ("", DEV_SECRET_KEY):
+        raise InsecureProductionConfig(
+            f"SECRET_KEY is missing or is the built-in development default while "
+            f"ENVIRONMENT={settings.ENVIRONMENT!r}. Every JWT this process would issue could be "
+            "forged by anyone with the source. Set SECRET_KEY to a strong random value "
+            "(e.g. `python -c \"import secrets; print(secrets.token_urlsafe(48))\"`) and restart."
+        )
+
+    # main.py already withholds the localhost ORIGIN REGEX in production, but the allowlist
+    # itself defaults to localhost — so gating the regex alone would have left the same hole
+    # open by the other route.
+    local_origins = [
+        o.strip() for o in settings.CORS_ORIGINS.split(",")
+        if o.strip() and any(h in o.lower() for h in _LOCAL_HOSTS)
+    ]
+    if local_origins:
+        raise InsecureProductionConfig(
+            f"CORS_ORIGINS contains local origins {local_origins} while "
+            f"ENVIRONMENT={settings.ENVIRONMENT!r}. Combined with credentialed requests, any page "
+            "served from a user's own machine could call this API as them. Set CORS_ORIGINS to "
+            "the real browser origin(s) only."
+        )
+
+    app_url = settings.APP_URL.strip()
+    if not app_url.lower().startswith("https://") or any(h in app_url.lower() for h in _LOCAL_HOSTS):
+        raise InsecureProductionConfig(
+            f"APP_URL is {app_url!r} while ENVIRONMENT={settings.ENVIRONMENT!r}. It must be the "
+            "public https origin: it becomes Stripe checkout return URLs and the base of "
+            "credential-bearing email links."
+        )
+
+    # Non-fatal: each of these degrades a feature rather than exposing anything.
+    if not settings.REDIS_URL.strip():
+        log.warning(
+            "REDIS_URL is unset in production. The live bus degrades to in-process, so presence "
+            "and broadcast state will not be shared between instances — correct only for a "
+            "single-instance deployment."
+        )
+    if not settings.GCS_BUCKET.strip():
+        log.warning("GCS_BUCKET is unset in production — recording upload and replay delivery "
+                    "will be unavailable.")
+    if settings.STRIPE_SECRET_KEY.strip().startswith("sk_test"):
+        log.warning(
+            "STRIPE_SECRET_KEY is a TEST-mode key in production. Checkout will work end to end "
+            "but no real money will move. Intentional for a staged rollout; not for launch."
+        )
+
+
+_validate_production_config()

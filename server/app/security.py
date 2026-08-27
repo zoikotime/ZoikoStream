@@ -162,24 +162,59 @@ require_moderator = require_min_role("moderator")
 # dollar-threshold registry which doesn't exist yet (see commercial.py module docstring's
 # "no invented values" doctrine): a future threshold table would REFINE these gates, not
 # replace them, so collapsing to yes/no here is honest rather than a guessed number.
-COMMERCIAL_ACTIONS = ("accept", "change", "refund_approve", "write_off", "media_access")
+# The five original Section-25 matrix columns, plus five that separate the doc's Finance and
+# Operations duties. Those five existed only as `require_super_admin` on the routes, which
+# meant a `support` or `security` staff row had exactly the same authority over capacity,
+# invoices and reconciliation as `finance_ops` — the matrix narrowed refunds and left
+# everything else wide open.
+#
+#   capacity   pools, holds, reservations, releases, audience envelope   -> Operations
+#   readiness  readiness checks, incident facts                          -> Operations
+#   finance    payments, capture, tax determination, invoice issuance     -> Finance
+#   reconcile  reconciliation report, period close, settlement matching   -> Finance
+#   configure  catalog, service profiles, policies, seller entities       -> Super Admin only
+COMMERCIAL_ACTIONS = (
+    "accept", "change", "refund_approve", "write_off", "media_access",
+    "capacity", "readiness", "finance", "reconcile", "configure",
+)
+
+# Every action a role is not explicitly granted. Spelled out as a base dict so adding a column
+# to COMMERCIAL_ACTIONS cannot silently grant it to anyone — a new action defaults to denied
+# for every named role, and only an unscoped super_admin keeps it.
+_NO_COMMERCIAL = {action: False for action in COMMERCIAL_ACTIONS}
+
+
+def _grants(**allowed: bool) -> dict:
+    unknown = set(allowed) - set(COMMERCIAL_ACTIONS)
+    if unknown:
+        raise ValueError(f"unknown commercial action(s) in role grant: {sorted(unknown)}")
+    return {**_NO_COMMERCIAL, **allowed}
+
 
 # Customer-side rows (Organization Owner == org_admin, Billing Admin, Event Producer/
 # Operator == host). Event Organizer/moderator get no commercial authority in the doc.
+# No customer role holds ANY of the five new Zoiko-side actions: a customer never configures
+# the catalog, reserves platform capacity, issues an invoice or runs reconciliation.
 _CUSTOMER_COMMERCIAL = {
-    "org_admin":     {"accept": True,  "change": True,  "refund_approve": False, "write_off": False, "media_access": False},
-    "billing_admin": {"accept": True,  "change": True,  "refund_approve": False, "write_off": False, "media_access": False},
-    "host":          {"accept": False, "change": False, "refund_approve": False, "write_off": False, "media_access": True},
+    "org_admin":     _grants(accept=True, change=True),
+    "billing_admin": _grants(accept=True, change=True),
+    "host":          _grants(media_access=True),
 }
 
 # Zoiko-staff rows. Only reached when a super_admin has staff_commercial_role SET —
 # unset means full access (see commercial_can below).
 _STAFF_COMMERCIAL = {
-    "sales":       {"accept": False, "change": True,  "refund_approve": False, "write_off": False, "media_access": False},
-    "finance_ops": {"accept": False, "change": True,  "refund_approve": True,  "write_off": True,  "media_access": False},
-    "live_ops":    {"accept": False, "change": True,  "refund_approve": False, "write_off": False, "media_access": True},
-    "support":     {"accept": False, "change": False, "refund_approve": False, "write_off": False, "media_access": False},
-    "security":    {"accept": False, "change": False, "refund_approve": False, "write_off": False, "media_access": False},
+    "sales":       _grants(change=True),
+    # Finance/Billing Ops: the money. Not capacity, not readiness — those are Operations', and
+    # doc Section 25's whole point is that one person does not hold both.
+    "finance_ops": _grants(change=True, refund_approve=True, write_off=True,
+                            finance=True, reconcile=True),
+    # Live Ops: delivery. Holds capacity and readiness, and media access for the event it runs.
+    # Deliberately no `finance`/`reconcile`: an operator must not be able to issue an invoice
+    # or close a period for the event they are delivering.
+    "live_ops":    _grants(change=True, media_access=True, capacity=True, readiness=True),
+    "support":     _grants(),
+    "security":    _grants(),
 }
 
 
