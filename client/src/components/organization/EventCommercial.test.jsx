@@ -32,9 +32,10 @@ function order(over = {}) {
 }
 
 /** Route every GET the component makes. `payments` drives the outstanding calculation. */
-function wireApi({ ord = order(), payments = [], invoices = [], schedule = [],
+function wireApi({ ord = order(), payments = [], invoices = [], schedule = [], changeOrders = [],
                    readiness = { ready: true, blocking_reasons: [], exceptions_applied: [] } } = {}) {
   api.get.mockImplementation((url) => {
+    if (url.endsWith("/change-orders")) return Promise.resolve({ data: changeOrders });
     if (url.includes("/orders/current")) return Promise.resolve({ data: ord });
     if (url.endsWith("/quotes")) return Promise.resolve({ data: [] });
     if (url.endsWith("/capacity")) return Promise.resolve({ data: [] });
@@ -295,5 +296,71 @@ describe("security", () => {
       }
       api.post.mockClear();
     }
+  });
+});
+
+// ── Change-order acceptance (customer side) ──────────────────────────────────────────────
+// Staff raise a change order; accepting it is the one step in the amendment workflow only the
+// customer can take (require_commercial("accept") — org_admin holds it). Accepting changes
+// what they owe, so the price impact and resulting total must be visible BEFORE the button.
+
+const CHANGE_ORDER_ID = "33333333-3333-3333-3333-333333333333";
+
+function changeOrder(over = {}) {
+  return {
+    id: CHANGE_ORDER_ID, event_order_id: ORDER_ID, prior_order_version: 1,
+    changes: { add_lines: [{ catalog_line_id: "cl1", quantity: "1" }], remove_line_ids: [] },
+    applied_lines: null, price_delta: "250.00", reason: "Extra camera agreed on call",
+    customer_acceptance: false, status: "draft", requested_by: null, approved_by: null,
+    approval_exception_id: null, created_at: "2026-08-01T10:00:00Z", ...over,
+  };
+}
+
+async function renderWithChangeOrder(over = {}) {
+  wireApi({ changeOrders: [changeOrder(over)] });
+  render(<EventCommercial event={EVENT} />);
+  return screen.findByText(/Proposed changes/i);
+}
+
+describe("Change order acceptance", () => {
+  it("shows the reason, the price impact and the resulting total", async () => {
+    await renderWithChangeOrder();
+    expect(screen.getByText(/Extra camera agreed on call/i)).toBeInTheDocument();
+    // +250.00 on a 1440.00 order.
+    expect(screen.getByText(/Additional/i)).toBeInTheDocument();
+    expect(screen.getByText("$250.00")).toBeInTheDocument();
+    expect(screen.getByText("$1,690.00")).toBeInTheDocument();
+  });
+
+  it("posts to the change-order accept endpoint with no body of its own", async () => {
+    await renderWithChangeOrder();
+    api.post.mockResolvedValueOnce({ data: {} });
+    await userEvent.click(screen.getByRole("button", { name: /accept change/i }));
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    const [url] = api.post.mock.calls[0];
+    expect(url).toBe(`/commercial/change-orders/${CHANGE_ORDER_ID}/accept`);
+    // The customer never sends an amount — the delta is the server's, computed from the lines.
+    for (const [, body] of api.post.mock.calls) {
+      expect(body ?? {}).not.toHaveProperty("price_delta");
+      expect(body ?? {}).not.toHaveProperty("amount");
+    }
+  });
+
+  it("offers no accept action once the change order is already accepted", async () => {
+    await renderWithChangeOrder({ status: "accepted", customer_acceptance: true });
+    expect(screen.queryByRole("button", { name: /accept change/i })).not.toBeInTheDocument();
+  });
+
+  it("frames a negative delta as a reduction rather than a charge", async () => {
+    await renderWithChangeOrder({ price_delta: "-250.00", reason: "Dropped the extra camera" });
+    expect(screen.getByText(/Reduction of/i)).toBeInTheDocument();
+    expect(screen.getByText("$1,190.00")).toBeInTheDocument();
+  });
+
+  it("renders nothing when there are no change orders", async () => {
+    wireApi();
+    render(<EventCommercial event={EVENT} />);
+    await waitFor(() => expect(screen.getByTestId("pay-button")).toBeInTheDocument());
+    expect(screen.queryByText(/Proposed changes/i)).not.toBeInTheDocument();
   });
 });

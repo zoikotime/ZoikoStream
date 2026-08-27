@@ -8,6 +8,9 @@ import useApi from "../../hooks/useApi";
 import { notify } from "../../ui/Toast";
 import { CatalogVersionModal, CatalogVersionDrawer } from "./CommerceCatalogModal";
 import { ServiceProfileModal, CancellationPolicyModal } from "./CommercePolicyModals";
+import { SellerEntitiesTab, CapacityPoolsTab } from "./CommerceFinanceOps";
+import { ExceptionsTab, PeriodsTab } from "./CommerceGovernance";
+import { SettlementMatchModal } from "./EventCommerceModals";
 
 // Super Admin side of ZST-LE-COM-001: the registries that Live Event orders are built
 // from (catalog, service profiles, cancellation policies) plus the ledger reconciliation
@@ -18,7 +21,16 @@ const TABS = [
   { key: "catalog", label: "Catalog" },
   { key: "profiles", label: "Service Profiles" },
   { key: "policies", label: "Cancellation Policies" },
+  // Both registries fail closed when empty — no active seller entity means no invoice can be
+  // issued, no active pool means no capacity can be reserved — so they belong next to the
+  // other things that have to exist before an order can complete.
+  { key: "sellers", label: "Seller Entities" },
+  { key: "capacity", label: "Capacity" },
   { key: "reconciliation", label: "Reconciliation" },
+  // Governance: every money-affecting override, and the month-end freeze. Both were
+  // API-only until now.
+  { key: "exceptions", label: "Exceptions" },
+  { key: "periods", label: "Period Close" },
 ];
 
 const STATUS_TONE = { draft: "neutral", published: "success", retired: "danger" };
@@ -217,22 +229,42 @@ function ReconList({ title, items, render, empty }) {
 }
 
 function ReconciliationTab() {
-  const { data, loading, error } = useApi(() => api.get("/commercial/reconciliation").then((r) => r.data));
+  const { data, loading, error, reload } = useApi(() => api.get("/commercial/reconciliation").then((r) => r.data));
+  // Candidate payments for a manual match. The settlement itself carries no order, so the
+  // operator picks from payments on the order they believe it belongs to — pulled from the
+  // provider-event evidence, which is the only link back we have.
+  const { data: providerEvents } = useApi(() =>
+    api.get("/commercial/provider-events", { params: { limit: 100 } }).then((r) => r.data));
+  const [matching, setMatching] = useState(null);
+  const [showEvents, setShowEvents] = useState(false);
 
   if (error) return <p className="px-1 py-8 text-center text-sm text-rose-600 dark:text-rose-400">Couldn't load reconciliation. {errMsg(error)}</p>;
   if (loading) return <div className="zk-skeleton h-40 w-full rounded-xl bg-slate-200 dark:bg-slate-800" />;
 
+  const matchSettlement = async (body) => {
+    try {
+      await api.post(`/commercial/unmatched-settlements/${matching.id}/match`, body);
+      notify.success("Settlement matched");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    }
+  };
+
+  const missingSeller = data.orders_missing_seller_entity || [];
   const totalIssues =
     data.reservations_without_order.length + data.reservations_with_missing_order.length +
-    data.unmatched_settlements.length + data.orders_missing_invoice.length;
+    data.unmatched_settlements.length + data.orders_missing_invoice.length +
+    missingSeller.length;
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 xl:grid-cols-5">
         <StatCard label="Capacity without order" value={data.reservations_without_order.length} />
         <StatCard label="Orphaned reservations" value={data.reservations_with_missing_order.length} />
         <StatCard label="Unmatched settlements" value={data.unmatched_settlements.length} />
         <StatCard label="Orders missing invoice" value={data.orders_missing_invoice.length} />
+        <StatCard label="Orders missing seller" value={missingSeller.length} />
       </div>
 
       {totalIssues === 0 ? (
@@ -262,9 +294,16 @@ function ReconciliationTab() {
           />
           <ReconList
             title="Unmatched payment settlements" items={data.unmatched_settlements}
-            empty="None." render={(p) => (
-              <li key={p.id} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
-                {p.provider} · {p.provider_payment_ref} · {p.amount} {p.currency}
+            empty="None." render={(s) => (
+              <li key={s.id} className="flex items-start justify-between gap-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+                <span className="min-w-0">
+                  {s.provider} · {s.provider_payment_ref || "no reference"}
+                  {s.amount != null ? ` · ${s.amount} ${s.currency || ""}` : ""}
+                  <span className="mt-0.5 block text-xs opacity-80">{s.reason}</span>
+                </span>
+                {/* Attribution is a deliberate human act (doc P5) — never auto-allocated. */}
+                <Button variant="secondary" size="sm" className="shrink-0"
+                        onClick={() => setMatching(s)}>Match</Button>
               </li>
             )}
           />
@@ -276,7 +315,86 @@ function ReconciliationTab() {
               </li>
             )}
           />
+          <ReconList
+            title="Accepted orders with no active seller entity" items={missingSeller}
+            empty="None." render={(o) => (
+              <li key={o.id} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
+                Order {o.id.slice(0, 8)} · {o.total_amount} {o.currency}
+                <span className="mt-0.5 block text-xs opacity-80">
+                  Chargeable now, but can never be invoiced until an active entity is assigned.
+                </span>
+              </li>
+            )}
+          />
         </div>
+      )}
+
+      {/* Provider event evidence (doc P1). Every inbound provider event is retained — including
+          the ones that were REJECTED — so "what did the provider actually tell us, and what did
+          we do about it" is answerable without database access. */}
+      <Panel
+        title="Provider event evidence"
+        count={providerEvents?.length || 0}
+        action={
+          <Button variant="secondary" size="sm" onClick={() => setShowEvents((v) => !v)}>
+            {showEvents ? "Hide" : "Show"}
+          </Button>
+        }
+      >
+        {!showEvents ? (
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            The raw inbound record behind every payment state change. Rejected and replayed
+            events are kept too — a provider event is never deleted.
+          </p>
+        ) : !providerEvents || providerEvents.length === 0 ? (
+          <p className="text-sm text-slate-500 dark:text-slate-400">No provider events received yet.</p>
+        ) : (
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {providerEvents.map((e) => (
+              <li key={e.id} className="flex items-start justify-between gap-3 py-2 text-sm">
+                <span className="min-w-0">
+                  <span className="font-medium text-slate-700 dark:text-slate-200">{e.event_type}</span>
+                  <span className="mt-0.5 block truncate text-xs text-slate-400">
+                    {e.provider} · {e.provider_payment_ref || "no payment ref"} ·{" "}
+                    {new Date(e.received_at).toLocaleString()}
+                    {e.processing_error ? ` · ${e.processing_error}` : ""}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {!e.signature_verified && <Badge status="danger">unsigned</Badge>}
+                  <Badge status={
+                    e.processing_status === "processed" ? "success"
+                      : e.processing_status === "rejected" || e.processing_status === "failed" ? "danger"
+                        : "neutral"
+                  }>
+                    {e.processing_status}
+                  </Badge>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+
+      {matching && (
+        <SettlementMatchModal
+          settlement={matching}
+          // Candidates are the payments the retained provider events already point at. The
+          // settlement carries no order of its own, so this is the only honest link back —
+          // and the server refuses any match whose amount or currency disagrees anyway.
+          payments={(providerEvents || [])
+            .filter((e) => e.payment_id)
+            .map((e) => ({
+              id: e.payment_id,
+              provider_payment_ref: e.provider_payment_ref,
+              amount: matching.amount,
+              currency: matching.currency,
+              state: e.processing_status,
+            }))
+            .filter((p, i, arr) => arr.findIndex((x) => x.id === p.id) === i)}
+          onClose={() => setMatching(null)}
+          onCreate={matchSettlement}
+        />
       )}
     </div>
   );
@@ -291,7 +409,7 @@ export default function Commerce() {
         <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Live Events Commerce</h1>
         <p className="mt-1 flex items-start gap-2 text-sm text-slate-500 dark:text-slate-400">
           <FiAlertTriangle className="mt-0.5 shrink-0 text-amber-500" />
-          Nothing here charges real money — no payment processor is connected yet. This
+          Stripe runs in TEST mode — checkout works end to end but no real money moves. This
           configures the registries a Live Event order is built from (ZST-LE-COM-001).
         </p>
       </div>
@@ -301,7 +419,11 @@ export default function Commerce() {
       {tab === "catalog" && <CatalogTab />}
       {tab === "profiles" && <ProfilesTab />}
       {tab === "policies" && <PoliciesTab />}
+      {tab === "sellers" && <SellerEntitiesTab />}
+      {tab === "capacity" && <CapacityPoolsTab />}
       {tab === "reconciliation" && <ReconciliationTab />}
+      {tab === "exceptions" && <ExceptionsTab />}
+      {tab === "periods" && <PeriodsTab />}
     </div>
   );
 }

@@ -32,7 +32,8 @@ from _testsupport import code_only
 from app.db import engine
 from app.models import (
     AuditLog, CatalogVersion, CommercialAccount, CommercialException, Event, EventOrder,
-    Organization, Payment, PaymentSchedule, ProviderEvent, UnmatchedSettlement, User,
+    Organization, Payment, PaymentSchedule, ProviderEvent, RefundCredit,
+    UnmatchedSettlement, User,
 )
 
 
@@ -126,16 +127,25 @@ def test_no_unguarded_state_assignment_remains():
 # ══════════════════════════════════════════════════════════════════════════════════════
 
 class _AllocSession:
-    """Serves list_payment_schedules + _captured_amount from in-memory lists."""
+    """Serves list_payment_schedules + order_settlement from in-memory lists.
 
-    def __init__(self, schedules, captured):
+    Dispatches on the queried entity. `RefundCredit` was added when order_settlement started
+    netting executed remedies out of the collected figure — without it, the refund query fell
+    through to the schedules list and handed PaymentSchedule rows to code expecting remedies.
+    """
+
+    def __init__(self, schedules, captured, remedies=None):
         self._schedules, self._captured = schedules, captured
+        self._remedies = remedies or []
         self.added = []
 
     def scalars(self, stmt):
-        # reallocate_schedules asks for schedules; _captured_amount asks for payments.
         entity = getattr(getattr(stmt, "column_descriptions", [{}])[0].get("entity", None), "__name__", "")
-        rows = self._captured if entity == "Payment" else self._schedules
+        rows = {
+            "Payment": self._captured,
+            "RefundCredit": self._remedies,
+            "PaymentSchedule": self._schedules,
+        }.get(entity, self._schedules)
         return SimpleNamespace(all=lambda: rows)
 
     def add(self, obj):
@@ -160,11 +170,78 @@ def _paid(amount):
                    state="paid", idempotency_key=str(uuid.uuid4()))
 
 
-def _allocate(schedule_amounts, captured_amounts):
+def _remedy(amount, *, type_="refund", status="executed"):
+    return RefundCredit(id=uuid.uuid4(), event_order_id=uuid.uuid4(), type=type_,
+                        amount=Decimal(amount), reason_code="test", status=status)
+
+
+def _allocate(schedule_amounts, captured_amounts, remedies=None):
     schedules = [_sched(a) for a in schedule_amounts]
-    session = _AllocSession(schedules, [_paid(c) for c in captured_amounts])
+    session = _AllocSession(schedules, [_paid(c) for c in captured_amounts], remedies)
     summary = crud.reallocate_schedules(session, uuid.uuid4())
     return schedules, summary
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# REFUND NETTING (pure logic)
+# ══════════════════════════════════════════════════════════════════════════════════════
+# order_settlement summed gross payments and subtracted nothing, so an EXECUTED refund left
+# the order still reading as fully collected. Three calculations consumed that figure —
+# financial readiness, the outstanding payable balance, and milestone allocation — so a
+# refunded order simultaneously reported "satisfied" to the go-live gate, refused
+# re-collection as "already paid in full", and kept its milestones marked satisfied.
+
+def _settle(captured, remedies=None):
+    session = _AllocSession([], [_paid(c) for c in captured], remedies or [])
+    return crud.order_settlement(session, uuid.uuid4())
+
+
+def test_settlement_nets_an_executed_refund_out_of_collected():
+    s = _settle([1000], [_remedy(400)])
+    assert s["gross_captured"] == Decimal(1000)
+    assert s["refunded"] == Decimal(400)
+    assert s["net"] == Decimal(600)
+    assert s["refundable"] == Decimal(600)
+
+
+def test_settlement_ignores_an_unexecuted_remedy():
+    """A pending or approved-but-unexecuted remedy has not moved money and must not reduce
+    the collected figure — otherwise merely REQUESTING a refund would un-satisfy an order."""
+    for status in ("pending", "approved", "declined"):
+        s = _settle([1000], [_remedy(400, status=status)])
+        assert s["refunded"] == Decimal(0), status
+        assert s["net"] == Decimal(1000), status
+
+
+def test_credits_satisfy_a_balance_but_are_not_refundable_cash():
+    """A credit/waiver means the customer no longer owes it, so it counts toward settlement —
+    but no cash arrived, so it can never be handed back."""
+    s = _settle([0], [_remedy(250, type_="credit")])
+    assert s["net"] == Decimal(250)
+    assert s["refundable"] == Decimal(0)
+
+
+def test_a_fully_refunded_order_reads_as_uncollected():
+    s = _settle([1000], [_remedy(1000)])
+    assert s["net"] == Decimal(0) and s["refundable"] == Decimal(0)
+
+
+def test_settlement_never_goes_negative():
+    """An over-refund (shouldn't happen — payment_refundable_amount caps it) must still not
+    produce negative collected money feeding the readiness gate."""
+    s = _settle([100], [_remedy(500)])
+    assert s["net"] == Decimal(0) and s["refundable"] == Decimal(0)
+
+
+def test_refund_unsatisfies_a_previously_satisfied_milestone():
+    """The end-to-end consequence: the milestone the capture satisfied goes back to
+    outstanding once the money is returned."""
+    satisfied, _ = _allocate([1000], [1000])
+    assert satisfied[0].status == "satisfied"
+    after_refund, summary = _allocate([1000], [1000], [_remedy(1000)])
+    assert after_refund[0].status != "satisfied"
+    assert after_refund[0].allocated_amount == Decimal(0)
+    assert summary["outstanding"] == Decimal(1000)
 
 
 def test_zero_capture_leaves_the_milestone_unsatisfied():
@@ -384,6 +461,7 @@ class TestGoLiveGate:
             yield db, ids
             for oid in ids.orders:
                 db.execute(text("DELETE FROM payment_schedules WHERE event_order_id=:o"), {"o": oid})
+                db.execute(text("DELETE FROM commercial_state_transitions WHERE event_order_id=:o"), {"o": oid})
                 db.execute(text("DELETE FROM event_orders WHERE id=:o"), {"o": oid})
             db.execute(text("DELETE FROM audit_logs WHERE org_id=:o"), {"o": org.id})
             for eid in ids.events:
@@ -704,6 +782,7 @@ class TestProviderEvents:
                  {"u": ids.user_id, "o": ids.org_id}),
                 ("DELETE FROM payment_schedules WHERE event_order_id = :o", {"o": ids.order_id}),
                 ("DELETE FROM payments WHERE event_order_id = :o", {"o": ids.order_id}),
+                ("DELETE FROM commercial_state_transitions WHERE event_order_id=:o", {"o": ids.order_id}),
                 ("DELETE FROM event_orders WHERE id = :o", {"o": ids.order_id}),
                 ("DELETE FROM events WHERE id = :e", {"e": ids.event_id}),
                 ("DELETE FROM catalog_versions WHERE id = :c", {"c": ids.catalog_id}),
@@ -947,6 +1026,7 @@ class TestProviderEvents:
                 db.execute(text("DELETE FROM provider_events WHERE provider_payment_ref LIKE :m"),
                            {"m": f"{ctx.miss}%"})
                 db.execute(text("DELETE FROM payments WHERE id = :p"), {"p": victim_id})
+                db.execute(text("DELETE FROM commercial_state_transitions WHERE event_order_id=:o"), {"o": other_order.id})
                 db.execute(text("DELETE FROM event_orders WHERE id = :o"), {"o": other_order.id})
                 db.execute(text("DELETE FROM events WHERE id = :e"), {"e": other_event.id})
                 db.execute(text("DELETE FROM catalog_versions WHERE id = :c"), {"c": other_catalog.id})

@@ -63,6 +63,15 @@ POLICY_STATUSES = ("draft", "published", "retired")
 QUOTE_STATUSES = ("draft", "issued", "accepted", "expired", "withdrawn", "superseded")
 ORDER_STATUSES = ("draft", "pending_acceptance", "accepted", "active", "completed", "canceled", "terminated")
 CAPACITY_STATES = ("unrequested", "soft_held", "hard_reserved", "consumed", "released", "expired")
+# Canonical capacity audit vocabulary (doc Section 30). Every movement of committed inventory
+# emits exactly one of these against the AuditLog, carrying actor, timestamp, the event/order
+# it was for, and a reason. Named separately from CAPACITY_STATES because an audit event is a
+# TRANSITION ("released") while a state is a condition ("released") — and because
+# SOFT_HOLD_EXPIRED and RELEASED both land a reservation in a non-holding state but are
+# operationally different facts (a lapse versus a decision).
+CAPACITY_AUDIT_EVENTS = (
+    "soft_hold_created", "soft_hold_expired", "hard_reserved", "released", "consumed",
+)
 PAYMENT_STATES = (
     "requires_action", "pending", "partially_paid", "paid", "failed",
     "refunded", "part_refunded", "reversed", "disputed", "unmatched",
@@ -93,6 +102,12 @@ DISPUTE_STATES = ("opened", "evidence_required", "evidence_submitted", "won", "l
 EXCEPTION_TYPES = (
     "price_override", "waiver", "exceptional_cancellation",
     "financial_hold_override", "risk_tier_reduction", "complimentary_event",
+    # doc Section 25 names both in the RBAC matrix ("write_off" was already an ACTION in
+    # security.COMMERCIAL_ACTIONS with no code path behind it). A write-off reduces what the
+    # customer owes without money moving; a discount reduces the price before it is owed.
+    # Both are governed the same way as every other override: requested, then approved by a
+    # different human, with evidence — never a direct edit to an amount.
+    "write_off", "discount",
 )
 EXCEPTION_STATUSES = ("requested", "approved", "declined", "expired")
 
@@ -138,6 +153,51 @@ PAYMENT_TRANSITIONS: dict[str, tuple[str, ...]] = {
     # Terminal: a declined authorization cannot later become a successful payment. This is
     # the transition the old code silently permitted.
     "failed": (),
+}
+
+# ── Canonical commercial lifecycle (doc Section 28 "Event commercial lifecycle") ─────────
+# DRAFT -> QUOTED -> ORDER_ACCEPTED -> FINANCIAL_HOLD -> CAPACITY_HELD -> CONFIRMED
+#       -> READY -> LIVE -> COMPLETED, with CANCELED reachable from anything pre-COMPLETED.
+#
+# This state is DERIVED, never stored as a writable field. The authoritative facts already
+# live in EventOrder.status, PaymentSchedule.status, CapacityReservation.state, ReadinessCheck
+# and Event.status; a second writable column would be a second truth, and the doc's "no state
+# is manually bypassable" requirement is satisfied precisely because there is no setter to
+# bypass — crud.commercial.commercial_lifecycle_state computes it and CommercialStateTransition
+# records every observed change.
+#
+# EventOrder.lifecycle_state is a CACHE of the last computed value, kept only so a transition
+# can be detected and logged. Nothing reads it as authority (see crud.sync_lifecycle).
+COMMERCIAL_LIFECYCLE_STATES = (
+    "draft", "quoted", "order_accepted", "financial_hold", "capacity_held",
+    "confirmed", "ready", "live", "completed", "canceled",
+)
+
+# What may legally follow what. Backwards moves are deliberately permitted where the
+# underlying facts can legitimately regress: a change order clears the tax determination and
+# reopens FINANCIAL_HOLD, a reschedule releases capacity and drops CONFIRMED back to
+# ORDER_ACCEPTED, and a failed readiness check un-READYs an event. What is NOT permitted is
+# skipping the gates — nothing reaches CONFIRMED without passing through capacity, and nothing
+# reaches LIVE except from READY.
+COMMERCIAL_LIFECYCLE_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "draft": ("quoted", "order_accepted", "canceled"),
+    # A quote may be superseded back to draft, or accepted into an order.
+    "quoted": ("draft", "order_accepted", "canceled"),
+    # Acceptance splits on what is outstanding: money due -> FINANCIAL_HOLD, money satisfied
+    # but capacity not yet committed -> CAPACITY_HELD.
+    "order_accepted": ("financial_hold", "capacity_held", "confirmed", "canceled"),
+    "financial_hold": ("order_accepted", "capacity_held", "confirmed", "canceled"),
+    "capacity_held": ("order_accepted", "financial_hold", "confirmed", "canceled"),
+    # CONFIRMED means paid/credited AND capacity hard-reserved. READY additionally means every
+    # readiness gate passed. Both can regress if a fact regresses.
+    "confirmed": ("ready", "capacity_held", "financial_hold", "order_accepted", "canceled"),
+    "ready": ("live", "confirmed", "capacity_held", "financial_hold", "canceled"),
+    # Only from READY. This is the transition golive_block_reason guards.
+    "live": ("completed", "ready", "canceled"),
+    # Terminal for the commercial record. A post-completion correction is a new change
+    # order/credit against a completed order, never a return to an earlier state (doc T4).
+    "completed": (),
+    "canceled": (),
 }
 
 _MONEY = Numeric(12, 2)
@@ -287,6 +347,15 @@ class ServiceProfile(Base):
     requires_reserved_capacity: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # R3 only
     requires_change_freeze: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)       # R3 only
     requires_full_rehearsal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)      # R3 only
+    # doc Section 10: managed delivery is not optional at the higher tiers — the event must be
+    # run by an assigned Zoiko command owner, not self-served by the customer. Distinct from
+    # requires_command_owner, which is satisfied by a manual attestation: managed_only makes the
+    # command-owner gate NON-WAIVABLE for this profile even if the flag above is unset, which is
+    # what "managed-only launch" means operationally.
+    managed_only: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Whether an order under this profile MAY be sold as an Assured Event. Eligibility is not
+    # the same as election: crud.accept_order requires this to be true before EventOrder
+    # .assured_event can be set, and evaluate_readiness then applies the stricter gate set.
     assured_event_eligible: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
     effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -400,9 +469,17 @@ class EventOrder(Base):
     # then recomputed as subtotal + tax_amount (crud.record_tax_determination).
     total_amount: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
     risk_tier: Mapped[str] = mapped_column(String(4), default="r0", nullable=False)
+    # doc Section 10 "Assured Event": an elected, contractually-stronger service commitment.
+    # Only settable when the bound ServiceProfile is assured_event_eligible (crud.accept_order),
+    # and it tightens the readiness gate set rather than being a label (crud.evaluate_readiness).
+    assured_event: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     billing_classification: Mapped[str] = mapped_column(String(20), default="commercial", nullable=False)
     billing_source: Mapped[str] = mapped_column(String(30), default="direct_zoikostream", nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    # Last OBSERVED value of the derived commercial lifecycle state. A cache for change
+    # detection only — crud.commercial_lifecycle_state recomputes from the underlying facts on
+    # every read and nothing treats this column as authority. See COMMERCIAL_LIFECYCLE_STATES.
+    lifecycle_state: Mapped[str | None] = mapped_column(String(20))
     terms_version: Mapped[str | None] = mapped_column(String(40))
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     accepted_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
@@ -476,6 +553,91 @@ class EventOrderVersion(Base):
     total_amount: Mapped[Decimal] = mapped_column(_MONEY, nullable=False)
     snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CommercialStateTransition(Base):
+    """Append-only log of the derived commercial lifecycle (doc Section 28).
+
+    One row per OBSERVED state change, written by crud.sync_lifecycle after any operation that
+    could move the state. Because the state itself is derived from the underlying facts, this
+    table is the only place lifecycle history exists — and it is insert-only: a transition is
+    never updated or deleted, so "how did this order reach CONFIRMED" is answerable forever.
+
+    `blocking_reasons` captures WHY the state is what it is at the moment of transition (the
+    readiness evaluator's reasons, the financial state, the missing capacity), so a historical
+    state is self-explaining without re-deriving facts that have since changed.
+
+    `illegal` marks a transition that COMMERCIAL_LIFECYCLE_TRANSITIONS does not permit. Such a
+    transition is still recorded rather than dropped: it means the underlying facts moved in a
+    way the model did not anticipate, which is a data-integrity alarm worth keeping, not an
+    error to swallow. The state is reported as computed either way — the log tells the truth
+    about what happened.
+    """
+
+    __tablename__ = "commercial_state_transitions"
+
+    id: Mapped[uuid.UUID] = _id_col()
+    event_order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("event_orders.id"), index=True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
+    from_state: Mapped[str | None] = mapped_column(String(20))
+    to_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    # What operation observed the change — "order.accept", "payment.captured", "capacity.reserve",
+    # "readiness.evaluate", "order.cancel", "event.golive", ...
+    trigger: Mapped[str] = mapped_column(String(60), nullable=False)
+    # Human rationale where the operation carried one (a cancellation reason, a reschedule
+    # reason, a write-off justification). Distinct from `trigger`, which names the mechanical
+    # operation, and from `blocking_reasons`, which is the machine-derived gate list.
+    reason: Mapped[str | None] = mapped_column(Text)
+    illegal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    blocking_reasons: Mapped[list | None] = mapped_column(JSON)
+    financial_state: Mapped[str | None] = mapped_column(String(30))
+    capacity_satisfied: Mapped[bool | None] = mapped_column(Boolean)
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    correlation_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventReschedule(Base):
+    """A moved event window, with the original preserved (doc Section 9 "Reschedule").
+
+    Deliberately NOT an update to Event.start_time alone: the doc requires the original
+    commercial and operational history to survive, and a bare field update destroys the very
+    fact a reschedule dispute turns on ("what were we contracted to deliver, and when").
+
+    A reschedule RELEASES the capacity held for the old window — it cannot silently carry it,
+    because capacity is a time-specific resource and the old reservation does not cover the new
+    time (doc C1). Re-holding against the new window is a separate, explicit step, so an event
+    mid-reschedule is visibly not capacity-backed rather than appearing confirmed.
+
+    No reschedule fee is computed here. There is no published reschedule-fee policy registry,
+    and inventing a percentage is exactly what doc E1 forbids — so any commercial consequence
+    is raised as a normal ChangeOrder and referenced by `change_order_id`.
+    """
+
+    __tablename__ = "event_reschedules"
+
+    id: Mapped[uuid.UUID] = _id_col()
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
+    event_order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("event_orders.id"), index=True)
+    # The window as it stood before this reschedule — the historical obligation.
+    previous_start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    previous_end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    new_start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    new_end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # Which order version was effective when the move happened, so the commercial basis of the
+    # original commitment is recoverable even after later change orders.
+    order_version: Mapped[int | None] = mapped_column(Integer)
+    # Reservations released by this move, as {reservation_id: resource_type}. Kept so "what did
+    # we give up" is answerable without inferring it from release timestamps.
+    released_reservations: Mapped[dict | None] = mapped_column(JSON)
+    # Lead-time hours to the ORIGINAL start at the moment of the request. The cancellation
+    # policy band a reschedule would have fallen into is a commercial fact worth freezing.
+    lead_time_hours_at_request: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    change_order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("change_orders.id"))
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    correlation_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -843,21 +1005,43 @@ class PaymentDispute(Base):
 
 class ChangeOrder(Base):
     """An approved post-acceptance commercial delta (doc G1). Applying one increments the
-    parent EventOrder.order_version; it never edits prior lines in place."""
+    parent EventOrder.order_version; it never edits prior lines in place.
+
+    Full provenance (doc Section 25): who asked (`requested_by`), who accepted
+    (`approved_by`), when (`created_at`/`accepted_at`), why (`reason`), what lines moved
+    (`changes` before, `applied_lines` after) and the amount (`price_delta`). `requested_by`
+    and `reason` were absent, so a change order recorded WHAT changed and the approver, but
+    never who initiated it or on what grounds.
+    """
 
     __tablename__ = "change_orders"
 
     id: Mapped[uuid.UUID] = _id_col()
     event_order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_orders.id"), nullable=False, index=True)
     prior_order_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    changes: Mapped[dict] = mapped_column(JSON, nullable=False)  # {added_lines, removed_lines, field deltas}
+    # REQUESTED plan: {"add_lines": [...], "remove_line_ids": [...]}. Validated against the
+    # order's own published catalog version before the row is written (crud._plan_change_order_lines).
+    changes: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # APPLIED result, written at acceptance: the line rows actually created and destroyed, with
+    # their amounts. `changes` is intent; this is what happened. Kept separately because a plan
+    # re-validated at apply time can legitimately be refused, and because the removed rows are
+    # deleted from event_order_lines — this is where their identity survives outside the
+    # previous version's snapshot.
+    applied_lines: Mapped[dict | None] = mapped_column(JSON)
     price_delta: Mapped[Decimal] = mapped_column(_MONEY, default=0, nullable=False)
+    # Mandatory rationale. A commercial delta with no stated reason is not auditable.
+    reason: Mapped[str | None] = mapped_column(Text)
     service_impact: Mapped[str | None] = mapped_column(String(300))
     risk_impact: Mapped[str | None] = mapped_column(String(300))
     capacity_impact: Mapped[str | None] = mapped_column(String(300))
     customer_acceptance: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    # The approved CommercialException that authorised a revenue REDUCTION or a price override.
+    # An increase needs none; a decrease may not exist without one (crud.create_change_order),
+    # so this column is the evidence link for "which approval permitted this reduction".
+    approval_exception_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("commercial_exceptions.id"))
     effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -986,6 +1170,10 @@ RECONCILIATION_CATEGORIES = (
     "order_without_invoice",        # doc 29 "Order-to-invoice": billable accepted order/change order, no invoice
     "event_without_classification", # doc 29 "Event-to-order": no billing_classification/source + no order/waiver
     "unmatched_settlement",         # doc 29 "Daily payment": provider settlement with no matching invoice/order
+    # doc L1: an accepted commercial order whose account has no ACTIVE registered seller entity
+    # can be taxed and PAID and then never invoiced (issue_invoice fails closed on it). Caught
+    # at period close so the entity is assigned before anyone is charged, not after.
+    "order_without_seller_entity",
 )
 RECONCILIATION_STATUSES = ("open", "investigating", "resolved", "accepted_risk")
 

@@ -261,6 +261,11 @@ def watch_event(
         replay_entitlement is not None
         and replay_entitlement.publish_state == "published"
         and replay_entitlement.watermark_status == "ready"
+        # Retention (doc Section 14/J): `expires_at` was stored and read by nothing, so a
+        # replay whose retention window had lapsed stayed playable forever. Checked live rather
+        # than relying only on the maintenance sweep — access must stop on the date it was sold
+        # to stop, not on the next time a scheduler happens to run.
+        and not commercial_crud.replay_access_expired(replay_entitlement)
     )
 
     recording_url = recording_duration = None

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   FiPlus, FiFileText, FiShield, FiActivity, FiCheckCircle,
-  FiAlertTriangle, FiUpload, FiUnlock,
+  FiAlertTriangle, FiUpload, FiUnlock, FiPercent, FiCalendar,
 } from "react-icons/fi";
 import { Panel, Button, Badge } from "../../components/admin";
 import api, { errMsg } from "../../api";
@@ -12,7 +12,10 @@ import { money } from "../../utils/money";
 import {
   NewQuoteModal, NewOrderModal, AddLineModal, CapacityHoldModal,
   PaymentScheduleModal, ReadinessCheckModal, IncidentModal, RemedyModal,
+  TaxDeterminationModal, RescheduleModal, ChangeOrderModal,
 } from "./EventCommerceModals";
+import { LifecyclePanel, RefundsPanel } from "./EventCommerceLifecycle";
+import { DisputesPanel } from "./CommerceDisputes";
 
 // Staff side of constructing a Live Event commercial order (ZST-LE-COM-001). The customer
 // (org_admin) only ever sees and accepts what gets built here — see
@@ -41,15 +44,16 @@ function useAdminCommerceData(eventId) {
       api.get("/commercial/cancellation-policies?status_=published").then((r) => r.data),
     ]);
     const orders = await api.get(`/commercial/events/${eventId}/orders`).then((r) => r.data);
-    let schedule = [], payments = [], invoices = [];
+    let schedule = [], payments = [], invoices = [], changeOrders = [];
     if (order) {
-      [schedule, payments, invoices] = await Promise.all([
+      [schedule, payments, invoices, changeOrders] = await Promise.all([
         api.get(`/commercial/orders/${order.id}/payment-schedule`).then((r) => r.data),
         api.get(`/commercial/orders/${order.id}/payments`).then((r) => r.data),
         api.get(`/commercial/orders/${order.id}/invoices`).then((r) => r.data),
+        api.get(`/commercial/orders/${order.id}/change-orders`).then((r) => r.data),
       ]);
     }
-    return { quotes, order, orders, capacity, readiness, incidents, catalogVersions, serviceProfiles, cancellationPolicies, schedule, payments, invoices };
+    return { quotes, order, orders, capacity, readiness, incidents, catalogVersions, serviceProfiles, cancellationPolicies, schedule, payments, invoices, changeOrders };
   });
 }
 
@@ -75,7 +79,7 @@ export default function EventCommerceAdmin({ eventId }) {
     return <Panel title="Commercial"><div className="zk-skeleton h-40 w-full rounded-lg bg-slate-200 dark:bg-slate-800" /></Panel>;
   }
 
-  const { quotes, order, orders, capacity, readiness, incidents, catalogVersions, serviceProfiles, cancellationPolicies, schedule, payments, invoices } = data;
+  const { quotes, order, orders, capacity, readiness, incidents, catalogVersions, serviceProfiles, cancellationPolicies, schedule, payments, invoices, changeOrders } = data;
   const selectedCatalogVersion = order ? catalogVersions.find((v) => v.id === order.catalog_version_id) : null;
   const acceptedOrders = orders.filter((o) => ["accepted", "active", "completed"].includes(o.status));
 
@@ -84,7 +88,14 @@ export default function EventCommerceAdmin({ eventId }) {
       <Panel
         eyebrow="ZST-LE-COM-001"
         title="Quotes"
-        action={<Button size="sm" leftIcon={FiPlus} onClick={() => setModal({ kind: "quote" })}>New quote</Button>}
+        action={
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" leftIcon={FiCalendar} onClick={() => setModal({ kind: "reschedule" })}>
+              Reschedule
+            </Button>
+            <Button size="sm" leftIcon={FiPlus} onClick={() => setModal({ kind: "quote" })}>New quote</Button>
+          </div>
+        }
       >
         {quotes.length === 0 ? (
           <p className="text-sm text-slate-500 dark:text-slate-400">No quotes yet.</p>
@@ -194,17 +205,42 @@ export default function EventCommerceAdmin({ eventId }) {
         )}
       </Panel>
 
+      <LifecyclePanel eventId={eventId} orderId={order?.id} />
+
       {order && (
         <Panel
           title="Payments & invoices"
           action={
             <div className="flex gap-2">
               <Button variant="secondary" size="sm" leftIcon={FiPlus} onClick={() => setModal({ kind: "schedule" })}>Add milestone</Button>
+              <Button variant="secondary" size="sm" leftIcon={FiPercent} onClick={() => setModal({ kind: "tax" })}>
+                {order.tax_amount == null ? "Determine tax" : "Re-determine tax"}
+              </Button>
               <Button size="sm" leftIcon={FiFileText} onClick={() => act(() => api.post(`/commercial/orders/${order.id}/invoices`, {}), "Invoice issued")}>Issue invoice</Button>
             </div>
           }
         >
           <div className="space-y-4">
+            {/* An undetermined tax basis is the single most common reason checkout and
+                invoicing refuse. Say so here rather than letting the operator discover it as
+                a 400 from a button on the other side of the page. */}
+            {order.tax_amount == null ? (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-500/30 dark:bg-amber-500/10">
+                <FiAlertTriangle className="mt-0.5 shrink-0 text-amber-500" />
+                <p className="text-sm text-amber-800 dark:text-amber-300">
+                  No tax determination recorded — the {money(order.total_amount, order.currency)} total
+                  is provisional. This order cannot be charged or invoiced until tax is determined
+                  (zero is valid, but only as an explicit determination).
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Tax {money(order.tax_amount, order.currency)} · {label(order.tax_treatment)}
+                {order.tax_jurisdiction ? ` · ${order.tax_jurisdiction}` : ""}
+                {order.tax_source ? ` · ${order.tax_source}` : ""}
+                {order.tax_exemption_reason ? ` · ${order.tax_exemption_reason}` : ""}
+              </p>
+            )}
             {schedule.length > 0 && (
               <ul className="space-y-1.5">
                 {schedule.map((s) => (
@@ -243,6 +279,86 @@ export default function EventCommerceAdmin({ eventId }) {
           </div>
         </Panel>
       )}
+
+      {/* Change orders: the governed way to amend an ACCEPTED order (doc G1). Every line is
+          priced from the order's own catalog version and the delta is computed server-side —
+          a reduction additionally needs an approved discount/price-override exception. */}
+      {order && (
+        <Panel
+          title="Change orders"
+          count={changeOrders.length}
+          action={
+            ["accepted", "active"].includes(order.status) && (
+              <Button size="sm" leftIcon={FiPlus} onClick={() => setModal({ kind: "changeOrder" })}
+                      disabled={!selectedCatalogVersion}>
+                Raise change order
+              </Button>
+            )
+          }
+        >
+          {changeOrders.length === 0 ? (
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              {["accepted", "active"].includes(order.status)
+                ? "No change orders. A draft order's lines are edited directly — change orders exist to amend an accepted one."
+                : "Change orders become available once this order is accepted."}
+            </p>
+          ) : (
+            <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+              {changeOrders.map((co) => {
+                const added = co.applied_lines?.added || co.changes?.add_lines || [];
+                const removed = co.applied_lines?.removed || co.changes?.remove_line_ids || [];
+                return (
+                  <li key={co.id} className="py-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-medium text-slate-800 dark:text-slate-100">
+                          <span className={Number(co.price_delta) < 0 ? "text-rose-600" : "text-emerald-600"}>
+                            {Number(co.price_delta) >= 0 ? "+" : "−"}
+                            {money(Math.abs(Number(co.price_delta)), order.currency)}
+                          </span>
+                          <span className="ml-2 text-xs font-normal text-slate-400">
+                            from v{co.prior_order_version}
+                          </span>
+                        </p>
+                        {co.reason && (
+                          <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">{co.reason}</p>
+                        )}
+                        <p className="mt-1 text-xs text-slate-400">
+                          {added.length} line{added.length === 1 ? "" : "s"} added ·{" "}
+                          {removed.length} removed
+                          {co.requested_by ? ` · requested by ${co.requested_by.slice(0, 8)}` : ""}
+                          {co.approved_by ? ` · accepted by ${co.approved_by.slice(0, 8)}` : ""}
+                          {co.accepted_at ? ` · ${fmtDateTime(co.accepted_at)}` : ""}
+                        </p>
+                        {co.approval_exception_id && (
+                          <p className="text-xs text-amber-600">
+                            Authorised by exception {co.approval_exception_id.slice(0, 8)}
+                          </p>
+                        )}
+                      </div>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <Badge status={co.status === "accepted" ? "success" : co.status === "rejected" ? "danger" : "warning"}>
+                          {label(co.status)}
+                        </Badge>
+                        {co.status !== "accepted" && (
+                          <span className="text-xs text-slate-400">awaiting customer</span>
+                        )}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Panel>
+      )}
+
+      {/* Chargebacks. Cases arrive inbound from the provider — nothing is opened here. */}
+      {order && (
+        <DisputesPanel order={order} event={{ title: undefined }} payments={payments} onChanged={reload} />
+      )}
+
+      {order && <RefundsPanel order={order} currency={order.currency} onChanged={reload} />}
 
       <Panel
         title="Readiness"
@@ -334,6 +450,33 @@ export default function EventCommerceAdmin({ eventId }) {
           onCreate={({ incident_id, ...rest }) =>
             act(() => api.post(`/commercial/incidents/${incident_id}/remedy`, rest), "Remedy proposed — pending a different approver")
           }
+        />
+      )}
+      {modal?.kind === "tax" && order && (
+        <TaxDeterminationModal
+          order={order} onClose={close}
+          onCreate={(body) => act(() => api.post(`/commercial/orders/${order.id}/tax-determination`, body), "Tax determination recorded")}
+        />
+      )}
+      {modal?.kind === "changeOrder" && order && (
+        <ChangeOrderModal
+          catalogLines={selectedCatalogVersion?.lines || []}
+          orderLines={order.lines || []}
+          currency={order.currency}
+          onClose={close}
+          onCreate={(body) => act(
+            () => api.post(`/commercial/orders/${order.id}/change-orders`, body),
+            "Change order raised — the customer must accept it",
+          )}
+        />
+      )}
+      {modal?.kind === "reschedule" && (
+        <RescheduleModal
+          onClose={close}
+          onCreate={(body) => act(
+            () => api.post(`/commercial/events/${eventId}/reschedule`, body),
+            "Event rescheduled — capacity released and must be re-held",
+          )}
         />
       )}
     </div>

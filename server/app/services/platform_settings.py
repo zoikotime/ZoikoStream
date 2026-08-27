@@ -47,6 +47,52 @@ def max_bitrate_kbps(db: Session) -> int | None:
     return int(value) if value is not None else None
 
 
+def _maintenance_hours(db: Session, field: str) -> int | None:
+    """A maintenance window in hours from the "maintenance_windows" setting, or None.
+
+    None means "this environment has not configured that window", and services/maintenance.py
+    reports the job as skipped rather than assuming one. A sweep interval is operational
+    policy — how long an abandoned checkout may sit before someone looks at it is a business
+    decision, not a number this module gets to pick (doc Section 26).
+    """
+    row = db.get(PlatformSetting, "maintenance_windows")
+    value = (row.value or {}).get(field) if row else None
+    if value is None:
+        return None
+    hours = int(value)
+    return hours if hours > 0 else None
+
+
+def stale_payment_window_hours(db: Session) -> int | None:
+    """How long a payment may sit un-settled before it is reported as stale."""
+    return _maintenance_hours(db, "stale_payment_hours")
+
+
+def unmatched_settlement_alert_hours(db: Session) -> int | None:
+    """How long unattributed provider money may sit before it is alerted on (doc P5)."""
+    return _maintenance_hours(db, "unmatched_settlement_hours")
+
+
+def require_media_plane(db: Session) -> bool:
+    """Whether readiness should refuse a commercial event when no media plane is configured.
+
+    OFF by default, and that is deliberate rather than lazy. A commercial event with no LiveKit
+    credentials genuinely cannot deliver, so enforcing it is correct in production — but making
+    it unconditional would make the readiness verdict depend on ambient environment variables,
+    and dev/CI legitimately run with no media plane (see test_livekit_identity.py). An
+    always-on check would turn every go-live test red everywhere except a fully-provisioned
+    deployment.
+
+    So it is an explicit Operations switch, same shape as audience_capacity_envelope: unset
+    means "this environment does not assert media-plane readiness", set means enforce it.
+    Turning it on is the production hardening step; the switch itself invents nothing.
+
+    Stored on "streaming_limits" alongside the other delivery-side controls.
+    """
+    row = db.get(PlatformSetting, "streaming_limits")
+    return bool((row.value or {}).get("require_media_plane")) if row else False
+
+
 def audience_capacity_envelope(db: Session) -> int | None:
     """Approved platform-wide audience qualification band — the peak concurrent-viewer count
     an event may expect WITHOUT an explicit, hard-reserved capacity commitment.
