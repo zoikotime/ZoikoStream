@@ -133,6 +133,11 @@ def watch_event(
     response: Response,
     reg: str | None = Query(None, description="Registration access token from POST /register"),
     link: str | None = Query(None, description="Access-link token from POST /access-links"),
+    monitor: bool = Query(
+        False,
+        description="Set by client/src/pages/speaker/Backstage.jsx's return-feed monitor "
+                     "only — see services/livekit.py's secondary()/primary() docstring.",
+    ),
     user: User | None = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
@@ -209,8 +214,14 @@ def watch_event(
 
     room = f"event_{ev.id}"
     token = url = None
+    # "degraded" (persisted by services/broadcast.py's sampler/webhook-driven
+    # mark_degraded/mark_recovered when the producer's media drops mid-broadcast) still gets
+    # a token — a viewer should be able to sit connected and recover automatically once the
+    # producer reconnects, same as before the drop, rather than being kicked out to a "not
+    # live" state and having to refresh. media_status (below) is what tells the frontend the
+    # difference between this and a genuinely healthy "live".
     can_stream = (
-        ev.status == "live" and livekit.configured()
+        ev.status in ("live", "degraded") and livekit.configured()
         and not not_started and not expired
         and (not ev.registration_required or registered)
     )
@@ -238,7 +249,17 @@ def watch_event(
             # never going to hold a moderation-socket identity to promote in the first
             # place, so a disposable identity is correct here, not a bug.
             identity = f"viewer-{uuid.uuid4()}"
-        token = livekit.create_stream_token(identity, room, False)
+        # monitor=True is Backstage.jsx's own return-feed subscription, requested BY the
+        # contributor themselves alongside their own publish connection (services/
+        # contributor.py's my_publish_token, identity=ctx.identity=str(user.id) — the exact
+        # same string `identity` resolves to here for a signed-in user). Without tagging,
+        # both connections share one identity and evict each other (DUPLICATE_IDENTITY —
+        # see services/livekit.py's secondary()/primary() docstring). Every other caller of
+        # this endpoint (ordinary viewers, guest/link tokens) is untouched — only a
+        # contributor watching their own return feed ever sends monitor=True, and only when
+        # they're the signed-in user the identity would otherwise collide for.
+        token_identity = livekit.secondary(identity, "monitor") if (monitor and user) else identity
+        token = livekit.create_stream_token(token_identity, room, False)
         url = livekit.settings.LIVEKIT_URL
 
     # Replay: same access rule as the live token (registration_required gates it the same
@@ -285,6 +306,20 @@ def watch_event(
     org_name = ev.organization.name if ev.organization else None
     hosts = crud.list_assignees(db, ev.id, "host")
 
+    # A real, persisted liveness signal — see WatchOut.media_status's own docstring. Reads
+    # only Event.status (already up to date via the sampler/webhook, see
+    # services/broadcast.py), never calls LiveKit directly here.
+    if ev.status == "live":
+        media_status = "live"
+    elif ev.status == "degraded":
+        media_status = "reconnecting"
+    elif ev.status == "ended" or expired:
+        media_status = "ended"
+    elif not_started:
+        media_status = "waiting_for_host"
+    else:
+        media_status = "unavailable"
+
     return WatchOut(
         id=ev.id, title=ev.title, description=ev.description, status=ev.status,
         visibility=ev.visibility, start_time=ev.start_time,
@@ -297,6 +332,7 @@ def watch_event(
         not_started=not_started, expired=expired,
         livekit_url=url, livekit_token=token, room=room if token else None,
         recording_url=recording_url, recording_duration_seconds=recording_duration,
+        media_status=media_status,
     )
 
 

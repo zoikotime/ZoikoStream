@@ -35,6 +35,66 @@ log = logging.getLogger(__name__)
 PLAYBACK_TOKEN_TTL = timedelta(hours=4)
 
 
+# ── secondary connection identities ────────────────────────────────────────────
+# LiveKit allows exactly ONE connection per identity in a room — a second connection on the
+# same identity EVICTS the first. Every token minted for a signed-in user used identity=
+# str(user.id) (moderation.resolve_ctx), so a user holding more than one simultaneous LiveKit
+# connection for the same event collided:
+#   * the host console (a publish connection, see services/broadcast.py's _preview/
+#     snapshot_extra) vs. that same host visiting the public watch page (a subscribe
+#     connection, routers/events.py's watch_event) — both str(user.id).
+#   * the Backstage page's own return-feed monitor (client/src/pages/speaker/Backstage.jsx,
+#     a subscribe-only token from watch_event) vs. that same contributor's own mic/cam
+#     publish connection (services/contributor.py's my_publish_token) — again both
+#     str(user.id).
+# Each collision meant both connections saw a Disconnected(DUPLICATE_IDENTITY), each
+# reconnected, each eviction re-triggered the other — burning both retry budgets in seconds
+# and leaving BOTH sides on "couldn't reconnect" (see client/src/hooks/livekitDisconnect.js,
+# added for exactly this symptom, and server/test_livekit_identity.py's own docstring).
+#
+# secondary()/primary() are the fix: a SECONDARY connection for a user (their host-console
+# publish, or their own return-feed monitor) gets a distinguishable identity so it can
+# coexist with that same user's PRIMARY connection (their audience/moderation-target
+# identity, or a contributor's own publish token) in the same room. Deliberately NOT used
+# for every connection — the primary identity is what moderator actions (mute/promote/
+# remove — services/moderation.py's _participant_action, services/contributor.py's
+# _operator_action) and the LiveKit webhook's presence bookkeeping key on, so tagging it
+# would silently address (or presence-track) a participant that doesn't exist under that
+# name. Only the two connections documented above ever call secondary(); everything else
+# (ordinary viewers, guest/link/anonymous identities, ingress endpoints, a contributor's own
+# publish token) is untouched and stays exactly as it already was.
+#
+# Format is deliberately NOT the existing "prefix-uuid" convention used elsewhere in this
+# codebase (guest-<id>, guest-link-<id>, viewer-<id>, ingress-<id>) — those all use a plain
+# hyphen, which a UUID payload also contains, so a naive split() would be ambiguous. "::" is
+# a delimiter none of those, and no UUID, can ever contain, which is what lets primary()
+# safely pass every one of them through completely unchanged (see test_livekit_identity.py's
+# test_tagged_identity_resolves_back_to_its_owner).
+_SECONDARY_TAGS = ("host", "monitor")
+
+
+def secondary(identity: str, tag: str) -> str:
+    """A distinguishable LiveKit identity for `identity`'s SECOND simultaneous connection to
+    the same room, so it doesn't evict (or get evicted by) their primary one. `tag` must be
+    one of _SECONDARY_TAGS."""
+    if tag not in _SECONDARY_TAGS:
+        raise ValueError(f"unknown secondary connection tag: {tag!r}")
+    return f"{tag}::{identity}"
+
+
+def primary(identity: str) -> str:
+    """The reverse of secondary(): strips a known tag prefix to recover the identity a
+    presence record / moderation action should key on. Anything that isn't one of OUR
+    tags — a plain user id, a guest/guest-link/viewer/ingress identity — passes through
+    unchanged, so this is always safe to call on any identity a LiveKit webhook hands us
+    (routers/live.py), tagged or not."""
+    for tag in _SECONDARY_TAGS:
+        prefix = f"{tag}::"
+        if identity.startswith(prefix):
+            return identity[len(prefix):]
+    return identity
+
+
 def create_stream_token(
     identity: str,
     room_name: str,
@@ -124,6 +184,24 @@ async def set_stage(room: str, identity: str, on_stage: bool) -> bool:
     )
 
 
+async def participant_connected(room: str, identity: str) -> bool:
+    """Whether this EXACT identity currently holds a live connection in the room.
+
+    Exact, not "is this person here": a contributor backstage is connected under their
+    tagged monitor identity (secondary(id, "monitor")) while their publishing identity — the
+    bare id this asks about — is not in the room at all yet. That distinction is the whole
+    point of the call: see _operator_action's bring_live, which uses it to tell "LiveKit
+    refused to stage someone who IS here" (a real enforcement failure) apart from "there is
+    nobody under that identity to stage yet" (the normal pre-go-live state, where the publish
+    grant rides on the token the browser fetches once it goes live, not on this call).
+
+    False on any error, including a not-configured LiveKit — a caller that cannot confirm
+    presence must fall back to the permissive path, never block a legitimate action."""
+    return await _with_room(
+        lambda svc: svc.get_participant(api.RoomParticipantIdentity(room=room, identity=identity))
+    )
+
+
 async def ensure_room(room: str, empty_timeout: int = 600) -> bool:
     """Create the room ahead of the first publisher so a Go Live click has somewhere to
     land. Already-exists is success, not an error."""
@@ -184,6 +262,42 @@ def _gcs_credentials_json() -> str | None:
                   settings.GCS_CREDENTIALS_PATH, exc)
         return None
     return raw
+
+
+def gcs_config_error() -> str | None:
+    """A specific, actionable diagnosis of why recording uploads won't work — or None if
+    they will. Split out from _gcs_credentials_json's own logging (which only ever fires once
+    per process, thanks to lru_cache) so a caller that needs to explain the failure to a
+    *user* (a host clicking Record, an admin at startup) always gets a fresh, precise reason
+    instead of nothing on every call after the first.
+
+    Named separately from _gcs_credentials_json's cached parse so it's cheap to call
+    speculatively (startup, every recording.start) without re-reading the file each time —
+    it reuses that cached result rather than re-parsing."""
+    if not settings.GCS_BUCKET:
+        return "GCS_BUCKET is not set — recordings will not be uploaded anywhere"
+    path = settings.GCS_CREDENTIALS_PATH
+    if not path:
+        return "GCS_CREDENTIALS_PATH is not set — egress has no destination credentials"
+    if path.startswith(("http://", "https://")):
+        return (
+            "GCS_CREDENTIALS_PATH is a URL (looks like a Google Cloud Console link), not a "
+            "path to a downloaded service-account JSON key file. Download a key for a "
+            "service account with Storage Object Admin on the bucket, and point this at "
+            "that file's path."
+        )
+    raw = _gcs_credentials_json()
+    if raw is None:
+        return (f"GCS_CREDENTIALS_PATH ({path}) could not be read as a valid service-account "
+                "JSON key file — see the server log for the underlying read/parse error")
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError:
+        return f"GCS_CREDENTIALS_PATH ({path}) is not valid JSON"
+    if info.get("type") != "service_account" or not info.get("client_email"):
+        return (f"GCS_CREDENTIALS_PATH ({path}) is valid JSON but doesn't look like a "
+                "downloaded service-account key (missing type=service_account/client_email)")
+    return None
 
 
 def gcs_configured() -> bool:

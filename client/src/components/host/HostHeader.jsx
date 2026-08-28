@@ -309,7 +309,12 @@ export default function HostHeader({
             srLabel="Control connection"
             tone={conn.tone}
             spin={conn.spin}
-            title={attempt > 0 ? `${conn.label} — auto-reconnect attempt ${attempt}` : conn.label}
+            // Explicitly named "console" (not "stream"/"media"): this is the chat/control
+            // WebSocket (hooks/useEventStream), a separate connection from the LiveKit
+            // publish this event's health/recording badges above describe — a working
+            // console connection is not evidence media is flowing (see the audit's control-
+            // plane-vs-media-plane finding). The health badge above is the media signal.
+            title={`Console connection: ${attempt > 0 ? `${conn.label} — auto-reconnect attempt ${attempt}` : conn.label}`}
           >
             <span className={cx(valSm, conn.tone)}>
               {conn.label}{attempt > 0 && connection !== "open" ? ` ·${attempt}` : ""}

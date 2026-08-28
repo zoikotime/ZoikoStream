@@ -42,6 +42,14 @@ function ToggleRow({ toggle, settings, disabled, onChange }) {
 function SettingsBody({ settings, media, canHost, send }) {
   const s = settings || {};
   const set = (patch) => send("broadcast.settings", { settings: patch });
+  // Continuous controls (the range sliders below) commit on release, not on every step.
+  // A range input fires onChange once per pixel of travel, so one drag of a slider sent
+  // dozens of broadcast.settings frames — enough on its own to blow the socket's 30-actions-
+  // per-10s budget (routers/live.py RATE_LIMIT), after which the server refuses the NEXT
+  // action the host takes. When that action was Go Live, the host got "Slow down — too many
+  // actions" for a click that had nothing to do with the slider. The value still tracks the
+  // thumb live because the input is uncontrolled between commits.
+  const setOnCommit = (key) => (e) => set({ [key]: Number(e.target.value) });
   const disabled = !canHost;
   const actual = media?.actual;
   return (
@@ -114,15 +122,20 @@ function SettingsBody({ settings, media, canHost, send }) {
         <div className="grid grid-cols-2 gap-2">
           <div>
             <Label variant="console">Mic gain</Label>
+            {/* defaultValue + onPointerUp/onKeyUp: commit on release. See setOnCommit. */}
             <Input variant="console" type="range" min={0} max={200} disabled={disabled}
-                   value={s.mic_gain ?? 100}
-                   onChange={(e) => set({ mic_gain: Number(e.target.value) })} aria-label="Mic gain" />
+                   key={`mic_gain-${s.mic_gain ?? 100}`}
+                   defaultValue={s.mic_gain ?? 100}
+                   onPointerUp={setOnCommit("mic_gain")}
+                   onKeyUp={setOnCommit("mic_gain")} aria-label="Mic gain" />
           </div>
           <div>
             <Label variant="console">Monitor volume</Label>
             <Input variant="console" type="range" min={0} max={100} disabled={disabled}
-                   value={s.speaker_volume ?? 100}
-                   onChange={(e) => set({ speaker_volume: Number(e.target.value) })} aria-label="Monitor volume" />
+                   key={`speaker_volume-${s.speaker_volume ?? 100}`}
+                   defaultValue={s.speaker_volume ?? 100}
+                   onPointerUp={setOnCommit("speaker_volume")}
+                   onKeyUp={setOnCommit("speaker_volume")} aria-label="Monitor volume" />
           </div>
         </div>
         {actual && (

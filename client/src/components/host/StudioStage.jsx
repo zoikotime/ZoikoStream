@@ -17,8 +17,8 @@
 // and KPI row are always reachable on a laptop without scrolling.
 import { useEffect, useState } from "react";
 import {
-  FiMonitor, FiVideoOff, FiEye, FiMic, FiMicOff, FiAlertTriangle, FiCameraOff, FiUploadCloud,
-  FiPlay, FiMaximize, FiMinimize, FiX,
+  FiMonitor, FiVideo, FiVideoOff, FiEye, FiMic, FiMicOff, FiAlertTriangle, FiCameraOff,
+  FiUploadCloud, FiPlay, FiMaximize, FiMinimize, FiX,
 } from "react-icons/fi";
 import useInterval from "../../hooks/useInterval";
 import { cx } from "../../ui/tokens";
@@ -69,24 +69,51 @@ function Countdown({ until, onDone }) {
 }
 
 // The status word in the top-left. On-air is the only saturated fill on the stage.
+// "reconnecting"/"degraded" are additional overlays on top of a "live" BroadcastSession —
+// see displayStatus below, which is what actually decides which of these paints, combining
+// this WS-driven broadcast status with the real LiveKit publish state (useLiveKitPublish's
+// isPublishing/isReconnecting) so the chip can never claim "On air" while the producer's
+// actual media connection is down or the backend has confirmed it degraded (audit fix: this
+// used to read broadcast?.status alone, which stays "live" in Postgres/the bus for an
+// unbounded time after a real disconnect — see services/broadcast.py mark_degraded).
 const STATE_CHIP = {
   live: "bg-rose-600 text-white",
+  reconnecting: "bg-amber-500 text-white",
+  degraded: "bg-amber-600 text-white",
   paused: "bg-amber-500 text-white",
   ended: "bg-slate-700 text-slate-100",
   preview: "bg-slate-950/70 text-slate-200 ring-1 ring-white/15 backdrop-blur-sm",
 };
-const STATE_LABEL = { live: "On air", paused: "Paused", ended: "Ended", preview: "Preview" };
+const STATE_LABEL = {
+  live: "On air", reconnecting: "Reconnecting", degraded: "At risk",
+  paused: "Paused", ended: "Ended", preview: "Preview",
+};
 
 export default function StudioStage({
   broadcast, recording, analytics, media, screenShare, screenVideoRef, camera, mic,
   countdownUntil, onCountdownDone, publishToken, isPublishing, isReconnecting, publishError,
-  onTogglePreview,
+  onStartPreview, onRetryPreview, eventStatus,
 }) {
   // Destructured so `videoRef` is a plain binding: passing the whole media bag around makes
   // every `media.*` read look like a ref access to the React hooks lint rules.
-  const { videoRef, actual, active: previewActive, error: mediaError } = media;
+  const {
+    videoRef, actual, active: previewActive, error: mediaError, phase: mediaPhase,
+    videoTrack: previewVideoTrack,
+  } = media;
+  // Ready, but the hardware only gave us a microphone — useMediaPreview falls back to a
+  // single kind rather than failing outright when a camera is missing, blocked or busy, so
+  // the host can still run an audio-only broadcast. Distinct from "you turned your camera
+  // off", which is a choice, not a limitation.
+  const audioOnly = previewActive && !previewVideoTrack;
   const status = broadcast?.status || "preview";
-  const live = status === "live";
+  // The one chip an operator glances at first, so it has to be the honest one. Only ever
+  // says "live" when the session is live AND the publisher isn't mid-reconnect AND the
+  // backend hasn't confirmed the media dropped — otherwise it downgrades to a state that
+  // matches the (already-honest) publish banner lower on the stage.
+  const displayStatus = status === "live"
+    ? (isReconnecting ? "reconnecting" : eventStatus === "degraded" ? "degraded" : "live")
+    : status;
+  const live = displayStatus === "live";
   const viewers = analytics?.viewers ?? 0;
 
   // Fullscreen is a CSS state change on the EXISTING monitor node, never a re-parent into a
@@ -182,13 +209,13 @@ export default function StudioStage({
             <span
               className={cx(
                 "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-bold uppercase leading-none tracking-wide",
-                STATE_CHIP[status] || STATE_CHIP.preview
+                STATE_CHIP[displayStatus] || STATE_CHIP.preview
               )}
             >
               {live && (
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white motion-reduce:animate-none" />
               )}
-              {STATE_LABEL[status] || status}
+              {STATE_LABEL[displayStatus] || displayStatus}
             </span>
 
             <div className="flex flex-wrap items-center justify-end gap-1.5">
@@ -255,6 +282,47 @@ export default function StudioStage({
               </span>
               <p className="text-sm font-semibold text-white">Camera unavailable</p>
               <p className="text-xs leading-relaxed text-slate-400">{mediaError}</p>
+              {/* This branch used to be a dead end: it is the only one with no action, so a
+                  host whose first attempt failed (permission dismissed, camera busy, device
+                  unplugged) had no way back to a working preview except reloading the page.
+                  Retry re-arms the same acquisition the deck's Preview key would. */}
+              {onRetryPreview && (
+                <button
+                  type="button"
+                  onClick={onRetryPreview}
+                  className={cx(
+                    "pointer-events-auto mt-0.5 inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold text-white",
+                    "bg-gradient-to-r from-violet-600 to-indigo-600 shadow-lg shadow-violet-900/40",
+                    "hover:from-violet-500 hover:to-indigo-500",
+                    "transition-[background-image,box-shadow] duration-200 ease-out motion-reduce:transition-none",
+                    focusOnStage
+                  )}
+                >
+                  <FiPlay aria-hidden="true" /> Try again
+                </button>
+              )}
+            </div>
+          ) : mediaPhase === "acquiring" ? (
+            // The permission prompt is on screen (or the device is warming up). This state
+            // used to fall through to "Preview is off" below — which was not just wrong but
+            // a dead end: it offered a "Start preview" CTA wired to the TOGGLE, so a host who
+            // believed the UI and clicked it turned the pending request OFF and their camera
+            // never came on at all. Fake devices auto-grant in ~0ms, so only a real host with
+            // a real prompt ever sat in this window long enough to hit it. No CTA here: the
+            // only thing to do is answer the browser, and there is nothing to re-start.
+            <div className="flex max-w-sm flex-col items-center gap-3">
+              <span className="relative grid h-12 w-12 place-items-center">
+                <span aria-hidden="true" className="zk-pulse-ring absolute inset-0 rounded-full bg-violet-500/25" />
+                <span className="relative grid h-12 w-12 place-items-center rounded-full bg-white/[0.04] ring-1 ring-white/10">
+                  <FiVideo aria-hidden="true" className="text-xl text-violet-300" />
+                </span>
+              </span>
+              <div>
+                <p className="text-sm font-semibold text-white">Starting your camera and microphone…</p>
+                <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                  If your browser is asking for permission, choose Allow.
+                </p>
+              </div>
             </div>
           ) : !previewActive ? (
             // Deliberate empty state, not an unfinished one: it names the state, says why
@@ -278,10 +346,13 @@ export default function StudioStage({
                   Check your camera and microphone here before anyone else can see you.
                 </p>
               </div>
-              {onTogglePreview && (
+              {onStartPreview && (
                 <button
                   type="button"
-                  onClick={onTogglePreview}
+                  // onStartPreview, not the toggle: this button only ever means "turn the
+                  // preview ON". Wired to the toggle it was destructive in exactly the state
+                  // that renders it — see the acquiring branch above.
+                  onClick={onStartPreview}
                   className={cx(
                     "group pointer-events-auto inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold text-white",
                     "bg-gradient-to-r from-violet-600 to-indigo-600 shadow-lg shadow-violet-900/40",
@@ -298,6 +369,17 @@ export default function StudioStage({
                   Start preview
                 </button>
               )}
+            </div>
+          ) : audioOnly ? (
+            <div className="flex max-w-sm flex-col items-center gap-2.5">
+              <span className="grid h-12 w-12 place-items-center rounded-full bg-amber-500/10 ring-1 ring-amber-500/30">
+                <FiCameraOff aria-hidden="true" className="text-xl text-amber-400" />
+              </span>
+              <p className="text-sm font-semibold text-white">Broadcasting audio only</p>
+              <p className="text-xs leading-relaxed text-slate-400">
+                No camera is available, so this event is going out as audio.
+                Your microphone is {mic ? "live" : "muted"}.
+              </p>
             </div>
           ) : !camera ? (
             <div className="flex flex-col items-center gap-2.5">

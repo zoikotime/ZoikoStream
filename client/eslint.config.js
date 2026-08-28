@@ -5,7 +5,10 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // Generated output, not source. playwright-report/ in particular ships a bundled copy of
+  // the trace viewer, which alone contributed ~740 no-undef errors and drowned the real
+  // lint signal the moment anyone ran the E2E suite with its HTML reporter.
+  globalIgnores(['dist', 'playwright-report', 'test-results', 'blob-report']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [

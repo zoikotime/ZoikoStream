@@ -22,6 +22,7 @@ uses (moderation._participant_action's "stage"/"mute"/"remove" ops).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -31,6 +32,8 @@ from ..crud import event as event_crud
 from ..models import ContributorSession, EventAssignment, User
 from . import bus, livekit
 from . import moderation as mod
+
+log = logging.getLogger(__name__)
 
 
 def session_out(s: ContributorSession) -> dict:
@@ -265,39 +268,82 @@ async def _admit(ctx, payload):
 async def _standby(ctx, payload):
     """ready/on_standby/live -> on_standby. Pulling someone off the live program back to
     standby also revokes their publish permission — otherwise they'd stay on-air while the
-    console shows them as staged."""
+    console shows them as staged.
+
+    Audit fix (same pattern as _operator_action's bring_live/mute/remove): the LiveKit
+    revoke used to run AFTER the DB row was already committed to "on_standby", with its
+    result never checked — a contributor who was actually still live at LiveKit (the revoke
+    silently failed) was shown as safely off-stage. The revoke now runs first when it
+    matters (state was "live"), and the DB transition only happens once it's confirmed
+    enforced."""
     identity = str(payload.get("identity") or "")
     if not identity:
         return []
 
-    def work(db):
+    def check(db):
         s = _session_by_identity(db, ctx.event_id, identity)
         if s is None:
             return None
         if s.state not in ("ready", "on_standby", "live"):
             return "Contributor is not in a state that can go on standby"
-        was_live = s.state == "live"
+        return s.state
+
+    state = await mod.tx(check)
+    if isinstance(state, str):
+        return state
+    if state is None:
+        return []
+    was_live = state == "live"
+
+    if was_live:
+        enforced = await livekit.set_stage(ctx.room, identity, False)
+        if not enforced:
+            log.warning("contributor standby not enforced by LiveKit for %s on event %s — "
+                        "ContributorSession.state left unchanged", identity, ctx.event_id)
+            return [("moderator", "action.result",
+                    {"op": "standby", "identity": identity, "enforced": False})]
+
+    def work(db):
+        s = _session_by_identity(db, ctx.event_id, identity)
+        if s is None:
+            return None
         s.state = "on_standby"
         act = mod.record(db, ctx, "mod", "A contributor was placed on standby",
                          audit="live.contributor.standby", target_type="contributor_session", target_id=s.id)
-        return session_out(s), act, was_live
+        return session_out(s), act
 
     out = await mod.tx(work)
-    if isinstance(out, str):
-        return out
     if not out:
         return []
-    s, act, was_live = out
-    if was_live:
-        await livekit.set_stage(ctx.room, identity, False)
+    s, act = out
     await bus.presence_upsert(ctx.event_id, identity, {"contributor_state": "on_standby", "on_stage": False})
     return [("contributor", "session.update", s), ("activity", "activity.new", act)]
+
+
+def _enforced(frames: list) -> bool:
+    """Pull the `enforced` flag out of the action.result frame moderation._participant_action
+    always includes (moderation.py's own return, e.g. `("moderator", "action.result",
+    {"op", "identity", "enforced"})`). Defaults True only if that frame is somehow absent, so
+    a missing signal never silently blocks a state transition that has nothing to check it
+    against — the real failure case (enforced explicitly False) always short-circuits below."""
+    return next((f[2].get("enforced", True) for f in frames
+                 if f[0] == "moderator" and f[1] == "action.result"), True)
 
 
 async def _operator_action(ctx, payload, op: str):
     """bring_live | mute | remove — each delegates its LiveKit enforcement to the existing
     moderation._participant_action (stage/mute/remove ops), then layers the
-    ContributorSession state transition on top."""
+    ContributorSession state transition on top.
+
+    Audit fix: moderation._participant_action already tells the caller whether LiveKit
+    actually applied the change (`enforced`) — and the console already toasts on
+    `enforced === false` (useLiveEvent.js's action.result handler). What was missing is that
+    ContributorSession.state was written unconditionally regardless of that flag, so a
+    contributor could be marked "live"/"muted" in the DB/console while LiveKit silently
+    never granted (or revoked) the actual publish permission. Each branch below now only
+    performs its DB transition when `_enforced(frames)` is True; otherwise the prior state is
+    left untouched (and returned as-is), and the operator still sees the existing
+    action.result toast — no new frontend plumbing needed."""
     identity = str(payload.get("identity") or "")
     if not identity:
         return []
@@ -310,6 +356,23 @@ async def _operator_action(ctx, payload, op: str):
         if not await mod.tx(check):
             return "Contributor must be admitted before going live"
         frames = await mod._participant_action(ctx, {**payload, "on_stage": True}, "stage")
+        # Only a contributor who is ACTUALLY in the room can meaningfully fail to be staged.
+        # Backstage.jsx opens its publishing connection on `isLive` (state "live"/"muted"),
+        # so before this action the contributor is present only under their tagged monitor
+        # identity — set_stage against their bare publishing identity necessarily 404s
+        # ("participant does not exist"), which is the normal pre-go-live state, not LiveKit
+        # refusing anything. Gating the transition on that alone deadlocked the flow outright:
+        # state could never reach "live", so the browser never connected, so set_stage could
+        # never succeed. (Found by the Playwright E2E suite; the publish grant itself rides on
+        # my_publish_token, which the browser fetches once live — not on this call.) When they
+        # ARE connected and LiveKit still refused, that is a genuine enforcement failure and
+        # the guard below still holds the state back exactly as intended.
+        if not _enforced(frames) and await livekit.participant_connected(ctx.room, identity):
+            log.warning("contributor bring_live not enforced by LiveKit for %s on event %s — "
+                        "ContributorSession.state left unchanged", identity, ctx.event_id)
+            s = await mod.tx(lambda db: (lambda row: session_out(row) if row else None)(
+                _session_by_identity(db, ctx.event_id, identity)))
+            return [*frames, ("contributor", "session.update", s)] if s else frames
 
         def work(db):
             s = _session_by_identity(db, ctx.event_id, identity)
@@ -324,6 +387,12 @@ async def _operator_action(ctx, payload, op: str):
     if op == "mute":
         muted = bool(payload.get("muted", True))
         frames = await mod._participant_action(ctx, payload, "mute")
+        if not _enforced(frames):
+            log.warning("contributor mute(%s) not enforced by LiveKit for %s on event %s — "
+                        "ContributorSession.state left unchanged", muted, identity, ctx.event_id)
+            s = await mod.tx(lambda db: (lambda row: session_out(row) if row else None)(
+                _session_by_identity(db, ctx.event_id, identity)))
+            return [*frames, ("contributor", "session.update", s)] if s else frames
 
         def work(db):
             s = _session_by_identity(db, ctx.event_id, identity)
@@ -340,6 +409,12 @@ async def _operator_action(ctx, payload, op: str):
 
     if op == "remove":
         frames = await mod._participant_action(ctx, payload, "remove")
+        if not _enforced(frames):
+            log.warning("contributor remove not enforced by LiveKit for %s on event %s — "
+                        "ContributorSession.state left unchanged", identity, ctx.event_id)
+            s = await mod.tx(lambda db: (lambda row: session_out(row) if row else None)(
+                _session_by_identity(db, ctx.event_id, identity)))
+            return [*frames, ("contributor", "session.update", s)] if s else frames
 
         def work(db):
             s = _session_by_identity(db, ctx.event_id, identity)

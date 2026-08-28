@@ -58,6 +58,31 @@ const EMPTY = {
 
 const TYPING_TTL = 4000;
 
+// Which event the console attaches to when the URL carries no ?event=<id>.
+//
+// This used to ask the API for `status: "live"` and take the first row — an exact-match
+// filter (crud/event.py list_events), so it could only ever find an event that was ALREADY
+// live, i.e. precisely the case where the host does not need the Go Live button. A host who
+// had not gone live yet resolved nothing, and Dashboard.jsx short-circuits a null `resolved`
+// to a "No event to broadcast" empty state, so the whole console — deck, stage and Go Live
+// control — never mounted at all. That is the host role's own landing page (auth/roleHome.js
+// maps host -> /host/dashboard, with no event id), so every host hit it on first login and
+// the only working entry point was the assignment email's ?event= link.
+//
+// Ranked rather than filtered: an on-air event still wins, and otherwise the console opens
+// the soonest event this host could actually take live. `armed` outranks scheduled/published
+// because it is the state a host deliberately moves an event into just before going live.
+const BROADCASTABLE = ["live", "degraded", "paused", "armed", "scheduled", "published"];
+
+// Exported for the regression tests only — the console still uses it through the hook.
+export function pickBroadcastable(items) {
+  const ranked = items
+    .map((ev) => ({ ev, rank: BROADCASTABLE.indexOf(ev.status) }))
+    .filter((x) => x.rank !== -1)
+    .sort((a, b) => a.rank - b.rank);
+  return ranked.length ? ranked[0].ev : null;
+}
+
 const upsert = (list, item, key = "id") => {
   const i = list.findIndex((x) => x[key] === item[key]);
   if (i === -1) return [...list, item];
@@ -67,7 +92,11 @@ const upsert = (list, item, key = "id") => {
 };
 const drop = (list, item, key = "id") => list.filter((x) => x[key] !== item[key]);
 
-function reducer(state, env) {
+// Exported alongside EMPTY for the regression tests, so the live-state transitions that
+// decide whether a host can go live are assertable without standing up a socket.
+export { EMPTY as INITIAL_LIVE_STATE };
+
+export function reducer(state, env) {
   const { channel, type, data } = env;
   switch (`${channel}/${type}`) {
     case "moderator/snapshot":
@@ -218,7 +247,19 @@ function reducer(state, env) {
     case "broadcast/broadcast.preview":
       return {
         ...state,
-        broadcast: { ...state.broadcast, status: "preview", settings: data.settings },
+        broadcast: {
+          ...state.broadcast,
+          // The server's own status, and never a demotion of a broadcast that is on air.
+          // This used to hard-code "preview", so arming a preview mid-broadcast flipped
+          // `live` false here — tearing down the publisher (hooks/useLiveKitPublish.js gates
+          // on it) and turning the transport control back into "Go Live" while the event was
+          // still live. services/broadcast.py::_preview no longer sends a demotion, and this
+          // refuses to apply one regardless, so neither side alone can drop a live broadcast.
+          status: state.broadcast?.status === "live" || state.broadcast?.status === "paused"
+            ? state.broadcast.status
+            : (data.status || "preview"),
+          settings: data.settings,
+        },
         publishToken: data.publish_token || state.publishToken,
         livekitUrl: data.livekit_url || state.livekitUrl,
       };
@@ -227,7 +268,20 @@ function reducer(state, env) {
     case "broadcast/broadcast.countdown":
       return { ...state, countdownUntil: data.until };
     case "broadcast/broadcast.health":
-      return { ...state, health: data, recovering: !!data.recovering };
+      return {
+        ...state,
+        health: data,
+        recovering: !!data.recovering,
+        // event_status is the persisted signal from services/broadcast.py's
+        // mark_degraded/mark_recovered (the audit fix: a producer disconnect used to only
+        // ever reach this bus event, never Postgres, so a refresh/reconnect would silently
+        // forget it). Kept in `event.status` alongside the existing "live"/"ended" writes
+        // from broadcast.update below, so every consumer of event.status sees one
+        // consistent value instead of two competing sources.
+        event: data.event_status
+          ? { ...state.event, status: data.event_status }
+          : state.event,
+      };
 
     case "recording/recording.update":
       return {
@@ -261,8 +315,8 @@ export default function useLiveEvent() {
     eventParam
       ? Promise.resolve(null)
       : api
-          .get("/events", { params: { status: "live", page_size: 1 } })
-          .then((r) => r.data.items[0] || null)
+          .get("/events", { params: { page_size: 50, sort_by: "start_time", order: "asc" } })
+          .then((r) => pickBroadcastable(r.data.items || []))
   );
   const resolved = useMemo(
     () => (eventParam ? { id: eventParam } : liveEvent),
@@ -272,6 +326,21 @@ export default function useLiveEvent() {
   const onEnvelope = useCallback((env) => {
     if (env.channel === "moderator" && env.type === "error") {
       notify.error(env.data.message);
+      // A rejection of the go-live action itself resolves the pending click, exactly like
+      // the readiness gate's "host"/"broadcast.error" does. The generic error frame is what
+      // the server sends when the action is refused BEFORE the handler runs — the rate
+      // limiter (routers/live.py's SlidingWindow) and the HOST_ONLY permission check both
+      // land here — and it used to `return` before dispatching, so goLivePending stayed true:
+      // the button sat disabled on "Starting…" for the full 12s timeout and then reported
+      // "Didn't hear back from the server", which was not what happened. Re-routed as the
+      // same broadcast.error the reducer already knows how to resolve, carrying the server's
+      // real message instead of a fabricated one.
+      if (env.data?.action === "broadcast.golive") {
+        dispatch({
+          channel: "host", type: "broadcast.error",
+          data: { error: env.data.message, code: "action_rejected" },
+        });
+      }
       return;
     }
     if (env.channel === "recording" && env.type === "recording.error") {

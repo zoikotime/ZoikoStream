@@ -29,6 +29,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, func, select
+from sqlalchemy.exc import IntegrityError
 
 from ..crud import commercial as commercial_crud
 from ..crud.admin import get_feature_flag_by_key
@@ -248,16 +249,24 @@ _RECORDING_ROLE_ORDER = case(
 
 
 def _current_recordings(db, ctx) -> list[LiveRecording]:
-    """Every row still active for this event (one, or two under dual recording — see
-    _recording_start), primary first. Pause/resume/stop act on the whole set; callers that
-    only want "the" recording for a summary field use actives[0]."""
-    return db.scalars(
-        select(LiveRecording)
-        .where(LiveRecording.event_id == ctx.event_id,
-               LiveRecording.org_id == ctx.org_id,
-               LiveRecording.status.in_(("recording", "paused")))
-        .order_by(_RECORDING_ROLE_ORDER, LiveRecording.created_at)
-    ).all()
+    """Every row still active for the CURRENT broadcast session (one, or two under dual
+    recording — see _recording_start), primary first. Pause/resume/stop act on the whole
+    set; callers that only want "the" recording for a summary field use actives[0].
+
+    Scoped by session_id, not just event_id: a recording orphaned by a crash in an earlier
+    session (row never reached "stopped"/"failed") must never be reported "active" once a
+    later, unrelated Go Live opens a new session for the same event — that was the audit's
+    "stale recording from an old broadcast session" finding. A recording started before any
+    session existed (during preview) has session_id NULL, so it's matched by the no-session
+    branch below rather than silently excluded."""
+    session = _current_session(db, ctx)
+    q = select(LiveRecording).where(
+        LiveRecording.event_id == ctx.event_id,
+        LiveRecording.org_id == ctx.org_id,
+        LiveRecording.status.in_(("recording", "paused")),
+    )
+    q = q.where(LiveRecording.session_id == session.id) if session else q.where(LiveRecording.session_id.is_(None))
+    return db.scalars(q.order_by(_RECORDING_ROLE_ORDER, LiveRecording.created_at)).all()
 
 
 def _feature_enabled(db, key: str, default: bool) -> bool:
@@ -315,7 +324,12 @@ def _seed_settings(ev: Event | None) -> dict:
         "waiting_room": ev.waiting_room_enabled,
         "raise_hand_enabled": False if memorial else ev.raise_hand_enabled,
         "allow_screen_share": ev.allow_screen_share,
-        "auto_upload": ev.auto_start_recording or DEFAULT_SETTINGS["auto_upload"],
+        # auto_upload (whether a captured file auto-uploads once recording stops) takes the
+        # plain default — recording itself is always a deliberate host action (ACTIONS/
+        # _recording_start), never automatic on go-live. The Event.auto_start_recording
+        # column that used to be conflated with this setting has been removed entirely
+        # (it was dead: no code path read it to actually start anything, and no frontend
+        # form ever exposed it).
     }
     if memorial:
         seeded["reactions_enabled"] = False
@@ -418,7 +432,7 @@ async def _golive(ctx, payload):
         # The event's own lifecycle only moves forward from a publishable (or armed) state —
         # reuse the existing guard rather than writing "live" unconditionally. Readiness was
         # already cleared by _golive_gate above.
-        if ev is not None and ev.status in ("published", "scheduled", "armed"):
+        if ev is not None and ev.status in ("published", "scheduled", "armed", "degraded"):
             ev.status = "live"
             ev.start_time = ev.start_time or now
         act = mod.record(db, ctx, "system", "Host started the stream", audit="live.broadcast.golive",
@@ -426,8 +440,24 @@ async def _golive(ctx, payload):
                          meta={"enforced_in_livekit": enforced})
         return session_out(session), act
 
-    out = await mod.tx(work)
+    try:
+        out = await mod.tx(work)
+    except IntegrityError:
+        # Two concurrent Go Live requests both saw "no open session" and both tried to
+        # INSERT one; the partial unique index on (event_id) WHERE ended_at IS NULL (see
+        # migrate_broadcast_session_unique.py) rejected the loser instead of allowing a
+        # second open BroadcastSession row. Re-running the same work() now sees the
+        # winner's already-committed row and takes the idempotent "already live" branch, so
+        # the loser's request resolves cleanly instead of surfacing a 500.
+        log.info("event %s: concurrent go-live insert conflict, retrying against the winner", ctx.event_id)
+        out = await mod.tx(work)
     session, act = out
+    if act is None:
+        # The session was already "live" — an idempotent double-click, OR the host's own
+        # reconnect after a producer drop the sampler had marked degraded (see
+        # mark_degraded/mark_recovered). Either way, clear a stale degraded flag now rather
+        # than waiting up to SAMPLE_SECONDS for the sampler to notice the publisher is back.
+        await mark_recovered(str(ctx.event_id), str(ctx.org_id))
     await bus.state_set(ctx.event_id, {"status": "live", "started_at": session["started_at"]})
     if act:  # only the transition that actually happened, not a redundant "already live" call
         await mod.tx(lambda db: webhooks.enqueue(db, ctx.org_id, "session.started", {
@@ -502,8 +532,11 @@ async def _end(ctx, payload, emergency: bool = False):
             session.paused_ms += int((now - session.paused_at).total_seconds() * 1000)
         session.status, session.ended_at, session.paused_at = "ended", now, None
         session.ended_reason = reason
-        # Reuse the event lifecycle guard: "ended" is only legal from "live".
-        if ev is not None and ev.status == "live":
+        # Reuse the event lifecycle guard: "ended" is only legal from "live" or "degraded"
+        # (crud.event.status_transition_error already allows degraded -> ended; this is the
+        # write-back that was missing — without it, ending a degraded event left Event.status
+        # stuck on "degraded" forever).
+        if ev is not None and ev.status in ("live", "degraded"):
             ev.status = "ended"
             ev.end_time = ev.end_time or now
         text = "Host triggered an emergency stop" if emergency else "Host ended the stream"
@@ -526,17 +559,105 @@ async def _end(ctx, payload, emergency: bool = False):
     return frames
 
 
+# Skip the "nobody's publishing" check for this long after go-live, so the normal camera/
+# mic warm-up (a host clicking Go Live before their tracks finish publishing) is never
+# mistaken for a dropped connection. Chosen well above useLiveKitPublish.js's own retry
+# window (~46s over 5 backoff attempts), so a transient client-side reconnect resolves
+# before the server would ever consider degrading the event over it.
+DEGRADE_GRACE_SECONDS = 20
+
+
+async def mark_degraded(event_id: str, org_id: str, reason: str) -> bool:
+    """Persist that a live event's media has genuinely stopped flowing — the fix for the
+    audit finding that a producer disconnect was only ever pushed to the ephemeral Redis/bus
+    'broadcast.health' event and never written to Postgres, leaving Event.status == "live"
+    indefinitely. BroadcastSession.status is deliberately left untouched: the session is
+    still open, just unhealthy, the same "session survives, a sub-field moves" shape _pause
+    already uses. A no-op (returns False) unless the event is currently "live", so this is
+    safe to call on every unhealthy sampler tick without double-writing or racing a normal
+    End (which can only end a "live" or "degraded" event — see _end)."""
+    def work(db):
+        ev = db.get(Event, uuid.UUID(event_id))
+        if ev is None or ev.status != "live":
+            return False
+        ev.status = "degraded"
+        return True
+
+    changed = await mod.tx(work)
+    if changed:
+        log.warning("event %s (org %s) marked degraded: %s", event_id, org_id, reason)
+        # The durable state change above is the actual fix and has already committed — a
+        # Redis/bus hiccup notifying consoles of it must not make this call look like it
+        # failed (the sampler's caller would otherwise retry mark_degraded on an event that's
+        # already correctly "degraded" in Postgres, achieving nothing) or crash the sampler's
+        # loop over the OTHER open sessions in the same tick.
+        try:
+            await mod.feed_activity(event_id, "system", f"Media dropped — {reason}",
+                                    actor="system", persist=True)
+            await bus.publish(event_id, "broadcast", "broadcast.health", {
+                "level": "down", "issues": [reason], "recovering": True, "event_status": "degraded",
+            })
+        except Exception:  # noqa: BLE001 — the DB write already succeeded; a notify failure is not fatal
+            log.exception("event %s: degraded state persisted, but notifying consoles failed", event_id)
+    return changed
+
+
+async def mark_recovered(event_id: str, org_id: str) -> bool:
+    """Symmetric recovery: Event.status "degraded" -> "live". A no-op unless currently
+    degraded, so callers (the sampler, and _golive's reconnect path) can call it
+    unconditionally whenever media looks healthy again."""
+    def work(db):
+        ev = db.get(Event, uuid.UUID(event_id))
+        if ev is None or ev.status != "degraded":
+            return False
+        ev.status = "live"
+        return True
+
+    changed = await mod.tx(work)
+    if changed:
+        log.info("event %s (org %s) recovered from degraded", event_id, org_id)
+        try:
+            await mod.feed_activity(event_id, "system", "Media recovered", actor="system", persist=True)
+            await bus.publish(event_id, "broadcast", "broadcast.health", {
+                "level": "ok", "issues": [], "recovering": False, "event_status": "live",
+            })
+        except Exception:  # noqa: BLE001 — same reasoning as mark_degraded's own try/except
+            log.exception("event %s: recovery persisted, but notifying consoles failed", event_id)
+    return changed
+
+
 async def _preview(ctx, payload):
     """Preview before going live: reserve the room so the host can check camera/mic against
-    real infrastructure. No session row — nothing has been broadcast yet."""
+    real infrastructure. No session row — nothing has been broadcast yet.
+
+    Never demotes a broadcast that is already on air. This used to write status="preview"
+    unconditionally — into the SHARED bus state, and out to every console on the event — so a
+    host who hit the Preview key mid-broadcast (or whose console armed the preview for any
+    other reason) knocked their own live broadcast back to "preview" everywhere. On the
+    client that flipped `live` false, which is exactly what hooks/useLiveKitPublish.js gates
+    `enabled` on, so the publisher tore itself down and viewers lost audio and video while
+    the host was still sitting there apparently live. Reserving a room and minting a token
+    are both safe while live; only the status write was ever the problem, so only it is
+    conditional.
+    """
     enforced = await livekit.ensure_room(ctx.room)
-    state = await bus.state_set(ctx.event_id, {"status": "preview"})
+    state = await bus.state_get(ctx.event_id)
+    status = state.get("status")
+    if status not in ("live", "paused"):
+        state = await bus.state_set(ctx.event_id, {"status": "preview"})
+        status = "preview"
     return [("broadcast", "broadcast.preview", {
-        "status": "preview", "enforced": enforced,
+        "status": status, "enforced": enforced,
         "settings": state.get("settings", DEFAULT_SETTINGS),
         # Consumed by hooks/useLiveKitPublish.js: the host studio connects and publishes the
         # already-acquired camera/mic tracks with this token once the broadcast goes live.
-        "publish_token": livekit.create_stream_token(ctx.identity, ctx.room, True)
+        # secondary(..., "host"): this is the host's SECOND simultaneous LiveKit connection
+        # for this event whenever they also visit the public watch page as a signed-in org
+        # member (routers/events.py's watch_event, identity=str(user.id), same as this
+        # ctx.identity) — tagging it is what stops the two from evicting each other via
+        # LiveKit's one-connection-per-identity rule (see services/livekit.py's secondary/
+        # primary docstring).
+        "publish_token": livekit.create_stream_token(livekit.secondary(ctx.identity, "host"), ctx.room, True)
         if livekit.configured() else None,
         "livekit_url": livekit.settings.LIVEKIT_URL or None,
     })]
@@ -618,6 +739,27 @@ async def _recording_start(ctx, payload):
     if existing:
         return "A recording is already running"
 
+    # _current_recordings is scoped to the CURRENT session, so a row orphaned by an earlier
+    # session that crashed mid-recording (never reached "stopped"/"failed") won't show up
+    # above but would still sit there forever as a false "recording" in the org's history and
+    # confuse anything that scans by event_id alone. Reconcile it now, on the natural trigger
+    # of someone actually trying to record again — logged so an operator can see it happened.
+    orphaned = await mod.tx(lambda db: [str(r.id) for r in db.scalars(
+        select(LiveRecording).where(
+            LiveRecording.event_id == ctx.event_id, LiveRecording.org_id == ctx.org_id,
+            LiveRecording.status.in_(("recording", "paused")),
+        )
+    ).all()])
+    if orphaned:
+        def _fail_orphans(db):
+            for rid in orphaned:
+                r = db.get(LiveRecording, uuid.UUID(rid))
+                if r is not None and r.status in ("recording", "paused"):
+                    r.status, r.error = "failed", "Orphaned from a previous broadcast session"
+        await mod.tx(_fail_orphans)
+        log.warning("event %s: %d orphaned recording row(s) marked failed before starting a new one",
+                    ctx.event_id, len(orphaned))
+
     if not await mod.tx(lambda db: _feature_enabled(db, "recordings_enabled", default=True)):
         return "Recording is temporarily disabled platform-wide — contact support"
 
@@ -629,12 +771,21 @@ async def _recording_start(ctx, payload):
     # two separate egress jobs, two separate rows/files — so a recorder failure on one never
     # means total loss. An ordinary event (dual False) keeps the exact single-row path this
     # always had.
+    # A specific diagnosis (bad/missing GCS credential vs. a generic LiveKit error) so the
+    # host sees the true cause instead of a bare "LiveKit egress unavailable" — the audit
+    # found this env's own GCS_CREDENTIALS_PATH pointed at a Console URL, not a key file,
+    # and the only visible symptom was a silently-uncaptured recording.
+    gcs_error = livekit.gcs_config_error()
+
     roles = ("primary", "secondary") if dual else (None,)
     started: list[tuple[str | None, str, str | None, str | None]] = []   # (role, filepath, egress_id, error)
     for role in roles:
         suffix = f"-{role}" if role else ""
         filepath = f"zoikostream/{ctx.org_id}/{ctx.event_id}/{int(now.timestamp())}{suffix}.mp4"
         egress_id, error = await livekit.start_recording(ctx.room, quality, filepath)
+        if egress_id is None and gcs_error:
+            error = gcs_error
+            log.warning("event %s: recording start not captured — %s", ctx.event_id, gcs_error)
         started.append((role, filepath, egress_id, error))
 
     def work(db):
@@ -722,14 +873,25 @@ async def _recording_stop(ctx, payload):
 
 async def _stage_media(ctx, payload, kind: str):
     """Force a participant's camera or screen share off (or allow it back on). LiveKit's
-    publish permission is the real lever, so revoking it is what actually stops a track."""
+    publish permission is the real lever, so revoking it is what actually stops a track.
+
+    Audit fix: presence's camera_allowed/share_allowed used to be written unconditionally —
+    the same "state persisted as if it succeeded" bug already fixed for contributor
+    bring_live/mute/remove/standby. If LiveKit didn't actually apply the change, presence
+    now keeps its PRIOR value (not a fabricated new one) instead of showing "camera off"
+    for a participant who can still actually publish."""
     identity = str(payload.get("identity") or "")
     if not identity:
         return []
     allowed = bool(payload.get("allowed", True))
     enforced = await livekit.set_stage(ctx.room, identity, allowed)
     field = "camera_allowed" if kind == "camera" else "share_allowed"
-    rec = await bus.presence_upsert(ctx.event_id, identity, {field: allowed})
+    if enforced:
+        rec = await bus.presence_upsert(ctx.event_id, identity, {field: allowed})
+    else:
+        log.warning("stage.%s(%s) not enforced by LiveKit for %s on event %s — presence left unchanged",
+                    kind, allowed, identity, ctx.event_id)
+        rec = await bus.presence_upsert(ctx.event_id, identity, {})  # unchanged; just re-read for `name` below
     name = rec.get("name") or identity
     verb = "enabled" if allowed else "disabled"
     act = await mod.tx(lambda db: mod.record(
@@ -752,7 +914,16 @@ async def _stage_admit(ctx, payload):
         frames = [("participants", "participant.update", rec),
                   ("stage", "waiting.admitted", {"identity": identity})]
     else:
-        await livekit.remove_participant(ctx.room, identity)
+        # Audit fix: the LiveKit removal result was previously discarded entirely — presence
+        # was always cleared, so a denied visitor whom LiveKit failed to actually remove
+        # (unconfigured/unreachable) vanished from the roster while still connected to the
+        # room's media. Only drop them from presence once LiveKit confirms the removal.
+        enforced = await livekit.remove_participant(ctx.room, identity)
+        if not enforced:
+            log.warning("waiting-room deny not enforced by LiveKit for %s on event %s",
+                        identity, ctx.event_id)
+            return [("moderator", "action.result",
+                    {"op": "stage.deny", "identity": identity, "enforced": False})]
         rec = await bus.presence_remove(ctx.event_id, identity) or {"identity": identity}
         frames = [("participants", "participant.leave", rec),
                   ("stage", "waiting.denied", {"identity": identity})]
@@ -779,18 +950,32 @@ async def _stage_admit_all(ctx, payload):
 
 
 async def _stage_mute_all(ctx, payload):
-    """Mute everyone who isn't running the show — the single most-used host control."""
+    """Mute everyone who isn't running the show — the single most-used host control.
+
+    Audit fix: each target's mute result used to be discarded — presence always flipped to
+    muted:true regardless, so a participant LiveKit failed to actually mute showed as
+    silenced in the console while still audible. Presence now only flips for the targets
+    LiveKit confirmed; the rest are logged and counted separately in the activity note so a
+    host isn't left thinking the whole room went quiet when part of it didn't."""
     people = await bus.presence_all(ctx.event_id)
     targets = [p for p in people
                if p.get("role") not in ("host", "moderator") and not p.get("muted")]
     frames = []
+    failed = 0
     for p in targets:
-        await livekit.mute_participant(ctx.room, p["identity"], True)
+        enforced = await livekit.mute_participant(ctx.room, p["identity"], True)
+        if not enforced:
+            failed += 1
+            log.warning("mute_all: not enforced by LiveKit for %s on event %s", p["identity"], ctx.event_id)
+            continue
         rec = await bus.presence_upsert(ctx.event_id, p["identity"], {"muted": True})
         frames.append(("participants", "participant.update", rec))
+    muted = len(targets) - failed
+    note = f"Host muted {muted} participant(s)" + (f" ({failed} could not be enforced)" if failed else "")
     act = await mod.tx(lambda db: mod.record(
-        db, ctx, "mod", f"Host muted {len(targets)} participant(s)",
-        audit="live.stage.mute_all", target_type="participant", meta={"count": len(targets)}))
+        db, ctx, "mod", note,
+        audit="live.stage.mute_all", target_type="participant",
+        meta={"count": muted, "failed": failed}))
     return [*frames, ("activity", "activity.new", act)]
 
 
@@ -989,9 +1174,9 @@ async def snapshot_extra(ctx) -> dict:
         "livekit_url": livekit.settings.LIVEKIT_URL or None,
         # Present only for hosts, and only when LiveKit is configured. This is the token
         # hooks/useLiveKitPublish.js connects and publishes with once `live` is true — see
-        # that hook and _preview's own publish_token above for the same token on the
-        # pre-go-live path.
-        "publish_token": livekit.create_stream_token(ctx.identity, ctx.room, True)
+        # that hook and _preview's own publish_token above for the same token (and the same
+        # secondary(..., "host") tagging — see services/livekit.py) on the pre-go-live path.
+        "publish_token": livekit.create_stream_token(livekit.secondary(ctx.identity, "host"), ctx.room, True)
         if (ctx.can_host and livekit.configured()) else None,
     }
 
@@ -1003,7 +1188,7 @@ async def _sample_once() -> list[tuple[str, dict]]:
     separate from the moderation scheduler so neither has to import the other."""
     sessions = await mod.tx(lambda db: [
         {"event_id": str(s.event_id), "org_id": str(s.org_id), "id": str(s.id),
-         "status": s.status, "peak": s.peak_viewers}
+         "status": s.status, "peak": s.peak_viewers, "started_at": s.started_at}
         for s in db.scalars(
             select(BroadcastSession).where(BroadcastSession.ended_at.is_(None))).all()
     ])
@@ -1034,11 +1219,28 @@ async def _sample_once() -> list[tuple[str, dict]]:
 
         counts = await mod.tx(write)
         await bus.state_set(event_id, {"peak_viewers": peak})
+        health = health_of(split, s["status"], None)
+
+        # This IS the audit's "reconciliation" mechanism, not a separate ticker: every open
+        # session gets its real, LiveKit-webhook-driven publishing state cross-checked
+        # against the DB every SAMPLE_SECONDS, and self-corrects in either direction. A
+        # startup grace window keeps the normal post-Go-Live camera/mic warm-up from being
+        # mistaken for a drop; health_of() itself already never reports "down" for a paused
+        # session, so a manual pause can never trigger this.
+        if health["level"] == "down":
+            started = s["started_at"]
+            past_grace = started is None or (
+                datetime.now(timezone.utc) - started).total_seconds() > DEGRADE_GRACE_SECONDS
+            if past_grace:
+                await mark_degraded(event_id, s["org_id"], "No media is being published")
+        else:
+            await mark_recovered(event_id, s["org_id"])
+
         out.append((event_id, {
             **split, "peak_viewers": peak,
             "engagement": engagement_score(counts, peak),
             "avg_watch_seconds": _watch_seconds(people, datetime.now(timezone.utc).timestamp()),
-            "health": health_of(split, s["status"], None),
+            "health": health,
             "t": datetime.now(timezone.utc).isoformat(),
         }))
     return out

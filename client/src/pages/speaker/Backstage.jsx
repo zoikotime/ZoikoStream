@@ -133,12 +133,15 @@ export default function Backstage() {
 
   // Return feed: the same subscribe-only token a viewer gets from GET /events/:id/watch —
   // a logged-in org member always clears its org-membership check, so this needs no new
-  // backend endpoint.
+  // backend endpoint. `monitor: true` tags this connection's LiveKit identity distinctly
+  // from this same contributor's own publish connection below (my_publish_token) — both
+  // would otherwise resolve to the identical identity (str(user.id)) and evict each other
+  // (see services/livekit.py's secondary()/primary() docstring).
   const [watch, setWatch] = useState(null);
   useEffect(() => {
     if (!eventId) return undefined;
     let cancelled = false;
-    api.get(`/events/${eventId}/watch`).then(({ data }) => {
+    api.get(`/events/${eventId}/watch`, { params: { monitor: true } }).then(({ data }) => {
       if (!cancelled) setWatch(data);
     }).catch(() => {});
     return () => { cancelled = true; };
