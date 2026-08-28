@@ -72,7 +72,6 @@ class Event(Base):
     polls_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     raise_hand_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     allow_screen_share: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    auto_start_recording: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     auto_end_event: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)

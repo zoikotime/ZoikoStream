@@ -8,7 +8,14 @@ Run: `python test_broadcast.py` (or pytest)."""
 import asyncio
 import types
 import uuid
+from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
+
+from app.db import SessionLocal
+from app.models import (
+    AnalyticsSnapshot, BroadcastSession, Event, LiveActivity, LiveRecording, Organization, User,
+)
 from app.services import broadcast as bc
 from app.services import moderation as m
 
@@ -201,11 +208,65 @@ def test_session_out_tolerates_no_session():
     assert set(bc.DEFAULT_SETTINGS) <= set(out["settings"])
 
 
+def _preview_status(existing_status):
+    """Runs _preview against a fresh in-process bus state seeded with `existing_status`, and
+    reports (status it published, status it left in the shared bus state).
+
+    Blanks REDIS_URL rather than clearing bus._redis: bus.redis() short-circuits to the
+    in-process dict when the URL is unset, so nothing new is connected. Clearing the cached
+    client instead makes the NEXT redis() build one bound to this asyncio.run()'s loop, which
+    then dies with it and fails an unrelated later test in the same process with
+    "Event loop is closed". LiveKit is stubbed for the same reason a unit test shouldn't need
+    a network: _preview's room reservation is not what this asserts."""
+    from app.services import bus
+    from app.services import livekit as lk
+
+    ctx = _ctx(can_host=True, role="org_admin")
+    url, ensure = bus.settings.REDIS_URL, lk.ensure_room
+
+    async def _stub_ensure_room(room, empty_timeout=600):
+        return True
+
+    bus.settings.REDIS_URL = ""
+    lk.ensure_room = _stub_ensure_room
+    try:
+        async def run():
+            if existing_status:
+                await bus.state_set(ctx.event_id, {"status": existing_status})
+            frames = await bc._preview(ctx, {})
+            return frames[0][2]["status"], (await bus.state_get(ctx.event_id)).get("status")
+
+        return asyncio.run(run())
+    finally:
+        bus.settings.REDIS_URL = url
+        lk.ensure_room = ensure
+
+
+def test_preview_never_demotes_a_broadcast_that_is_on_air():
+    """THE BUG: _preview wrote status="preview" unconditionally — into the SHARED bus state
+    and out to every console on the event. A host who armed the preview mid-broadcast knocked
+    their own live broadcast back to "preview" everywhere; on the client that flips `live`
+    false, which is exactly what hooks/useLiveKitPublish.js gates `enabled` on, so the
+    publisher tore itself down and viewers lost audio and video while the host still looked
+    live. Reserving the room and minting the token are safe while live; only the status
+    write ever needed to be conditional."""
+    for on_air in ("live", "paused"):
+        published, stored = _preview_status(on_air)
+        assert published == on_air, f"preview published {published!r} over a {on_air} broadcast"
+        assert stored == on_air, f"preview stored {stored!r} over a {on_air} broadcast"
+
+
+def test_preview_still_marks_an_idle_event_as_previewing():
+    for idle in (None, "preview", "ended"):
+        published, stored = _preview_status(idle)
+        assert published == "preview"
+        assert stored == "preview"
+
+
 def _fake_event(**overrides):
     base = dict(
         category="Webinar", chat_enabled=True, qa_enabled=True, polls_enabled=True,
         waiting_room_enabled=False, raise_hand_enabled=True, allow_screen_share=True,
-        auto_start_recording=False,
     )
     base.update(overrides)
     return types.SimpleNamespace(**base)
@@ -238,6 +299,15 @@ def test_seed_settings_tolerates_no_event():
     assert bc._seed_settings(None) == dict(bc.DEFAULT_SETTINGS)
 
 
+def test_seed_settings_auto_upload_uses_the_plain_default():
+    """Audit fix: auto_upload (upload-on-stop) used to be silently driven by
+    Event.auto_start_recording — a different setting (whether recording auto-STARTS, which
+    it never did — see ACTIONS/_recording_start, always a deliberate host action) that has
+    since been removed from the Event model/schema entirely as dead, unexposed config.
+    auto_upload now always seeds from the plain default, independent of anything on Event."""
+    assert bc._seed_settings(_fake_event())["auto_upload"] == bc.DEFAULT_SETTINGS["auto_upload"]
+
+
 def _fake_recording(**overrides):
     """recording_out only reads attributes off the row, so a SimpleNamespace stands in for
     a LiveRecording without a DB — same technique as test_contributor.py's _session."""
@@ -258,6 +328,178 @@ def test_recording_out_carries_role():
     assert bc.recording_out(_fake_recording(role="primary"))["role"] == "primary"
     assert bc.recording_out(_fake_recording(role="secondary"))["role"] == "secondary"
     assert bc.recording_out(_fake_recording())["role"] is None
+
+
+# ── mark_degraded / mark_recovered / session-scoped recordings (real DB) ───────
+# Same real-DB-with-cleanup pattern as test_registration.py: these write actual rows through
+# app.db.SessionLocal (the functions under test use mod.tx internally, a separate connection
+# from this test's own `db`, so setup/teardown commit explicitly rather than relying on a
+# rollback — a rollback here would not undo what the other connection already committed).
+
+NOW = datetime.now(timezone.utc)
+
+
+def _db_org(db):
+    o = Organization(name=f"org-test-{uuid.uuid4().hex[:8]}", status="active")
+    db.add(o)
+    db.flush()
+    return o
+
+
+def _db_user(db, org):
+    u = User(
+        org_id=org.id, full_name="Test Owner", role="org_admin", is_active=True,
+        email=f"t{uuid.uuid4().hex[:10]}@example.com",
+        username=f"u{uuid.uuid4().hex[:10]}", password_hash="x",
+    )
+    db.add(u)
+    db.flush()
+    return u
+
+
+def _db_event(db, org, creator, status="live", **kw):
+    e = Event(org_id=org.id, created_by=creator.id, title="Broadcast Test Event",
+              status=status, start_time=NOW - timedelta(minutes=5), visibility="public", **kw)
+    db.add(e)
+    db.flush()
+    return e
+
+
+def _db_cleanup(db, org, user, ev, extra_rows=()):
+    # mark_degraded/mark_recovered/_golive etc. write LiveActivity rows through their own
+    # (mod.tx-opened) connection — this session must re-query for them rather than assume
+    # nothing landed, same reasoning test_registration.py's _cleanup gives for committing
+    # its own setup before the endpoint under test runs.
+    db.query(LiveActivity).filter(LiveActivity.event_id == ev.id).delete()
+    # A real dev server's ticker (services/broadcast.py::run_sampler) may be running against
+    # this same database and can sample a test event that briefly went "live" before this
+    # cleanup runs, writing an AnalyticsSnapshot that would otherwise FK-block deleting the
+    # event.
+    db.query(AnalyticsSnapshot).filter(AnalyticsSnapshot.event_id == ev.id).delete()
+    for row in extra_rows:
+        db.delete(row)
+    db.delete(ev)
+    db.delete(user)
+    db.delete(org)
+    db.commit()
+
+
+def test_mark_degraded_and_recovered_round_trip():
+    """The core of the audit's Critical #1/#2 fix: a producer disconnect now has to survive
+    as a real Postgres value, not just an ephemeral bus event. Also proves the no-op guards —
+    mark_degraded only fires from "live", mark_recovered only from "degraded" — so calling
+    either on every sampler tick (services/broadcast.py's extended _sample_once) can never
+    stomp on an event a host has since ended."""
+    db = SessionLocal()
+    org = _db_org(db)
+    user = _db_user(db, org)
+    ev = _db_event(db, org, user, status="live")
+    db.commit()
+    try:
+        assert asyncio.run(bc.mark_degraded(str(ev.id), str(org.id), "No media is being published")) is True
+        db.expire_all()
+        assert db.get(Event, ev.id).status == "degraded"
+
+        # No-op: already degraded, not "live".
+        assert asyncio.run(bc.mark_degraded(str(ev.id), str(org.id), "again")) is False
+
+        assert asyncio.run(bc.mark_recovered(str(ev.id), str(org.id))) is True
+        db.expire_all()
+        assert db.get(Event, ev.id).status == "live"
+
+        # No-op: already live, not "degraded".
+        assert asyncio.run(bc.mark_recovered(str(ev.id), str(org.id))) is False
+    finally:
+        _db_cleanup(db, org, user, ev)
+        db.close()
+
+
+def test_mark_degraded_does_not_touch_an_ended_event():
+    """Required behavior #7 from the audit: 'avoid incorrectly marking a normally ended
+    event as degraded'. mark_degraded's guard (status must be "live") makes this structural,
+    not timing-dependent — even if a stale sampler tick for an already-ended event's session
+    runs after End, it can't regress the event backward out of "ended"."""
+    db = SessionLocal()
+    org = _db_org(db)
+    user = _db_user(db, org)
+    ev = _db_event(db, org, user, status="ended")
+    db.commit()
+    try:
+        assert asyncio.run(bc.mark_degraded(str(ev.id), str(org.id), "stale tick")) is False
+        db.expire_all()
+        assert db.get(Event, ev.id).status == "ended"
+    finally:
+        _db_cleanup(db, org, user, ev)
+        db.close()
+
+
+def test_current_recordings_ignores_orphan_from_an_ended_session():
+    """Audit finding: _current_recordings used to be scoped by event_id alone, so a recording
+    row orphaned by a crash in an earlier (now-ended) BroadcastSession could still be reported
+    "active" once a later, unrelated Go Live opened a new session for the same event. Scoping
+    by the CURRENT session's id (see _current_recordings) is what this proves."""
+    db = SessionLocal()
+    org = _db_org(db)
+    user = _db_user(db, org)
+    ev = _db_event(db, org, user)
+    old_session = BroadcastSession(event_id=ev.id, org_id=org.id, status="ended",
+                                   started_at=NOW - timedelta(hours=1), ended_at=NOW - timedelta(minutes=30))
+    new_session = BroadcastSession(event_id=ev.id, org_id=org.id, status="live", started_at=NOW)
+    db.add_all([old_session, new_session])
+    db.flush()
+    orphan = LiveRecording(event_id=ev.id, org_id=org.id, session_id=old_session.id,
+                           status="recording", started_at=NOW - timedelta(minutes=45))
+    db.add(orphan)
+    db.commit()
+    try:
+        ctx = m.Ctx(event_id=ev.id, org_id=org.id, room=f"event_{ev.id}", user_id=user.id,
+                   name="Test Host", identity=str(user.id), role="host",
+                   can_moderate=True, can_host=True)
+        active = bc._current_recordings(db, ctx)
+        assert active == [], "an orphaned recording from an ENDED session must not read as active"
+    finally:
+        _db_cleanup(db, org, user, ev, extra_rows=[orphan, old_session, new_session])
+        db.close()
+
+
+def test_concurrent_golive_creates_exactly_one_open_session():
+    """The actual race, not just the index in isolation: two concurrent Go Live requests for
+    the same event must resolve to one open BroadcastSession. Exercises the real _golive
+    (commercial gate, LiveKit ensure_room, the INSERT, and the IntegrityError retry) — a
+    fabricated DB-locking test wouldn't prove the retry path in _golive.py:_golive itself
+    actually gets hit and actually recovers cleanly."""
+    db = SessionLocal()
+    org = _db_org(db)
+    user = _db_user(db, org)
+    ev = _db_event(db, org, user, status="published")
+    db.commit()
+    try:
+        ctx = m.Ctx(event_id=ev.id, org_id=org.id, room=f"event_{ev.id}", user_id=user.id,
+                   name="Test Host", identity=str(user.id), role="host",
+                   can_moderate=True, can_host=True)
+
+        async def race():
+            return await asyncio.gather(bc._golive(ctx, {}), bc._golive(ctx, {}))
+
+        results = asyncio.run(race())
+        # Neither request may raise/surface the IntegrityError to the caller — both must
+        # resolve to a normal frame list.
+        for r in results:
+            assert isinstance(r, list), f"a concurrent go-live leaked an error instead of resolving: {r!r}"
+
+        db.expire_all()
+        open_sessions = db.scalars(
+            select(BroadcastSession).where(BroadcastSession.event_id == ev.id,
+                                           BroadcastSession.ended_at.is_(None))
+        ).all()
+        assert len(open_sessions) == 1, \
+            f"expected exactly one open BroadcastSession, found {len(open_sessions)}"
+        assert db.get(Event, ev.id).status == "live"
+    finally:
+        db.expire_all()
+        sessions = db.scalars(select(BroadcastSession).where(BroadcastSession.event_id == ev.id)).all()
+        _db_cleanup(db, org, user, ev, extra_rows=sessions)
+        db.close()
 
 
 if __name__ == "__main__":

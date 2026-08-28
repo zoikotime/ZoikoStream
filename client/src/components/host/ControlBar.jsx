@@ -119,11 +119,23 @@ export default function ControlBar({
   // hooks/useLiveEvent.js "host/broadcast.error") — shown here, next to the control that
   // failed, rather than only as a toast that scrolls away.
   goLivePending = false, goLiveError = null,
+  // Whether the opening moderator/snapshot has arrived (hooks/useLiveEvent state.ready).
+  // Defaults true so nothing that renders this deck without the flag silently reads as
+  // permanently connecting.
+  ready = true,
 }) {
   const status = broadcast?.status || "preview";
   const live = status === "live";
   const paused = status === "paused";
   const ended = status === "ended";
+  // "We don't know yet" is not "you may not". canHost starts false in the reducer's EMPTY
+  // state and only becomes true when the snapshot lands, so until then every permission-
+  // derived control here was reporting a REFUSAL it had no basis for: Go Live sat disabled
+  // telling an org_admin "Only the event host can start or pause the broadcast". Measured on
+  // a real console against a remote database, that window was ~6s on a clean load, and it
+  // lasts as long as the socket keeps failing to connect — i.e. indefinitely on a bad
+  // network, with the host staring at a permission error that was never true.
+  const connecting = !ready;
   const rec = recording?.status;
   const shareBlocked = broadcast?.settings?.allow_screen_share === false;
 
@@ -300,13 +312,15 @@ export default function ControlBar({
             <button
               type="button"
               onClick={live ? onPause : onGoLive}
-              disabled={!canHost || ended || (!live && goLivePending)}
-              title={!canHost
-                ? "Only the event host can start or pause the broadcast"
-                : live ? "Pause the broadcast"
-                  : ended ? "This event has ended"
-                    : goLivePending ? "Waiting for the server to confirm…"
-                      : "Start broadcasting"}
+              disabled={connecting || !canHost || ended || (!live && goLivePending)}
+              title={connecting
+                ? "Connecting to the studio — this control unlocks once the console is in sync"
+                : !canHost
+                  ? "Only the event host can start or pause the broadcast"
+                  : live ? "Pause the broadcast"
+                    : ended ? "This event has ended"
+                      : goLivePending ? "Waiting for the server to confirm…"
+                        : "Start broadcasting"}
               className={cx(
                 "inline-flex h-10 items-center gap-2 rounded-lg px-4 text-[13px] font-semibold",
                 live ? TRANSPORT.hold : TRANSPORT.primary,
@@ -315,9 +329,14 @@ export default function ControlBar({
             >
               {live
                 ? <><FiPause aria-hidden="true" className="text-base" /> Pause</>
-                : goLivePending
-                  ? <><FiLoader aria-hidden="true" className="text-base animate-spin" /> Starting…</>
-                  : (
+                : connecting
+                  // Distinct from "Starting…" below, which means the go-live request itself
+                  // is in flight. This one means the console is not in sync yet, so the
+                  // host can tell "wait a moment" apart from "your click is being processed".
+                  ? <><FiLoader aria-hidden="true" className="text-base animate-spin" /> Connecting…</>
+                  : goLivePending
+                    ? <><FiLoader aria-hidden="true" className="text-base animate-spin" /> Starting…</>
+                    : (
                     <>
                       {/* Go Live is the one action the whole deck exists for, so its glyph
                           transmits while the broadcast is still idle. */}

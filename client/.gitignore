@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Playwright E2E artifacts — traces/screenshots can capture page state; never commit them.
+/test-results/
+/playwright-report/
+/blob-report/
+/e2e/.auth/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

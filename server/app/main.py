@@ -24,6 +24,7 @@ from .routers.contact import router as contact_router
 from .security import ALGORITHM
 from .services import bus
 from .services import platform_settings
+from .services import livekit
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
 from .services.ops import request_stats, run_metric_sampler
@@ -67,6 +68,18 @@ async def lifespan(_: FastAPI):
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=DB_MAX_CONNECTIONS, thread_name_prefix="zoiko-db")
     loop.set_default_executor(executor)
+
+    # Same "loudly flagged at startup" posture as config.py's SECRET_KEY check: a bad GCS
+    # credential (e.g. a Console URL instead of a downloaded service-account key file — the
+    # exact misconfiguration the live-streaming audit found in this deployment's .env)
+    # otherwise only ever shows up as a silent "not captured" recording, discovered by a host
+    # long after the fact. Recording is optional (many events run with none configured at
+    # all), so this warns rather than refusing to boot. Runs in every process (leader or
+    # follower) — unlike the tickers below, this is a per-process config check, not a job
+    # that would duplicate if it ran more than once.
+    gcs_error = livekit.gcs_config_error()
+    if gcs_error:
+        log.warning("Recording uploads will not work: %s", gcs_error)
 
     supervisor = asyncio.create_task(_ticker_supervisor())
     try:

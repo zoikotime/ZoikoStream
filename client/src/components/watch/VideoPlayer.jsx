@@ -164,8 +164,19 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false, ch
   // whichever one is live right now (the LiveKit stream, or the recorded replay).
   useEffect(() => {
     if (!canStream || !mediaRef.current) return;
-    if (playing) mediaRef.current.play().catch(() => {}); // autoplay can be blocked pre-interaction
-    else mediaRef.current.pause();
+    if (playing) {
+      // Rejection isn't always the expected "blocked pre-interaction" case this is muted
+      // for — logging it (not just swallowing it) means a genuinely different autoplay
+      // failure leaves a trace instead of nothing. Reverting `playing` to false keeps the
+      // visible play/pause button honest: without this, the button showed "playing" while
+      // the element sat paused, with no way to tell from the UI.
+      mediaRef.current.play().catch((e) => {
+        console.warn("Live video play() rejected:", e?.name || e);
+        setPlaying(false);
+      });
+    } else {
+      mediaRef.current.pause();
+    }
   }, [canStream, playing, hasVideo, mediaRef]);
 
   // livekit-client's own attachToElement() (called on every track.attach(), including a
@@ -184,8 +195,14 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false, ch
 
   useEffect(() => {
     if (!canReplay || !replayRef.current) return;
-    if (playing) replayRef.current.play().catch(() => {});
-    else replayRef.current.pause();
+    if (playing) {
+      replayRef.current.play().catch((e) => {
+        console.warn("Replay video play() rejected:", e?.name || e);
+        setPlaying(false);
+      });
+    } else {
+      replayRef.current.pause();
+    }
   }, [canReplay, playing]);
 
   useEffect(() => {
@@ -243,10 +260,17 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false, ch
   };
 
   const showPlayOverlay = !playing || (!isLive && !isEnded);
-  const showPlaceholder = canReplay ? !replayStarted : !canStream || !hasVideo;
+  // !hasVideo && !hasAudio, not just !hasVideo: an audio-only stream (host's camera off, or
+  // video simply hasn't attached yet while audio already has) used to stay stuck behind
+  // "waiting for the host's camera" with no unmute prompt below ever appearing — the viewer
+  // heard nothing and had no way to know why. Either track arriving is enough to drop the
+  // placeholder.
+  const showPlaceholder = canReplay ? !replayStarted : !canStream || (!hasVideo && !hasAudio);
   // Actually watchable right now, but silent because it started muted (autoplay policy) —
   // worth a visible nudge, since a silently-muted stream with no indicator reads as broken.
-  const showUnmutePrompt = muted && !showPlaceholder && ((canStream && hasVideo) || (canReplay && replayStarted));
+  // hasAudio alongside hasVideo for the same reason as showPlaceholder above.
+  const showUnmutePrompt = muted && !showPlaceholder
+    && ((canStream && (hasVideo || hasAudio)) || (canReplay && replayStarted));
 
   return (
     <div
@@ -370,11 +394,19 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false, ch
                     ? streamError
                     : canStream && reconnecting
                       ? "Reconnecting…"
-                      : canStream && connected
-                        ? "Waiting for the host's camera…"
-                        : isLive
-                          ? "On air now"
-                          : "Host"}
+                      // Backend-confirmed (services/broadcast.py mark_degraded, via
+                      // GET /events/:id/watch's media_status) — distinct from the transient,
+                      // client-only `reconnecting` above: this means the SERVER has verified
+                      // the producer's media actually dropped, not just this viewer's own
+                      // socket. Worth its own honest wording rather than folding into the
+                      // generic "waiting for camera" case below.
+                      : canStream && watch?.media_status === "reconnecting"
+                        ? "The host's connection dropped — waiting for them to reconnect…"
+                        : canStream && connected
+                          ? "Waiting for the host's camera…"
+                          : isLive
+                            ? "On air now"
+                            : "Host"}
                 </p>
               </div>
             </div>

@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
 import useInterval from "../../hooks/useInterval";
 import useEventStream from "../../hooks/useEventStream";
+import { controlPlaneNotice } from "./controlPlaneNotice";
 import { Link, useParams } from "react-router-dom";
 import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
@@ -362,9 +363,20 @@ export default function EventWatch() {
   }, [fetchWatch, markAlert, panel.you, panel.participants, panel.reactions]);
   const {
     status: liveStatus,
+    closeReason: liveCloseReason,
     send: sendLive,
     disconnect: disconnectLive,
   } = useEventStream(eventId, onLiveEnvelope, regToken, linkToken);
+
+  // An honest word about the CONTROL socket, kept strictly separate from media state.
+  // liveStatus was previously consumed in only two places — a disabled control and the chat
+  // panel's connected dot — and closeReason was never read at all, so a viewer whose socket
+  // the server had explicitly REFUSED ("Invalid or expired session", close 1008, confirmed
+  // against production) sat on a normal-looking page with no explanation and no way to act.
+  // Deliberately does NOT touch the player: chat/polls/Q&A being offline says nothing about
+  // whether audio and video are arriving, and conflating them is what made a dead control
+  // plane read as "the event is in preview".
+  const controlNotice = controlPlaneNotice(liveStatus, liveCloseReason);
 
   // This viewer's own presence record, once the snapshot has named it — whether they're
   // currently invited on stage (mic live, real LiveKit publish grant; see
@@ -542,6 +554,19 @@ export default function EventWatch() {
 
       {/* Top section: banner */}
       <WatchHeader event={event} viewers={viewers} />
+
+      {controlNotice && (
+        <p
+          role="status"
+          className={
+            controlNotice.tone === "error"
+              ? "border-b border-rose-200 bg-rose-50 px-4 py-2 text-center text-[13px] font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
+              : "border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-[13px] font-medium text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
+          }
+        >
+          {controlNotice.text}
+        </p>
+      )}
 
       {/* Main layout: player + info (70%) / chat panel (30%).
           Explicit row/column placement rather than nesting the info card inside the left
