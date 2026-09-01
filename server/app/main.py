@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from jose import JWTError, jwt
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +27,14 @@ from .services import platform_settings
 from .services import livekit
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
+from .services.org_comms import run_invitation_reminders
+from .services.credential_lifecycle import run_credential_sweeper
+from .services.org_state import require_operational_org_access
+from .services.media_comms import run_media_sweeper
+from .services.media_retention import run_retention_sweeper
+from .services.signing_rotation import run_signing_rotation_sweeper
+from .services.org_governance import run_governance_sweeper
+from .services.support_access import run_support_access_sweeper
 from .services.ops import request_stats, run_metric_sampler
 from .services.webhooks import run_webhook_retries
 from .services.delivery import run_watermark_processor
@@ -42,7 +50,7 @@ log = logging.getLogger(__name__)
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Six background tickers, each owning its own domain (which is also what keeps
+    """Thirteen background tickers, each owning its own domain (which is also what keeps
     moderation and broadcast from having to import each other):
       * scheduler  — fires scheduled polls/announcements, closes timed-out polls
       * sampler    — writes analytics snapshots (the retention graph) and pushes live counters
@@ -51,9 +59,22 @@ async def lifespan(_: FastAPI):
       * watermark  — burns the policy watermark into pending customer exports (services/delivery.py)
       * validation — compares a dual-recording pair and advances its replay entitlement
                      once real evidence exists (services/validation.py)
+      * invites    — sends the ZST-EC-001 ORG-001 Reminder for invitations nearing expiry
+                     (services/org_comms.py)
+      * support    — warns on and closes expiring authorized support sessions, so ORG-009
+                     access is time-bound by the platform rather than by trust
+                     (services/support_access.py)
+      * governance — access-review reminders/overdue and ownership-transfer expiry
+                     (services/org_governance.py)
+      * credential — API-credential expiry warnings and dormancy (services/credential_lifecycle.py)
+      * signing    — webhook signing-secret rotation overlap windows (services/signing_rotation.py)
+      * media      — governed live-input signal transitions (services/media_comms.py)
+      * retention  — recording retention warnings and replay-availability expiry, both
+                     deadline-driven so neither has a request or webhook that could carry
+                     them (services/media_retention.py)
     The bus releases its Redis client on the way out.
 
-    All six run in the LEADER process only, elected by a Postgres advisory lock (see
+    All thirteen run in the LEADER process only, elected by a Postgres advisory lock (see
     db.try_acquire_ticker_leadership). They previously ran in every process, so a deployment
     with more than one instance fired each scheduled poll, webhook delivery and watermark burn
     once per instance. A follower serves HTTP normally and simply runs no tickers; it retries
@@ -108,6 +129,18 @@ def _start_tickers() -> list:
         asyncio.create_task(run_webhook_retries()),
         asyncio.create_task(run_watermark_processor()),
         asyncio.create_task(run_validation_processor()),
+        # ZST-EC-001 communication tickers. Every one of these sends email, so running them
+        # in more than one process would mail the same person twice - the duplicate-work
+        # problem leader election exists to solve, in its most visible form.
+        asyncio.create_task(run_invitation_reminders()),
+        asyncio.create_task(run_support_access_sweeper()),
+        asyncio.create_task(run_governance_sweeper()),
+        asyncio.create_task(run_credential_sweeper()),
+        asyncio.create_task(run_signing_rotation_sweeper()),
+        asyncio.create_task(run_media_sweeper()),
+        # MED-009 / MED-011. Retention warnings and replay expiry are both deadline-driven,
+        # so neither has a request or a webhook that could carry it.
+        asyncio.create_task(run_retention_sweeper()),
     ]
 
 
@@ -122,9 +155,9 @@ async def _stop_tickers(tasks: list) -> None:
 async def _ticker_supervisor() -> None:
     """Run the tickers only while this process is the elected leader.
 
-    One supervisor gates all six rather than each ticker checking for itself: the invariant is
-    "these jobs run in one process", so it belongs in one place. Six independent checks would
-    be six chances for one of them to drift out of step.
+    One supervisor gates all thirteen rather than each ticker checking for itself: the invariant is
+    "these jobs run in one process", so it belongs in one place. Thirteen independent checks
+    would be thirteen chances for one of them to drift out of step.
 
     If leadership is LOST mid-flight (the lock's connection dropped) the tickers are cancelled
     immediately, because by then a follower may already have been promoted. Stopping is always
@@ -254,10 +287,23 @@ async def maintenance_gate(request: Request, call_next):
 # at the bottom) and its client-side routes — /dashboard, /admin/*, /organization/* — are
 # spelled exactly like the router prefixes. Without the namespace a hard refresh on any of
 # those pages hits the API and gets JSON instead of the app.
-for router in (auth_router, dashboard_router, admin_router, organization_router,
-               events_router, live_router, commercial_router, deliveries_router,
-               contact_router):
+# ZST-EC-001 ORG-010. Organization-scoped routers carry the operational-state gate, so a
+# restricted or suspended tenant genuinely loses operational access instead of only being
+# told it did. The dependency resolves the caller optionally, so the public routes in these
+# routers (invitation preview/accept, event registration, watch) are unaffected, and it
+# allows an explicit preserved allowlist — billing, export, privacy, security settings and
+# support — so a restricted customer can still pay, retrieve their data or appeal.
+#
+# auth_router and admin_router are deliberately NOT gated: identity must keep working
+# (IDN-008 owns identity restriction, not this), and platform staff must still be able to
+# act on a restricted tenant.
+_ORG_STATE_GATE = [Depends(require_operational_org_access)]
+
+for router in (auth_router, dashboard_router, admin_router, contact_router):
     app.include_router(router, prefix="/api")
+for router in (organization_router, events_router, live_router, commercial_router,
+               deliveries_router):
+    app.include_router(router, prefix="/api", dependencies=_ORG_STATE_GATE)
 
 
 # A DB outage (e.g. Supabase paused, DNS blip) raises OperationalError. Without this,

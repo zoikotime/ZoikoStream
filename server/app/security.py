@@ -38,11 +38,14 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def create_access_token(user: User, remember: bool) -> str:
-    delta = (
-        timedelta(days=settings.REMEMBER_TOKEN_DAYS)
-        if remember
-        else timedelta(hours=settings.ACCESS_TOKEN_HOURS)
-    )
+    # ZST-EC-001 Phase 10. organizations.security.session_timeout was stored and displayed
+    # but never read, so a tenant that set "1 hour" still got the platform default. It is
+    # applied here, and only when it SHORTENS the session - the setting exists to tighten a
+    # tenant's own sessions, not to let one hold a token longer than the product allows.
+    from .services import org_policy   # local import: services import security
+
+    delta = org_policy.session_lifetime(getattr(user, "organization", None),
+                                        remember=remember)
     payload = {
         "sub": str(user.id),
         "role": user.role,

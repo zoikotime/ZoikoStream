@@ -34,5 +34,19 @@ class Invitation(Base):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # ZST-EC-001 ORG-001/ORG-002 notification markers. One per lifecycle transition, claimed
+    # by conditional UPDATE so a page refresh, a retried request or a second worker cannot
+    # send the same notice twice. They live on the invitation because the invitation IS the
+    # authoritative record of the lifecycle they describe.
+    #
+    # `reminder_sent_at` doubles as the reminder ticker's idempotency key: at most one
+    # reminder per invitation, and rotating the token on resend clears it so the new
+    # deadline can be reminded about once.
+    invited_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expired_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    joined_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     organization: Mapped["Organization"] = relationship()
     inviter: Mapped["User | None"] = relationship(foreign_keys=[invited_by_id])

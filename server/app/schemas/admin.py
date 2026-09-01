@@ -36,6 +36,10 @@ class OrgUpdate(BaseModel):
     domain: str | None = Field(None, max_length=255)
     region: str | None = Field(None, max_length=40)
     status: str | None = None
+    # ZST-EC-001 ORG-010. Coarse, customer-safe category recorded with an operational-state
+    # change so the notice can state a reason without exposing enforcement logic. Ignored
+    # for edits that do not change state.
+    reason_category: str | None = None
     storage_used_gb: float | None = None
     bandwidth_gb: float | None = None
     plan_slug: str | None = None  # switch the org's active subscription plan
@@ -287,6 +291,22 @@ class IncidentUpdate(BaseModel):
 # console needs. `kind` is free-text on the model; GOVERNANCE_KINDS below is this API's own
 # closed list, not a DB constraint, so the two ops.py-owned kinds keep working unmodified.
 
+class LegalHoldIn(BaseModel):
+    """A hold's actual legal instruction is privileged and has no field here — only a closed
+    category and an opaque reference, both of which are safe to render into a notification
+    sent to a data-governance mailbox."""
+
+    category: str
+    hold_reference: str = Field(..., max_length=80)
+
+
+class RetentionDecisionIn(BaseModel):
+    approve: bool
+    # An approver may grant less than was asked for. Null means "grant exactly the request".
+    granted_until: datetime | None = None
+    note: str | None = Field(None, max_length=2000)
+
+
 GOVERNANCE_KINDS = (
     "dpia", "legal_hold", "privacy_request", "access_review", "exception", "obligation",
     "single_path_override", "break_glass",
@@ -328,6 +348,10 @@ class ApiKeyOut(BaseModel):
     id: str
     label: str
     prefix: str
+    # Non-secret, hash-derived short identifier (ZST-EC-001 DEV-002). Shown in the console
+    # AND in the credential-created email so a security administrator can match the two
+    # without either surface ever carrying key material.
+    fingerprint: str | None = None
     created_at: datetime
     # None = non-expiring. Keys minted before expiry existed keep None rather than being
     # retroactively given a deadline.
@@ -351,6 +375,58 @@ class ApiKeyCreate(BaseModel):
 # are returned as-is rather than mirrored into a parallel model tree that would have to be
 # edited twice on every change. Only the REQUEST bodies are modelled — those are the ones
 # that need validating.
+
+# ── ORG-009 authorized support access (ZST-EC-001) ──────────────────────────
+# Staff-side request bodies. Nothing here can grant access: a request is a request, and a
+# session only starts through the approval gate in services/support_access.py.
+
+class SupportAccessCreate(BaseModel):
+    """Ask an Organization for scoped, time-limited access."""
+    org_id: uuid.UUID
+    case_reference: str = Field(min_length=3, max_length=60)
+    reason_category: str
+    engineer_display: str = Field(min_length=2, max_length=120)
+    requested_scope: str = Field(min_length=3, max_length=200)
+    allowed_actions: list[str] = Field(min_length=1)
+    # Capped in the schema AND clamped in the domain. No open-ended support access.
+    minutes: int = Field(60, ge=1, le=480)
+    emergency: bool = False
+    emergency_reason: str | None = Field(None, max_length=300)
+
+
+class SupportAccessAmend(BaseModel):
+    """Change the terms. Any change invalidates an existing approval."""
+    case_reference: str | None = Field(None, min_length=3, max_length=60)
+    requested_scope: str | None = Field(None, min_length=3, max_length=200)
+    allowed_actions: list[str] | None = None
+    minutes: int | None = Field(None, ge=1, le=480)
+
+
+class SupportAccessOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    org_id: uuid.UUID
+    case_reference: str
+    reason_category: str
+    engineer_display: str
+    requested_scope: str
+    requested_minutes: int
+    status: str
+    requested_at: datetime | None = None
+    approved_at: datetime | None = None
+    approved_by_email: str | None = None
+    starts_at: datetime | None = None
+    expires_at: datetime | None = None
+    ended_at: datetime | None = None
+    emergency: bool = False
+    post_use_review_at: datetime | None = None
+
+    @computed_field
+    @property
+    def allowed_action_list(self) -> list[str]:
+        return []
+
 
 class ElevationRequest(BaseModel):
     """Step-up privilege request. `minutes` is capped so an elevation can't be permanent."""

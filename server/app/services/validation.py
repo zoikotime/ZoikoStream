@@ -127,6 +127,107 @@ def validate_recording_pair(db, primary: LiveRecording, secondary: LiveRecording
     db.commit()
 
 
+def validate_single(db, recording: LiveRecording) -> None:
+    """The same real checks as a dual pair, for an event that records ONE path.
+
+    Single-path recordings previously never got a validation verdict at all — the pair
+    comparison was the only thing that ran, so `validation_status` stayed NULL forever and
+    an operator was told "Validation pending" indefinitely. MED-008 needs a verdict for
+    every asset, so this runs the checks that are meaningful without a second path to
+    compare against: the object exists, it downloads, ffprobe can read it, it has a
+    measurable duration, and it carries both an audio and a video track.
+
+    There is deliberately no duration COMPARISON here and no `duration_delta_seconds` key —
+    with one path there is nothing to compare it to, and emitting the key with a null value
+    would read as a check that ran and found nothing wrong.
+    """
+    evidence: dict = {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "gap_detection": "not implemented",
+        "caption_qa": "not implemented",
+        "comparison": "not applicable — single recording path",
+    }
+    verdict = "valid"
+
+    local_path = livekit.download_to_temp(recording.file_url)
+    if local_path is None:
+        evidence["single"] = {"error": "Could not download the file for inspection"}
+        verdict = "failed"
+    else:
+        probe = _ffprobe_info(local_path)
+        try:
+            os.remove(local_path)
+        except OSError:
+            pass
+        if probe is None:
+            evidence["single"] = {"error": "Could not read the file (ffprobe failed)"}
+            verdict = "failed"
+        else:
+            evidence["single"] = probe
+            if probe.get("duration_seconds") is None:
+                verdict = "degraded"
+            if not probe.get("has_video") or not probe.get("has_audio"):
+                verdict = "degraded"
+
+    recording.validation_status = verdict
+    recording.validation_evidence = evidence
+    db.commit()
+
+
+def _pending_singles(db) -> list[LiveRecording]:
+    """Single-path recordings captured but never validated."""
+    return list(db.scalars(
+        select(LiveRecording).where(
+            LiveRecording.role.is_(None), LiveRecording.status == "stopped",
+            LiveRecording.enforced.is_(True), LiveRecording.validation_status.is_(None),
+        )
+    ).all())
+
+
+def _finalized(db, *recordings: LiveRecording) -> None:
+    """Announce MED-008 and stamp the retention policy, once a verdict is committed.
+
+    Both happen here rather than at the call sites because they are consequences of the same
+    fact — the asset is final — and splitting them is how one of them ends up forgotten on a
+    new code path. Never raises: a communications or policy failure must not roll back a
+    validation verdict that genuinely ran.
+    """
+    from . import media_retention, recording_comms
+
+    for recording in recordings:
+        if recording is None:
+            continue
+        try:
+            media_retention.assign_retention(db, recording)
+        except Exception:  # noqa: BLE001
+            log.exception("retention assignment failed for recording %s", recording.id)
+            db.rollback()
+        try:
+            recording_comms.notify_finalized(db, recording_comms.media_comms._Bg(),
+                                             recording)
+        except Exception:  # noqa: BLE001
+            log.exception("MED-008 notice failed for recording %s", recording.id)
+            db.rollback()
+
+
+def _replay_prepared(db, event) -> None:
+    """Advance the audience replay entitlement and announce MED-009 Prepared.
+
+    "Prepared" is ready_for_review — a usable source exists. It is emphatically not
+    "published", which stays a deliberate operator action.
+    """
+    from . import replay_comms
+
+    entitlement = commercial_crud.get_or_create_replay_entitlement(db, event,
+                                                                   scope="audience")
+    commercial_crud.advance_to_ready_for_review(db, entitlement)
+    try:
+        replay_comms.notify_prepared(db, replay_comms.media_comms._Bg(), entitlement)
+    except Exception:  # noqa: BLE001 — a notice must not undo the state it describes
+        log.exception("MED-009 prepared notice failed for event %s", event.id)
+        db.rollback()
+
+
 def on_recording_captured(db, recording: LiveRecording) -> None:
     """Call once a LiveRecording reaches status="stopped", enforced=True
     (services/broadcast.py::record_egress_result — the same place the file's existence is
@@ -142,8 +243,7 @@ def on_recording_captured(db, recording: LiveRecording) -> None:
     event = db.get(Event, recording.event_id)
     if event is None:
         return
-    entitlement = commercial_crud.get_or_create_replay_entitlement(db, event, scope="audience")
-    commercial_crud.advance_to_ready_for_review(db, entitlement)
+    _replay_prepared(db, event)
 
 
 def _pending_pairs(db) -> list[tuple[LiveRecording, LiveRecording]]:
@@ -167,15 +267,29 @@ def process_pending_validations(db) -> None:
     for primary, secondary in _pending_pairs(db):
         try:
             validate_recording_pair(db, primary, secondary)
+            _finalized(db, primary, secondary)
             if primary.validation_status in ("valid", "degraded"):
                 event = db.get(Event, primary.event_id)
                 if event is not None:
-                    entitlement = commercial_crud.get_or_create_replay_entitlement(db, event, scope="audience")
-                    commercial_crud.advance_to_ready_for_review(db, entitlement)
+                    _replay_prepared(db, event)
         except Exception:  # noqa: BLE001 — one bad pair must not stop the batch
             log.exception("validation failed for event %s", primary.event_id)
             primary.validation_status = secondary.validation_status = "failed"
             db.commit()
+            _finalized(db, primary, secondary)
+
+    # Single-path recordings get a verdict too. Before MED-008 they never did: nothing
+    # validated them, so `validation_status` stayed NULL and the console showed "Validation
+    # pending" for the life of the asset.
+    for recording in _pending_singles(db):
+        try:
+            validate_single(db, recording)
+            _finalized(db, recording)
+        except Exception:  # noqa: BLE001 — one bad row must not stop the batch
+            log.exception("validation failed for recording %s", recording.id)
+            recording.validation_status = "failed"
+            db.commit()
+            _finalized(db, recording)
 
 
 async def run_validation_processor(interval: float = 20.0) -> None:

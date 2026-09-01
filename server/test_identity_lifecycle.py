@@ -32,7 +32,10 @@ from app.models import (
     AccountStateEvent,
     IdentityChallenge,
     Organization,
+    ElevationSession,
     SignInEvent,
+    StepUpGrant,
+    SupportAccessRequest,
     User,
 )
 from app.security import hash_password
@@ -146,7 +149,18 @@ def _cleanup(email):
         if user is None:
             db.commit()
             return
-        for model in (SignInEvent, IdentityChallenge, AccountRecovery):
+        # SupportAccessRequest / ElevationSession / StepUpGrant all FK-reference users and
+        # are now created by the ORG-009 path these tests exercise.
+        # A request references three users: the tenant it targets, the engineer who raised
+        # it and the approver who decided it. Filtering on org_id alone leaves the staff
+        # engineer undeletable, so all three references are cleared.
+        db.query(SupportAccessRequest).filter(
+            (SupportAccessRequest.org_id == user.org_id)
+            | (SupportAccessRequest.engineer_id == user.id)
+            | (SupportAccessRequest.approved_by_id == user.id)).delete(
+                synchronize_session=False)
+        for model in (SignInEvent, IdentityChallenge, AccountRecovery, ElevationSession,
+                      StepUpGrant):
             db.query(model).filter(model.user_id == user.id).delete()
         org_id = user.org_id
         db.delete(user)
@@ -203,6 +217,54 @@ def _token_for(email):
                         headers={"User-Agent": UA})
     assert r.status_code == 200, r.text
     return r.json()["access_token"]
+
+
+def _support_session(client, staff_auth, target_email, capability="tenant.members.write"):
+    """Obtain a genuine customer-approved support session over the target's Organization.
+
+    ZST-EC-001 ORG-009: `require_super_admin` alone no longer reaches tenant data
+    (services/tenant_access.py). These IDN-008 tests act on another Organization's member,
+    so they now have to do what a real support engineer does — request scoped access, have
+    that Organization approve it, and start the session. The boundary itself is covered in
+    test_tenant_access.py; here it is just the price of admission.
+    """
+    db = SessionLocal()
+    try:
+        target = db.query(User).filter(User.email == target_email.lower()).one()
+        org_id, approver_email = str(target.org_id), target.email
+    finally:
+        db.close()
+
+    _reset_limits()
+    cap, ctx = _capture()
+    with ctx:
+        created = client.post("/api/admin/support-access", headers=staff_auth, json={
+            "org_id": org_id, "case_reference": f"CASE-{uuid.uuid4().hex[:6].upper()}",
+            "reason_category": "customer_reported_issue",
+            "engineer_display": "Zoiko Steam Support Engineer",
+            "requested_scope": "Member administration for this case",
+            "allowed_actions": [capability], "minutes": 60,
+        })
+    assert created.status_code == 201, created.text
+    req_id = created.json()["id"]
+
+    # The target IS an org_admin of their own organization (see _make_user), so they are an
+    # eligible approver.
+    approver_auth = {"Authorization": f"Bearer {_token_for(approver_email)}"}
+    _reset_limits()
+    cap2, ctx2 = _capture()
+    with ctx2:
+        decided = client.post(f"/api/organization/support-access/{req_id}/decision",
+                              headers=approver_auth, json={"approve": True})
+    assert decided.status_code == 200, decided.text
+
+    _reset_limits()
+    cap3, ctx3 = _capture()
+    with ctx3:
+        started = client.post(f"/api/admin/support-access/{req_id}/start",
+                              headers=staff_auth)
+    assert started.status_code == 200, started.text
+    return req_id
 
 
 # ══ shared Class A controls ═════════════════════════════════════════════════════
@@ -593,6 +655,7 @@ def test_008_1_to_5_suspension_notifies_after_commit():
     try:
         token = _token_for(admin_email)
         auth = {"Authorization": f"Bearer {token}"}
+        _support_session(client, auth, email)
 
         _reset_limits()
         cap, ctx = _capture()
@@ -725,6 +788,7 @@ def test_008_hard_delete_still_works_and_notifies():
     try:
         _token_for(email)          # creates a sign_in_events row -> FK pressure
         token = _token_for(admin_email)
+        _support_session(client, {"Authorization": f"Bearer {token}"}, email)
         _reset_limits()
         cap, ctx = _capture()
         with ctx:
@@ -756,6 +820,7 @@ def test_008_16_preferences_cannot_suppress_and_18_resend_failure_keeps_state():
     client = TestClient(m.app)
     try:
         token = _token_for(admin_email)
+        _support_session(client, {"Authorization": f"Bearer {token}"}, email)
         _reset_limits()
         cap, ctx = _capture(fail=True)
         with ctx:

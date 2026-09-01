@@ -21,6 +21,7 @@ from ..config import settings
 from ..crud import commercial as commercial_crud
 from ..crud import event as crud
 from ..db import get_db
+from ..services import notifications as notif_svc
 from ..email import (
     send_assignment_email, send_contributor_invite_email, send_event_created_email,
     send_registration_confirmation_email, send_viewer_invite_email,
@@ -113,10 +114,16 @@ def create_event(data: EventCreate, background: BackgroundTasks, admin: User = D
 
     # After the response, same as signup's welcome mail — a Resend outage never delays or
     # breaks event creation (send_event_created_email is best-effort and logs its own errors).
-    background.add_task(
-        send_event_created_email,
-        admin.email, admin.full_name, event.title, event.start_time, event.status,
-    )
+    #
+    # ZST-EC-001 ORG-012: this is Class B operational mail and is genuinely suppressible, so
+    # it asks the central enforcement point rather than reading a boolean. Class A families
+    # short-circuit inside that helper and can never reach a preference check.
+    if notif_svc.should_send_operational_notification(family="EVT-001",
+                                                      org=admin.organization):
+        background.add_task(
+            send_event_created_email,
+            admin.email, admin.full_name, event.title, event.start_time, event.status,
+        )
 
     return event
 
@@ -277,6 +284,12 @@ def watch_event(
     # wait for it (services/delivery.py's shared ticker — a real recording can run hours),
     # so "published" alone isn't enough to serve the file yet. Same "publish now, deliver
     # once ready" split the customer export's /deliveries/{token} page already uses.
+    #
+    # ALSO gated on the entitlement's own expiry (ZST-EC-001 MED-009). `expires_at` was a
+    # stored date that nothing honoured: an expired entitlement kept serving its replay
+    # indefinitely. It is an authorization boundary now, which is also what makes the
+    # MED-009 "availability expired" notice truthful rather than a claim about a control
+    # that did not exist.
     replay_entitlement = commercial_crud.get_replay_entitlement(db, ev.id, scope="audience")
     replay_published = (
         replay_entitlement is not None
@@ -286,6 +299,11 @@ def watch_event(
         # replay whose retention window had lapsed stayed playable forever. Checked live rather
         # than relying only on the maintenance sweep — access must stop on the date it was sold
         # to stop, not on the next time a scheduler happens to run.
+        #
+        # Both branches fixed this independently. crud's version is the one kept: it also
+        # treats an explicit `expired` publish_state as expired and accepts an injectable
+        # `now`. services/replay_comms.is_expired now delegates here, so the MED-009 sweep
+        # and this live gate can never disagree about a row.
         and not commercial_crud.replay_access_expired(replay_entitlement)
     )
 

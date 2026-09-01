@@ -150,5 +150,6 @@ class User(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     organization: Mapped["Organization"] = relationship(
-        back_populates="users"
+        back_populates="users",
+        foreign_keys=[org_id],
     )

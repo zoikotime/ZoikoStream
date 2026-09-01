@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Float, JSON, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, JSON, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -13,7 +13,10 @@ if TYPE_CHECKING:
     from .subscription import Subscription
 
 # Account states the super admin can set. `suspended` blocks the org platform-wide.
-ORG_STATUSES = ("active", "trial", "suspended")
+# "restricted" added for ZST-EC-001 ORG-010: the platform previously collapsed every
+# non-active operational posture into "suspended", which made a partial restriction and a
+# full suspension indistinguishable to the customer being told about it.
+ORG_STATUSES = ("active", "trial", "restricted", "suspended")
 
 
 class Organization(Base):
@@ -56,6 +59,13 @@ class Organization(Base):
     # Domain verification (custom domain lives in `domain` above). Real DNS check is a later
     # flow; this defaults False and flips only when that flow lands — not faked here.
     domain_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # ZST-EC-001 ORG-008. Before this there was no owner concept at all - an organization had
+    # a set of interchangeable org_admins, so there was nothing for an ownership transfer to
+    # move. Nullable because existing organizations genuinely have no recorded owner, and
+    # inventing one by picking an arbitrary admin would misattribute accountability.
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"))
     # Grouped settings as JSON blobs (matches PlatformSetting.value). Shape enforced by the
     # Pydantic schemas, not the column, so toggles can evolve without a migration.
     notifications: Mapped[dict | None] = mapped_column(JSON, default=dict)
@@ -70,8 +80,17 @@ class Organization(Base):
         server_default=func.now(),
     )
 
+    # foreign_keys is required now that ORG-008 added organizations.owner_user_id: there
+    # are two FK paths between these tables, and membership is the one on User.org_id.
+    # Without this SQLAlchemy cannot tell "the org's members" from "the org's owner".
     users: Mapped[list["User"]] = relationship(
-        back_populates="organization"
+        back_populates="organization",
+        foreign_keys="User.org_id",
+    )
+
+    owner: Mapped["User | None"] = relationship(
+        foreign_keys=[owner_user_id],
+        post_update=True,   # owner is set after both rows exist; avoids a cyclic flush
     )
 
     subscriptions: Mapped[list["Subscription"]] = relationship(

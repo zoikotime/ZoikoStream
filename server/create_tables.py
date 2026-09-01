@@ -99,6 +99,9 @@ _EVENT_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS service_profile_id UUID REFERENCES service_profiles(id)",
     "ADD COLUMN IF NOT EXISTS commercial_account_id UUID REFERENCES commercial_accounts(id)",
     "ADD COLUMN IF NOT EXISTS expected_audience INTEGER",
+    # Present on the model (models/event.py) but never in this list, so an events table that
+    # predates the field could not self-heal — create_all() only creates missing TABLES.
+    "ADD COLUMN IF NOT EXISTS auto_start_recording BOOLEAN NOT NULL DEFAULT FALSE",
 ]
 
 # Commercial recording fields (doc Section 14/J — R2/R3 independent dual recording).
@@ -331,9 +334,144 @@ _PHASE2_STATEMENTS = [
 ]
 
 
+# ZST-EC-001 ORG-001/ORG-002 notification markers. One column per lifecycle transition,
+# claimed by conditional UPDATE so a retry cannot duplicate the notice. All nullable with no
+# default: an existing invitation has genuinely never been announced under the new scheme,
+# and NULL is the honest representation of that.
+# ZST-EC-001 ORG-007. Records HOW a reviewer was designated, so a review can be audited
+# for who was asked and on what basis. Nullable: rows written before the designation rule
+# existed genuinely have no recorded basis, and inventing one would be worse than NULL.
+# ZST-EC-001 DEV-006/DEV-007. Verification + health state on an existing table, so
+# create_all() cannot add them.
+_WEBHOOK_ENDPOINT_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS status VARCHAR(24) NOT NULL DEFAULT 'pending_verification'",
+    "ADD COLUMN IF NOT EXISTS verification_token_hash VARCHAR(64)",
+    "ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS verification_attempts INTEGER NOT NULL DEFAULT 0",
+    "ADD COLUMN IF NOT EXISTS verification_attempted_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS verification_reset_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS verification_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS reset_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS health VARCHAR(16) NOT NULL DEFAULT 'healthy'",
+    "ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0",
+    "ADD COLUMN IF NOT EXISTS last_delivery_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS degraded_since TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS disabled_reason VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS degraded_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS recovered_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS disabled_notified_at TIMESTAMPTZ",
+]
+
+# ZST-EC-001 DEV-008 signing-secret rotation.
+_WEBHOOK_ROTATION_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS previous_secret VARCHAR(64)",
+    "ADD COLUMN IF NOT EXISTS secret_version INTEGER NOT NULL DEFAULT 1",
+    "ADD COLUMN IF NOT EXISTS previous_secret_version INTEGER",
+    "ADD COLUMN IF NOT EXISTS rotation_started_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS rotation_ends_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS rotation_completed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS rotated_by UUID",
+    "ADD COLUMN IF NOT EXISTS rotation_started_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS rotation_ending_notified_at TIMESTAMPTZ",
+]
+
+_WEBHOOK_DELIVERY_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS dead_lettered_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS replayed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS replayed_by UUID",
+    "ADD COLUMN IF NOT EXISTS replay_count INTEGER NOT NULL DEFAULT 0",
+]
+
+_REVIEW_ASSIGNMENT_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS reviewer_source VARCHAR(30)",
+]
+
+_INVITATION_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS invited_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS expired_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS revoked_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS joined_notified_at TIMESTAMPTZ",
+]
+
+# ZST-EC-001 ORG-008. Organizations previously had no owner at all - just interchangeable
+# org_admins - so there was nothing for an ownership transfer to move. Nullable because
+# existing organizations genuinely have no recorded owner and picking an arbitrary admin
+# would misattribute accountability.
+_ORG_OWNER_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL",
+]
+
 _IDENTITY_CHALLENGE_COLUMNS = [
     # IDN-007 lockout. The table predates it, so create_all() alone will not add it.
     "ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ",
+]
+
+
+# Columns models/event.py no longer declares. See the call site for why they must be relaxed
+# rather than re-added: main deliberately removed them from the model.
+_EVENT_RELAX_NOT_NULL = ("auto_start_recording", "auto_end_event")
+
+
+def _relax_not_null(table: str, column: str) -> str:
+    """DROP NOT NULL on a column that may not exist (see the call site for why)."""
+    return f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = '{table}' AND column_name = '{column}'
+            ) THEN
+                EXECUTE 'ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL';
+            END IF;
+        END $$;
+    """
+
+
+# ── ZST-EC-001 MED-007 / MED-008 / MED-011 — recording governance ────────────────────────
+# `validation_status` / `validation_evidence` / `retention_*` / `legal_hold` already existed;
+# these are the health, finalization-announcement and deletion-lifecycle columns.
+_MED_RECORDING_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS hold_category VARCHAR(40)",
+    "ADD COLUMN IF NOT EXISTS hold_reference VARCHAR(80)",
+    "ADD COLUMN IF NOT EXISTS hold_set_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS hold_set_by UUID",
+    "ADD COLUMN IF NOT EXISTS hold_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS hold_released_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS health_state VARCHAR(16)",
+    "ADD COLUMN IF NOT EXISTS health_changed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS health_reason TEXT",
+    "ADD COLUMN IF NOT EXISTS started_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS degraded_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS recovered_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS stopped_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS finalization_notified_state VARCHAR(16)",
+    "ADD COLUMN IF NOT EXISTS finalization_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS deletion_status VARCHAR(16)",
+    "ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS deletion_requested_by UUID",
+    "ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS deletion_failure_category VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS deletion_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS deletion_failed_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS retention_warned_at TIMESTAMPTZ",
+]
+
+# ── ZST-EC-001 MED-009 — replay lifecycle ────────────────────────────────────────────────
+_MED_REPLAY_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS withdrawn_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS withdrawn_by UUID",
+    "ADD COLUMN IF NOT EXISTS withdraw_reason VARCHAR(200)",
+    "ADD COLUMN IF NOT EXISTS previous_publish_state VARCHAR(20)",
+    "ADD COLUMN IF NOT EXISTS state_changed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS prepared_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS published_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS access_changed_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS withdrawn_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS expired_notified_at TIMESTAMPTZ",
 ]
 
 
@@ -351,6 +489,18 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE users {clause}"))
         for clause in _IDENTITY_CHALLENGE_COLUMNS:
             conn.execute(text(f"ALTER TABLE identity_challenges {clause}"))
+        for clause in _INVITATION_COLUMNS:
+            conn.execute(text(f"ALTER TABLE invitations {clause}"))
+        for clause in _REVIEW_ASSIGNMENT_COLUMNS:
+            conn.execute(text(f"ALTER TABLE access_review_assignments {clause}"))
+        for clause in _WEBHOOK_ENDPOINT_COLUMNS:
+            conn.execute(text(f"ALTER TABLE webhook_endpoints {clause}"))
+        for clause in _WEBHOOK_ROTATION_COLUMNS:
+            conn.execute(text(f"ALTER TABLE webhook_endpoints {clause}"))
+        for clause in _WEBHOOK_DELIVERY_COLUMNS:
+            conn.execute(text(f"ALTER TABLE webhook_deliveries {clause}"))
+        for clause in _ORG_OWNER_COLUMNS:
+            conn.execute(text(f"ALTER TABLE organizations {clause}"))
         for stmt in _USER_BACKFILL:
             conn.execute(text(stmt))
         for clause in _EVENT_COLUMNS:
@@ -364,7 +514,23 @@ def ensure_schema():
         for clause in _EVENT_REGISTRATION_COLUMNS:
             conn.execute(text(f"ALTER TABLE event_registrations {clause}"))
         for col in _EVENT_REGISTRATION_RELAX_NOT_NULL:
-            conn.execute(text(f"ALTER TABLE event_registrations ALTER COLUMN {col} DROP NOT NULL"))
+            # These relax LEGACY columns that only exist in databases predating the current
+            # model. On a fresh database create_all() builds the table without them, and a
+            # bare ALTER COLUMN then aborts the whole migration — which is why bootstrapping
+            # an empty database used to fail here. Postgres has no ALTER COLUMN IF EXISTS,
+            # so the guard is explicit.
+            conn.execute(text(_relax_not_null("event_registrations", col)))
+        for col in _EVENT_RELAX_NOT_NULL:
+            # Same legacy problem, one table over, surfaced by merging main. main removed
+            # `auto_start_recording` / `auto_end_event` from models/event.py, but the columns
+            # survive in any database created while the model still had them — as NOT NULL
+            # with NO server default, because the old model supplied the default Python-side.
+            # SQLAlchemy no longer sends a value for a column it does not know about, so every
+            # Event insert hit a NotNullViolation on exactly those databases (a fresh one is
+            # unaffected: the ADD COLUMN above carries DEFAULT FALSE). Relaxing the constraint
+            # is the non-destructive fix — the data stays, and the column stops being required
+            # by a model that no longer manages it.
+            conn.execute(text(_relax_not_null("events", col)))
         for clause in _CUSTOMER_DELIVERY_COLUMNS:
             conn.execute(text(f"ALTER TABLE customer_deliveries {clause}"))
         for clause in _REPLAY_ENTITLEMENT_COLUMNS:
@@ -403,6 +569,10 @@ def ensure_schema():
             conn.execute(text(stmt))
         for stmt in _PHASE5B_STATEMENTS:
             conn.execute(text(stmt))
+        for clause in _MED_RECORDING_COLUMNS:
+            conn.execute(text(f"ALTER TABLE live_recordings {clause}"))
+        for clause in _MED_REPLAY_COLUMNS:
+            conn.execute(text(f"ALTER TABLE replay_entitlements {clause}"))
     print("Schema ready!")
 
 

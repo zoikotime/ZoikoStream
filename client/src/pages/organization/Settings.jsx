@@ -64,6 +64,12 @@ function Field({ label, hint, error, className, children }) {
     </div>
   );
 }
+// Says which channel a control affects and how far it reaches, so a reader can tell an
+// organization-wide routing change from a personal one.
+function scopeNote(item) {
+  const scope = item.scope === "organization" ? "Applies organization-wide" : "Applies to you";
+  return `${scope} · ${item.channel === "email" ? "Email" : item.channel}.`;
+}
 function SettingRow({ title, desc, children }) {
   return (
     <div className="flex items-center justify-between gap-4 border-b border-slate-100 py-3.5 last:border-0 dark:border-slate-800">
@@ -99,7 +105,7 @@ function IconButton({ icon: Icon, title, danger, onClick }) {
 // domain have a backend — permissions, API keys, integrations, domain-verify and the
 // danger zone stay local (no endpoint yet) and are marked at their call sites.
 const loadSettings = async () => {
-  const [profile, security, notifs, domainData, branding, keys] = await Promise.all([
+  const [profile, security, notifs, domainData, branding, keys, notifCatalog] = await Promise.all([
     api.get("/organization/profile").then((r) => r.data),
     api.get("/organization/security").then((r) => r.data),
     api.get("/organization/notifications").then((r) => r.data),
@@ -109,8 +115,14 @@ const loadSettings = async () => {
     // itself. An API build that predates /organization/api-keys 404s here, and taking the
     // whole settings page down over a panel is the wrong trade. null = "couldn't load".
     api.get("/organization/api-keys").then((r) => r.data).catch(() => null),
+    // The notification catalog is the server's description of what each preference actually
+    // controls — its message class, whether it is mandatory, and whether a send path for it
+    // exists at all. Rendering the panel from this instead of a hardcoded list is what stops
+    // the page offering a switch for an email Zoiko Steam never sends. Tolerant like the key
+    // list above: an older API 404s here and the panel falls back to the static grouping.
+    api.get("/organization/notifications/catalog").then((r) => r.data).catch(() => null),
   ]);
-  return { profile, security, notifs, domain: domainData, branding, keys };
+  return { profile, security, notifs, domain: domainData, branding, keys, notifCatalog };
 };
 
 // Slugs are constrained server-side (^[a-z0-9][a-z0-9-]*$, 3-140). Normalising as the user
@@ -197,6 +209,9 @@ const toApi = (s) => ({
 
 export default function OrganizationSettings() {
   const { data, loading, error, reload } = useApi(loadSettings);
+  // Server-described notification controls. null on an older API build, which the panel
+  // falls back to handling.
+  const catalog = data?.notifCatalog ?? null;
   // ?tab= IS the tab state — not a seed for it.
   //
   // It used to initialise a useState, which meant the URL was read exactly once, at mount.
@@ -648,17 +663,69 @@ export default function OrganizationSettings() {
 
           {/* ── NOTIFICATIONS ── */}
           {tab === "notifications" && (
-            <Panel title="Notifications" desc="Choose what your team gets notified about">
-              {notificationGroups.map((g) => (
-                <div key={g.title} className="mb-6 last:mb-0">
-                  <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">{g.title}</h3>
-                  {g.items.map((it) => (
-                    <SettingRow key={it.key} title={it.label} desc={it.desc}>
-                      <Switch checked={settings.notifs[it.key]} onChange={() => toggleNotif(it.key)} />
-                    </SettingRow>
+            <Panel
+              title="Notifications"
+              desc="Choose what your team gets notified about"
+            >
+              {catalog ? (
+                <>
+                  {/* Three groups, decided by the server rather than by this file:
+                      configurable, mandatory (always on) and not-yet-available. A control
+                      that cannot change anything is never rendered as a working switch. */}
+                  {[
+                    { title: "Operational notifications",
+                      rows: catalog.filter((c) => c.configurable) },
+                    { title: "Always on",
+                      rows: catalog.filter((c) => c.mandatory) },
+                    { title: "Not available yet",
+                      rows: catalog.filter((c) => !c.configurable && !c.mandatory) },
+                  ].filter((g) => g.rows.length > 0).map((g) => (
+                    <div key={g.title} className="mb-6 last:mb-0">
+                      <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                        {g.title}
+                      </h3>
+                      {g.rows.map((it) => (
+                        <SettingRow
+                          key={it.key}
+                          title={it.label}
+                          desc={`${it.description} ${scopeNote(it)}`}
+                        >
+                          {it.mandatory ? (
+                            <span className="whitespace-nowrap rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+                              Always on
+                            </span>
+                          ) : it.configurable ? (
+                            <Switch
+                              checked={settings.notifs[it.key]}
+                              onChange={() => toggleNotif(it.key)}
+                            />
+                          ) : (
+                            <span className="whitespace-nowrap rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                              Unavailable
+                            </span>
+                          )}
+                        </SettingRow>
+                      ))}
+                    </div>
                   ))}
-                </div>
-              ))}
+                  <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
+                    Mandatory security, legal, access, and contract communications cannot be
+                    disabled.
+                  </p>
+                </>
+              ) : (
+                // Fallback for an API build without the catalog endpoint.
+                notificationGroups.map((g) => (
+                  <div key={g.title} className="mb-6 last:mb-0">
+                    <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">{g.title}</h3>
+                    {g.items.map((it) => (
+                      <SettingRow key={it.key} title={it.label} desc={it.desc}>
+                        <Switch checked={settings.notifs[it.key]} onChange={() => toggleNotif(it.key)} />
+                      </SettingRow>
+                    ))}
+                  </div>
+                ))
+              )}
             </Panel>
           )}
 

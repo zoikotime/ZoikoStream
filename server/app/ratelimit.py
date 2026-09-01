@@ -90,6 +90,17 @@ def rate_limit(scope: str, limit: int, window: float = 60.0):
         if bucket is None:
             bucket = _HITS[key] = SlidingWindow(limit, window)
         if not bucket.allow():
+            # ZST-EC-001 DEV-010. The refusal is ALSO counted in a shared, durable counter
+            # so a governed threshold can be evidenced across workers and across restarts.
+            # The in-memory window above stays the hot-path enforcement; this is the
+            # accounting a notification may legitimately be driven from, because an email
+            # must never describe one process's private opinion.
+            try:
+                from .services import api_usage
+
+                api_usage.record_refusal(client_ip(request), scope)
+            except Exception:  # noqa: BLE001 — accounting must never break enforcement
+                pass
             raise HTTPException(
                 status.HTTP_429_TOO_MANY_REQUESTS,
                 "Too many attempts. Please wait a moment and try again.",

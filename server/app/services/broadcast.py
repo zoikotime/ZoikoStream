@@ -143,6 +143,41 @@ def session_out(s: BroadcastSession | None, settings: dict | None = None) -> dic
     }
 
 
+# ── MED-007 recording health (ZST-EC-001) ───────────────────────────────────────────────
+# Thin module-level wrappers so the tx workers below stay readable and the import stays lazy
+# (recording_comms reaches broadcast indirectly through media_comms -> org_comms). Every one
+# of these is called INSIDE the worker that commits the state it describes, so a notice can
+# only ever describe a capture that authoritatively exists.
+
+def recording_comms_notify_started(db, recording) -> None:
+    """ZST-EC-001 MED-007. Internal operator + asset-owner notice."""
+    try:
+        from . import recording_comms
+
+        recording_comms.notify_started(db, recording_comms.media_comms._Bg(), recording)
+    except Exception:  # noqa: BLE001 - a notice must never break starting a recording
+        log.exception("MED-007 start notice failed")
+
+
+def recording_comms_notify_stopped(db, recording) -> None:
+    try:
+        from . import recording_comms
+
+        recording_comms.notify_stopped(db, recording_comms.media_comms._Bg(), recording)
+    except Exception:  # noqa: BLE001
+        log.exception("MED-007 stop notice failed")
+
+
+def recording_comms_record_health(db, recording) -> None:
+    """Re-evaluate capture health after a path's outcome changed."""
+    try:
+        from . import recording_comms
+
+        recording_comms.record_health(db, recording_comms.media_comms._Bg(), recording)
+    except Exception:  # noqa: BLE001
+        log.exception("MED-007 health evaluation failed")
+
+
 def recording_out(r: LiveRecording) -> dict:
     return {
         "id": str(r.id), "status": r.status, "quality": r.quality,
@@ -190,6 +225,11 @@ def record_egress_result(egress_info) -> dict | None:
         # function's own docstring. Never publishes anything itself (BRD "never
         # auto-publish on event end").
         validation.on_recording_captured(db, r)
+        # LiveKit has just told us what this path actually did. That is the only moment a
+        # mid-capture path failure becomes knowable, so health is re-evaluated here and the
+        # stop notice is attempted again (claim-guarded, so it sends at most once).
+        recording_comms_record_health(db, r)
+        recording_comms_notify_stopped(db, r)
         out = recording_out(r)
         webhooks.enqueue(db, r.org_id, "recording.failed" if egress_info.error else "recording.ready", {
             "event_id": str(r.event_id), "recording_id": out["id"], "role": out["role"],
@@ -227,6 +267,16 @@ def record_ingress_status(ingress_info) -> tuple[str, dict] | None:
             row.error = state.error
         db.commit()
         db.refresh(row)
+        # ZST-EC-001 MED-002. Fold the raw status into the loss clock. This ANNOUNCES
+        # nothing: whether a loss has persisted long enough to be an interruption
+        # cannot be judged the instant it drops, so the threshold is evaluated on the
+        # ticker (media_comms.sweep).
+        try:
+            from . import media_comms
+
+            media_comms.observe_signal(db, row)
+        except Exception:  # noqa: BLE001 - accounting must not break the webhook
+            log.exception("MED-002 signal observation failed for ingress %s", row.id)
         return str(row.event_id), ingress_out(row)
     finally:
         db.close()
@@ -427,6 +477,7 @@ async def _golive(ctx, payload):
         if session.status == "paused" and session.paused_at:
             session.paused_ms += int((now - session.paused_at).total_seconds() * 1000)
         session.status = "live"
+        media_notify_started(db, session)
         session.started_at = session.started_at or now
         session.paused_at = None
         # The event's own lifecycle only moves forward from a publishable (or armed) state —
@@ -532,6 +583,7 @@ async def _end(ctx, payload, emergency: bool = False):
             session.paused_ms += int((now - session.paused_at).total_seconds() * 1000)
         session.status, session.ended_at, session.paused_at = "ended", now, None
         session.ended_reason = reason
+        media_notify_ended(db, session)
         # Reuse the event lifecycle guard: "ended" is only legal from "live" or "degraded"
         # (crud.event.status_transition_error already allows degraded -> ended; this is the
         # write-back that was missing — without it, ending a degraded event left Event.status
@@ -713,7 +765,7 @@ async def _stop_recording_rows(ctx, now) -> list[dict]:
     errors = {rid: (await livekit.stop_recording(egress_id) if egress_id else None) for rid, egress_id in active}
 
     def work(db):
-        rows = []
+        rows, last = [], None
         for rid, _ in active:
             r = db.get(LiveRecording, uuid.UUID(rid))
             if r is None:
@@ -724,6 +776,11 @@ async def _stop_recording_rows(ctx, now) -> list[dict]:
             if errors.get(rid):
                 r.error = errors[rid]
             rows.append(recording_out(r))
+            last = r
+        if last is not None:
+            # One notice per capture, not per path: notify_stopped resolves the capture
+            # group and returns early while any sibling path is still running.
+            recording_comms_notify_stopped(db, last)
         return rows
 
     return await mod.tx(work)
@@ -813,7 +870,12 @@ async def _recording_start(ctx, payload):
         act = mod.record(db, ctx, "recording", note, audit="live.recording.start",
                          target_type="live_recording", target_id=rows[0].id,
                          meta={"quality": quality, "enforced": captured == len(rows), "dual": dual})
-        return [recording_out(r) for r in rows], act
+        # Committed first, announced second. The notice also establishes the capture's
+        # health baseline, so a later path loss is a detectable transition rather than a
+        # comparison against None.
+        out = [recording_out(r) for r in rows]
+        recording_comms_notify_started(db, rows[0])
+        return out, act
 
     recs, act = await mod.tx(work)
     return [("recording", "recording.update", r) for r in recs] + [("activity", "activity.new", act)]
@@ -1120,6 +1182,54 @@ async def analytics_now(ctx) -> dict:
     }
 
 
+def media_notify_started(db, session) -> None:
+    """ZST-EC-001 MED-004. INTERNAL operator notice only.
+
+    Imports media_comms lazily and swallows every failure: a notification must never
+    be able to stop a broadcast going live. It reaches no audience-facing sender —
+    internal media state is not audience communication consent.
+    """
+    try:
+        from . import media_comms
+
+        media_comms.notify_session_started(db, media_comms._Bg(), session)
+    except Exception:  # noqa: BLE001
+        log.exception('MED-004 start notice failed')
+
+
+def media_notify_ended(db, session) -> None:
+    """ZST-EC-001 MED-004 end. Same posture as media_notify_started."""
+    try:
+        from . import media_comms
+
+        media_comms.notify_session_ended(db, media_comms._Bg(), session)
+    except Exception:  # noqa: BLE001
+        log.exception('MED-004 end notice failed')
+
+
+def _record_media_health(ctx, health: dict) -> dict:
+    """Persist the governed health level for MED-005 and return it unchanged.
+
+    Returns its input so the console payload is untouched — this is observation, not a
+    second opinion. Repeated evaluations at the same level record and send nothing; only a
+    transition is a communication event, which is what stops a polling loop from mailing an
+    operator every tick.
+    """
+    try:
+        from . import media_comms
+
+        db = mod.SessionLocal()
+        try:
+            session = _current_session(db, ctx)
+            if session is not None:
+                media_comms.record_health(db, media_comms._Bg(), session, health)
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - health reporting must not break the console payload
+        log.exception("MED-005 health transition recording failed")
+    return health
+
+
 def health_of(split: dict, status: str, recording_enforced: bool | None) -> dict:
     """Live health from signals we actually have: is it live, is anybody publishing, how
     many connections report poor quality, did the recording attach."""
@@ -1170,7 +1280,12 @@ async def snapshot_extra(ctx) -> dict:
         "recordings": recordings,
         "can_host": ctx.can_host,
         "countdown_until": state.get("countdown_until"),
-        "health": health_of(split, session["status"], recording["enforced"] if recording else None),
+        # ZST-EC-001 MED-005. health_of() stays the ONE authoritative calculation; the
+        # transition is recorded from its output so a level CHANGE can be announced without
+        # this module or media_comms re-deriving health.
+        "health": _record_media_health(
+            ctx, health_of(split, session["status"],
+                           recording["enforced"] if recording else None)),
         "livekit_url": livekit.settings.LIVEKIT_URL or None,
         # Present only for hosts, and only when LiveKit is configured. This is the token
         # hooks/useLiveKitPublish.js connects and publishes with once `live` is true — see

@@ -25,6 +25,8 @@ import httpx
 from sqlalchemy import select
 
 from ..db import SessionLocal
+from . import webhook_lifecycle
+from . import webhook_security
 from ..models import WebhookDelivery, WebhookEndpoint
 
 log = logging.getLogger(__name__)
@@ -34,6 +36,16 @@ MAX_ATTEMPTS = 6
 # Exponential backoff — same doubling shape hooks/useEventStream.js and
 # hooks/useLiveKitViewer.js already use client-side for reconnects, mirrored server-side.
 BACKOFF_BASE_SECONDS = 30
+
+
+class _Bg:
+    """Inline sender for the delivery ticker, which is already off the request path."""
+
+    def add_task(self, fn, *args, **kwargs) -> None:
+        try:
+            fn(*args, **kwargs)
+        except Exception:  # noqa: BLE001 — a health notice must not break delivery
+            log.exception("Webhook health notice failed")
 
 
 def sign(secret: str, timestamp: int, body: bytes) -> str:
@@ -58,6 +70,17 @@ def enqueue(db, org_id, event_type: str, data: dict) -> None:
     for ep in endpoints:
         if event_type not in (ep.events or []):
             continue
+        # ZST-EC-001 DEV-006. THE production-delivery gate. Until this existed, `enabled`
+        # was the only check, so any URL an administrator saved began receiving signed
+        # customer payloads immediately — including a typo, or an internal address.
+        #
+        # Withheld events are not queued at all rather than queued-and-skipped: a queued
+        # delivery to an unverified endpoint would sit in the log looking like a pending
+        # obligation the platform intends to honour.
+        deliverable, reason = webhook_security.is_deliverable(ep)
+        if not deliverable:
+            log.info("Webhook %s withheld for endpoint %s: %s", event_type, ep.id, reason)
+            continue
         db.add(WebhookDelivery(
             endpoint_id=ep.id, event_type=event_type,
             payload={"event": event_type, "sent_at": now.isoformat(), "data": data},
@@ -75,22 +98,59 @@ def _load_delivery(delivery_id, endpoint_id) -> dict | None:
             return None
         return {
             "id": delivery.id, "event_type": delivery.event_type, "payload": delivery.payload,
-            "url": endpoint.url, "secret": endpoint.secret,
+            # Every active secret version, so a delivery during a rotation window is
+            # signed with both and either verifier accepts it.
+            "url": endpoint.url, "secrets": active_secrets(endpoint),
         }
     finally:
         db.close()
 
 
-async def _send(url: str, secret: str, event_type: str, delivery_id, payload: dict) -> tuple[int | None, str | None]:
+def signature_header(versions: list[tuple[int, str]], timestamp: int, body: bytes) -> str:
+    """Build the X-Zoiko-Signature value across every currently-active secret version.
+
+    Format stays backward compatible: `t=<ts>,v1=<hmac>` for a single secret, exactly what
+    subscribers already parse. During a DEV-008 rotation a second entry is appended as
+    `v1=<hmac-of-previous>`, so a consumer that scans for any matching v1 value verifies
+    with EITHER secret while it migrates. No new algorithm, no format a current consumer
+    cannot read — the migration mechanism has to work with the verifier people already
+    wrote.
+    """
+    parts = [f"t={timestamp}"]
+    for _version, secret in versions:
+        parts.append(f"v1={sign(secret, timestamp, body)}")
+    return ",".join(parts)
+
+
+def active_secrets(endpoint) -> list[tuple[int, str]]:
+    """Current secret first, then the retiring one while its overlap window is open."""
+    now = datetime.now(timezone.utc)
+    out = [(endpoint.secret_version or 1, endpoint.secret)]
+    if (endpoint.previous_secret
+            and endpoint.rotation_ends_at
+            and endpoint.rotation_ends_at > now):
+        out.append((endpoint.previous_secret_version or 0, endpoint.previous_secret))
+    return out
+
+
+async def _send(url: str, secrets: list, event_type: str, delivery_id, payload: dict) -> tuple[int | None, str | None]:
     """Returns (status_code, error) — exactly one meaningful. Real async HTTP, deliberately
     not the sync httpx.post email.py uses — see module docstring."""
+    # Re-validated here, not only at registration. A hostname that resolved to a public
+    # address when the endpoint was saved can resolve to a private one later, which is
+    # exactly what DNS rebinding does.
+    try:
+        webhook_security.validate_webhook_url(url)
+    except webhook_security.UnsafeWebhookUrl as exc:
+        return None, f"blocked: {exc}"
+
     body = json.dumps(payload, default=str).encode()
     ts = int(time.time())
     headers = {
         "Content-Type": "application/json",
         "X-Zoiko-Event": event_type,
         "X-Zoiko-Delivery": str(delivery_id),
-        "X-Zoiko-Signature": f"t={ts},v1={sign(secret, ts, body)}",
+        "X-Zoiko-Signature": signature_header(secrets, ts, body),
     }
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
@@ -109,16 +169,33 @@ def _finalize(delivery_id, status_code: int | None, error: str | None) -> None:
             return
         d.attempt_count += 1
         d.last_response_code = status_code
+        terminal = None
         if error is None:
             d.status, d.delivered_at, d.next_attempt_at = "delivered", datetime.now(timezone.utc), None
+            terminal = "success"
         else:
             d.last_error = error
             if d.attempt_count >= MAX_ATTEMPTS:
-                d.status, d.next_attempt_at = "failed", None
+                # ZST-EC-001 DEV-007: retained for controlled replay, not dropped.
+                d.status, d.next_attempt_at = "dead_lettered", None
+                d.dead_lettered_at = datetime.now(timezone.utc)
+                terminal = "failure"
             else:
                 delay = BACKOFF_BASE_SECONDS * (2 ** (d.attempt_count - 1))
                 d.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
         db.commit()
+
+        # Health folds in TERMINAL outcomes only. A failed attempt that will be retried is
+        # not a health signal — that is what keeps one transient 500 from alarming anyone.
+        if terminal is not None:
+            endpoint = db.get(WebhookEndpoint, d.endpoint_id)
+            if endpoint is not None:
+                if terminal == "success":
+                    transition = webhook_lifecycle.record_success(db, endpoint)
+                else:
+                    transition = webhook_lifecycle.record_failure(db, endpoint)
+                if transition:
+                    webhook_lifecycle.notify_health(db, _Bg(), endpoint, transition)
     finally:
         db.close()
 
@@ -128,7 +205,7 @@ async def _attempt(delivery_id, endpoint_id) -> None:
     if loaded is None:
         return  # already delivered/failed by a previous tick, or the endpoint was deleted
     status_code, error = await _send(
-        loaded["url"], loaded["secret"], loaded["event_type"], loaded["id"], loaded["payload"]
+        loaded["url"], loaded["secrets"], loaded["event_type"], loaded["id"], loaded["payload"]
     )
     await asyncio.to_thread(_finalize, delivery_id, status_code, error)
 

@@ -5,21 +5,43 @@ never read from the request body. Super admin isn't blocked — it operates on i
 here and uses /admin/* for cross-org management. Reads: any member. Writes + sensitive
 reads (security, developer): org admin (require_org_admin already admits super_admin)."""
 
+import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import (Header, APIRouter, BackgroundTasks, Depends, HTTPException,
+                     Query, Request, Response, status)
+from fastapi.responses import JSONResponse
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from .. import email as email_mod
 from ..config import settings
 from ..crud import admin as admin_crud
 from ..crud import delivery as delivery_crud
 from ..crud import event as event_crud
 from ..crud import organization as crud
 from ..db import get_db
-from ..email import send_invitation_email
+from ..email import UnsafeLinkError
 from ..services import account_lifecycle as lifecycle
-from ..models import Event, LiveIngressEndpoint, Organization, User, WEBHOOK_EVENTS
+from ..models import (
+    EXPORT_TYPES,
+    SCOPE_ORGANIZATION,
+    DeveloperDataExport,
+    WEBHOOK_VERIFIED,
+    STEP_UP_HIGH_RISK_ROLE_GRANT,
+    STEP_UP_OWNERSHIP_TRANSFER,
+    AccessReview,
+    AccessReviewAssignment,
+    Event,
+    LiveIngressEndpoint,
+    Organization,
+    NotificationPreferenceEvent,
+    OwnershipTransfer,
+    SupportAccessRequest,
+    User,
+    WEBHOOK_EVENTS,
+)
 from ..schemas.admin import (
     AdminUserOut,
     ApiKeyCreate,
@@ -31,6 +53,15 @@ from ..schemas.admin import (
 )
 from ..schemas.auth import TokenOut, UserOut
 from ..schemas.organization import (
+    AccessReviewAssignmentOut,
+    AccessReviewCreate,
+    AccessReviewDecisionIn,
+    AccessReviewOut,
+    OwnershipTransferCreate,
+    OwnershipTransferOut,
+    NotificationCatalogItem,
+    SupportAccessCustomerOut,
+    SupportAccessDecision,
     InvitationAccept,
     InvitationAction,
     InvitationCreate,
@@ -61,15 +92,36 @@ from ..schemas.organization import (
     WebhookEndpointCreated,
     WebhookEndpointOut,
     WebhookEndpointUpdate,
+    WebhookVerificationOut,
+    DeveloperExportCreate,
+    RetentionExtensionCreate,
+    RetentionStateOut,
+    WebhookVerifyIn,
     WebhookSecretOut,
 )
 from ..security import create_access_token, get_current_user, hash_password, require_org_admin
 from ..services import delivery as delivery_svc
 from ..services import livekit, org as org_svc
+from ..services import credential_lifecycle
+from ..services import developer_comms
+from ..services import developer_export
+from ..services import signing_rotation
+from ..services import media_comms
+from ..services import media_retention
+from ..services import webhook_lifecycle
+from ..services import webhook_security
+from ..services import notifications as notif_svc
+from ..services import org_policy
+from ..services import stepup as stepup_svc
+from ..services import org_comms
+from ..services import org_governance as governance
+from ..services import support_access as support_svc
 from ..services import report as report_svc
 
 # Roles an org admin may assign/invite. Excludes super_admin (platform-only, never via this API).
 ORG_ASSIGNABLE_ROLES = ("org_admin", "host", "moderator", "speaker", "viewer")
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/organization", tags=["organization"])
 
@@ -175,30 +227,91 @@ def list_recordings(
 @router.delete("/recordings/{recording_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_recording(
     recording_id: uuid.UUID,
+    background: BackgroundTasks,
     admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org),
     db: Session = Depends(get_db),
 ):
-    """Removes both the file (best-effort — see livekit.delete_object) and the DB row.
-    Org-admin only: this is a destructive, unrecoverable action on org data.
+    """Governed deletion of a recording (ZST-EC-001 MED-011).
 
-    Legal hold overrides deletion — checked against BOTH the recording's own `legal_hold`
-    column and an open legal-hold governance record on its event (crud.admin.
-    event_under_legal_hold); only a super_admin can place or release one (routers/admin.py),
-    so an org admin can never delete their way around a hold they didn't set and can't lift."""
+    Org-admin only: this is a destructive, unrecoverable action on org data. Every gate lives
+    in services/media_retention.delete_asset, so the same rules apply to any future caller:
+
+        legal hold -> pending retention extension -> retention window -> storage result
+
+    Legal hold was already enforced here and still is, against BOTH the recording's own
+    `legal_hold` column and an open legal-hold governance record on its event; only a
+    super_admin can place or release one, so an org admin can never delete their way around
+    a hold they didn't set and can't lift.
+
+    Two things are new. A recording inside its committed retention window is refused — the
+    retention date is a keep-guarantee, not a suggestion, and an extension request that is
+    still pending blocks deletion too. And the storage deletion's RESULT is now read: the
+    previous version called livekit.delete_object(), discarded the boolean it returns, and
+    deleted the row regardless, which left an orphaned object in the bucket with nothing
+    recording that it should have been removed.
+
+    Recordings with no retention date — every row captured before MED-011, and every row
+    still being validated — behave exactly as they did before.
+    """
     rec = event_crud.get_org_recording(db, admin.org_id, recording_id)
     if rec is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
-    if rec.legal_hold or admin_crud.event_under_legal_hold(db, rec.event_id):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "This recording is under legal hold and cannot be deleted. Contact platform support to release the hold.",
-        )
-    livekit.delete_object(rec.file_url)
-    if rec.size_bytes:
-        org.storage_used_gb = round(max(0.0, float(org.storage_used_gb or 0) - rec.size_bytes / (1024 ** 3)), 3)
-    db.delete(rec)
-    db.commit()
+    deleted, reason = media_retention.delete_asset(db, background, rec, actor=admin)
+    if not deleted:
+        raise HTTPException(status.HTTP_409_CONFLICT, reason)
+
+
+# ── Retention extension (ZST-EC-001 MED-011) ──────────────────────────────────
+# Maker-checker on purpose. An Organization can ASK to keep a recording longer; only Zoiko
+# Steam platform governance can grant it (routers/admin.py). Letting the asset owner extend
+# their own retention unilaterally would make the retention policy advisory.
+
+@router.get("/recordings/{recording_id}/retention", response_model=RetentionStateOut)
+def recording_retention(recording_id: uuid.UUID,
+                        org: Organization = Depends(get_my_org),
+                        db: Session = Depends(get_db)):
+    """This asset's committed retention state and whether it can be deleted right now."""
+    rec = event_crud.get_org_recording(db, org.id, recording_id)
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
+    eligible, reason = media_retention.deletion_eligible(db, rec)
+    policy = media_retention.policy(db)
+    return RetentionStateOut(
+        recording_id=rec.id,
+        retention_policy_version=rec.retention_policy_version or str(policy["version"]),
+        retention_expires_at=rec.retention_expires_at,
+        legal_hold=bool(rec.legal_hold) or admin_crud.event_under_legal_hold(db, rec.event_id),
+        hold_reference=rec.hold_reference,
+        hold_category=rec.hold_category,
+        deletion_eligible=eligible,
+        deletion_blocked_reason=reason,
+    )
+
+
+@router.post("/recordings/{recording_id}/retention-extensions",
+             status_code=status.HTTP_202_ACCEPTED)
+def request_retention_extension(recording_id: uuid.UUID, data: RetentionExtensionCreate,
+                                background: BackgroundTasks,
+                                admin: User = Depends(require_org_admin),
+                                org: Organization = Depends(get_my_org_admin),
+                                db: Session = Depends(get_db)):
+    """Ask platform governance to extend a recording's retention. Grants nothing by itself."""
+    rec = event_crud.get_org_recording(db, org.id, recording_id)
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recording not found")
+    try:
+        extension = media_retention.request_extension(
+            db, background, rec, requester=admin,
+            reason_category=data.reason_category, requested_until=data.requested_until)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+    admin_crud.create_audit_log(db, actor=admin, action="retention.extension_request",
+                                target_type="live_recording", target_id=rec.id,
+                                org_id=org.id,
+                                meta={"reason_category": data.reason_category})
+    return {"id": str(extension.id), "state": extension.state,
+            "requested_until": extension.requested_until}
 
 
 # ── Controlled customer export (BRD LE-AC-18) ─────────────────────────────────
@@ -287,7 +400,8 @@ def list_live_inputs(org: Organization = Depends(get_my_org), db: Session = Depe
 
 @router.post("/live-inputs", response_model=LiveInputOut, status_code=status.HTTP_201_CREATED)
 async def create_live_input(
-    data: LiveInputCreate, admin: User = Depends(get_current_user),
+    data: LiveInputCreate, background: BackgroundTasks,
+    admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
 ):
     ev = db.get(Event, data.event_id)
@@ -311,6 +425,11 @@ async def create_live_input(
     if info is not None:
         row.ingress_id = info.ingress_id
     db.commit()
+
+    # ZST-EC-001 MED-001. The row is committed above, so the notice reports a
+    # resource that already exists. `enforced` decides how readiness is described —
+    # an unprovisioned input is recorded intent, not a working ingest.
+    media_comms.notify_input_created(db, background, row)
     db.refresh(row)
     return LiveInputOut(
         id=row.id, event_id=ev.id, event_title=ev.title, title=row.title,
@@ -467,48 +586,255 @@ def list_my_api_keys(org: Organization = Depends(get_my_org_admin), db: Session 
 @router.post("/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
 def create_my_api_key(
     data: ApiKeyCreate,
+    background: BackgroundTasks,
+    admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org_admin),
     db: Session = Depends(get_db),
 ):
     """Mint a key for the caller's OWN org. The raw key is in this response and nowhere
     else — only its sha256 is stored, so it can never be re-shown."""
-    return admin_crud.create_api_key(db, org, data.label, expires_in_days=data.expires_in_days)
+    created = admin_crud.create_api_key(db, org, data.label,
+                                        expires_in_days=data.expires_in_days)
+    # ZST-EC-001 DEV-002. The credential is committed before this line, so the notice
+    # reports a credential that already exists; a delivery failure cannot unmake it. The
+    # claim inside notify_credential_created keys off the credential id, so a retried
+    # request cannot produce a second security email for one key.
+    admin_crud.create_audit_log(db, actor=admin, action="api_key.create",
+                                target_type="api_key", target_id=created.id, org_id=org.id,
+                                meta={"label": data.label,
+                                      "fingerprint": created.fingerprint})
+    developer_comms.notify_credential_created(db, background, org=org, creator=admin,
+                                              key_id=created.id)
+    return created
 
 
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_my_api_key(
     key_id: str,
+    background: BackgroundTasks,
+    admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org_admin),
     db: Session = Depends(get_db),
 ):
     # Scoped to the caller's own org, so a key id from another org is simply not found.
-    if not admin_crud.revoke_api_key(db, org, key_id):
+    if not admin_crud.revoke_api_key(db, org, key_id, actor_id=admin.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "API key not found")
+    credential_lifecycle.notify_revoked(db, background, org=org, key_id=key_id, actor=admin)
 
 
 @router.post("/developer/api-keys", response_model=ApiKeyCreated, status_code=status.HTTP_201_CREATED)
 def create_developer_api_key(
-    data: ApiKeyCreate, admin: User = Depends(get_current_user),
+    data: ApiKeyCreate, background: BackgroundTasks,
+    admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
 ):
     """Org-scoped minting — same mint/hash logic as the super-admin path
     (crud.admin.create_api_key), just gated to this org's own admin instead of a platform
-    operator. The raw key is returned once, here, and never again."""
+    operator. The raw key is returned once, here, and never again.
+
+    Previously depended on get_current_user, which let ANY authenticated member of the org
+    mint a credential — the org-admin dependency below is what the sibling /api-keys route
+    already required, and minting is not a member-level action.
+    """
     created = admin_crud.create_api_key(db, org, data.label, data.expires_in_days)
     admin_crud.create_audit_log(db, actor=admin, action="api_key.create", target_type="api_key",
-                                target_id=created.id, org_id=org.id, meta={"label": data.label})
+                                target_id=created.id, org_id=org.id,
+                                meta={"label": data.label, "fingerprint": created.fingerprint})
+    # ZST-EC-001 DEV-002 — after the credential is committed.
+    developer_comms.notify_credential_created(db, background, org=org, creator=admin,
+                                              key_id=created.id)
     return created
 
 
 @router.delete("/developer/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_developer_api_key(
-    key_id: str, admin: User = Depends(get_current_user),
+    key_id: str, background: BackgroundTasks,
+    admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
 ):
-    if not admin_crud.revoke_api_key(db, org, key_id):
+    if not admin_crud.revoke_api_key(db, org, key_id, actor_id=admin.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "API key not found")
     admin_crud.create_audit_log(db, actor=admin, action="api_key.revoke", target_type="api_key",
                                 target_id=key_id, org_id=org.id)
+    # ZST-EC-001 DEV-004 — after the revocation is committed.
+    credential_lifecycle.notify_revoked(db, background, org=org, key_id=key_id, actor=admin)
+
+
+# ── Developer / Webhook verification + credential rotation (ZST-EC-001 DEV-004/006) ──
+
+@router.post("/developer/webhooks/{endpoint_id}/verification",
+             response_model=WebhookVerificationOut)
+def reset_webhook_verification(endpoint_id: uuid.UUID, background: BackgroundTasks,
+                               admin: User = Depends(require_org_admin),
+                               org: Organization = Depends(get_my_org_admin),
+                               db: Session = Depends(get_db)):
+    """Issue (or re-issue) the verification challenge for an endpoint.
+
+    Re-issuing returns the endpoint to PENDING_VERIFICATION, which withholds production
+    events until it is verified again — that is the point of a reset, not a side effect.
+    """
+    ep = crud.get_webhook_endpoint(db, org.id, endpoint_id)
+    if ep is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook endpoint not found")
+    was_verified = ep.status == WEBHOOK_VERIFIED
+    raw = webhook_lifecycle.reset_verification(db, ep)
+    admin_crud.create_audit_log(db, actor=admin, action="webhook.verification_reset",
+                                target_type="webhook_endpoint", target_id=ep.id,
+                                org_id=org.id, meta={"url": ep.url})
+    if was_verified:
+        webhook_lifecycle.notify_verification_reset(db, background, ep)
+    else:
+        webhook_lifecycle.notify_verification_required(db, background, ep)
+    return WebhookVerificationOut(
+        endpoint_id=ep.id, status=ep.status, challenge=raw,
+        challenge_header=webhook_security.CHALLENGE_HEADER,
+        expires_at=ep.verification_expires_at)
+
+
+@router.post("/developer/webhooks/{endpoint_id}/verify", response_model=WebhookEndpointOut)
+def verify_webhook_endpoint(endpoint_id: uuid.UUID, data: WebhookVerifyIn,
+                            admin: User = Depends(require_org_admin),
+                            org: Organization = Depends(get_my_org_admin),
+                            db: Session = Depends(get_db)):
+    """Redeem the challenge. Only this makes an endpoint production-eligible."""
+    ep = crud.get_webhook_endpoint(db, org.id, endpoint_id)
+    if ep is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook endpoint not found")
+    outcome = webhook_lifecycle.verify(db, ep, data.challenge)
+    if outcome == webhook_lifecycle.OK:
+        admin_crud.create_audit_log(db, actor=admin, action="webhook.verified",
+                                    target_type="webhook_endpoint", target_id=ep.id,
+                                    org_id=org.id, meta={"url": ep.url})
+        return ep
+    detail = {
+        webhook_lifecycle.NOT_PENDING: "This endpoint is already verified.",
+        webhook_lifecycle.NO_CHALLENGE: "No verification challenge is outstanding.",
+        webhook_lifecycle.EXPIRED: "The verification challenge expired. Reset it and retry.",
+        webhook_lifecycle.TOO_MANY_ATTEMPTS: "Too many attempts. Reset verification.",
+    }.get(outcome, "The verification challenge did not match.")
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, detail)
+
+
+@router.post("/developer/api-keys/{key_id}/rotate", response_model=ApiKeyCreated,
+             status_code=status.HTTP_201_CREATED)
+def rotate_developer_api_key(key_id: str, background: BackgroundTasks,
+                             admin: User = Depends(require_org_admin),
+                             org: Organization = Depends(get_my_org_admin),
+                             db: Session = Depends(get_db)):
+    """Issue a replacement credential and retire the original.
+
+    The replacement secret is in this response and nowhere else. There is deliberately no
+    overlap window: an overlap is a promise about what an authentication path will accept,
+    and no Zoiko Steam endpoint authenticates an API key yet.
+    """
+    retired, replacement = admin_crud.rotate_api_key(db, org, key_id, actor_id=admin.id)
+    if replacement is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "API key not found, or already revoked")
+    admin_crud.create_audit_log(db, actor=admin, action="api_key.rotate",
+                                target_type="api_key", target_id=replacement.id,
+                                org_id=org.id,
+                                meta={"rotated_from": key_id,
+                                      "old_fingerprint": admin_crud.key_fingerprint(retired),
+                                      "new_fingerprint": replacement.fingerprint})
+    credential_lifecycle.notify_rotated(db, background, org=org, old_record=retired,
+                                        new_key_id=replacement.id, actor=admin)
+    return replacement
+
+
+# ── Developer / signing rotation + data export (ZST-EC-001 DEV-008 / DEV-012) ────────
+
+@router.post("/developer/webhooks/{endpoint_id}/rotate-secret")
+def rotate_webhook_signing_secret(endpoint_id: uuid.UUID, background: BackgroundTasks,
+                                  admin: User = Depends(require_org_admin),
+                                  org: Organization = Depends(get_my_org_admin),
+                                  db: Session = Depends(get_db)):
+    """Issue a replacement signing secret and open the overlap window.
+
+    Both secrets sign every delivery until the window closes, so a subscriber can migrate
+    without dropping events. The raw secret is in this response and in the reveal route;
+    it is never emailed.
+    """
+    ep = crud.get_webhook_endpoint(db, org.id, endpoint_id)
+    if ep is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook endpoint not found")
+    raw, fingerprint = signing_rotation.start_rotation(db, ep, actor_id=admin.id)
+    admin_crud.create_audit_log(db, actor=admin, action="webhook.secret_rotate",
+                                target_type="webhook_endpoint", target_id=ep.id,
+                                org_id=org.id, meta={"fingerprint": fingerprint})
+    signing_rotation.notify_started(db, background, ep)
+    return {"endpoint_id": str(ep.id), "secret": raw, "fingerprint": fingerprint,
+            "secret_version": ep.secret_version,
+            "overlap_ends_at": ep.rotation_ends_at}
+
+
+@router.post("/developer/exports", status_code=status.HTTP_202_ACCEPTED)
+def request_developer_export(data: DeveloperExportCreate, background: BackgroundTasks,
+                             admin: User = Depends(require_org_admin),
+                             org: Organization = Depends(get_my_org_admin),
+                             db: Session = Depends(get_db)):
+    """Request a governed server-side export of developer metadata.
+
+    Org-admin only: credential and webhook metadata is security-sensitive, and an ordinary
+    member has no business bulk-exporting it. Generation happens after the response so a
+    large export never blocks the request.
+    """
+    if data.export_type not in EXPORT_TYPES:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            f"Unsupported export type. Expected one of {list(EXPORT_TYPES)}")
+    export = developer_export.request_export(db, org=org, requester=admin,
+                                             export_type=data.export_type)
+    admin_crud.create_audit_log(db, actor=admin, action="developer_export.request",
+                                target_type="developer_export", target_id=export.id,
+                                org_id=org.id, meta={"export_type": data.export_type})
+    background.add_task(_run_export, export.id)
+    return {"id": str(export.id), "status": export.status,
+            "export_type": export.export_type}
+
+
+def _run_export(export_id) -> None:
+    """Generate, store and announce one export, off the request path."""
+    from ..db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        export = db.get(DeveloperDataExport, export_id)
+        if export is None:
+            return
+        token = developer_export.process(db, export)
+        if token:
+            developer_export.notify_ready(db, developer_export._Bg(), export, token)
+        else:
+            developer_export.notify_failed(db, developer_export._Bg(), export)
+    finally:
+        db.close()
+
+
+@router.get("/developer/exports/{export_id}/download")
+def download_developer_export(export_id: uuid.UUID, token: str, request: Request,
+                              admin: User = Depends(require_org_admin),
+                              org: Organization = Depends(get_my_org_admin),
+                              db: Session = Depends(get_db)):
+    """Serve an export against a single-use, short-lived, purpose-bound authorization.
+
+    Authenticated AND token-bound: the link alone is not sufficient, so a forwarded email
+    does not hand the export to whoever received it.
+    """
+    export = db.get(DeveloperDataExport, export_id)
+    if export is None or export.org_id != org.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Export not found")
+
+    client_hint = request.headers.get("user-agent", "")[:120]
+    if not developer_export.authorize_download(db, export, token, user=admin,
+                                               client=client_hint):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "This download link is not valid or has expired.")
+    content = developer_export.load(export)
+    if content is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The export object is no longer stored")
+    return Response(content=content, media_type="text/csv",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{export.export_type}.csv"'})
 
 
 # ── Developer / Webhooks ──────────────────────────────────────────────────────
@@ -523,11 +849,23 @@ def _validate_events(events: list[str]) -> None:
 
 @router.post("/developer/webhooks", response_model=WebhookEndpointCreated, status_code=status.HTTP_201_CREATED)
 def create_developer_webhook(
-    data: WebhookEndpointCreate, admin: User = Depends(get_current_user),
+    data: WebhookEndpointCreate, background: BackgroundTasks,
+    admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
 ):
     _validate_events(data.events)
+    # ZST-EC-001 DEV-006. Validated before anything is stored: the URL column had no
+    # constraint at all, so an internal or metadata address could be registered and the
+    # platform would sign and POST to it.
+    try:
+        webhook_security.validate_webhook_url(data.url)
+    except webhook_security.UnsafeWebhookUrl as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     ep = crud.create_webhook_endpoint(db, org.id, data.url, data.label, data.events, admin.id)
+    # The endpoint starts PENDING_VERIFICATION and receives no production events until it
+    # proves control of the URL.
+    webhook_lifecycle.issue_challenge(db, ep)
+    webhook_lifecycle.notify_verification_required(db, background, ep)
     admin_crud.create_audit_log(db, actor=admin, action="webhook.create", target_type="webhook_endpoint",
                                 target_id=ep.id, org_id=org.id, meta={"url": data.url})
     return ep
@@ -543,6 +881,12 @@ def update_developer_webhook(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Webhook endpoint not found")
     if data.events is not None:
         _validate_events(data.events)
+    url_changed = bool(data.url and data.url.strip() != ep.url)
+    if url_changed:
+        try:
+            webhook_security.validate_webhook_url(data.url)
+        except webhook_security.UnsafeWebhookUrl as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     ep = crud.update_webhook_endpoint(db, ep, url=data.url, label=data.label,
                                       events=data.events, enabled=data.enabled)
     admin_crud.create_audit_log(db, actor=admin, action="webhook.update", target_type="webhook_endpoint",
@@ -589,17 +933,111 @@ def list_developer_webhook_deliveries(
 
 @router.get("/notifications", response_model=OrgNotifications)
 def get_notifications(org: Organization = Depends(get_my_org)):
-    return OrgNotifications(**(org.notifications or {}))
+    # Normalized, not raw. A legacy `security_alerts: false` sitting in the JSON column
+    # must never be reported back as though it were in effect.
+    return OrgNotifications(**notif_svc.effective(org))
+
+
+@router.get("/notifications/catalog", response_model=list[NotificationCatalogItem])
+def notification_catalog(org: Organization = Depends(get_my_org)):
+    """What each preference actually controls.
+
+    The settings page renders from this rather than from a hardcoded list, so a switch can
+    never outlive the email it claims to govern: `mandatory` marks the families no
+    preference may suppress, and `available` marks the ones with no send path at all.
+    """
+    current = notif_svc.effective(org)
+    return [
+        NotificationCatalogItem(**entry, value=bool(current.get(entry["key"], False)))
+        for entry in notif_svc.CATALOG
+    ]
 
 
 @router.patch("/notifications", response_model=OrgNotifications)
 def update_notifications(
     data: OrgNotifications,
+    background: BackgroundTasks,
+    admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org_admin),
     db: Session = Depends(get_db),
 ):
-    merged = crud.merge_json(db, org, "notifications", data.model_dump(exclude_unset=True))
-    return OrgNotifications(**merged)
+    """Save operational preferences, then confirm the change (ZST-EC-001 ORG-012).
+
+    Order is fixed: normalize -> compare -> commit -> record the snapshot event -> notify.
+    Nothing is emailed unless something actually moved, and the email describes state that
+    is already durable.
+    """
+    previous = notif_svc.effective(org)
+    incoming = data.model_dump(exclude_unset=True)
+
+    # Normalize BEFORE persisting. A client may still send `security_alerts: false` for
+    # backward compatibility; it is pinned back to True here rather than rejected, so old
+    # clients keep working and the mandatory guarantee still holds in the database.
+    proposed = notif_svc.normalize({**previous, **incoming})
+
+    if proposed == previous:
+        # A no-op is not a change: no event, no email.
+        return OrgNotifications(**previous)
+
+    merged = crud.merge_json(db, org, "notifications", proposed)
+    current = notif_svc.normalize(merged)
+
+    effective_at = datetime.now(timezone.utc)
+    event = NotificationPreferenceEvent(
+        org_id=org.id,
+        preference_owner_id=admin.id, preference_owner_email=admin.email,
+        actor_id=admin.id, actor_email=admin.email,
+        previous_preferences=previous, current_preferences=current,
+        scope=SCOPE_ORGANIZATION, effective_at=effective_at,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    admin_crud.create_audit_log(db, actor=admin, action="notification_preferences.update",
+                                target_type="organization", target_id=org.id, org_id=org.id,
+                                meta={"changed": notif_svc.summarize_change(previous, current)})
+    org_comms_notify_preferences(db, background, org, event, admin)
+    return OrgNotifications(**current)
+
+
+def org_comms_notify_preferences(db, background, org, event, actor) -> None:
+    """Queue the single summarized ORG-012 message for one committed change.
+
+    One notification per event, claimed by conditional UPDATE, so a double-submit or a
+    retried request cannot confirm the same change twice.
+
+    Recipients are the preference owner plus — only when organization-wide routing moved —
+    the recorded Organization owner. Every administrator is deliberately NOT mailed: a
+    routine settings edit is not an organization-wide security event.
+    """
+    updated = db.execute(
+        update(NotificationPreferenceEvent)
+        .where(NotificationPreferenceEvent.id == event.id,
+               NotificationPreferenceEvent.notified_at.is_(None))
+        .values(notified_at=datetime.now(timezone.utc))
+    ).rowcount
+    db.commit()
+    if not updated:
+        return
+
+    summary = notif_svc.summarize_change(event.previous_preferences or {},
+                                         event.current_preferences or {})
+    owner = db.get(User, org.owner_user_id) if org.owner_user_id else None
+    addresses = org_comms.recipients(actor, owner)
+    if not addresses:
+        return
+    try:
+        for address in addresses:
+            background.add_task(
+                email_mod.send_notification_preferences_email, address,
+                change_summary=summary,
+                effective_at=org_comms.org_timestamp(org, event.effective_at),
+                scope=f"{org.name} (organization-wide)",
+                actor=actor.email if actor else None,
+            )
+    except UnsafeLinkError:
+        log.exception("ORG-012 not queued: APP_URL unsafe for this environment")
 
 
 # ── Security ──────────────────────────────────────────────────────────────────
@@ -679,6 +1117,7 @@ def get_org_user(user_id: uuid.UUID, admin: User = Depends(require_org_admin), d
 
 @router.patch("/users/{user_id}", response_model=AdminUserOut)
 def update_org_user(user_id: uuid.UUID, data: UserUpdate, background: BackgroundTasks,
+                    step_up: str | None = Header(None, alias="X-Step-Up"),
                     admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
     u = crud.get_org_user(db, admin.org_id, user_id)
     if u is None:
@@ -691,8 +1130,39 @@ def update_org_user(user_id: uuid.UUID, data: UserUpdate, background: Background
     if u.id == admin.id and (data.is_active is False or (data.role and data.role != admin.role)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot demote or deactivate yourself")
     was_active = u.is_active
+    # ORG-003 high-risk control. Handing someone administrative control of the Organization
+    # requires proof the acting admin is present RIGHT NOW, not that they signed in earlier.
+    # Ordinary role changes are deliberately left alone — requiring re-auth to make somebody
+    # a Viewer would train people to type their password without reading the prompt.
+    if org_comms.is_high_risk_grant(u.role, data.role):
+        outcome = stepup_svc.consume(
+            db, admin, reference=step_up, purpose=STEP_UP_HIGH_RISK_ROLE_GRANT,
+            spent_on=f"grant {data.role} to {u.id}")
+        if outcome != stepup_svc.OK:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                {"code": "STEP_UP_REQUIRED",
+                 "purpose": STEP_UP_HIGH_RISK_ROLE_GRANT,
+                 "message": stepup_svc.describe(outcome)})
+
+    # ORG-003 needs the BEFORE picture, and it has to be taken while the old values are
+    # still on the row. Normalized to the same display form as the after-picture so the two
+    # are comparable and an unrelated edit produces two identical strings.
+    previous_access = org_comms.describe_access(role=u.role, org=admin.organization,
+                                                active=u.is_active)
     crud.update_org_user(db, u, data)
-    # IDN-008 only on a real active-state flip, after commit.
+    current_access = org_comms.describe_access(role=u.role, org=admin.organization,
+                                               active=u.is_active)
+
+    # ORG-003 - committed access-policy change. announce_access_changed no-ops when the two
+    # snapshots match, so renaming a member sends nothing.
+    org_comms.announce_access_changed(db, background, user=u, org_id=u.org_id,
+                                      previous_access=previous_access,
+                                      current_access=current_access)
+
+    # IDN-008 only on a real active-state flip, after commit. Kept separate from ORG-003 on
+    # purpose: a deactivation restricts the Zoiko identity, which is a different claim from
+    # an Organization access change and is owned by a different family.
     if data.is_active is not None and data.is_active != was_active:
         lifecycle.announce(
             db, background, user=u, email=u.email, org_id=u.org_id,
@@ -712,13 +1182,327 @@ def delete_org_user(user_id: uuid.UUID, background: BackgroundTasks,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot delete your own account")
     if u.role == "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot delete a super admin")
+    previous_access = org_comms.describe_access(role=u.role, org=admin.organization,
+                                                active=u.is_active)
     crud.soft_delete_user(db, u)  # retained in DB, hidden from listings, sessions killed
+
+    # ORG-004 - the membership in THIS Organization ended. identity_also_restricted records
+    # that soft_delete_user additionally deactivated the account, for the audit trail; it
+    # never changes the copy, because ORG-004 must not claim anything about the identity.
+    org_comms.announce_membership_removed(db, background, user=u, email=u.email,
+                                          org_id=u.org_id, previous_access=previous_access,
+                                          identity_also_restricted=True)
+
     # IDN-008 "Deletion completed". Truthful for a soft delete: active access really is
     # removed, and the record really is retained — which is exactly what the residual-records
-    # wording says, rather than claiming erasure.
+    # wording says, rather than claiming erasure. Both families fire because both statements
+    # are true: one Organization membership ended AND the identity was deleted here.
     lifecycle.announce(db, background, user=u, email=u.email, org_id=u.org_id,
                        state=lifecycle.STATE_DELETION_COMPLETED,
                        reason_category="organization_administrative_action")
+
+
+# ══ ORG-009 Authorized support access — customer surface ════════════════════════════════
+# The approval gate, from the tenant's side. These are the only routes that can turn a
+# support request into something startable, and they are org-scoped by the caller's own
+# membership: an approver can only ever decide on requests against their OWN Organization.
+
+
+def _support_customer_out(req) -> SupportAccessCustomerOut:
+    return SupportAccessCustomerOut(
+        id=req.id, case_reference=req.case_reference,
+        engineer_display=req.engineer_display, requested_scope=req.requested_scope,
+        allowed_actions=support_svc.actions_list(req.allowed_actions),
+        requested_minutes=req.requested_minutes, status=req.status,
+        emergency=req.emergency, requested_at=req.requested_at,
+        approved_at=req.approved_at, approved_by_email=req.approved_by_email,
+        starts_at=req.starts_at, expires_at=req.expires_at, ended_at=req.ended_at,
+    )
+
+
+def _my_support_request(db: Session, admin: User, req_id: uuid.UUID) -> SupportAccessRequest:
+    req = db.get(SupportAccessRequest, req_id)
+    # Scoped to the caller's organization. A 404 rather than a 403 so this cannot be used to
+    # discover that a support request exists against some other tenant.
+    if req is None or req.org_id != admin.org_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Support request not found")
+    return req
+
+
+@router.get("/support-access", response_model=list[SupportAccessCustomerOut])
+def list_support_access(admin: User = Depends(require_org_admin),
+                        db: Session = Depends(get_db)):
+    """Every support-access request raised against this Organization, newest first.
+
+    This is the "action history" surface the ORG-009 ended notice points at, and it is a
+    tenant route — no customer email ever links to a Super Admin console.
+    """
+    rows = db.scalars(
+        select(SupportAccessRequest)
+        .where(SupportAccessRequest.org_id == admin.org_id)
+        .order_by(SupportAccessRequest.requested_at.desc())
+    ).all()
+    return [_support_customer_out(r) for r in rows]
+
+
+@router.post("/support-access/{req_id}/decision", response_model=SupportAccessCustomerOut)
+def decide_support_access(req_id: uuid.UUID, data: SupportAccessDecision,
+                          background: BackgroundTasks,
+                          admin: User = Depends(require_org_admin),
+                          db: Session = Depends(get_db)):
+    """Approve or deny scoped support access to this Organization.
+
+    Approval binds to the exact terms on the record right now (services/support_access.py
+    fingerprints them). If staff later widen the scope or extend the duration, this approval
+    stops applying and a fresh decision is required.
+    """
+    req = _my_support_request(db, admin, req_id)
+    if req.status != "requested":
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"This request is already {req.status}")
+
+    outcome = (support_svc.approve(db, req, admin) if data.approve
+               else support_svc.deny(db, req, admin))
+    if outcome != support_svc.OK:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This request is already {outcome}")
+
+    admin_crud.create_audit_log(
+        db, actor=admin,
+        action="support_access.approve" if data.approve else "support_access.deny",
+        target_type="support_access", target_id=req.id, org_id=req.org_id,
+        meta={"case": req.case_reference, "engineer": req.engineer_display,
+              "scope": req.requested_scope, "minutes": req.requested_minutes},
+    )
+    return _support_customer_out(req)
+
+
+# ══ ORG-008 Organization ownership transfer ═════════════════════════════════════════════
+# Ownership moves only after BOTH parties confirm from an authenticated session, before the
+# request expires. An email link click is never sufficient — the emails carry no token at all.
+
+
+@router.get("/ownership-transfer", response_model=OwnershipTransferOut | None)
+def get_ownership_transfer(admin: User = Depends(require_org_admin),
+                           db: Session = Depends(get_db)):
+    return db.scalar(
+        select(OwnershipTransfer)
+        .where(OwnershipTransfer.org_id == admin.org_id,
+               OwnershipTransfer.status.notin_(("completed", "canceled", "expired")))
+        .order_by(OwnershipTransfer.initiated_at.desc())
+    )
+
+
+@router.post("/ownership-transfer", response_model=OwnershipTransferOut,
+             status_code=status.HTTP_201_CREATED)
+def start_ownership_transfer(data: OwnershipTransferCreate, background: BackgroundTasks,
+                             admin: User = Depends(require_org_admin),
+                             org: Organization = Depends(get_my_org),
+                             db: Session = Depends(get_db)):
+    """Propose a new owner. Ownership does NOT change here."""
+    proposed = db.scalar(
+        select(User).where(User.org_id == admin.org_id,
+                           func.lower(User.email) == data.proposed_owner_email.lower(),
+                           User.is_active.is_(True), User.deleted_at.is_(None))
+    )
+    if proposed is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "The proposed owner must be an active member of this Organization")
+    if org.owner_user_id == proposed.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "That member already owns this Organization")
+    existing = db.scalar(
+        select(OwnershipTransfer).where(
+            OwnershipTransfer.org_id == org.id,
+            OwnershipTransfer.status.notin_(("completed", "canceled", "expired")))
+    )
+    if existing is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "An ownership transfer is already in progress")
+
+    current_owner = db.get(User, org.owner_user_id) if org.owner_user_id else admin
+    transfer = governance.initiate_transfer(db, org=org, current_owner=current_owner,
+                                            proposed_owner=proposed, initiated_by=admin)
+    admin_crud.create_audit_log(db, actor=admin, action="ownership_transfer.initiate",
+                                target_type="ownership_transfer", target_id=transfer.id,
+                                org_id=org.id,
+                                meta={"proposed_owner": proposed.email})
+    governance.notify_transfer_initiated(db, background, transfer)
+    return transfer
+
+
+@router.post("/ownership-transfer/{transfer_id}/confirm", response_model=OwnershipTransferOut,
+             responses={409: {"description": "Transfer expired or already resolved"}})
+def confirm_ownership_transfer(transfer_id: uuid.UUID, background: BackgroundTasks,
+                               step_up: str | None = Header(None, alias="X-Step-Up"),
+                               user: User = Depends(get_current_user),
+                               db: Session = Depends(get_db)):
+    """Record this party's durable confirmation, and complete once both exist.
+
+    Deliberately depends on get_current_user rather than require_org_admin: the proposed
+    owner may not be an administrator yet, and requiring one would make the second
+    confirmation impossible for exactly the person it is meant to come from.
+
+    ZST-EC-001 ORG-008: BOTH confirmations require a fresh step-up. Ownership of a tenant is
+    the highest-value grant in the product, and an unattended session is not evidence that
+    the owner is the one confirming. The email carries no token precisely so that the only
+    way to confirm is here, signed in, having just re-entered a password.
+    """
+    transfer = db.get(OwnershipTransfer, transfer_id)
+    if transfer is None or transfer.org_id != user.org_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Transfer not found")
+
+    outcome = stepup_svc.consume(db, user, reference=step_up,
+                                 purpose=STEP_UP_OWNERSHIP_TRANSFER,
+                                 spent_on=f"confirm transfer {transfer_id}")
+    if outcome != stepup_svc.OK:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "STEP_UP_REQUIRED", "purpose": STEP_UP_OWNERSHIP_TRANSFER,
+             "message": stepup_svc.describe(outcome)})
+
+    # Expiry is evaluated before anything else, so a retry cannot resurrect a dead request.
+    if governance.transfer_is_expired(transfer):
+        if governance.expire_transfer(db, transfer):
+            governance.notify_transfer_expired(db, background, transfer)
+        # Returned, not raised. BackgroundTasks ride on the response object, and raising
+        # builds a NEW response that discards everything queued on the abandoned one - so
+        # raising here would record the expiry and silently drop the notice telling both
+        # parties that ownership did not change.
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": "This transfer request expired; ownership did not change"},
+            background=background,
+        )
+
+    outcome = governance.confirm_transfer(db, transfer, user)
+    if outcome == "not_a_party":
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Only the current or proposed owner can confirm this transfer")
+    admin_crud.create_audit_log(db, actor=user, action="ownership_transfer.confirm",
+                                target_type="ownership_transfer", target_id=transfer.id,
+                                org_id=transfer.org_id, meta={"status": transfer.status})
+
+    if transfer.status == "ready" and governance.complete_transfer(db, transfer):
+        admin_crud.create_audit_log(db, actor=user, action="ownership_transfer.complete",
+                                    target_type="ownership_transfer", target_id=transfer.id,
+                                    org_id=transfer.org_id,
+                                    meta={"new_owner": transfer.proposed_owner_email})
+        governance.notify_transfer_completed(db, background, transfer)
+    return transfer
+
+
+@router.delete("/ownership-transfer/{transfer_id}", response_model=OwnershipTransferOut)
+def cancel_ownership_transfer(transfer_id: uuid.UUID, background: BackgroundTasks,
+                              admin: User = Depends(require_org_admin),
+                              db: Session = Depends(get_db)):
+    transfer = db.get(OwnershipTransfer, transfer_id)
+    if transfer is None or transfer.org_id != admin.org_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Transfer not found")
+    if not governance.cancel_transfer(db, transfer, admin):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"This transfer is already {transfer.status}")
+    admin_crud.create_audit_log(db, actor=admin, action="ownership_transfer.cancel",
+                                target_type="ownership_transfer", target_id=transfer.id,
+                                org_id=transfer.org_id, meta={})
+    governance.notify_transfer_canceled(db, background, transfer)
+    return transfer
+
+
+# ══ ORG-007 Access review ═══════════════════════════════════════════════════════════════
+# A reviewer's silence leaves a decision PENDING. There is no path here that turns silence
+# into an approval, and completion is refused while anything is still pending.
+
+
+@router.post("/access-reviews", response_model=AccessReviewOut,
+             status_code=status.HTTP_201_CREATED)
+def open_access_review(data: AccessReviewCreate, background: BackgroundTasks,
+                       admin: User = Depends(require_org_admin),
+                       db: Session = Depends(get_db)):
+    review = governance.open_review(
+        db, org_id=admin.org_id,
+        due_at=datetime.now(timezone.utc) + timedelta(days=data.due_in_days),
+        created_by=admin, review_period=data.review_period,
+    )
+    admin_crud.create_audit_log(db, actor=admin, action="access_review.open",
+                                target_type="access_review", target_id=review.id,
+                                org_id=admin.org_id,
+                                meta={"due_at": review.due_at.isoformat()})
+    governance.notify_review_opened(db, background, review)
+    out = AccessReviewOut.model_validate(review)
+    out.outstanding = governance.outstanding(db, review)
+    return out
+
+
+@router.get("/access-reviews/{review_id}/assignments",
+            response_model=list[AccessReviewAssignmentOut])
+def list_review_assignments(review_id: uuid.UUID, admin: User = Depends(require_org_admin),
+                            db: Session = Depends(get_db)):
+    review = db.get(AccessReview, review_id)
+    if review is None or review.org_id != admin.org_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Access review not found")
+    return db.scalars(
+        select(AccessReviewAssignment)
+        .where(AccessReviewAssignment.review_id == review.id)
+        .order_by(AccessReviewAssignment.member_email)
+    ).all()
+
+
+@router.post("/access-reviews/{review_id}/assignments/{assignment_id}",
+             response_model=AccessReviewAssignmentOut)
+def decide_review_assignment(review_id: uuid.UUID, assignment_id: uuid.UUID,
+                             data: AccessReviewDecisionIn,
+                             admin: User = Depends(require_org_admin),
+                             db: Session = Depends(get_db)):
+    """Record one decision. An exception needs a reason and an accountable owner."""
+    review = db.get(AccessReview, review_id)
+    if review is None or review.org_id != admin.org_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Access review not found")
+    if review.status == "completed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This review is already complete")
+    assignment = db.get(AccessReviewAssignment, assignment_id)
+    if assignment is None or assignment.review_id != review.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Assignment not found")
+
+    if data.decision not in ("approved", "change_required", "remove", "exception"):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown decision")
+    if data.decision == "exception" and not (data.reason or "").strip():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "An exception requires a recorded reason")
+
+    governance.record_decision(db, assignment, decision=data.decision, decided_by=admin,
+                               reason=data.reason,
+                               exception_owner_email=(data.exception_owner_email
+                                                      or None))
+    admin_crud.create_audit_log(db, actor=admin, action="access_review.decide",
+                                target_type="access_review_assignment",
+                                target_id=assignment.id, org_id=review.org_id,
+                                meta={"decision": data.decision,
+                                      "member": assignment.member_email,
+                                      "high_risk": assignment.high_risk})
+    return assignment
+
+
+@router.post("/access-reviews/{review_id}/complete", response_model=AccessReviewOut)
+def complete_access_review(review_id: uuid.UUID, background: BackgroundTasks,
+                           admin: User = Depends(require_org_admin),
+                           db: Session = Depends(get_db)):
+    review = db.get(AccessReview, review_id)
+    if review is None or review.org_id != admin.org_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Access review not found")
+    if not governance.complete(db, review):
+        pending = governance.outstanding(db, review)
+        # Inaction is not approval: the review stays open until every member has a decision.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{pending} member(s) still have no recorded decision; a review cannot be "
+            f"completed by leaving them pending",
+        )
+    admin_crud.create_audit_log(db, actor=admin, action="access_review.complete",
+                                target_type="access_review", target_id=review.id,
+                                org_id=review.org_id, meta=governance.tally(db, review))
+    governance.notify_review_completed(db, background, review)
+    out = AccessReviewOut.model_validate(review)
+    out.outstanding = 0
+    return out
 
 
 # ── Invitations (admin management) ───────────────────────────────────────────────
@@ -756,6 +1540,12 @@ def create_invitation(data: InvitationCreate, background: BackgroundTasks,
     email = data.email.lower()
     if data.role not in ORG_ASSIGNABLE_ROLES:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid role")
+    # ZST-EC-001 Phase 10. organizations.security.allowed_domains was inert; it now gates
+    # who may be invited. Deliberately not applied to sign-in - locking out an existing
+    # member whose address predates the policy is a support incident, not a security win.
+    domain_issue = org_policy.domain_violation(org, email)
+    if domain_issue:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, domain_issue)
     if crud.user_email_taken(db, email):
         raise HTTPException(status.HTTP_409_CONFLICT, "A user with that email already exists")
     if crud.pending_invite_exists(db, admin.org_id, email):
@@ -766,8 +1556,10 @@ def create_invitation(data: InvitationCreate, background: BackgroundTasks,
                              "Member seat limit reached for your plan — upgrade to invite more people")
     inv, raw = crud.create_invitation(db, admin.org_id, email, data.role, admin.id)
     url = _invite_url(raw)
-    org_name = admin.organization.name if admin.organization else "your organization"
-    background.add_task(send_invitation_email, email, org_name, admin.full_name, url)
+    # ORG-001 base variant. The invitation row is already committed, so the notice reports
+    # state rather than creating it, and the claim inside announce_invited means a retried
+    # request cannot mail the invitee twice.
+    org_comms.announce_invited(db, background, inv, raw)
     return _inv_out(inv, token=raw, url=url)  # raw token returned once, for delivery
 
 
@@ -780,12 +1572,22 @@ def update_invitation(invitation_id: uuid.UUID, data: InvitationAction, backgrou
     if inv.status == "accepted":
         raise HTTPException(status.HTTP_409_CONFLICT, "Invitation already accepted")
     if data.action == "resend":
+        # resend_invitation re-issues the offer (new token, new deadline) and clears the
+        # ORG-001 markers, so the new offer is announced exactly once. It grants nothing on
+        # its own: the invitee still has to accept, and the role is unchanged.
         inv, raw = crud.resend_invitation(db, inv)
         url = _invite_url(raw)
-        org_name = admin.organization.name if admin.organization else "your organization"
-        background.add_task(send_invitation_email, inv.email, org_name, admin.full_name, url)
+        org_comms.announce_invited(db, background, inv, raw)
         return _inv_out(inv, token=raw, url=url)
-    crud.set_invitation_status(db, inv, "cancelled" if data.action == "cancel" else "expired")
+
+    # Revoked and Expired are distinct ORG-001 variants with distinct copy, so the notice is
+    # chosen from the state actually written rather than from one shared "cancelled" branch.
+    revoked = data.action == "cancel"
+    crud.set_invitation_status(db, inv, "cancelled" if revoked else "expired")
+    if revoked:
+        org_comms.announce_revoked(db, background, inv)
+    else:
+        org_comms.announce_expired(db, background, inv)
     return _inv_out(inv)
 
 
@@ -797,36 +1599,64 @@ def delete_invitation(invitation_id: uuid.UUID, admin: User = Depends(require_or
     crud.delete_invitation(db, inv)
 
 
+def _expired_response(db, background, inv) -> JSONResponse:
+    """ORG-001 Expired, fired where a lapsed invitation is actually observed and recorded.
+
+    These are unauthenticated routes, so this is the only place in the request path where
+    expiry becomes authoritative state. The claim inside announce_expired means repeatedly
+    opening a dead link mails the invitee once, not once per refresh.
+
+    Returns the 400 explicitly instead of raising it. BackgroundTasks ride on the response
+    object, and raising builds a NEW response - which discards every task queued on the
+    abandoned one. Raising here would have meant the Expired notice was queued and then
+    silently dropped on both public paths, in production, with nothing to show for it.
+    """
+    org_comms.announce_expired(db, background, inv)
+    return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
+                        content={"detail": "Invitation has expired"},
+                        background=background)
+
+
 # ── Invitation accept / reject (public — the invitee holds a token, not a session) ──
 
-@router.get("/invitations/preview", response_model=InvitationPreview)
-def preview_invitation(token: str, db: Session = Depends(get_db)):
+@router.get("/invitations/preview", response_model=InvitationPreview,
+            responses={400: {"description": "Invalid or expired invitation"}})
+def preview_invitation(token: str, background: BackgroundTasks, db: Session = Depends(get_db)):
     inv = crud.find_invitation_by_token(db, token)
     if inv is None or inv.status != "pending":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or already-used invitation")
     if inv.expires_at < datetime.now(timezone.utc):
         crud.set_invitation_status(db, inv, "expired")
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invitation has expired")
+        return _expired_response(db, background, inv)
     return InvitationPreview(
         email=inv.email, role=inv.role,
         organization_name=inv.organization.name if inv.organization else "your organization",
     )
 
 
-@router.post("/invitations/accept", response_model=TokenOut)
-def accept_invitation(data: InvitationAccept, db: Session = Depends(get_db)):
+@router.post("/invitations/accept", response_model=TokenOut,
+             responses={400: {"description": "Invalid or expired invitation"}})
+def accept_invitation(data: InvitationAccept, background: BackgroundTasks,
+                      db: Session = Depends(get_db)):
     inv = crud.find_invitation_by_token(db, data.token)
     if inv is None or inv.status != "pending":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or already-used invitation")
     if inv.expires_at < datetime.now(timezone.utc):
         crud.set_invitation_status(db, inv, "expired")
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invitation has expired")
+        return _expired_response(db, background, inv)
     if crud.user_email_taken(db, inv.email):
         raise HTTPException(status.HTTP_409_CONFLICT, "That email is already registered")
     if data.username and crud.username_taken(db, data.username):
         raise HTTPException(status.HTTP_409_CONFLICT, "Username already taken")
+    violation = org_policy.password_violation(inv.organization, data.password)
+    if violation:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, violation)
     username = (data.username or crud.unique_username(db, inv.email.split("@")[0])).lower()
     user = crud.accept_invitation(db, inv, data.full_name, username, hash_password(data.password))
+    # ORG-002. accept_invitation committed both the membership and the accepted status, so
+    # the notice describes state that already exists. Recipients are the inviter plus the
+    # organization's administrators, deduplicated, with the new member excluded.
+    org_comms.announce_member_joined(db, background, inv, user)
     out = UserOut.model_validate(user)
     out.organization_name = user.organization.name if user.organization else None
     return TokenOut(access_token=create_access_token(user, remember=False), user=out)
