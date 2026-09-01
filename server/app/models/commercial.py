@@ -912,6 +912,25 @@ class ReplayEntitlement(Base):
     # the selection a second time.
     source_recording_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
+    # ── MED-009 replay lifecycle (ZST-EC-001) ───────────────────────────────────
+    # `publish_state` is the authoritative state; these record the WITHDRAWAL that moves it
+    # to "withheld", which previously had no writer at all (the state was declared in
+    # REPLAY_STATES and never set by anything).
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    withdrawn_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    withdraw_reason: Mapped[str | None] = mapped_column(String(200))
+    # The state this row held before the current one — what the MED-009 access-change
+    # notice reports as "previous access" without having to guess it.
+    previous_publish_state: Mapped[str | None] = mapped_column(String(20))
+    state_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    prepared_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    access_changed_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    withdrawn_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expired_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     event: Mapped["Event"] = relationship()
 
 

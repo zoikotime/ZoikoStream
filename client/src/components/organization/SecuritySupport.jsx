@@ -60,15 +60,32 @@ export default function SecuritySupport({ posture }) {
             tone={s.open_findings ? BAD : CONSOLE.faint}
             title={s.open_findings == null ? "Needs a security findings scanner (not integrated)" : undefined}
           />
+          {/* These two read the ENFORCEMENT state, never the stored preference. The
+              settings toggles record an intent, but no SSO or MFA subsystem exists to act
+              on it, so a tile saying "Enabled" told operators their Organization was
+              protected by a control that does not run. "Requested" is the honest word for
+              a preference with nothing behind it, and the tooltip says why. */}
           <Row
             label="SSO enforced"
-            value={s.sso_enforced ? "Enabled" : "Off"}
+            value={s.sso_enforced ? "Enabled" : s.sso_requested ? "Requested" : "Off"}
             tone={s.sso_enforced ? GOOD : WARN}
+            title={
+              !s.sso_enforced && s.sso_requested
+                ? "Requested in settings, but not enforced: no identity provider is configured"
+                : undefined
+            }
           />
           <Row
             label="2FA required"
-            value={s.two_factor_required ? "Enabled" : "Off"}
+            value={
+              s.two_factor_required ? "Enabled" : s.two_factor_requested ? "Requested" : "Off"
+            }
             tone={s.two_factor_required ? GOOD : WARN}
+            title={
+              !s.two_factor_required && s.two_factor_requested
+                ? "Requested in settings, but not enforced: no MFA enrolment exists"
+                : undefined
+            }
           />
         </div>
 

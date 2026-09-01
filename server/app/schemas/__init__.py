@@ -9,6 +9,8 @@ from their module directly, so they are deliberately not re-exported here.
 
 from .auth import (
     ChangeRecoveryContactIn,
+    StepUpIn,
+    StepUpOut,
     ConfirmRecoveryContactIn,
     ForgotPasswordIn,
     LoginIn,
@@ -25,6 +27,8 @@ from .auth import (
 
 __all__ = [
     "ChangeRecoveryContactIn",
+    "StepUpIn",
+    "StepUpOut",
     "ConfirmRecoveryContactIn",
     "ForgotPasswordIn",
     "LoginIn",

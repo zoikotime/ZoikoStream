@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from jose import JWTError, jwt
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,14 @@ from .services import bus
 from .services import platform_settings
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
+from .services.org_comms import run_invitation_reminders
+from .services.credential_lifecycle import run_credential_sweeper
+from .services.org_state import require_operational_org_access
+from .services.media_comms import run_media_sweeper
+from .services.media_retention import run_retention_sweeper
+from .services.signing_rotation import run_signing_rotation_sweeper
+from .services.org_governance import run_governance_sweeper
+from .services.support_access import run_support_access_sweeper
 from .services.ops import request_stats, run_metric_sampler
 from .services.webhooks import run_webhook_retries
 from .services.delivery import run_watermark_processor
@@ -35,7 +43,7 @@ from .db import DB_MAX_CONNECTIONS, SessionLocal
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Six background tickers, each owning its own domain (which is also what keeps
+    """Nine background tickers, each owning its own domain (which is also what keeps
     moderation and broadcast from having to import each other):
       * scheduler  — fires scheduled polls/announcements, closes timed-out polls
       * sampler    — writes analytics snapshots (the retention graph) and pushes live counters
@@ -44,8 +52,15 @@ async def lifespan(_: FastAPI):
       * watermark  — burns the policy watermark into pending customer exports (services/delivery.py)
       * validation — compares a dual-recording pair and advances its replay entitlement
                      once real evidence exists (services/validation.py)
+      * invites    — sends the ZST-EC-001 ORG-001 Reminder for invitations nearing expiry
+                     (services/org_comms.py)
+      * support    — warns on and closes expiring authorized support sessions, so ORG-009
+                     access is time-bound by the platform rather than by trust
+                     (services/support_access.py)
+      * governance — access-review reminders/overdue and ownership-transfer expiry
+                     (services/org_governance.py)
     The bus releases its Redis client on the way out.
-    ponytail: all six run per PROCESS. With multiple workers, run them in one worker (or a
+    ponytail: all nine run per PROCESS. With multiple workers, run them in one worker (or a
     cron worker) or a scheduled poll (or a webhook delivery, a watermark burn, or a
     validation pass) fires once per worker.
 
@@ -61,7 +76,16 @@ async def lifespan(_: FastAPI):
 
     tasks = [asyncio.create_task(run_scheduler()), asyncio.create_task(run_sampler()),
              asyncio.create_task(run_metric_sampler()), asyncio.create_task(run_webhook_retries()),
-             asyncio.create_task(run_watermark_processor()), asyncio.create_task(run_validation_processor())]
+             asyncio.create_task(run_watermark_processor()), asyncio.create_task(run_validation_processor()),
+             asyncio.create_task(run_invitation_reminders()),
+             asyncio.create_task(run_support_access_sweeper()),
+             asyncio.create_task(run_governance_sweeper()),
+             asyncio.create_task(run_credential_sweeper()),
+             asyncio.create_task(run_signing_rotation_sweeper()),
+             asyncio.create_task(run_media_sweeper()),
+             # ZST-EC-001 MED-009 / MED-011. Retention warnings and replay expiry are both
+             # deadline-driven, so neither has a request or a webhook that could carry it.
+             asyncio.create_task(run_retention_sweeper())]
     try:
         yield
     finally:
@@ -160,10 +184,23 @@ async def maintenance_gate(request: Request, call_next):
 # at the bottom) and its client-side routes — /dashboard, /admin/*, /organization/* — are
 # spelled exactly like the router prefixes. Without the namespace a hard refresh on any of
 # those pages hits the API and gets JSON instead of the app.
-for router in (auth_router, dashboard_router, admin_router, organization_router,
-               events_router, live_router, commercial_router, deliveries_router,
-               contact_router):
+# ZST-EC-001 ORG-010. Organization-scoped routers carry the operational-state gate, so a
+# restricted or suspended tenant genuinely loses operational access instead of only being
+# told it did. The dependency resolves the caller optionally, so the public routes in these
+# routers (invitation preview/accept, event registration, watch) are unaffected, and it
+# allows an explicit preserved allowlist — billing, export, privacy, security settings and
+# support — so a restricted customer can still pay, retrieve their data or appeal.
+#
+# auth_router and admin_router are deliberately NOT gated: identity must keep working
+# (IDN-008 owns identity restriction, not this), and platform staff must still be able to
+# act on a restricted tenant.
+_ORG_STATE_GATE = [Depends(require_operational_org_access)]
+
+for router in (auth_router, dashboard_router, admin_router, contact_router):
     app.include_router(router, prefix="/api")
+for router in (organization_router, events_router, live_router, commercial_router,
+               deliveries_router):
+    app.include_router(router, prefix="/api", dependencies=_ORG_STATE_GATE)
 
 
 # A DB outage (e.g. Supabase paused, DNS blip) raises OperationalError. Without this,

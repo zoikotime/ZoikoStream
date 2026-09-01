@@ -68,6 +68,19 @@ class ConfirmRecoveryContactIn(BaseModel):
     token: str = Field(min_length=16, max_length=512)
 
 
+class StepUpIn(BaseModel):
+    """Re-verify the holder's password for one high-risk purpose."""
+    password: str = Field(min_length=1, max_length=72)
+    purpose: str
+
+
+class StepUpOut(BaseModel):
+    """The opaque reference is returned exactly once and never recoverable afterwards."""
+    reference: str
+    purpose: str
+    expires_in_minutes: int
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

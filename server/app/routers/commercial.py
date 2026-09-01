@@ -51,6 +51,7 @@ from ..models import (
     ReconciliationException, RefundCredit, ReplayEntitlement, SellerLegalEntity, ServiceProfile,
     UnmatchedSettlement, User,
 )
+from ..services import replay_comms
 from ..schemas.commercial import (
     CancelOrderRequest, CancellationPolicyCreate, CancellationPolicyOut, CancellationResult,
     CapacityHoldCreate, CapacityOut, CatalogLineCreate, CatalogLineOut, CatalogVersionCreate,
@@ -62,7 +63,8 @@ from ..schemas.commercial import (
     PaymentScheduleOut, PaymentWebhookIn, PeriodCreate, QuoteCreate, QuoteOut,
     ReadinessCheckCreate, ReadinessCheckOut, ReadinessEvaluation, ReconciliationExceptionOut,
     ReconciliationReport, RefundCreditOut, RemedyProposeCreate, ReplayEntitlementCreate,
-    ReplayEntitlementOut, SellerLegalEntityCreate, SellerLegalEntityOut, ServiceProfileCreate,
+    ReplayEntitlementOut, ReplayWithdrawIn, SellerLegalEntityCreate, SellerLegalEntityOut,
+    ServiceProfileCreate,
     ServiceProfileOut, TaxDeterminationCreate, CapacityPoolCreate, CapacityPoolOut,
     CapacityPoolUtilisationOut, OrderVersionOut, ProviderEventOut, UnmatchedSettlementOut,
     SettlementMatchCreate, CommercialExceptionCreate, CommercialExceptionOut,
@@ -938,10 +940,19 @@ def create_replay_entitlement(event_id: uuid.UUID, data: ReplayEntitlementCreate
 def publish_replay(entitlement_id: uuid.UUID, background: BackgroundTasks,
                     admin: User = Depends(require_commercial("media_access")), db: Session = Depends(get_db)):
     ent = _get_replay_entitlement_or_404(db, admin, entitlement_id)
+    was = ent.publish_state
     try:
         ent = crud.publish_replay(db, ent)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    if was == "withheld":
+        # Restoring a withdrawn replay is an ACCESS CHANGE, not a first publication — the
+        # people who were told it had been withdrawn are the people who need to know it is
+        # being served again.
+        ent.withdrawn_notified_at = None
+        ent.previous_publish_state = was
+        db.commit()
+        replay_comms.notify_access_changed(db, background, ent, was)
     # "customer" scope = notify the purchaser (doc Q2). "audience" scope would mean every
     # attendee, a broadcast-email concern this module doesn't own — not sent here.
     if ent.scope == "customer":
@@ -951,6 +962,35 @@ def publish_replay(entitlement_id: uuid.UUID, background: BackgroundTasks,
         if contact and ev:
             watch_url = f"{settings.APP_URL.rstrip('/')}/events/{ent.event_id}/watch"
             background.add_task(send_replay_available_email, contact[0], contact[1], ev.title, watch_url)
+    # ZST-EC-001 MED-009. A DIFFERENT audience from the purchaser notice above: the asset
+    # owner and the people authorized to publish learn that a decision was taken on an asset
+    # they are accountable for. Neither message is a substitute for the other.
+    replay_comms.notify_published(db, background, ent)
+    return ent
+
+
+@router.post("/replay-entitlements/{entitlement_id}/withdraw", response_model=ReplayEntitlementOut)
+def withdraw_replay(entitlement_id: uuid.UUID, data: ReplayWithdrawIn,
+                    background: BackgroundTasks,
+                    admin: User = Depends(require_commercial("media_access")),
+                    db: Session = Depends(get_db)):
+    """Stop serving a replay (ZST-EC-001 MED-009 Withdrawn).
+
+    `withheld` was declared in REPLAY_STATES from the beginning and had no writer at all —
+    there was no way to un-publish a replay short of editing the database. This is that
+    writer, and it is a real access change: routers/events.py::watch_event serves a replay
+    only while publish_state == "published", so a withdrawal takes effect immediately.
+
+    The recording itself is untouched. Withdrawal removes replay access, nothing else.
+    """
+    ent = _get_replay_entitlement_or_404(db, admin, entitlement_id)
+    if ent.publish_state not in ("published", "ready_for_review"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Only a published or prepared replay can be withdrawn.")
+    previous = replay_comms.withdraw(db, ent, actor_id=admin.id, reason=data.reason)
+    if previous is None:
+        return ent
+    replay_comms.notify_withdrawn(db, background, ent)
     return ent
 
 

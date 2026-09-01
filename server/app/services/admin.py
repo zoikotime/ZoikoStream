@@ -284,6 +284,25 @@ def list_recordings(db: Session, status: str | None = None, org_id=None, limit: 
     return out
 
 
+def recording_org_id(db: Session, recording_id):
+    """Owning Organization of a recording, via its event.
+
+    ZST-EC-001 ORG-009: the support approval has to be checked against the tenant whose
+    media this actually is, not against whatever organization the caller happened to name.
+    """
+    rec = db.get(LiveRecording, recording_id)
+    if rec is None:
+        return None
+    event = db.get(Event, rec.event_id) if rec.event_id else None
+    return event.org_id if event else None
+
+
+def event_org_id(db: Session, event_id):
+    """Owning Organization of an event, for the same reason as recording_org_id."""
+    event = db.get(Event, event_id)
+    return event.org_id if event else None
+
+
 def recording_playback_url(db: Session, recording_id) -> str | None:
     r = db.get(LiveRecording, recording_id)
     if r is None or not r.file_url or not livekit.object_exists(r.file_url):

@@ -2739,7 +2739,12 @@ def publish_replay(db: Session, entitlement: ReplayEntitlement) -> ReplayEntitle
     finishes, the same "publish now, deliver once ready" split the customer export already
     uses. Doesn't reset an already-`ready` watermark (a re-publish after some other field
     changed shouldn't discard a successful burn and force a re-encode)."""
-    if entitlement.publish_state not in ("not_available", "ready_for_review"):
+    # "withheld" is allowed as a source so a withdrawal is reversible: replay_comms.withdraw
+    # can move a published replay out of service, and this is how it comes back. Without it
+    # a withdrawal would be permanent and the MED-009 access-change transition would have no
+    # trigger at all. "expired" is deliberately NOT here — a lapsed availability window is
+    # re-opened by setting a new expires_at, not by re-publishing over the old one.
+    if entitlement.publish_state not in ("not_available", "ready_for_review", "withheld"):
         raise ValueError(f"Cannot publish replay from state '{entitlement.publish_state}'")
     entitlement.publish_state = "published"
     if entitlement.watermark_status != "ready":

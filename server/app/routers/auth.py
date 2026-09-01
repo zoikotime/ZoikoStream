@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..crud import identity as identity_crud
 from ..crud import recovery as recovery_crud
+from ..services import org_policy
+from ..services import stepup as stepup_svc
 from ..db import get_db
 from .. import email as email_mod
 from ..email import (
@@ -18,11 +20,13 @@ from ..email import (
     send_reset_otp_email,
     verification_url,
 )
-from ..models import ALLOW, ALLOW_NEW_CONTEXT, BLOCK_SUSPICIOUS, Organization, User
+from ..models import STEP_UP_PURPOSES, STEP_UP_TTL_MINUTES, ALLOW, ALLOW_NEW_CONTEXT, BLOCK_SUSPICIOUS, Organization, User
 from ..services import identity_security as idsec
 from ..ratelimit import rate_limit
 from ..schemas import (
     ChangeRecoveryContactIn,
+    StepUpIn,
+    StepUpOut,
     ConfirmRecoveryContactIn,
     ForgotPasswordIn,
     LoginIn,
@@ -481,6 +485,17 @@ def reset_password(data: ResetPasswordIn, background: BackgroundTasks,
     user = _load_recovery_user(db, data.email)
     recovery = _check_code(db, user, data.otp)
 
+    # The Organization's password floor is enforced here, not merely displayed. It may
+    # only ever be STRICTER than the platform baseline (services/org_policy), so a tenant
+    # setting can tighten the rule but never weaken it.
+    #
+    # Checked BEFORE the code is spent, deliberately. Rejecting the password after consuming
+    # the single-use code would burn the recovery attempt on a validation failure and force
+    # the user to start recovery again - punishing them for a typo.
+    violation = org_policy.password_violation(user.organization, data.password)
+    if violation:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, violation)
+
     # Spend the code BEFORE committing the credential: single-use must hold even if the
     # write below fails.
     if not recovery_crud.consume_code(db, user, data.otp):
@@ -584,6 +599,31 @@ def confirm_recovery_contact(data: ConfirmRecoveryContactIn, background: Backgro
     )
     return {"message": "Recovery address confirmed.",
             "recovery_email": recovery_crud.mask_destination(user.recovery_email)}
+
+
+@router.post("/step-up", response_model=StepUpOut, dependencies=[_OTP_VERIFY_LIMIT])
+def step_up(data: StepUpIn, request: Request, db: Session = Depends(get_db),
+            user: User = Depends(get_current_user)):
+    """Re-verify the password and mint a short-lived, purpose-bound step-up grant.
+
+    ZST-EC-001 ORG-003 / ORG-008. High-risk operations need proof the person at the keyboard
+    is still the account holder RIGHT NOW. An existing session cannot supply that — it only
+    proves someone authenticated at some point — so this route re-checks the credential and
+    hands back a reference valid for one purpose, for a few minutes, once.
+
+    Rate-limited on the same bucket as OTP verification: this is a password oracle if left
+    unbounded.
+    """
+    ip = request.client.host if request.client else None
+    outcome, reference = stepup_svc.issue(db, user, password=data.password,
+                                          purpose=data.purpose, ip=ip)
+    if outcome == stepup_svc.UNKNOWN_PURPOSE:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            f"Unsupported purpose. Expected one of {list(STEP_UP_PURPOSES)}")
+    if outcome != stepup_svc.OK:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, stepup_svc.describe(outcome))
+    return StepUpOut(reference=reference, purpose=data.purpose,
+                     expires_in_minutes=STEP_UP_TTL_MINUTES)
 
 
 @router.get("/me", response_model=UserOut)

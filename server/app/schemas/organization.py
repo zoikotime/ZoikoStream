@@ -89,6 +89,45 @@ class WebhookEndpointCreated(WebhookEndpointOut):
     secret: str
 
 
+class WebhookVerificationOut(BaseModel):
+    """The challenge is returned ONCE, here. Only its hash is stored."""
+    endpoint_id: uuid.UUID
+    status: str
+    challenge: str
+    challenge_header: str
+    expires_at: datetime | None = None
+
+
+class DeveloperExportCreate(BaseModel):
+    export_type: str
+
+
+class RetentionExtensionCreate(BaseModel):
+    """`reason_category` is a closed list (models.media_governance.RETENTION_REASON_CATEGORIES)
+    rather than free text, because it is rendered into a notification sent to data-governance
+    recipients — a free-text field there is an invitation to paste confidential detail."""
+
+    reason_category: str
+    requested_until: datetime
+
+
+class RetentionStateOut(BaseModel):
+    recording_id: uuid.UUID
+    retention_policy_version: str
+    retention_expires_at: datetime | None = None
+    legal_hold: bool = False
+    # Safe hold metadata only. The hold's actual subject matter is never stored, so it
+    # cannot be served here.
+    hold_reference: str | None = None
+    hold_category: str | None = None
+    deletion_eligible: bool = True
+    deletion_blocked_reason: str | None = None
+
+
+class WebhookVerifyIn(BaseModel):
+    challenge: str = Field(min_length=8, max_length=256)
+
+
 class WebhookEndpointCreate(BaseModel):
     url: str = Field(min_length=1, max_length=2000)
     label: str | None = Field(None, max_length=120)
@@ -119,9 +158,19 @@ class WebhookDeliveryOut(BaseModel):
     created_at: datetime
 
 
+from .admin import ApiKeyOut  # noqa: E402  (shared credential shape)
+
+
 class OrgDeveloperOut(BaseModel):
-    """API keys and registered webhook endpoints."""
-    api_keys: list[dict] = []
+    """API keys and registered webhook endpoints.
+
+    `api_keys` is typed as ApiKeyOut, not list[dict]. It used to be the latter, and the
+    router's own comment said records were "shaped through ApiKeyOut" so `key_hash` could
+    not reach a browser - but list[dict] passes every key through untouched, so the stored
+    sha256 verifier for every credential was being returned to the client. Typing the field
+    is what actually enforces the redaction the comment describes.
+    """
+    api_keys: list[ApiKeyOut] = []
     webhooks: list[WebhookEndpointOut] = []
 
 
@@ -129,14 +178,43 @@ class OrgDeveloperOut(BaseModel):
 # All fields defaulted → GET fills missing keys; PATCH merges only supplied keys.
 
 class OrgNotifications(BaseModel):
+    """Stored operational preferences.
+
+    Every field is kept for backward compatibility with values already in the database and
+    with existing clients, but the server normalizes on read AND on write
+    (services/notifications.normalize): mandatory keys are pinned True and keys with no send
+    path are pinned False. A client may still POST `security_alerts: false`; it simply has
+    no effect, which is the safe way to deprecate a switch that was never honoured.
+    """
     event_scheduled: bool = True
-    event_starting: bool = True
-    recording_ready: bool = True
+    event_starting: bool = False
+    recording_ready: bool = False
     weekly_summary: bool = False
     billing: bool = True
-    mentions: bool = True
-    member_joined: bool = False
+    mentions: bool = False
+    # Opt-out: ORG-002 sent unconditionally before preferences were enforced.
+    member_joined: bool = True
+    # Class A. Always true on read and on write; see NotificationCatalogItem.mandatory.
     security_alerts: bool = True
+
+
+class NotificationCatalogItem(BaseModel):
+    """What one preference actually controls, so the UI can stop guessing.
+
+    `mandatory` means no preference can suppress the family. `available` means a send path
+    for it exists in this codebase at all — four of the historical eight name emails that
+    are never sent, and the settings page must not render those as working switches.
+    """
+    key: str
+    label: str
+    description: str
+    message_class: str
+    mandatory: bool
+    configurable: bool
+    available: bool
+    scope: str
+    channel: str
+    value: bool
 
 
 # ── Security ──────────────────────────────────────────────────────────────────
@@ -238,6 +316,90 @@ class RecordingOut(BaseModel):
 
 
 # ── Live Inputs (LiveKit Ingress) ─────────────────────────────────────────────
+
+# ── ORG-007 / ORG-008 / ORG-009 customer-side governance (ZST-EC-001) ───────
+
+class SupportAccessDecision(BaseModel):
+    """An Organization approver's decision on a support-access request."""
+    approve: bool
+
+
+class SupportAccessCustomerOut(BaseModel):
+    """What the tenant is allowed to see about a support request.
+
+    Deliberately omits internal engineer ids, elevation ids and reason internals - the
+    customer needs to know who was authorized to do what, for how long, on whose approval.
+    """
+    id: uuid.UUID
+    case_reference: str
+    engineer_display: str
+    requested_scope: str
+    allowed_actions: list[str]
+    requested_minutes: int
+    status: str
+    emergency: bool
+    requested_at: datetime | None = None
+    approved_at: datetime | None = None
+    approved_by_email: str | None = None
+    starts_at: datetime | None = None
+    expires_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class OwnershipTransferCreate(BaseModel):
+    proposed_owner_email: EmailStr
+
+
+class OwnershipTransferOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: str
+    current_owner_email: str
+    proposed_owner_email: str
+    expires_at: datetime
+    current_owner_confirmed_at: datetime | None = None
+    proposed_owner_confirmed_at: datetime | None = None
+    completed_at: datetime | None = None
+    canceled_at: datetime | None = None
+
+
+class AccessReviewCreate(BaseModel):
+    due_in_days: int = Field(14, ge=1, le=180)
+    review_period: str | None = Field(None, max_length=60)
+
+
+class AccessReviewDecisionIn(BaseModel):
+    decision: str            # approved | change_required | remove | exception
+    reason: str | None = Field(None, max_length=300)
+    exception_owner_email: EmailStr | None = None
+
+
+class AccessReviewAssignmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    member_email: str
+    member_name: str | None = None
+    access_snapshot: str | None = None
+    decision: str
+    decision_reason: str | None = None
+    decided_at: datetime | None = None
+    exception_owner_email: str | None = None
+    high_risk: bool = False
+
+
+class AccessReviewOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: str
+    review_period: str | None = None
+    opened_at: datetime | None = None
+    due_at: datetime
+    completed_at: datetime | None = None
+    outstanding: int = 0
+
 
 class LiveInputCreate(BaseModel):
     event_id: uuid.UUID

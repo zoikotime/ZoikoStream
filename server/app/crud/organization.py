@@ -186,15 +186,48 @@ def create_invitation(db, org_id, email, role, invited_by_id) -> tuple[Invitatio
 
 
 def resend_invitation(db, inv: Invitation) -> tuple[Invitation, str]:
-    """Rotate the token + reset the clock, returning to pending. Old link stops working."""
+    """Rotate the token + reset the clock, returning to pending. Old link stops working.
+
+    This is a deliberate re-issue, not a re-send: the product's existing rule is that a
+    resent invitation is a NEW offer with a new deadline, and ZST-EC-001 ORG-001 permits
+    preserving that as long as it does not silently widen authorization. It does not - the
+    role is unchanged, the old link is revoked by the hash rotation, and the new expiry is
+    the standard INVITE_TTL_DAYS window rather than an extension bolted onto the old one.
+
+    The ORG-001 notification markers are cleared with it. They describe transitions of the
+    offer that has just been replaced, so leaving them set would suppress the notice for the
+    new deadline; clearing them lets the new offer be announced (and later reminded about)
+    exactly once.
+    """
     raw = secrets.token_urlsafe(32)
     inv.token_hash = _hash_token(raw)
     inv.status = "pending"
     inv.accepted_at = None
     inv.expires_at = datetime.now(timezone.utc) + timedelta(days=INVITE_TTL_DAYS)
+    inv.invited_notified_at = None
+    inv.reminder_sent_at = None
+    inv.expired_notified_at = None
+    inv.revoked_notified_at = None
     db.commit()
     db.refresh(inv)
     return inv, raw
+
+
+def rotate_invitation_token(db, inv: Invitation) -> str:
+    """Issue a fresh raw token for an invitation WITHOUT touching its expiry or status.
+
+    The reminder needs a working link, and only the token hash is stored, so the original
+    raw token no longer exists anywhere by the time a reminder is due. Rotating is the only
+    way to produce a usable link - but the deadline the reminder announces must stay the
+    deadline the invitation already had, which is why this deliberately does not call
+    resend_invitation. The previous link stops working, which is correct: one live link per
+    invitation is the same guarantee the resend path already makes.
+    """
+    raw = secrets.token_urlsafe(32)
+    inv.token_hash = _hash_token(raw)
+    db.commit()
+    db.refresh(inv)
+    return raw
 
 
 def set_invitation_status(db, inv: Invitation, status: str) -> Invitation:

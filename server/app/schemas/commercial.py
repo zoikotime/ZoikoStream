@@ -856,6 +856,13 @@ class ReplayEntitlementCreate(BaseModel):
     expires_at: datetime | None = None
 
 
+class ReplayWithdrawIn(BaseModel):
+    """Why a replay was withdrawn. Free text, shown to the asset owner and publishers, so it
+    is length-capped and never rendered as HTML."""
+
+    reason: str | None = Field(None, max_length=200)
+
+
 class ReplayEntitlementOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID

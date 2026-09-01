@@ -729,9 +729,23 @@ def security_support(db: Session, org: Organization) -> dict:
             Invitation.org_id == org.id, Invitation.status == "pending")
     ) or 0
 
+    # `enforce_sso` and `require_2fa` are stored preferences with NO enforcement behind
+    # them: there is no IdP, no domain verification, no certificate lifecycle and no SSO
+    # sign-in route, and nothing in the login path consults require_2fa. Reporting them as
+    # enforced controls told operators their Organization was protected by measures that do
+    # not exist, so the API now reports the request separately from the enforcement.
+    #
+    # ZST-EC-001 ORG-005 depends on this distinction: no SSO lifecycle mail may ever be
+    # driven by a flag that enforces nothing.
+    sso_requested = bool(security.get("enforce_sso"))
+    mfa_requested = bool(security.get("require_2fa"))
     return {
-        "sso_enforced": bool(security.get("enforce_sso")),
-        "two_factor_required": bool(security.get("require_2fa")),
+        "sso_enforced": False,
+        "sso_requested": sso_requested,
+        "sso_available": False,
+        "two_factor_required": False,
+        "two_factor_requested": mfa_requested,
+        "two_factor_available": False,
         "allowed_domains": (security.get("allowed_domains") or "").strip() or None,
         "domain_verified": bool(org.domain_verified),
         "pending_members": pending_members,

@@ -160,11 +160,32 @@ def update_organization(db, org: Organization, data) -> Organization:
     return org
 
 
+def _purge_legacy_memberships(db, *, org_id=None, user_id=None) -> None:
+    """Clear the legacy `memberships` rows that still FK-reference this row.
+
+    `memberships` predates the org_id-on-User model and is NOT a SQLAlchemy model, so
+    Base.metadata.create_all() never creates it. It exists in databases provisioned before
+    that change and is absent from freshly provisioned ones — which meant a bare DELETE
+    aborted the whole transaction and made hard deletes fail on any new database. The
+    existence check is what keeps both shapes working.
+    """
+    exists = db.execute(text(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = current_schema() AND table_name = 'memberships'"
+    )).first()
+    if not exists:
+        return
+    if org_id is not None:
+        db.execute(text("DELETE FROM memberships WHERE org_id = :oid"), {"oid": org_id})
+    if user_id is not None:
+        db.execute(text("DELETE FROM memberships WHERE user_id = :uid"), {"uid": user_id})
+
+
 def delete_organization(db, org: Organization) -> None:
     db.query(Subscription).filter(Subscription.org_id == org.id).delete()
     # `memberships` predates the current org_id-on-User model and isn't SQLAlchemy-mapped,
     # but it still FK-references organizations — clean it up raw or the delete 500s.
-    db.execute(text("DELETE FROM memberships WHERE org_id = :oid"), {"oid": org.id})
+    _purge_legacy_memberships(db, org_id=org.id)
     db.delete(org)
     db.commit()
 
@@ -239,14 +260,45 @@ def update_user(db, user: User, data) -> AdminUserOut:
 def delete_user(db, user: User) -> None:
     # `memberships` predates the current org_id-on-User model and isn't SQLAlchemy-mapped,
     # but it still FK-references users — clean it up raw or the delete 500s.
-    db.execute(text("DELETE FROM memberships WHERE user_id = :uid"), {"uid": user.id})
+    _purge_legacy_memberships(db, user_id=user.id)
     # Identity tables added for IDN-001/IDN-003/IDN-007 also FK-reference users, and this
     # is a HARD delete (unlike the org-level soft delete), so every one of them would block
     # it. Removing them is correct: a spent verification challenge or a sign-in history row
     # has no meaning once the identity is gone. The lasting record of the deletion lives in
     # audit_logs and account_state_events, neither of which is FK-bound to the user.
-    for table in ("identity_challenges", "sign_in_events", "account_recoveries"):
+    for table in ("identity_challenges", "sign_in_events", "account_recoveries",
+                  "step_up_grants"):
         db.execute(text(f"DELETE FROM {table} WHERE user_id = :uid"), {"uid": user.id})
+
+    # Governance records added for ZST-EC-001 ORG-007/008/009 also FK-reference users, but
+    # they must NOT be deleted with the identity: a support session that touched a tenant,
+    # an ownership transfer, or an access-review decision are exactly the records that have
+    # to survive the person leaving. The references are nulled instead, and each row already
+    # stores the human-readable identity alongside the id (engineer_display,
+    # approved_by_email, current_owner_email, reviewer_email), so the record stays readable.
+    for stmt in (
+        "UPDATE support_access_requests SET engineer_id = NULL WHERE engineer_id = :uid",
+        "UPDATE support_access_requests SET approved_by_id = NULL WHERE approved_by_id = :uid",
+        "UPDATE support_access_requests SET emergency_authorizer_id = NULL "
+        "WHERE emergency_authorizer_id = :uid",
+        "UPDATE ownership_transfers SET current_owner_id = NULL WHERE current_owner_id = :uid",
+        "UPDATE ownership_transfers SET proposed_owner_id = NULL WHERE proposed_owner_id = :uid",
+        "UPDATE ownership_transfers SET initiated_by_id = NULL WHERE initiated_by_id = :uid",
+        "UPDATE access_reviews SET created_by_id = NULL WHERE created_by_id = :uid",
+        "UPDATE access_review_assignments SET reviewer_id = NULL WHERE reviewer_id = :uid",
+        "UPDATE access_review_assignments SET member_id = NULL WHERE member_id = :uid",
+        "UPDATE access_review_assignments SET decided_by_id = NULL WHERE decided_by_id = :uid",
+        "UPDATE access_review_escalations SET escalated_to_id = NULL "
+        "WHERE escalated_to_id = :uid",
+        "UPDATE organizations SET owner_user_id = NULL WHERE owner_user_id = :uid",
+    ):
+        db.execute(text(stmt), {"uid": user.id})
+
+    # Elevation sessions are ended rather than kept dangling — an elevation belonging to a
+    # deleted account should not read as still open — and then removed, since the durable
+    # record of what was done under it lives in audit_logs.
+    db.execute(text("DELETE FROM elevation_sessions WHERE user_id = :uid"), {"uid": user.id})
+
     db.delete(user)
     db.commit()
 
@@ -606,12 +658,158 @@ def update_governance_record(db, record: GovernanceRecord, data) -> GovernanceRe
 
 # ── Developer / API keys (stored on Organization.api_keys JSON) ─────────────
 
+def key_fingerprint(record: dict) -> str:
+    """Non-secret short identifier for one credential (ZST-EC-001 DEV-002).
+
+    Derived from the stored sha256 VERIFIER, never from the secret itself. The existing
+    `prefix` field would have been the obvious candidate, but it is `raw[:12]` - eight
+    characters of literal banner plus four characters of the actual token - so publishing it
+    in an email would disclose real key material for no benefit.
+
+    Eight hex characters of a hash carry no reconstruction risk and are enough for a human
+    to match an email against a console row.
+    """
+    digest = (record.get("key_hash") or record.get("id") or "").replace("-", "")
+    short = digest[:8].upper() or "UNKNOWN"
+    return f"{short[:4]}-{short[4:]}" if len(short) == 8 else short
+
+
 def list_api_keys(db, org: Organization) -> list[ApiKeyOut]:
     records = org.api_keys or []
     return [ApiKeyOut(id=r["id"], label=r["label"], prefix=r["prefix"],
+                      fingerprint=key_fingerprint(r),
                       created_at=r["created_at"], expires_at=r.get("expires_at"),
                       revoked=r.get("revoked", False))
             for r in records]
+
+
+def get_api_key_record(org: Organization, key_id: str) -> dict | None:
+    for r in (org.api_keys or []):
+        if r.get("id") == key_id:
+            return r
+    return None
+
+
+# Credential lifecycle states (ZST-EC-001 DEV-003/DEV-004). Explicit state, not inferred
+# from which notification markers happen to be set.
+KEY_ACTIVE = "active"
+KEY_EXPIRED = "expired"
+KEY_REVOKED = "revoked"
+KEY_STATUSES = (KEY_ACTIVE, KEY_EXPIRED, KEY_REVOKED)
+
+# How far ahead of expiry the warning fires.
+KEY_EXPIRY_WARNING_DAYS = 7
+
+
+def key_status(record: dict) -> str:
+    """Effective state of one credential record.
+
+    Derived so that records written before `status` existed still report correctly: a
+    revoked flag or a lapsed expiry is authoritative even without the field.
+    """
+    if record.get("revoked"):
+        return KEY_REVOKED
+    stored = record.get("status")
+    if stored in KEY_STATUSES:
+        return stored
+    expires = _parse_ts(record.get("expires_at"))
+    if expires is not None and expires <= datetime.now(timezone.utc):
+        return KEY_EXPIRED
+    return KEY_ACTIVE
+
+
+def _parse_ts(value):
+    if not value:
+        return None
+    if hasattr(value, "tzinfo"):
+        return value
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _mutate_key(db, org: Organization, key_id: str, changes: dict) -> dict | None:
+    """Apply changes to one credential record in the JSON column, atomically enough for a
+    single-writer path. Returns the updated record."""
+    records, updated, found = org.api_keys or [], [], None
+    for r in records:
+        if r.get("id") == key_id:
+            r = {**r, **changes}
+            found = r
+        updated.append(r)
+    if found is not None:
+        org.api_keys = updated
+        db.commit()
+    return found
+
+
+def claim_key_notification(db, org: Organization, key_id: str,
+                           column: str = "dev_002_notified_at") -> bool:
+    """Claim the right to send ONE notification for one credential. True for exactly one
+    caller, per (credential, marker).
+
+    The marker lives on the credential record itself, so a retried request that somehow
+    reached this point twice cannot produce two security emails for one credential.
+    """
+    records = org.api_keys or []
+    updated, claimed = [], False
+    for r in records:
+        if r.get("id") == key_id and not r.get(column):
+            r = {**r, column: datetime.now(timezone.utc).isoformat()}
+            claimed = True
+        updated.append(r)
+    if claimed:
+        org.api_keys = updated
+        db.commit()
+    return claimed
+
+
+def mark_key_expired(db, org: Organization, key_id: str) -> dict | None:
+    """Move a lapsed credential into the EXPIRED state.
+
+    This records lifecycle state. It does NOT block access, because no Zoiko Steam endpoint
+    authenticates an API key - see the reported DEV-003 gap, and note that the expiry email
+    is worded accordingly.
+    """
+    record = get_api_key_record(org, key_id)
+    if record is None or key_status(record) != KEY_ACTIVE:
+        return None
+    return _mutate_key(db, org, key_id,
+                       {"status": KEY_EXPIRED,
+                        "expired_at": datetime.now(timezone.utc).isoformat()})
+
+
+def rotate_api_key(db, org: Organization, key_id: str, actor_id=None,
+                   expires_in_days: int | None = None) -> tuple[dict | None, ApiKeyCreated | None]:
+    """Issue a replacement and retire the original, recording the relationship both ways.
+
+    There is NO overlap window: the previous credential is revoked immediately. An overlap
+    could only be honoured by an authentication path that checks expiry, and none exists —
+    promising one would be promising behaviour nothing enforces. The email says so.
+    """
+    old = get_api_key_record(org, key_id)
+    if old is None or key_status(old) == KEY_REVOKED:
+        return None, None
+
+    label = old.get("label") or "Rotated credential"
+    replacement = create_api_key(db, org, label, expires_in_days=expires_in_days)
+    now = datetime.now(timezone.utc).isoformat()
+
+    _mutate_key(db, org, replacement.id,
+                {"rotated_from": key_id,
+                 "rotated_from_fingerprint": key_fingerprint(old),
+                 "rotated_at": now,
+                 "rotated_by": str(actor_id) if actor_id else None})
+    retired = _mutate_key(db, org, key_id, {
+        "revoked": True, "status": KEY_REVOKED, "revoked_at": now,
+        "revoked_by": str(actor_id) if actor_id else None,
+        "revoke_reason": "rotated",
+        "rotated_to": replacement.id,
+        "rotated_to_fingerprint": replacement.fingerprint,
+    })
+    return retired, replacement
 
 
 def create_api_key(db, org: Organization, label: str, expires_in_days: int | None = None) -> ApiKeyCreated:
@@ -628,22 +826,34 @@ def create_api_key(db, org: Organization, label: str, expires_in_days: int | Non
         # what every key created before this field existed remains.
         "expires_at": (now + timedelta(days=expires_in_days)).isoformat() if expires_in_days else None,
         "revoked": False,
+        "status": KEY_ACTIVE,
     }
     org.api_keys = [*(org.api_keys or []), record]
     db.commit()
     return ApiKeyCreated(id=record["id"], label=label, prefix=record["prefix"],
+                         fingerprint=key_fingerprint(record),
                          created_at=record["created_at"], revoked=False, key=raw,
                          expires_at=record["expires_at"])
 
 
-def revoke_api_key(db, org: Organization, key_id: str) -> bool:
+def revoke_api_key(db, org: Organization, key_id: str, actor_id=None,
+                   reason: str = "administrative") -> bool:
+    """Revoke one credential, recording WHO and WHY.
+
+    Previously this set a bare `revoked: True`, so a revocation could be seen but never
+    attributed. The record is retained rather than deleted, which is what keeps the audit
+    history intact (ZST-EC-001 DEV-004).
+    """
     records = org.api_keys or []
     found = False
     updated = []
     for r in records:
         if r["id"] == key_id:
             found = True
-            r = {**r, "revoked": True}
+            r = {**r, "revoked": True, "status": KEY_REVOKED,
+                 "revoked_at": datetime.now(timezone.utc).isoformat(),
+                 "revoked_by": str(actor_id) if actor_id else None,
+                 "revoke_reason": reason}
         updated.append(r)
     if not found:
         return False

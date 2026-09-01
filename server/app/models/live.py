@@ -167,6 +167,22 @@ class BroadcastSession(_EventScoped):
     ended_reason: Mapped[str | None] = mapped_column(String(40))   # host | emergency_stop | room_finished
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
+    # ── MED-004 / MED-005 (ZST-EC-001) ──────────────────────────────────────────────────
+    # `health_level` mirrors what services/broadcast.health_of() returned at the last
+    # governed evaluation ("ok" | "warn" | "down"). It is stored so a TRANSITION can be
+    # detected: the calculation stays in broadcast.py and is never re-implemented here.
+    health_level: Mapped[str | None] = mapped_column(String(8))
+    health_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    health_issues: Mapped[str | None] = mapped_column(Text)
+
+    started_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    health_failed_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    health_degraded_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    health_recovered_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+
 
 BROADCAST_STATUSES = ("preview", "live", "paused", "ended")
 RECORDING_STATUSES = ("idle", "recording", "paused", "stopped", "failed")
@@ -213,6 +229,54 @@ class LiveRecording(_EventScoped):
     # Overrides normal retention expiry for this specific asset (doc R6) — distinct from a
     # paid extended-retention add-on, which is an EventOrderLine, not this flag.
     legal_hold: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Safe, non-confidential hold metadata (MED-011). The hold's actual legal instruction is
+    # never stored here — a category and an opaque reference are what a notification may
+    # carry, and counsel's reasoning is not something an email to an org admin should hold.
+    hold_category: Mapped[str | None] = mapped_column(String(40))
+    hold_reference: Mapped[str | None] = mapped_column(String(80))
+    hold_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hold_set_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    hold_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hold_released_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # ── MED-007 governed recording health ───────────────────────────────────────────────
+    # `status` above is the RAW capture state of ONE row. `health_state` is the GOVERNED
+    # view across every path of the same capture: a dual-recording event whose secondary
+    # egress never started is still "recording" on the primary row, but the capture as a
+    # whole has lost its redundancy, and that is what an operator needs told.
+    #
+    # Written only by services/media_comms.evaluate_recording_health, from committed rows.
+    health_state: Mapped[str | None] = mapped_column(String(16))
+    health_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    health_reason: Mapped[str | None] = mapped_column(Text)
+
+    started_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    degraded_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovered_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stopped_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # ── MED-008 finalization ────────────────────────────────────────────────────────────
+    # The finalization STATE is not stored again — it is read from `validation_status`
+    # above, which services/validation.py owns. Only the announcement marker lives here:
+    # which variant was last announced, so a later RECOVERED can still be sent after a
+    # FAILED without re-sending the FAILED.
+    finalization_notified_state: Mapped[str | None] = mapped_column(String(16))
+    finalization_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # ── MED-011 deletion lifecycle ──────────────────────────────────────────────────────
+    # Storage deletion and row deletion are separate operations that can disagree, so the
+    # outcome of the storage call is recorded rather than assumed.
+    deletion_status: Mapped[str | None] = mapped_column(String(16))
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deletion_requested_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A safe category ("storage_unavailable" | "object_delete_rejected"), never a provider
+    # exception string — cloud errors routinely embed bucket paths and request signatures.
+    deletion_failure_category: Mapped[str | None] = mapped_column(String(60))
+    deletion_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deletion_failed_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    retention_warned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AnalyticsSnapshot(_EventScoped):
@@ -329,6 +393,43 @@ class LiveIngressEndpoint(_EventScoped):
     enforced: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+    # ── MED-001 / MED-002 (ZST-EC-001) ──────────────────────────────────────────────────
+    # `state` above is the RAW LiveKit ingress status, written by every ingress webhook.
+    # `signal_state` is the GOVERNED view of it: a disconnect only becomes an interruption
+    # once it has persisted past a threshold, which is what stops a one-second encoder
+    # reconnect from paging an operator.
+    signal_state: Mapped[str] = mapped_column(String(16), default="healthy", nullable=False)
+    signal_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the current loss began. Cleared on confirmed recovery.
+    signal_lost_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_signal_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Confirmed interruptions inside the flap window — the input of the INTERMITTENT rule.
+    interruption_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    interruption_window_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+
+    created_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    interrupted_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    intermittent_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recovered_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ── MED-002 governed signal states ──────────────────────────────────────────────────────
+SIGNAL_HEALTHY = "healthy"
+SIGNAL_INTERRUPTED = "interrupted"
+SIGNAL_INTERMITTENT = "intermittent"
+SIGNAL_STATES = (SIGNAL_HEALTHY, SIGNAL_INTERRUPTED, SIGNAL_INTERMITTENT)
+
+# A loss must persist this long before it is an interruption. Deterministic and configurable
+# in one place rather than guessed at each call site.
+SIGNAL_INTERRUPTION_SECONDS = 60
+# Signal must hold for this long before recovery is announced, so a flapping link does not
+# produce an interrupted/recovered pair every minute.
+SIGNAL_RECOVERY_SECONDS = 120
+# Confirmed interruptions inside this window that make an input INTERMITTENT.
+SIGNAL_FLAP_WINDOW_SECONDS = 1800
+SIGNAL_FLAP_THRESHOLD = 3
 
 
 class LiveActivity(_EventScoped):
