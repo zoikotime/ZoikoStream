@@ -170,7 +170,7 @@ def test_duration_computed():
                  visibility="public", registration_required=False,
                  waiting_room_enabled=False, recording_enabled=False, chat_enabled=True,
                  qa_enabled=True, polls_enabled=False, raise_hand_enabled=True,
-                 allow_screen_share=True, auto_start_recording=False, auto_end_event=False,
+                 allow_screen_share=True, auto_end_event=False,
                  status="scheduled", start_time=start, end_time=start + timedelta(minutes=90))
     assert e.duration_minutes == 90
     e2 = e.model_copy(update={"end_time": None})

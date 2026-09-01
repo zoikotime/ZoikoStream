@@ -13,12 +13,27 @@ security.commercial_can/require_commercial implement the actual per-action matri
     (approver != requester) is still enforced separately in crud.commercial.
   * require_commercial("media_access") gates replay publication — customer host role
     plus Zoiko live_ops staff.
+  * require_commercial("capacity") gates capacity pools, holds, reservations, releases and
+    the audience envelope — Zoiko live_ops (Operations).
+  * require_commercial("readiness") gates readiness checks and incident facts — live_ops.
+  * require_commercial("finance") gates tax determination, invoice issuance, payment
+    capture and payment schedules — finance_ops (Finance).
+  * require_commercial("reconcile") gates the reconciliation report, period close,
+    settlement matching and provider-event evidence — finance_ops.
+  * require_commercial("configure") gates commercial configuration: catalog, service
+    profiles, cancellation policies and seller legal entities. NO scoped staff role holds
+    this — only an unscoped super_admin, per the doc's "Super Admin: commercial
+    configuration, seller entities".
   * require_super_admin still gates the remaining Zoiko-side authority the doc's Section-25
-    table doesn't break out to a specific staff row: catalog, service profiles,
-    cancellation policy, quote issuance, order construction, capacity, payment
-    schedule/invoice issuance, readiness checks, incidents, reconciliation (doc T1-T3
-    "who owns X"). An unscoped super_admin (staff_commercial_role is NULL) also passes
-    every require_commercial() gate — see security.commercial_can.
+    table doesn't break out to a specific staff row: quote issuance and order construction
+    (doc T1-T3 "who owns X"). An unscoped super_admin (staff_commercial_role is NULL) also
+    passes every require_commercial() gate — see security.commercial_can, so no existing
+    account's access changes.
+
+  These five action columns were previously all `require_super_admin`, which meant a
+  `support` or `security` staff row had the same authority over capacity, invoices and
+  reconciliation as `finance_ops`. Splitting them is what makes the Finance/Operations
+  separation of duties real rather than documentary.
   * Plain get_current_user (any org member) gates read-only views scoped to their org's
     events, same as routers/events.py.
   * POST /commercial/webhooks/payments has NO user auth — a payment provider calls it
@@ -68,10 +83,12 @@ from ..schemas.commercial import (
     ServiceProfileOut, TaxDeterminationCreate, CapacityPoolCreate, CapacityPoolOut,
     CapacityPoolUtilisationOut, OrderVersionOut, ProviderEventOut, UnmatchedSettlementOut,
     SettlementMatchCreate, CommercialExceptionCreate, CommercialExceptionOut,
-    ExceptionDecisionCreate,
+    ExceptionDecisionCreate, LifecycleOut, LifecycleTransitionOut,
+    RescheduleCreate, RescheduleOut, RescheduleResult,
 )
+from ..models.commercial import COMMERCIAL_LIFECYCLE_TRANSITIONS
 from ..security import get_current_user, org_scoped, require_commercial, require_org_admin, require_super_admin
-from ..services import payments as payment_svc, platform_settings
+from ..services import maintenance, payments as payment_svc, platform_settings
 from ..services import payments_stripe_events as stripe_events
 
 _log = logging.getLogger(__name__)
@@ -190,7 +207,7 @@ def list_catalog_versions(vertical: str | None = None, status_: str | None = Non
 # ── Seller legal entity registry (doc L1/P2) ──────────────────────────────────────────────
 
 @router.get("/seller-entities", response_model=list[SellerLegalEntityOut])
-def list_seller_entities(status_: str | None = None, admin: User = Depends(require_super_admin),
+def list_seller_entities(status_: str | None = None, admin: User = Depends(require_commercial("configure")),
                           db: Session = Depends(get_db)):
     """Zoiko-side registry: which legal entities may invoice. Super-admin only — a customer
     has no business enumerating Zoiko's selling entities or their tax registrations."""
@@ -198,7 +215,7 @@ def list_seller_entities(status_: str | None = None, admin: User = Depends(requi
 
 
 @router.post("/seller-entities", response_model=SellerLegalEntityOut, status_code=status.HTTP_201_CREATED)
-def create_seller_entity(data: SellerLegalEntityCreate, admin: User = Depends(require_super_admin),
+def create_seller_entity(data: SellerLegalEntityCreate, admin: User = Depends(require_commercial("configure")),
                           db: Session = Depends(get_db)):
     try:
         return crud.create_seller_entity(db, admin, **data.model_dump())
@@ -207,7 +224,7 @@ def create_seller_entity(data: SellerLegalEntityCreate, admin: User = Depends(re
 
 
 @router.post("/seller-entities/{entity_id}/activate", response_model=SellerLegalEntityOut)
-def activate_seller_entity(entity_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def activate_seller_entity(entity_id: uuid.UUID, admin: User = Depends(require_commercial("configure")),
                             db: Session = Depends(get_db)):
     entity = db.get(SellerLegalEntity, entity_id)
     if entity is None:
@@ -222,14 +239,14 @@ def activate_seller_entity(entity_id: uuid.UUID, admin: User = Depends(require_s
 
 @router.get("/capacity-pools", response_model=list[CapacityPoolOut])
 def list_capacity_pools(resource_type: str | None = None, status_: str | None = None,
-                         admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                         admin: User = Depends(require_commercial("capacity")), db: Session = Depends(get_db)):
     """Zoiko's own operational inventory — not tenant data, so super-admin only. A customer
     must not be able to read (or infer) Zoiko's total operator/recording headroom."""
     return crud.list_capacity_pools(db, resource_type=resource_type, status=status_)
 
 
 @router.post("/capacity-pools", response_model=CapacityPoolOut, status_code=status.HTTP_201_CREATED)
-def create_capacity_pool(data: CapacityPoolCreate, admin: User = Depends(require_super_admin),
+def create_capacity_pool(data: CapacityPoolCreate, admin: User = Depends(require_commercial("capacity")),
                           db: Session = Depends(get_db)):
     fields = data.model_dump()
     if fields.get("seller_legal_entity_id"):
@@ -246,7 +263,7 @@ def create_capacity_pool(data: CapacityPoolCreate, admin: User = Depends(require
 
 
 @router.post("/capacity-pools/{pool_id}/activate", response_model=CapacityPoolOut)
-def activate_capacity_pool(pool_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def activate_capacity_pool(pool_id: uuid.UUID, admin: User = Depends(require_commercial("capacity")),
                             db: Session = Depends(get_db)):
     pool = db.get(CapacityPool, pool_id)
     if pool is None:
@@ -255,7 +272,7 @@ def activate_capacity_pool(pool_id: uuid.UUID, admin: User = Depends(require_sup
 
 
 @router.get("/capacity-pools/{pool_id}/utilisation", response_model=CapacityPoolUtilisationOut)
-def capacity_pool_utilisation(pool_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def capacity_pool_utilisation(pool_id: uuid.UUID, admin: User = Depends(require_commercial("capacity")),
                                db: Session = Depends(get_db)):
     pool = db.get(CapacityPool, pool_id)
     if pool is None:
@@ -265,14 +282,14 @@ def capacity_pool_utilisation(pool_id: uuid.UUID, admin: User = Depends(require_
 
 
 @router.post("/catalog-versions", response_model=CatalogVersionOut, status_code=status.HTTP_201_CREATED)
-def create_catalog_version(data: CatalogVersionCreate, admin: User = Depends(require_super_admin),
+def create_catalog_version(data: CatalogVersionCreate, admin: User = Depends(require_commercial("configure")),
                             db: Session = Depends(get_db)):
     return crud.create_catalog_version(db, vertical=data.vertical, version_label=data.version_label, notes=data.notes)
 
 
 @router.post("/catalog-versions/{catalog_version_id}/lines", response_model=CatalogLineOut, status_code=status.HTTP_201_CREATED)
 def add_catalog_line(catalog_version_id: uuid.UUID, data: CatalogLineCreate,
-                      admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                      admin: User = Depends(require_commercial("configure")), db: Session = Depends(get_db)):
     cv = db.get(CatalogVersion, catalog_version_id)
     if cv is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Catalog version not found")
@@ -283,7 +300,7 @@ def add_catalog_line(catalog_version_id: uuid.UUID, data: CatalogLineCreate,
 
 
 @router.post("/catalog-versions/{catalog_version_id}/publish", response_model=CatalogVersionOut)
-def publish_catalog_version(catalog_version_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def publish_catalog_version(catalog_version_id: uuid.UUID, admin: User = Depends(require_commercial("configure")),
                              db: Session = Depends(get_db)):
     cv = db.get(CatalogVersion, catalog_version_id)
     if cv is None:
@@ -303,13 +320,13 @@ def list_service_profiles(risk_tier: str | None = None, status_: str | None = No
 
 
 @router.post("/service-profiles", response_model=ServiceProfileOut, status_code=status.HTTP_201_CREATED)
-def create_service_profile(data: ServiceProfileCreate, admin: User = Depends(require_super_admin),
+def create_service_profile(data: ServiceProfileCreate, admin: User = Depends(require_commercial("configure")),
                             db: Session = Depends(get_db)):
     return crud.create_service_profile(db, **data.model_dump())
 
 
 @router.post("/service-profiles/{service_profile_id}/publish", response_model=ServiceProfileOut)
-def publish_service_profile(service_profile_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def publish_service_profile(service_profile_id: uuid.UUID, admin: User = Depends(require_commercial("configure")),
                              db: Session = Depends(get_db)):
     profile = db.get(ServiceProfile, service_profile_id)
     if profile is None:
@@ -326,13 +343,13 @@ def list_cancellation_policies(vertical: str | None = None, status_: str | None 
 
 
 @router.post("/cancellation-policies", response_model=CancellationPolicyOut, status_code=status.HTTP_201_CREATED)
-def create_cancellation_policy(data: CancellationPolicyCreate, admin: User = Depends(require_super_admin),
+def create_cancellation_policy(data: CancellationPolicyCreate, admin: User = Depends(require_commercial("configure")),
                                 db: Session = Depends(get_db)):
     return crud.create_cancellation_policy(db, **data.model_dump())
 
 
 @router.post("/cancellation-policies/{policy_id}/publish", response_model=CancellationPolicyOut)
-def publish_cancellation_policy(policy_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def publish_cancellation_policy(policy_id: uuid.UUID, admin: User = Depends(require_commercial("configure")),
                                  db: Session = Depends(get_db)):
     policy = db.get(CancellationPolicy, policy_id)
     if policy is None:
@@ -393,7 +410,7 @@ def accept_quote(event_id: uuid.UUID, quote_id: uuid.UUID, user: User = Depends(
     if quote is None or quote.event_id != event_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Quote not found")
     try:
-        return crud.accept_quote(db, quote)
+        return crud.accept_quote(db, quote, actor=user)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
@@ -472,6 +489,7 @@ def accept_order(event_id: uuid.UUID, order_id: uuid.UUID, data: OrderAccept, ba
     if order is None or order.event_id != event_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     try:
+        order.assured_event = data.assured_event
         order = crud.accept_order(db, order, user, terms_version=data.terms_version)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
@@ -490,7 +508,7 @@ def activate_order(event_id: uuid.UUID, order_id: uuid.UUID, admin: User = Depen
     if order is None or order.event_id != event_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
     try:
-        return crud.activate_order(db, order)
+        return crud.activate_order(db, order, actor=admin)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
@@ -513,11 +531,121 @@ def cancel_order(event_id: uuid.UUID, order_id: uuid.UUID, data: CancelOrderRequ
     return CancellationResult(
         order=result["order"], policy_version=result["policy"].version_label,
         refund_amount=result["refund_amount"],
+        policy_refund_amount=result["policy_refund_amount"],
         refund_credit_id=result["refund_credit"].id if result["refund_credit"] else None,
+        refund_credit_ids=[rc.id for rc in result["refund_credits"]],
+    )
+
+
+# ── Commercial lifecycle (doc Section 28) ─────────────────────────────────────────────────
+
+@router.get("/orders/{order_id}/lifecycle", response_model=LifecycleOut)
+def order_lifecycle(order_id: uuid.UUID, user: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    """The order's derived commercial state, the evidence behind it, and its full history.
+
+    Read-only BY CONSTRUCTION: there is no corresponding write endpoint, because the state is
+    computed from committed facts rather than stored. Moving the lifecycle means satisfying the
+    gate it names (pay the milestone, reserve the capacity, pass the check) — which is exactly
+    the doc's "no state is manually bypassable" requirement.
+    """
+    order = _get_order_or_404(db, user, order_id)
+    event = db.get(Event, order.event_id)
+    snapshot = crud.commercial_lifecycle_state(db, event, order)
+    return LifecycleOut(
+        **snapshot,
+        allowed_next=list(COMMERCIAL_LIFECYCLE_TRANSITIONS.get(snapshot["state"], ())),
+        history=[LifecycleTransitionOut.model_validate(t)
+                 for t in crud.lifecycle_history(db, order_id=order.id)],
+    )
+
+
+@router.get("/events/{event_id}/lifecycle", response_model=LifecycleOut)
+def event_lifecycle(event_id: uuid.UUID, user: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    """Same view keyed by event, for an event that has no order yet (DRAFT/QUOTED)."""
+    ev = _get_event_or_404(db, user, event_id)
+    order = crud.get_current_order(db, ev.id)
+    snapshot = crud.commercial_lifecycle_state(db, ev, order)
+    return LifecycleOut(
+        **snapshot,
+        allowed_next=list(COMMERCIAL_LIFECYCLE_TRANSITIONS.get(snapshot["state"], ())),
+        history=[LifecycleTransitionOut.model_validate(t)
+                 for t in crud.lifecycle_history(db, event_id=ev.id)],
+    )
+
+
+# ── Reschedule (doc Section 9) ────────────────────────────────────────────────────────────
+
+@router.get("/events/{event_id}/reschedules", response_model=list[RescheduleOut])
+def list_reschedules(event_id: uuid.UUID, user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
+    return crud.list_reschedules(db, ev.id)
+
+
+@router.post("/events/{event_id}/reschedule", response_model=RescheduleResult,
+             status_code=status.HTTP_201_CREATED)
+def reschedule_event(event_id: uuid.UUID, data: RescheduleCreate,
+                      user: User = Depends(require_commercial("change")),
+                      db: Session = Depends(get_db)):
+    """Move an event's window, preserving the original and releasing its capacity.
+
+    Gated on the `change` authority rather than `capacity`: a reschedule is a change to the
+    commercial commitment that happens to release capacity, not a capacity operation. Re-holding
+    against the new window is a separate `capacity` action, which is the correct split — the
+    party who may move the date is not necessarily the party who may commit an operator to it.
+    """
+    ev = _get_event_or_404(db, user, event_id)
+    order = crud.get_current_order(db, ev.id)
+    try:
+        result = crud.reschedule_event(
+            db, ev, order, user, new_start=data.new_start_time,
+            new_end=data.new_end_time, reason=data.reason,
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return RescheduleResult(
+        reschedule=RescheduleOut.model_validate(result["reschedule"]),
+        released_reservations=result["released_reservations"],
+        lifecycle_state=result["lifecycle_state"],
+        capacity_requires_rehold=result["capacity_requires_rehold"],
     )
 
 
 # ── Capacity (doc Section 7/C) ────────────────────────────────────────────────────────────
+
+@router.post("/maintenance/expire-holds")
+def expire_soft_holds(admin: User = Depends(require_commercial("capacity")),
+                       db: Session = Depends(get_db)):
+    """Sweep soft holds whose governed period has lapsed, returning their inventory (doc C2).
+
+    There is no in-process job runner in this codebase, so the sweep also runs opportunistically
+    whenever capacity is claimed. This endpoint is what lets an external scheduler drive it: on
+    a quiet system an expired hold would otherwise keep occupying its pool until the next hold
+    attempt happened to trigger the sweep.
+    """
+    return {"expired": crud.expire_stale_soft_holds(db, actor=admin)}
+
+
+@router.post("/maintenance/run")
+def run_maintenance(admin: User = Depends(require_commercial("reconcile")),
+                     db: Session = Depends(get_db)):
+    """Run every scheduled commercial maintenance job (services/maintenance.py).
+
+    The single entry point for an external scheduler — Cloud Scheduler, a cron container, or an
+    operator. Deliberately NOT an in-process background thread: on Cloud Run that would run
+    once per instance, die mid-sweep on a scale-down, and be unobservable.
+
+    Idempotent, so a double-fire is harmless. Returns per-job results including any job that
+    failed, rather than a 500 that would hide the jobs that succeeded — a scheduler needs to
+    know "3 of 4 ran" and which one didn't.
+
+    Gated on `reconcile` (Finance) rather than `capacity`: the jobs touch payments and
+    settlements as well as inventory, so the widest authority they need is the one that owns
+    reconciliation.
+    """
+    return maintenance.run_all(db, actor=admin)
 
 @router.get("/events/{event_id}/capacity", response_model=list[CapacityOut])
 def list_capacity(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -526,7 +654,7 @@ def list_capacity(event_id: uuid.UUID, user: User = Depends(get_current_user), d
 
 
 @router.post("/events/{event_id}/capacity/hold", response_model=CapacityOut, status_code=status.HTTP_201_CREATED)
-def soft_hold_capacity(event_id: uuid.UUID, data: CapacityHoldCreate, admin: User = Depends(require_super_admin),
+def soft_hold_capacity(event_id: uuid.UUID, data: CapacityHoldCreate, admin: User = Depends(require_commercial("capacity")),
                         db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, admin, event_id)
     try:
@@ -538,26 +666,26 @@ def soft_hold_capacity(event_id: uuid.UUID, data: CapacityHoldCreate, admin: Use
 
 @router.post("/events/{event_id}/capacity/{reservation_id}/reserve", response_model=CapacityOut)
 def hard_reserve_capacity(event_id: uuid.UUID, reservation_id: uuid.UUID, order_id: uuid.UUID,
-                           admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                           admin: User = Depends(require_commercial("capacity")), db: Session = Depends(get_db)):
     _get_event_or_404(db, admin, event_id)
     reservation = db.get(CapacityReservation, reservation_id)
     order = db.get(EventOrder, order_id)
     if reservation is None or reservation.event_id != event_id or order is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Reservation or order not found")
     try:
-        return crud.hard_reserve_capacity(db, reservation, order)
+        return crud.hard_reserve_capacity(db, reservation, order, actor=admin)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
 
 @router.post("/events/{event_id}/capacity/{reservation_id}/release", response_model=CapacityOut)
 def release_capacity(event_id: uuid.UUID, reservation_id: uuid.UUID, reason: str = "manual_release",
-                      admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                      admin: User = Depends(require_commercial("capacity")), db: Session = Depends(get_db)):
     _get_event_or_404(db, admin, event_id)
     reservation = db.get(CapacityReservation, reservation_id)
     if reservation is None or reservation.event_id != event_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Reservation not found")
-    return crud.release_capacity(db, reservation, reason)
+    return crud.release_capacity(db, reservation, reason, actor=admin)
 
 
 # ── Payment schedule, payments, invoices (doc Sections 8, 20, 27) ───────────────────────
@@ -570,7 +698,7 @@ def list_payment_schedule(order_id: uuid.UUID, user: User = Depends(get_current_
 
 @router.post("/orders/{order_id}/payment-schedule", response_model=PaymentScheduleOut, status_code=status.HTTP_201_CREATED)
 def create_payment_schedule(order_id: uuid.UUID, data: PaymentScheduleCreate,
-                             admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                             admin: User = Depends(require_commercial("finance")), db: Session = Depends(get_db)):
     order = _get_order_or_404(db, admin, order_id)
     return crud.create_payment_schedule(db, order, **data.model_dump())
 
@@ -663,7 +791,7 @@ def create_checkout_session(order_id: uuid.UUID, data: CheckoutSessionCreate,
 
 @router.post("/payments/{payment_id}/capture", response_model=PaymentOut)
 def capture_payment(payment_id: uuid.UUID, background: BackgroundTasks,
-                     admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                     admin: User = Depends(require_commercial("finance")), db: Session = Depends(get_db)):
     payment = db.get(Payment, payment_id)
     if payment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
@@ -749,7 +877,7 @@ def list_order_versions(order_id: uuid.UUID, user: User = Depends(get_current_us
 
 @router.post("/orders/{order_id}/tax-determination", response_model=OrderOut)
 def record_tax_determination(order_id: uuid.UUID, data: TaxDeterminationCreate,
-                              admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                              admin: User = Depends(require_commercial("finance")), db: Session = Depends(get_db)):
     """Record the tax result for an order so it can be invoiced (doc L4/L6).
 
     Finance/Tax authority, so gated to require_super_admin like the other Zoiko-side
@@ -769,7 +897,7 @@ def record_tax_determination(order_id: uuid.UUID, data: TaxDeterminationCreate,
 
 
 @router.post("/orders/{order_id}/invoices", response_model=InvoiceOut, status_code=status.HTTP_201_CREATED)
-def issue_invoice(order_id: uuid.UUID, data: InvoiceCreate, admin: User = Depends(require_super_admin),
+def issue_invoice(order_id: uuid.UUID, data: InvoiceCreate, admin: User = Depends(require_commercial("finance")),
                    db: Session = Depends(get_db)):
     order = _get_order_or_404(db, admin, order_id)
     try:
@@ -791,7 +919,12 @@ def list_change_orders(order_id: uuid.UUID, user: User = Depends(get_current_use
 def create_change_order(order_id: uuid.UUID, data: ChangeOrderCreate, admin: User = Depends(require_commercial("change")),
                          db: Session = Depends(get_db)):
     order = _get_order_or_404(db, admin, order_id)
-    return crud.create_change_order(db, order, **data.model_dump())
+    try:
+        return crud.create_change_order(db, order, actor=admin, **data.model_dump())
+    except ValueError as e:
+        # Order not accepted, no line operations, a delta that disagrees with the lines, or a
+        # revenue reduction with no approved discount/price_override exception behind it.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
 
 @router.post("/change-orders/{change_order_id}/accept", response_model=ChangeOrderOut)
@@ -829,14 +962,14 @@ def list_readiness_checks(event_id: uuid.UUID, user: User = Depends(get_current_
 
 
 @router.post("/events/{event_id}/readiness/checks", response_model=ReadinessCheckOut, status_code=status.HTTP_201_CREATED)
-def record_readiness_check(event_id: uuid.UUID, data: ReadinessCheckCreate, admin: User = Depends(require_super_admin),
+def record_readiness_check(event_id: uuid.UUID, data: ReadinessCheckCreate, admin: User = Depends(require_commercial("readiness")),
                             db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, admin, event_id)
     return crud.record_readiness_check(db, ev, actor=admin, **data.model_dump())
 
 
 @router.post("/events/{event_id}/capacity/approve-envelope", response_model=CapacityOut, status_code=status.HTTP_201_CREATED)
-def approve_audience_capacity(event_id: uuid.UUID, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def approve_audience_capacity(event_id: uuid.UUID, admin: User = Depends(require_commercial("capacity")), db: Session = Depends(get_db)):
     """Operations approval of an event's stated audience size — clears the
     envelope_capacity_block_reason readiness gate. Self-service events (no commercial order)
     can hit that gate too, so this is deliberately not folded into the order-gated
@@ -866,7 +999,7 @@ def list_incidents(event_id: uuid.UUID, user: User = Depends(get_current_user), 
 
 
 @router.post("/events/{event_id}/incidents", response_model=IncidentOut, status_code=status.HTTP_201_CREATED)
-def open_incident(event_id: uuid.UUID, data: IncidentCreate, admin: User = Depends(require_super_admin),
+def open_incident(event_id: uuid.UUID, data: IncidentCreate, admin: User = Depends(require_commercial("readiness")),
                    db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, admin, event_id)
     fields = data.model_dump()
@@ -888,6 +1021,23 @@ def propose_remedy(incident_id: uuid.UUID, data: RemedyProposeCreate, admin: Use
         db, incident, order, admin, remedy_type=data.remedy_type, amount=data.amount,
         reason_code=data.reason_code, policy_version=data.policy_version,
     )
+
+
+@router.get("/orders/{order_id}/refund-credits", response_model=list[RefundCreditOut])
+def list_refund_credits(order_id: uuid.UUID, user: User = Depends(get_current_user),
+                         db: Session = Depends(get_db)):
+    """Every remedy raised against this order (doc Section 15/K).
+
+    Read-only and org-scoped like the other order-scoped views, so a customer can see the
+    refund history on their own order. Approving or executing one stays behind
+    require_commercial("refund_approve") — Finance only.
+    """
+    order = _get_order_or_404(db, user, order_id)
+    return db.scalars(
+        select(RefundCredit)
+        .where(RefundCredit.event_order_id == order.id)
+        .order_by(RefundCredit.created_at)
+    ).all()
 
 
 @router.post("/refund-credits/{refund_credit_id}/approve", response_model=RefundCreditOut)
@@ -1010,13 +1160,14 @@ def retry_replay_watermark(entitlement_id: uuid.UUID,
 # ── Reconciliation (doc Section 29) ──────────────────────────────────────────────────────
 
 @router.get("/reconciliation", response_model=ReconciliationReport)
-def reconciliation_report(admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def reconciliation_report(admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
     orphans = crud.list_capacity_orphans(db)
     return ReconciliationReport(
         reservations_without_order=orphans["reservations_without_order"],
         reservations_with_missing_order=orphans["reservations_with_missing_order"],
         unmatched_settlements=crud.list_unmatched_settlements(db),
         orders_missing_invoice=crud.list_orders_missing_invoice(db),
+        orders_missing_seller_entity=crud.list_orders_missing_seller_entity(db),
     )
 
 
@@ -1025,17 +1176,17 @@ def reconciliation_report(admin: User = Depends(require_super_admin), db: Sessio
 # Zoiko-side registries (catalog, service profiles, ...) rather than require_commercial().
 
 @router.get("/periods", response_model=list[FinancialPeriodOut])
-def list_periods(admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def list_periods(admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
     return db.query(FinancialPeriod).order_by(FinancialPeriod.period_start.desc()).all()
 
 
 @router.post("/periods", response_model=FinancialPeriodOut, status_code=status.HTTP_201_CREATED)
-def create_period(data: PeriodCreate, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def create_period(data: PeriodCreate, admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
     return crud.get_or_create_period(db, label=data.label, period_start=data.period_start, period_end=data.period_end)
 
 
 @router.post("/periods/{period_id}/close", response_model=FinancialPeriodOut)
-def close_period(period_id: uuid.UUID, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def close_period(period_id: uuid.UUID, admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
     period = db.get(FinancialPeriod, period_id)
     if period is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Period not found")
@@ -1046,13 +1197,13 @@ def close_period(period_id: uuid.UUID, admin: User = Depends(require_super_admin
 
 
 @router.get("/periods/{period_id}/exceptions", response_model=list[ReconciliationExceptionOut])
-def list_period_exceptions(period_id: uuid.UUID, admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def list_period_exceptions(period_id: uuid.UUID, admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
     return db.query(ReconciliationException).filter(ReconciliationException.period_id == period_id).all()
 
 
 @router.patch("/exceptions/{exception_id}", response_model=ReconciliationExceptionOut)
 def resolve_exception(exception_id: uuid.UUID, data: ExceptionResolveCreate,
-                       admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                       admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
     exception = db.get(ReconciliationException, exception_id)
     if exception is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Reconciliation exception not found")
@@ -1187,6 +1338,15 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
                 amount=translated.amount, currency=translated.currency,
                 idempotency_key_hint=translated.idempotency_key_hint, **shared,
             )
+        elif translated.is_dispute:
+            # A chargeback: the case record and the payment transition, owned by the commercial
+            # layer. Previously filed as evidence with follow_up_required, which meant a real
+            # dispute left the ledger reading `paid` while the money was gone. The won/lost
+            # outcome still comes from the card network — this never invents one.
+            result = crud.ingest_dispute_event(
+                db, event_type=translated.stripe_event_type, dispute=translated.dispute,
+                **shared,
+            )
         elif translated.requires_reconciliation:
             # Hosted checkout correlation: the payer acted, so the provider has now created the
             # payment object this session drives. Binds that reference onto the payment the
@@ -1226,7 +1386,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/provider-events", response_model=list[ProviderEventOut])
 def list_provider_events(processing_status: str | None = None, limit: int = 100,
-                          admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+                          admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
     """Raw provider evidence. Super-admin only — payloads are provider evidence about Zoiko's
     own merchant activity, not tenant-readable data."""
     stmt = select(ProviderEvent).order_by(ProviderEvent.received_at.desc()).limit(min(limit, 500))
@@ -1236,7 +1396,7 @@ def list_provider_events(processing_status: str | None = None, limit: int = 100,
 
 
 @router.get("/unmatched-settlements", response_model=list[UnmatchedSettlementOut])
-def list_unmatched_settlements(admin: User = Depends(require_super_admin), db: Session = Depends(get_db)):
+def list_unmatched_settlements(admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
     return crud.list_open_unmatched_settlements(db)
 
 
@@ -1314,5 +1474,32 @@ def decline_commercial_exception(exception_id: uuid.UUID, data: ExceptionDecisio
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Commercial exception not found")
     try:
         return crud.decline_commercial_exception(db, exception, admin, notes=data.notes)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.post("/commercial-exceptions/{exception_id}/execute-write-off", response_model=RefundCreditOut,
+             status_code=status.HTTP_201_CREATED)
+def execute_write_off(exception_id: uuid.UUID,
+                       admin: User = Depends(require_commercial("write_off")),
+                       db: Session = Depends(get_db)):
+    """Execute an APPROVED write-off: stop pursuing an owed amount (doc Section 25).
+
+    `write_off` was an RBAC action with nothing behind it — the permission gated no endpoint.
+    This is that endpoint. Maker-checker comes from the exception being executed: it must
+    already have been approved by someone other than its requester, so a single actor can
+    never both authorise and apply a write-off.
+
+    Recorded as a `fee_waiver` credit, which order_settlement already treats as satisfying a
+    balance without being refundable cash — so the order leaves FINANCIAL_HOLD without any
+    money being invented or moved. Idempotent: re-executing returns the original credit.
+    """
+    exception = db.get(CommercialException, exception_id)
+    if exception is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Commercial exception not found")
+    if exception.event_order_id:
+        _get_order_or_404(db, admin, exception.event_order_id)   # org-scopes the write
+    try:
+        return crud.execute_write_off(db, exception, admin)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))

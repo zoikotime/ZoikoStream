@@ -291,23 +291,32 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
         return {"ignored": evt.event}
 
     p = evt.participant
+    # A secondary connection (a host's own console, or a contributor's return-feed monitor —
+    # see services/livekit.py's secondary()/primary()) connects under a TAGGED identity so it
+    # doesn't evict that same user's primary one. Presence must still be keyed by the PRIMARY
+    # identity — otherwise a host's own publish shows up as a phantom separate participant,
+    # and health_of() reports "No media is being published" over a broadcast that's actually
+    # fine (see test_livekit_identity.py's test_tagged_identity_resolves_back_to_its_owner
+    # docstring). primary() is a safe no-op on every other identity shape (guest/guest-link/
+    # viewer/ingress/plain user id), so it's applied unconditionally here.
+    identity = livekit.primary(p.identity) if p else None
 
     if kind == "participant_joined" and p:
-        rec = await bus.presence_upsert(event_id, p.identity, {
-            "name": p.name or p.identity, "role": "viewer", "muted": False,
+        rec = await bus.presence_upsert(event_id, identity, {
+            "name": p.name or identity, "role": "viewer", "muted": False,
             "speaking": False, "hand": False, "quality": "excellent",
         })
         await bus.publish(event_id, "participants", "participant.join", rec)
         await mod.feed_activity(event_id, "join", f"{rec['name']} joined the event")
 
     elif kind == "participant_left" and p:
-        rec = await bus.presence_remove(event_id, p.identity)
+        rec = await bus.presence_remove(event_id, identity)
         if rec:
             await bus.publish(event_id, "participants", "participant.leave", rec)
             await mod.feed_activity(event_id, "leave", f"{rec.get('name')} left the event")
 
     elif kind in _TRACK_EVENTS and p:
-        rec = await bus.presence_upsert(event_id, p.identity, {"publishing": _TRACK_EVENTS[kind]})
+        rec = await bus.presence_upsert(event_id, identity, {"publishing": _TRACK_EVENTS[kind]})
         await bus.publish(event_id, "participants", "participant.update", rec)
         # LiveKit's server-side mute (services.livekit.mute_participant) only mutes the
         # tracks that existed at the moment it was called — it has no memory of "this

@@ -283,6 +283,45 @@ _PHASE4F_STATEMENTS = [
     "ON payments (provider, checkout_session_ref)",
 ]
 
+# Phase 5 — commercial lifecycle completion (ZST-LE-COM-001 Sections 9/10/28).
+#
+# create_all() below builds the brand-new tables (commercial_state_transitions,
+# event_reschedules); only the pre-existing tables need ALTERs. Every column is nullable or
+# carries a DEFAULT, so existing rows keep working unchanged:
+#   * assured_event defaults FALSE      — no existing order is retroactively an Assured Event.
+#   * managed_only defaults FALSE       — no existing service profile becomes managed-only.
+#   * lifecycle_state is NULL           — a NULL means "never yet computed", which
+#                                         crud.sync_lifecycle treats as the initial observation
+#                                         rather than as a transition from anywhere.
+_PHASE5_STATEMENTS = [
+    "ALTER TABLE event_orders ADD COLUMN IF NOT EXISTS assured_event BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE event_orders ADD COLUMN IF NOT EXISTS lifecycle_state VARCHAR(20)",
+    "ALTER TABLE service_profiles ADD COLUMN IF NOT EXISTS managed_only BOOLEAN NOT NULL DEFAULT FALSE",
+    # Lifecycle history is queried per order (the order timeline) and per event (the delivery
+    # timeline), so both directions are indexed.
+    "CREATE INDEX IF NOT EXISTS ix_commercial_state_transitions_order "
+    "ON commercial_state_transitions (event_order_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_commercial_state_transitions_event "
+    "ON commercial_state_transitions (event_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_event_reschedules_event "
+    "ON event_reschedules (event_id, created_at)",
+]
+
+# Phase 5b — production hardening (ZST-LE-COM-001 Sections 11/25/28/30).
+#
+# Change-order provenance and lifecycle rationale. All nullable: existing change orders keep
+# working with no requester/reason recorded (they predate the requirement), and new ones are
+# refused without a reason at the CRUD layer rather than by a NOT NULL that would break the
+# backfill.
+_PHASE5B_STATEMENTS = [
+    "ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS requested_by UUID REFERENCES users(id)",
+    "ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS reason TEXT",
+    "ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS applied_lines JSON",
+    "ALTER TABLE change_orders ADD COLUMN IF NOT EXISTS approval_exception_id UUID "
+    "REFERENCES commercial_exceptions(id)",
+    "ALTER TABLE commercial_state_transitions ADD COLUMN IF NOT EXISTS reason TEXT",
+]
+
 # Raw statements (not single-table ALTER fragments) — constraint swaps and index creation.
 _PHASE2_STATEMENTS = [
     "ALTER TABLE invoices DROP CONSTRAINT IF EXISTS uq_invoice_number",
@@ -370,6 +409,11 @@ _IDENTITY_CHALLENGE_COLUMNS = [
     # IDN-007 lockout. The table predates it, so create_all() alone will not add it.
     "ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ",
 ]
+
+
+# Columns models/event.py no longer declares. See the call site for why they must be relaxed
+# rather than re-added: main deliberately removed them from the model.
+_EVENT_RELAX_NOT_NULL = ("auto_start_recording", "auto_end_event")
 
 
 def _relax_not_null(table: str, column: str) -> str:
@@ -476,6 +520,17 @@ def ensure_schema():
             # an empty database used to fail here. Postgres has no ALTER COLUMN IF EXISTS,
             # so the guard is explicit.
             conn.execute(text(_relax_not_null("event_registrations", col)))
+        for col in _EVENT_RELAX_NOT_NULL:
+            # Same legacy problem, one table over, surfaced by merging main. main removed
+            # `auto_start_recording` / `auto_end_event` from models/event.py, but the columns
+            # survive in any database created while the model still had them — as NOT NULL
+            # with NO server default, because the old model supplied the default Python-side.
+            # SQLAlchemy no longer sends a value for a column it does not know about, so every
+            # Event insert hit a NotNullViolation on exactly those databases (a fresh one is
+            # unaffected: the ADD COLUMN above carries DEFAULT FALSE). Relaxing the constraint
+            # is the non-destructive fix — the data stays, and the column stops being required
+            # by a model that no longer manages it.
+            conn.execute(text(_relax_not_null("events", col)))
         for clause in _CUSTOMER_DELIVERY_COLUMNS:
             conn.execute(text(f"ALTER TABLE customer_deliveries {clause}"))
         for clause in _REPLAY_ENTITLEMENT_COLUMNS:
@@ -509,6 +564,10 @@ def ensure_schema():
         for stmt in _PHASE3_STATEMENTS:
             conn.execute(text(stmt))
         for stmt in _PHASE4F_STATEMENTS:
+            conn.execute(text(stmt))
+        for stmt in _PHASE5_STATEMENTS:
+            conn.execute(text(stmt))
+        for stmt in _PHASE5B_STATEMENTS:
             conn.execute(text(stmt))
         for clause in _MED_RECORDING_COLUMNS:
             conn.execute(text(f"ALTER TABLE live_recordings {clause}"))

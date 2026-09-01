@@ -492,8 +492,12 @@ const WatchPanel = memo(function WatchPanel({
             "mr-3 h-2 w-2 shrink-0 rounded-full",
             connected ? "bg-green-500" : "bg-slate-300 dark:bg-slate-700"
           )}
-          title={connected ? "Connected" : "Reconnecting…"}
-          aria-label={connected ? "Connected" : "Reconnecting"}
+          // Explicitly "chat" here: this is the chat/Q&A/poll socket (hooks/useEventStream),
+          // a separate connection from the video/audio player above — it reflects only
+          // whether messages can send/receive right now, never whether the stream itself is
+          // live (see VideoPlayer.jsx's own hasVideo/hasAudio/connected for that).
+          title={connected ? "Chat connected" : "Chat reconnecting…"}
+          aria-label={connected ? "Chat connected" : "Chat reconnecting"}
           role="status"
         />
       </div>

@@ -46,7 +46,6 @@ class EventCreate(_EventBase):
     polls_enabled: bool = False
     raise_hand_enabled: bool = True
     allow_screen_share: bool = True
-    auto_start_recording: bool = False
     auto_end_event: bool = False
     status: CreateStatus = "draft"
 
@@ -61,7 +60,6 @@ class EventUpdate(_EventBase):
     polls_enabled: bool | None = None
     raise_hand_enabled: bool | None = None
     allow_screen_share: bool | None = None
-    auto_start_recording: bool | None = None
     auto_end_event: bool | None = None
     status: EventStatus | None = None
 
@@ -95,7 +93,6 @@ class EventOut(BaseModel):
     polls_enabled: bool
     raise_hand_enabled: bool
     allow_screen_share: bool
-    auto_start_recording: bool
     auto_end_event: bool
     status: str
     created_at: datetime | None = None
@@ -150,6 +147,13 @@ class WatchOut(BaseModel):
     # (enforced=True) — same registration/private-event gate as the live token above.
     recording_url: str | None = None
     recording_duration_seconds: int | None = None
+    # Derived from Event.status (which the live-streaming audit's fix now actually persists
+    # as "degraded" when the sampler/webhook detects the producer's media has dropped, see
+    # services/broadcast.py mark_degraded/mark_recovered) — a real, DB-backed liveness signal
+    # for the player, distinct from `status` (kept as-is for backward compatibility with
+    # anything already reading it). Deliberately not a live LiveKit API call on every viewer
+    # request — see routers/events.py::watch_event for why.
+    media_status: str = "live"
 
 
 class RegistrationCreate(BaseModel):

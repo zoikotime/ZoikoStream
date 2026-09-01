@@ -38,6 +38,7 @@ from ..models import (
     ChangeOrder,
     CommercialAccount,
     CommercialException,
+    CommercialStateTransition,
     ContributorSession,
     Event,
     EventAssignment,
@@ -45,11 +46,15 @@ from ..models import (
     EventOrder,
     EventOrderLine,
     EventOrderVersion,
+    EventReschedule,
     FinancialPeriod,
     Invoice,
     Payment,
     PaymentDispute,
     PaymentSchedule,
+    CAPACITY_AUDIT_EVENTS,
+    COMMERCIAL_LIFECYCLE_STATES,
+    COMMERCIAL_LIFECYCLE_TRANSITIONS,
     EXCEPTION_TYPES,
     PAYMENT_STATES,
     PAYMENT_TRANSITIONS,
@@ -359,7 +364,7 @@ def issue_quote(db: Session, quote: Quote) -> Quote:
     return quote
 
 
-def accept_quote(db: Session, quote: Quote) -> Quote:
+def accept_quote(db: Session, quote: Quote, *, actor: User | None = None) -> Quote:
     """Only ACCEPTED can seed an order; a superseded/expired quote can never later be
     accepted (doc Section 28)."""
     if quote.status != "issued":
@@ -370,6 +375,13 @@ def accept_quote(db: Session, quote: Quote) -> Quote:
         raise ValueError("Quote has expired")
     quote.status = "accepted"
     quote.accepted_at = datetime.now(timezone.utc)
+    event = db.get(Event, quote.event_id)
+    if event is not None:
+        audit(db, actor=actor, action="commercial.quote.accept", target_type="commercial_quote",
+              target_id=quote.id, org_id=event.org_id, amount=str(quote.amount),
+              currency=quote.currency, quote_version=quote.version)
+        sync_lifecycle(db, event, get_current_order(db, event.id), actor=actor,
+                        trigger="quote.accept")
     db.commit()
     db.refresh(quote)
     return quote
@@ -517,6 +529,57 @@ def accept_order(db: Session, order: EventOrder, actor: User, *, terms_version: 
     )
     if other_effective is not None:
         raise ValueError("Another order is already accepted/active for this event")
+
+    # ── Service profile binding (doc Section 10/F) ──
+    # Validated only when a profile IS attached: whether one is REQUIRED is a risk-tier
+    # question, and it is enforced at the readiness gate (evaluate_readiness) rather than here,
+    # because a profile is legitimately assigned after acceptance while the event is scoped.
+    # What must never happen is acceptance against a draft/retired profile or one for a
+    # different tier — that would bind the order to controls nobody approved.
+    profile = db.get(ServiceProfile, order.service_profile_id) if order.service_profile_id else None
+    if profile is not None:
+        if profile.status != "published":
+            raise ValueError(
+                f"Service profile '{profile.version_label}' is '{profile.status}', not published — "
+                "an order may only be bound to an approved operational profile (doc F1)"
+            )
+        if profile.risk_tier != order.risk_tier:
+            raise ValueError(
+                f"Service profile '{profile.version_label}' is for {profile.risk_tier.upper()} but "
+                f"this order is {order.risk_tier.upper()} — the profile defines the tier's controls "
+                "and the two cannot disagree (doc Section 10)"
+            )
+
+    # ── Assured Event election (doc Section 10) ──
+    if getattr(order, "assured_event", False):
+        if profile is None:
+            raise ValueError(
+                "An Assured Event order must be bound to a service profile — the assurance is the "
+                "profile's control set, not a label"
+            )
+        if not profile.assured_event_eligible:
+            raise ValueError(
+                f"Service profile '{profile.version_label}' is not Assured-Event-eligible. Assured "
+                "Event cannot be elected against a profile Commercial has not approved for it"
+            )
+
+    # ── Currency must be one the selling entity can actually invoice (doc L2) ──
+    # Checked here as well as at invoice time. The invoice check alone was too late: by then the
+    # order had been accepted AND paid in a currency the seller entity cannot issue a document
+    # in, leaving collected money that can never be invoiced.
+    account = db.get(CommercialAccount, order.commercial_account_id)
+    if account is not None and account.seller_legal_entity_id:
+        entity = db.scalar(
+            select(SellerLegalEntity).where(SellerLegalEntity.code == account.seller_legal_entity_id)
+        )
+        if entity is not None and entity.default_currency and order.currency != entity.default_currency:
+            if order.currency not in (entity.supported_currencies or []):
+                raise ValueError(
+                    f"Order currency {order.currency} is not supported by seller entity "
+                    f"'{entity.code}' (default {entity.default_currency}). Accepting it would "
+                    "produce an order that cannot be invoiced (doc L2)"
+                )
+
     order.status = "accepted"
     order.accepted_at = datetime.now(timezone.utc)
     order.accepted_by = actor.id
@@ -534,7 +597,11 @@ def accept_order(db: Session, order: EventOrder, actor: User, *, terms_version: 
     snapshot_order_version(db, order, actor=actor)
     audit(db, actor=actor, action="commercial.order.accept", target_type="event_order", target_id=order.id,
           org_id=event.org_id if event else None, total_amount=str(order.total_amount),
-          order_version=order.order_version)
+          order_version=order.order_version, risk_tier=order.risk_tier,
+          assured_event=getattr(order, "assured_event", False),
+          service_profile_id=None if not order.service_profile_id else str(order.service_profile_id))
+    if event is not None:
+        sync_lifecycle(db, event, order, actor=actor, trigger="order.accept")
     db.commit()
     db.refresh(order)
     return order
@@ -624,16 +691,246 @@ def list_order_versions(db: Session, order_id) -> list[EventOrderVersion]:
     ).all()
 
 
-def activate_order(db: Session, order: EventOrder) -> EventOrder:
-    """ACCEPTED -> ACTIVE once capacity is hard-reserved and a payment schedule exists —
-    called by the router after those steps, not automatically, since the doc treats payment,
-    capacity and readiness as independent gates (doc C3/I3), not one boolean."""
+def activate_order(db: Session, order: EventOrder, *, actor: User | None = None) -> EventOrder:
+    """ACCEPTED -> ACTIVE. The full confirmation gate — no partial activation.
+
+    This originally checked ONLY `status == "accepted"` while its own docstring claimed the
+    router had already confirmed capacity and payment. It hadn't, so ACTIVE was reachable with
+    no reserved capacity and an overdue deposit, and the status told an operator nothing.
+
+    ACTIVE now means CONFIRMED-and-READY: the order is the platform's committed promise to
+    deliver, so every gate that go-live consults must already hold. The four refusals are
+    raised individually rather than as one combined verdict, because "activation failed" is
+    useless to an operator — they need to know WHICH gate:
+
+      1. capacity      — required resources are not hard-reserved (doc B4/C3)
+      2. financial     — a required milestone is overdue (doc D2)
+      3. profile       — the risk tier's service profile is missing/unpublished/mismatched
+      4. readiness     — a mandatory readiness check has not passed (doc I3)
+
+    Gates 3 and 4 come from evaluate_readiness, which is the same authority golive_block_reason
+    uses — so ACTIVE and go-live can never disagree about whether an event is deliverable.
+    That is the point: it closes the path where an order was marked ACTIVE, everyone treated it
+    as confirmed, and go-live then refused it.
+
+    An approved, correctly-scoped CommercialException clears its gate here exactly as it does
+    at go-live (evaluate_readiness reports it under `exceptions_applied`) — the governed
+    override path, not a bypass.
+    """
     if order.status != "accepted":
         raise ValueError(f"Cannot activate an order in status '{order.status}'")
+    event = db.get(Event, order.event_id)
+    if event is None:
+        raise ValueError("Order references an event that no longer exists")
+
+    # ── 1. Capacity ──
+    if not capacity_confirmed(db, event):
+        raise ValueError(
+            "Cannot activate: the operational capacity this order's service profile requires is "
+            "not hard-reserved. Paying for an event does not confirm it (doc B4) — reserve "
+            "capacity first, or an active order would promise delivery the platform has not "
+            "committed to"
+        )
+    # ── 2. Financial readiness ──
+    financial_state = financial_readiness_state(db, order)
+    if financial_state == "financial_hold":
+        raise ValueError(
+            "Cannot activate: this order is in financial hold (a required payment milestone is "
+            "overdue). Collect it, or raise and approve a `financial_hold_override` commercial "
+            "exception (doc D2)"
+        )
+    if financial_state == "due":
+        raise ValueError(
+            "Cannot activate: a required payment milestone is still outstanding. An ACTIVE order "
+            "is a delivery commitment, so the money behind it must be settled, credited or "
+            "covered by an approved exception first (doc D2)"
+        )
+
+    # ── 3 & 4. Service profile requirements + mandatory readiness checks ──
+    evaluation = evaluate_readiness(db, event, order)
+    if not evaluation["ready"]:
+        # Financial/capacity already passed above, so anything left is a profile or readiness
+        # gate. Reported verbatim: the operator needs the specific outstanding item.
+        raise ValueError(
+            "Cannot activate: readiness is not satisfied — "
+            + "; ".join(evaluation["blocking_reasons"])
+        )
+
     order.status = "active"
+    audit(db, actor=actor, action="commercial.order.activate", target_type="event_order",
+          target_id=order.id, org_id=event.org_id, financial_state=financial_state,
+          order_version=order.order_version, readiness_verdict=evaluation["verdict"],
+          exceptions_applied=evaluation.get("exceptions_applied") or None)
+    sync_lifecycle(db, event, order, actor=actor, trigger="order.activate",
+                    reason="all confirmation gates satisfied", evaluation=evaluation)
     db.commit()
     db.refresh(order)
     return order
+
+
+# ── Canonical commercial lifecycle (doc Section 28) ──────────────────────────────────────
+# DRAFT -> QUOTED -> ORDER_ACCEPTED -> FINANCIAL_HOLD -> CAPACITY_HELD -> CONFIRMED -> READY
+#       -> LIVE -> COMPLETED, plus CANCELED.
+#
+# DERIVED, never assigned. The facts that determine it already exist and are already
+# individually guarded (EventOrder.status through its own transitions, PaymentSchedule through
+# capture/allocation, CapacityReservation through the pool lock, Event.status through
+# status_transition_error + golive_block_reason). Adding a writable lifecycle column would
+# create a second truth that could disagree with all of them — and something that can be
+# written can be written to the wrong value. There is no setter here, which is precisely how
+# the doc's "no state is manually bypassable" requirement is met: the only way to reach
+# CONFIRMED is to satisfy the facts CONFIRMED is defined as.
+
+# Event lifecycle states that mean the commercial engagement is over, one way or another.
+_EVENT_STATES_COMPLETED = ("processing", "replay_ready", "ended", "archived")
+_EVENT_STATES_LIVE = ("live", "degraded", "ending")
+
+
+def commercial_lifecycle_state(db: Session, event: Event, order: EventOrder | None = None, *,
+                                evaluation: dict | None = None) -> dict:
+    """The event's current commercial lifecycle state, derived from committed facts.
+
+    Returns the state plus the evidence behind it, so a caller (and the transition log) can
+    answer "why is it here" without re-deriving anything:
+
+        {"state", "financial_state", "capacity_satisfied", "capacity_held",
+         "blocking_reasons", "readiness_verdict"}
+
+    `evaluation` lets a caller that has already run evaluate_readiness pass it in rather than
+    paying for it twice — the go-live path does exactly that.
+    """
+    # ── Terminal states first: nothing below can override a cancelled or delivered event ──
+    if (order is not None and order.status in ("canceled", "terminated")) or event.status == "cancelled":
+        return {"state": "canceled", "financial_state": None, "capacity_satisfied": None,
+                "capacity_held": False, "blocking_reasons": [], "readiness_verdict": None}
+    if (order is not None and order.status == "completed") or event.status in _EVENT_STATES_COMPLETED:
+        return {"state": "completed", "financial_state": None, "capacity_satisfied": None,
+                "capacity_held": False, "blocking_reasons": [], "readiness_verdict": None}
+    if event.status in _EVENT_STATES_LIVE:
+        return {"state": "live", "financial_state": None, "capacity_satisfied": None,
+                "capacity_held": False, "blocking_reasons": [], "readiness_verdict": None}
+
+    # ── Pre-delivery: the state is whatever gate is still outstanding ──
+    if order is None or order.status in ("draft", "pending_acceptance"):
+        # QUOTED means a real, live quote is on the table — a draft quote nobody has issued is
+        # not a commercial position, and a superseded/expired one is no longer one either.
+        quoted = db.scalar(
+            select(Quote.id).where(
+                Quote.event_id == event.id,
+                Quote.status.in_(("issued", "accepted")),
+            )
+        ) is not None
+        return {"state": "quoted" if quoted else "draft", "financial_state": None,
+                "capacity_satisfied": None, "capacity_held": False,
+                "blocking_reasons": [], "readiness_verdict": None}
+
+    evaluation = evaluation if evaluation is not None else evaluate_readiness(db, event, order)
+    financial_state = financial_readiness_state(db, order)
+    capacity_satisfied = capacity_confirmed(db, event)
+    # Any hard reservation at all — distinguishes "capacity is being assembled" from "no
+    # capacity has been committed", which is the difference between CAPACITY_HELD and
+    # ORDER_ACCEPTED.
+    capacity_held = db.scalar(
+        select(CapacityReservation.id).where(
+            CapacityReservation.event_id == event.id,
+            CapacityReservation.state.in_(("hard_reserved", "consumed")),
+        )
+    ) is not None
+
+    base = {
+        "financial_state": financial_state,
+        "capacity_satisfied": capacity_satisfied,
+        "capacity_held": capacity_held,
+        "blocking_reasons": list(evaluation.get("blocking_reasons") or []),
+        "readiness_verdict": evaluation.get("verdict"),
+    }
+
+    if evaluation.get("ready"):
+        # READY implies confirmed: evaluate_readiness already required financial readiness and
+        # capacity, so this cannot be reached with either outstanding.
+        return {"state": "ready", **base}
+    if financial_state not in ("satisfied", "approved_exception", "not_due"):
+        return {"state": "financial_hold", **base}
+    if capacity_satisfied:
+        return {"state": "confirmed", **base}
+    if capacity_held:
+        return {"state": "capacity_held", **base}
+    return {"state": "order_accepted", **base}
+
+
+def sync_lifecycle(db: Session, event: Event, order: EventOrder | None, *, trigger: str,
+                    actor: User | None = None, correlation_id: str | None = None,
+                    reason: str | None = None,
+                    evaluation: dict | None = None) -> dict:
+    """Recompute the lifecycle state and record it if it moved. Returns the computed snapshot.
+
+    Called after every operation that can move the state. Does NOT commit — it flushes and
+    leaves the transaction to its caller, so the transition lands atomically with the change
+    that caused it. A transition can never be recorded for an operation that then rolled back.
+
+    An illegal transition (one COMMERCIAL_LIFECYCLE_TRANSITIONS does not allow) is RECORDED,
+    not rejected. The state is derived from facts that have already been individually
+    validated, so an unexpected jump means the model's understanding of those facts is
+    incomplete — that is worth an alarm in the log, not an exception that would roll back a
+    legitimate commercial operation on a bookkeeping technicality.
+    """
+    snapshot = commercial_lifecycle_state(db, event, order, evaluation=evaluation)
+    state = snapshot["state"]
+    previous = order.lifecycle_state if order is not None else None
+    if previous == state:
+        return snapshot
+
+    illegal = not lifecycle_transition_allowed(previous, state)
+
+    db.add(CommercialStateTransition(
+        event_order_id=order.id if order is not None else None, event_id=event.id,
+        from_state=previous, to_state=state, trigger=trigger, reason=reason, illegal=illegal,
+        blocking_reasons=snapshot["blocking_reasons"] or None,
+        financial_state=snapshot["financial_state"],
+        capacity_satisfied=snapshot["capacity_satisfied"],
+        actor_id=actor.id if actor else None, correlation_id=correlation_id,
+    ))
+    if order is not None:
+        order.lifecycle_state = state
+    audit(db, actor=actor,
+          action="commercial.lifecycle.illegal_transition" if illegal else "commercial.lifecycle.transition",
+          target_type="event_order" if order is not None else "event",
+          target_id=order.id if order is not None else event.id, org_id=event.org_id,
+          correlation_id=correlation_id, from_state=previous, to_state=state, trigger=trigger,
+          reason=reason, financial_state=snapshot["financial_state"],
+          capacity_satisfied=snapshot["capacity_satisfied"],
+          blocking_reasons=snapshot["blocking_reasons"] or None)
+    db.flush()
+    return snapshot
+
+
+def lifecycle_transition_allowed(previous: str | None, new: str) -> bool:
+    """Whether `previous -> new` is a legal commercial lifecycle move.
+
+    Exposed separately from sync_lifecycle so the forbidden moves the standard names are
+    checkable directly — DRAFT->LIVE, QUOTED->COMPLETED and CANCELED->READY are all False here.
+
+    Note how those three are actually PREVENTED rather than merely detected: the state is
+    derived, so the only way to reach LIVE is for Event.status to become live, and
+    golive_block_reason refuses that for an event whose order is not accepted, paid, resourced
+    and ready. This function is the graph's opinion; the gates are the enforcement. Both are
+    tested.
+    """
+    if previous is None:
+        return True                      # first observation is not a transition
+    if previous == new:
+        return True                      # idempotent re-observation
+    return new in COMMERCIAL_LIFECYCLE_TRANSITIONS.get(previous, ())
+
+
+def lifecycle_history(db: Session, *, order_id=None, event_id=None) -> list[CommercialStateTransition]:
+    """Append-only lifecycle history, oldest first."""
+    stmt = select(CommercialStateTransition).order_by(CommercialStateTransition.created_at)
+    if order_id is not None:
+        stmt = stmt.where(CommercialStateTransition.event_order_id == order_id)
+    if event_id is not None:
+        stmt = stmt.where(CommercialStateTransition.event_id == event_id)
+    return db.scalars(stmt).all()
 
 
 # ── Capacity reservation (doc Section 7/C, state: UNREQUESTED->SOFT_HELD->HARD_RESERVED->...)
@@ -643,6 +940,40 @@ def activate_order(db: Session, order: EventOrder) -> EventOrder:
 # never took any. Kept as one tuple so utilisation and the oversell guard can never disagree
 # about what counts.
 CAPACITY_HOLDING_STATES = ("soft_held", "hard_reserved", "consumed")
+
+
+def _capacity_audit(db: Session, *, capacity_event: str, reservation: CapacityReservation,
+                     actor: User | None = None, reason: str | None = None,
+                     correlation_id: str | None = None, event: Event | None = None,
+                     **extra) -> None:
+    """Emit one canonical capacity audit event (doc Section 30).
+
+    Every movement of committed inventory goes through here, so the four things an auditor
+    needs are structurally guaranteed rather than remembered per call site: the ACTOR, the
+    TIMESTAMP (AuditLog.created_at), the EVENT/ORDER it was for, and a REASON. Five separate
+    audit calls previously assembled these by hand and disagreed about which fields to
+    include — release carried a reason, hard_reserve carried an order, neither carried both.
+
+    `capacity_event` is validated against CAPACITY_AUDIT_EVENTS, so a typo is an error rather
+    than a silently unqueryable action string.
+    """
+    if capacity_event not in CAPACITY_AUDIT_EVENTS:
+        raise ValueError(
+            f"Unknown capacity audit event '{capacity_event}' "
+            f"(allowed: {', '.join(CAPACITY_AUDIT_EVENTS)})"
+        )
+    ev = event if event is not None else db.get(Event, reservation.event_id)
+    audit(db, actor=actor, action=f"commercial.capacity.{capacity_event}",
+          target_type="capacity_reservation", target_id=reservation.id,
+          org_id=ev.org_id if ev is not None else None, correlation_id=correlation_id,
+          reason=reason, capacity_event=capacity_event,
+          resource_type=reservation.resource_type, quantity=reservation.quantity,
+          state=reservation.state, event_id=str(reservation.event_id),
+          event_order_id=(None if not reservation.event_order_id
+                          else str(reservation.event_order_id)),
+          capacity_pool_id=(None if not reservation.capacity_pool_id
+                            else str(reservation.capacity_pool_id)),
+          **extra)
 
 
 def list_capacity_pools(db: Session, *, resource_type: str | None = None, status: str | None = None,
@@ -806,12 +1137,25 @@ def soft_hold_capacity(db: Session, event: Event, *, resource_type: str, window_
         created_by=actor.id if actor else None,
     )
     db.add(reservation)
+    db.flush()
+    # doc Section 30: capacity is a commercial commitment, so every movement of it is audit
+    # evidence. NONE of the reservation transitions were audited before — hold, reserve,
+    # consume and release all mutated inventory silently, which left "who committed this
+    # operator to this event, and when" unanswerable.
+    _capacity_audit(db, capacity_event="soft_hold_created", reservation=reservation,
+                     actor=actor, event=event,
+                     reason=f"governed {hold_minutes}-minute hold taken against pool {locked.id}",
+                     region=region, window_start=window_start.isoformat(),
+                     window_end=window_end.isoformat(),
+                     expires_at=reservation.soft_hold_expires_at.isoformat())
     db.commit()  # releases the pool row lock
     db.refresh(reservation)
     return reservation
 
 
-def hard_reserve_capacity(db: Session, reservation: CapacityReservation, order: EventOrder) -> CapacityReservation:
+def hard_reserve_capacity(db: Session, reservation: CapacityReservation, order: EventOrder, *,
+                           actor: User | None = None,
+                           correlation_id: str | None = None) -> CapacityReservation:
     """Requires an accepted/active order — money without operational capacity is not a
     valid delivery commitment, and capacity without an order is equally invalid (doc B4).
 
@@ -848,41 +1192,71 @@ def hard_reserve_capacity(db: Session, reservation: CapacityReservation, order: 
     reservation.state = "hard_reserved"
     reservation.hard_reserved_at = datetime.now(timezone.utc)
     reservation.soft_hold_expires_at = None
+    event = db.get(Event, reservation.event_id)
+    _capacity_audit(db, capacity_event="hard_reserved", reservation=reservation, actor=actor,
+                     event=event, correlation_id=correlation_id,
+                     reason=f"committed against accepted order version {order.order_version}",
+                     order_version=order.order_version)
+    # Committing capacity can complete the CONFIRMED gate, so the lifecycle moves with it.
+    if event is not None:
+        sync_lifecycle(db, event, order, actor=actor, trigger="capacity.hard_reserve",
+                        correlation_id=correlation_id)
     db.commit()
     db.refresh(reservation)
     return reservation
 
 
-def consume_capacity(db: Session, reservation: CapacityReservation) -> CapacityReservation:
+def consume_capacity(db: Session, reservation: CapacityReservation, *,
+                      actor: User | None = None) -> CapacityReservation:
     """HARD_RESERVED -> CONSUMED once the event has actually used the resource (doc Section
     28). Still holds inventory — consumption is not a release."""
     if reservation.state != "hard_reserved":
         raise ValueError(f"Cannot consume capacity in state '{reservation.state}'")
     reservation.state = "consumed"
     reservation.consumed_at = datetime.now(timezone.utc)
+    event = db.get(Event, reservation.event_id)
+    _capacity_audit(db, capacity_event="consumed", reservation=reservation, actor=actor,
+                     event=event, reason="resource used by the delivered event")
     db.commit()
     db.refresh(reservation)
     return reservation
 
 
-def release_capacity(db: Session, reservation: CapacityReservation, reason: str) -> CapacityReservation:
+def release_capacity(db: Session, reservation: CapacityReservation, reason: str, *,
+                      actor: User | None = None,
+                      correlation_id: str | None = None) -> CapacityReservation:
     """Returns the held quantity to its pool by leaving CAPACITY_HOLDING_STATES. Idempotent:
-    releasing an already-released row is a no-op rather than a double credit."""
+    releasing an already-released row is a no-op rather than a double credit.
+
+    Deliberately does NOT sync the lifecycle: the two callers that release in bulk
+    (cancel_order, reschedule_event) each sync once after the whole batch, so a five-resource
+    cancellation records one transition instead of five.
+    """
     if reservation.state in ("released", "expired"):
         return reservation
+    previous = reservation.state
     reservation.state = "released"
     reservation.released_at = datetime.now(timezone.utc)
     reservation.release_reason = reason
+    event = db.get(Event, reservation.event_id)
+    _capacity_audit(db, capacity_event="released", reservation=reservation, actor=actor,
+                     event=event, correlation_id=correlation_id, reason=reason,
+                     from_state=previous)
     db.commit()
     db.refresh(reservation)
     return reservation
 
 
-def expire_stale_soft_holds(db: Session) -> int:
+def expire_stale_soft_holds(db: Session, *, actor: User | None = None) -> int:
     """Return inventory from soft holds whose governed period has lapsed (doc C2: "Soft holds
-    expire automatically"). Called opportunistically before capacity is read/claimed rather
-    than from a scheduler — there is no job runner in this codebase, and an expired hold that
-    is never swept would silently keep occupying a pool."""
+    expire automatically").
+
+    Called opportunistically before capacity is read/claimed AND from the operator-invokable
+    sweep (`POST /commercial/maintenance/expire-holds`) so an external scheduler can drive it.
+    There is still no in-process job runner; the endpoint is what makes the sweep reachable
+    without a new hold attempt, which is how a lapsed hold used to keep occupying a pool
+    indefinitely on a quiet system.
+    """
     now = datetime.now(timezone.utc)
     stale = db.scalars(
         select(CapacityReservation).where(
@@ -895,6 +1269,10 @@ def expire_stale_soft_holds(db: Session) -> int:
         reservation.state = "expired"
         reservation.released_at = now
         reservation.release_reason = "soft_hold_expired"
+        _capacity_audit(db, capacity_event="soft_hold_expired", reservation=reservation,
+                         actor=actor,
+                         reason="governed soft-hold period lapsed without a hard reservation",
+                         expired_at=now.isoformat())
     if stale:
         db.commit()
     return len(stale)
@@ -1200,11 +1578,137 @@ def list_payment_schedules(db: Session, order_id) -> list[PaymentSchedule]:
     return db.scalars(select(PaymentSchedule).where(PaymentSchedule.event_order_id == order_id)).all()
 
 
-def _captured_amount(db: Session, order_id) -> Decimal:
-    paid = db.scalars(
-        select(Payment).where(Payment.event_order_id == order_id, Payment.state.in_(("paid", "part_refunded")))
+# Payment states whose money we actually hold. Deliberately EXCLUDES `partially_paid`:
+# Payment.amount is the AUTHORIZED total, not the settled portion, and no column records the
+# short amount — so counting it would overstate collection. Excluding it understates, which
+# blocks rather than passes (doc D6: the outstanding balance stays explicit). `reversed`
+# (dispute lost) and `refunded` are absent for the same reason they should be: the money is gone.
+COLLECTED_PAYMENT_STATES = ("paid", "part_refunded")
+
+
+def order_settlement(db: Session, order_id) -> dict:
+    """Everything settled against one order, NETTED (doc D6, Section 29).
+
+    The previous `_captured_amount` summed gross payments and subtracted nothing, so an
+    executed refund left the order still reading as fully collected. Three separate
+    calculations consumed that figure — financial readiness, the outstanding payable balance
+    and milestone allocation — so a refunded order simultaneously reported "satisfied" to the
+    go-live gate, refused re-collection as "already paid in full", and kept its milestones
+    marked satisfied. All three are now derived from this one netted view.
+
+    * `gross_captured` — cash the provider settled to us.
+    * `refunded`       — EXECUTED refunds only. A pending or approved-but-unexecuted remedy
+                          has not moved money and must not reduce the collected figure.
+    * `credited`       — executed credits and fee waivers. No cash moved, but the customer no
+                          longer owes it, so it satisfies a balance without being collectable.
+    * `net`            — what counts as settled for readiness and for what is still owed.
+    * `refundable`     — the cash still available to refund. This is the cap a remedy may not
+                          exceed; it is NOT `net`, because a credit was never cash and cannot
+                          be handed back.
+    """
+    gross = sum((
+        p.amount for p in db.scalars(
+            select(Payment).where(
+                Payment.event_order_id == order_id,
+                Payment.state.in_(COLLECTED_PAYMENT_STATES),
+            )
+        ).all()
+    ), Decimal(0))
+    remedies = db.scalars(
+        select(RefundCredit).where(
+            RefundCredit.event_order_id == order_id,
+            RefundCredit.status == "executed",
+        )
     ).all()
-    return sum((p.amount for p in paid), Decimal(0))
+    # `status == "executed"` is re-checked here, not just in the WHERE clause above. The rule
+    # that an unexecuted remedy must not reduce collected money is the whole correctness
+    # property of this function, and keeping it visible at the point of summation means it can
+    # be asserted without a database — a filter that lives only in SQL is a filter nothing can
+    # test in isolation.
+    executed = [r for r in remedies if r.status == "executed"]
+    refunded = sum((r.amount for r in executed if r.type == "refund"), Decimal(0))
+    credited = sum((r.amount for r in executed if r.type in ("credit", "fee_waiver")), Decimal(0))
+    return {
+        "gross_captured": gross,
+        "refunded": refunded,
+        "credited": credited,
+        "net": max(gross - refunded + credited, Decimal(0)),
+        "refundable": max(gross - refunded, Decimal(0)),
+    }
+
+
+def _captured_amount(db: Session, order_id) -> Decimal:
+    """Net settled amount for this order — see order_settlement. Kept as the single name the
+    readiness, payable-balance and allocation paths call, so all three can never disagree."""
+    return order_settlement(db, order_id)["net"]
+
+
+def payment_refundable_amount(db: Session, payment: Payment) -> Decimal:
+    """How much of THIS payment may still be refunded.
+
+    `execute_refund_credit` used to compare a remedy against `payment.amount` alone, so the
+    same payment could be refunded repeatedly — three 100% refunds of one payment all passed
+    the check. Prior executed refunds against this specific payment are now subtracted.
+    """
+    already = sum((
+        r.amount for r in db.scalars(
+            select(RefundCredit).where(
+                RefundCredit.source_payment_id == payment.id,
+                RefundCredit.type == "refund",
+                RefundCredit.status == "executed",
+            )
+        ).all()
+    ), Decimal(0))
+    return max(Decimal(payment.amount) - already, Decimal(0))
+
+
+def _refundable_payments(db: Session, order_id) -> list[tuple[Payment, Decimal]]:
+    """(payment, still-refundable amount) for every payment holding cash on this order,
+    oldest first. Oldest-first so a refund unwinds collection in the order it was taken."""
+    payments = db.scalars(
+        select(Payment)
+        .where(Payment.event_order_id == order_id, Payment.state.in_(COLLECTED_PAYMENT_STATES))
+        .order_by(Payment.created_at)
+    ).all()
+    out = []
+    for p in payments:
+        remaining = payment_refundable_amount(db, p)
+        if remaining > 0:
+            out.append((p, remaining))
+    return out
+
+
+def allocate_refund_across_payments(db: Session, order: EventOrder, amount: Decimal, *,
+                                     reason_code: str, policy_version: str | None,
+                                     actor: User | None,
+                                     incident_id=None) -> list[RefundCredit]:
+    """Create PENDING refund remedies covering `amount`, each bound to a real source payment.
+
+    This is the fix for cancellation refunds that never moved money: `cancel_order` used to
+    create one RefundCredit with `source_payment_id` left NULL, and `execute_refund_credit`
+    only calls the provider when that field is set — so approving and executing it flipped the
+    status to `executed` while the payment stayed `paid` and nothing was returned to the payer.
+
+    A refund can only ever come out of a payment that actually holds cash, so the amount is
+    split across the refundable payments rather than recorded against the order in the
+    abstract. Still PENDING: maker-checker approval is unchanged and unbypassed.
+    """
+    remaining = Decimal(amount)
+    created: list[RefundCredit] = []
+    for payment, refundable in _refundable_payments(db, order.id):
+        if remaining <= 0:
+            break
+        take = min(remaining, refundable)
+        rc = RefundCredit(
+            event_order_id=order.id, source_payment_id=payment.id, incident_id=incident_id,
+            type="refund", amount=take, reason_code=reason_code,
+            policy_version=policy_version,
+            requested_by=actor.id if actor else None, status="pending",
+        )
+        db.add(rc)
+        created.append(rc)
+        remaining -= take
+    return created
 
 
 # ── Payments (doc Section 20/P, Section 28: provider-neutral, idempotent) ───────────────
@@ -1446,6 +1950,13 @@ def capture_payment(db: Session, payment: Payment, *, actor: User | None = None,
         if result.settled_at:
             payment.settled_at = result.settled_at
         reallocate_schedules(db, payment.event_order_id)
+        # Capturing money can satisfy the financial gate and move the order out of
+        # FINANCIAL_HOLD — recorded as a lifecycle transition, not inferred later.
+        order = db.get(EventOrder, payment.event_order_id)
+        event = db.get(Event, order.event_id) if order is not None else None
+        if order is not None and event is not None:
+            sync_lifecycle(db, event, order, actor=actor, trigger="payment.capture",
+                            correlation_id=correlation_id)
     db.commit()
     db.refresh(payment)
     return payment
@@ -1955,6 +2466,14 @@ def ingest_provider_event(db: Session, *, provider: str, provider_event_id: str,
                       error)
 
     allocation = reallocate_schedules(db, payment.event_order_id)
+    # A provider event that moved money can move the commercial lifecycle with it (settlement
+    # clearing FINANCIAL_HOLD, a reversal dropping it back in). Recorded here so the webhook
+    # path and the human capture path produce the same lifecycle history.
+    lifecycle_order = db.get(EventOrder, payment.event_order_id)
+    lifecycle_event = db.get(Event, lifecycle_order.event_id) if lifecycle_order is not None else None
+    if lifecycle_order is not None and lifecycle_event is not None:
+        sync_lifecycle(db, lifecycle_event, lifecycle_order, actor=None,
+                        trigger=f"provider_event:{event_type}", correlation_id=correlation_id)
     audit(db, actor=None, action="commercial.provider_event.processed", target_type="provider_event",
           target_id=record.id, org_id=org_id, correlation_id=correlation_id,
           payment_id=str(payment.id), to_state=new_state, event_type=event_type,
@@ -2055,7 +2574,20 @@ def record_tax_determination(db: Session, order: EventOrder, actor: User, *, tax
             "(e.g. exempt, zero-rated, reverse-charge, out-of-scope) — zero tax must be a "
             "stated outcome, never an unexplained amount (doc L6)"
         )
-
+    # NOT gated on a resolved seller legal entity, deliberately. Tax is a fact about a supply
+    # between two parties, so determining it before the selling party is known is arguably
+    # premature (doc L1/L4) — but making that a hard block here would refuse the determination
+    # on every order whose account has not yet been assigned an entity, including the entire
+    # existing mock-provider payment path, and the consequence it guards against (issuing a
+    # document under an unregistered seller) is ALREADY blocked at the only place it can
+    # happen: issue_invoice -> resolve_seller_entity. Enforcing it twice would break working
+    # collection to prevent something that cannot occur.
+    #
+    # What was genuinely missing is VISIBILITY: an accepted commercial order with a determined
+    # tax basis and no seller entity can be charged and then never invoiced. That is now a
+    # reconciliation control (list_orders_missing_seller_entity, category
+    # "order_without_seller_entity") so Finance sees it at period close instead of discovering
+    # it when an invoice refuses to issue.
     now = datetime.now(timezone.utc)
     previous = order.tax_amount
     order.tax_amount = tax_amount
@@ -2217,14 +2749,185 @@ def _allocate_invoice_number(db: Session, *, ledger: str, seller_entity: SellerL
 
 # ── Change orders (doc Section 11/G) ─────────────────────────────────────────────────────
 
+def _plan_change_order_lines(db: Session, order: EventOrder, changes: dict) -> tuple[list[dict], list[EventOrderLine], Decimal]:
+    """Validate a change order's line operations and compute its true price delta.
+
+    `changes` shape (both keys optional, at least one op required):
+
+        {"add_lines":       [{"catalog_line_id": ..., "quantity": "2",
+                              "is_addon": false, "is_complimentary": false}, ...],
+         "remove_line_ids": [order_line_id, ...]}
+
+    Every added line goes through the SAME validation `add_order_line` applies — it must come
+    from this order's own published catalog version, carry a price, and match the order's
+    currency — so a change order can never introduce a price that is not traceable to an
+    approved price book (doc B1/B2). That traceability is the whole reason a change order may
+    not be a bare number: `accept_change_order` used to just add `price_delta` to the subtotal
+    without touching any line, which left `sum(lines) != subtotal` and a delta with no
+    provenance whatsoever.
+    """
+    add_specs = changes.get("add_lines") or []
+    remove_ids = changes.get("remove_line_ids") or []
+    if not add_specs and not remove_ids:
+        raise ValueError(
+            "A change order must carry line operations (`add_lines` and/or `remove_line_ids`). "
+            "A bare price adjustment has no catalog provenance and would leave the order's "
+            "subtotal disagreeing with its own lines — to change a price without changing "
+            "scope, raise a `price_override` or `discount` commercial exception instead "
+            "(doc B1: no charge without an order line)"
+        )
+
+    planned: list[dict] = []
+    delta = Decimal(0)
+    for spec in add_specs:
+        line_id = spec.get("catalog_line_id")
+        if not line_id:
+            raise ValueError("Each add_lines entry requires a catalog_line_id")
+        catalog_line = db.get(CatalogLine, uuid.UUID(str(line_id)))
+        if catalog_line is None:
+            raise ValueError(f"Catalog line {line_id} not found")
+        if catalog_line.catalog_version_id != order.catalog_version_id:
+            raise ValueError(
+                "Catalog line belongs to a different catalog version than this order — a line's "
+                "price must be traceable to the order's own approved catalog version (doc B1/B2)"
+            )
+        if catalog_line.unit_price is None or not catalog_line.currency:
+            raise ValueError("Catalog line has no price/currency set — cannot add to an order (doc B2)")
+        if catalog_line.currency != order.currency:
+            raise ValueError(
+                f"Catalog line is priced in {catalog_line.currency} but this order is in "
+                f"{order.currency} — one currency per order/document (doc L2)"
+            )
+        quantity = Decimal(str(spec.get("quantity", 1)))
+        if quantity <= 0:
+            raise ValueError("Change order line quantity must be greater than zero")
+        is_complimentary = bool(spec.get("is_complimentary", False))
+        unit_price = Decimal(0) if is_complimentary else catalog_line.unit_price
+        line_total = unit_price * quantity
+        planned.append({
+            "catalog_line": catalog_line, "quantity": quantity, "unit_price": unit_price,
+            "line_total": line_total, "is_addon": bool(spec.get("is_addon", False)),
+            "is_complimentary": is_complimentary,
+        })
+        delta += line_total
+
+    removing: list[EventOrderLine] = []
+    for raw_id in remove_ids:
+        line = db.get(EventOrderLine, uuid.UUID(str(raw_id)))
+        if line is None or line.event_order_id != order.id:
+            raise ValueError(f"Order line {raw_id} does not belong to this order")
+        removing.append(line)
+        delta -= Decimal(line.line_total)
+
+    return planned, removing, delta
+
+
+def _exception_approver_holds_finance(db: Session, exception: CommercialException) -> bool:
+    """Whether the human who approved this exception holds Finance authority.
+
+    doc Section 25: a price OVERRIDE is a Finance decision. The approve endpoint is already
+    gated on the `write_off` column, but the exception could have been approved before that
+    gating existed, or by an account whose role changed since — so the change-order path
+    re-checks the recorded approver rather than trusting that the route must have been correct.
+    """
+    if exception.approver_id is None:
+        return False
+    approver = db.get(User, exception.approver_id)
+    if approver is None:
+        return False
+    from ..security import commercial_can
+    return commercial_can(approver, "finance") or commercial_can(approver, "write_off")
+
+
 def create_change_order(db: Session, order: EventOrder, *, changes: dict, price_delta: Decimal,
                          service_impact: str | None = None, risk_impact: str | None = None,
-                         capacity_impact: str | None = None) -> ChangeOrder:
-    return _persist_change_order(db, ChangeOrder(
+                         capacity_impact: str | None = None, reason: str | None = None,
+                         actor: User | None = None) -> ChangeOrder:
+    """Raise a post-acceptance commercial delta (doc G1).
+
+    The order must already be accepted — a draft order is still edited directly through
+    `add_order_line`, and routing that through a change order would be ceremony.
+
+    `price_delta` is now DERIVED from the line operations, not taken on trust. A caller-supplied
+    value is accepted only when it matches, and refused otherwise — the same "refuse rather
+    than silently substitute" rule `authorize_payment` uses for amounts, because quietly
+    booking a different delta than the caller stated is its own hazard.
+
+    Approval rules (doc Section 25):
+
+      INCREASE (delta > 0)  — allowed on an accepted order, no exception needed. The customer
+                              still has to accept the change order itself, which is the
+                              acceptance that matters for extra scope.
+      DECREASE (delta < 0)  — requires an approved `discount` or `price_override` exception on
+                              THIS order. Reducing revenue is a governed act; without this a
+                              single actor could create and accept a change order that
+                              discounted an order to nothing.
+      OVERRIDE (price_override) — additionally requires that the exception was approved by
+                              someone holding Finance authority, re-checked against the
+                              recorded approver rather than assumed from the route.
+
+    The authorising exception is stored on the row (`approval_exception_id`), so "what
+    permitted this reduction" is answerable from the change order itself.
+    """
+    if order.status not in ("accepted", "active"):
+        raise ValueError(
+            f"Cannot raise a change order against an order in status '{order.status}' — change "
+            "orders exist to amend an ACCEPTED order (doc G1); edit a draft order's lines directly"
+        )
+    if not (reason and reason.strip()):
+        raise ValueError(
+            "A change order requires a reason — a commercial delta with no stated grounds is "
+            "not auditable (doc Section 25)"
+        )
+    planned, removing, computed = _plan_change_order_lines(db, order, changes)
+    if price_delta is not None and Decimal(price_delta) != computed:
+        raise ValueError(
+            f"Stated price_delta {price_delta} does not match the {computed} computed from this "
+            "change order's line operations. The delta is determined by the catalog-priced lines "
+            "being added and removed, not by the request — omit it to accept the computed value"
+        )
+
+    authorising: CommercialException | None = None
+    if computed < 0:
+        discount = active_exception(db, exception_type="discount", order_id=order.id, gate="pricing")
+        override = active_exception(db, exception_type="price_override", order_id=order.id,
+                                    gate="pricing")
+        authorising = discount or override
+        if authorising is None:
+            raise ValueError(
+                f"This change order reduces the order by {abs(computed)} {order.currency}. A "
+                "revenue reduction requires an approved `discount` or `price_override` "
+                "commercial exception on this order first (doc Section 25 discount approval)"
+            )
+        # A price OVERRIDE is Finance's call, not Sales'. A plain `discount` is satisfied by the
+        # ordinary approval path; an override additionally needs a Finance approver on record.
+        if authorising.exception_type == "price_override" and not _exception_approver_holds_finance(db, authorising):
+            raise ValueError(
+                f"Exception {authorising.id} is a price override but was not approved by an "
+                "actor holding Finance authority. A price override requires Finance approval "
+                "(doc Section 25)"
+            )
+
+    co = ChangeOrder(
         event_order_id=order.id, prior_order_version=order.order_version, changes=changes,
-        price_delta=price_delta, service_impact=service_impact, risk_impact=risk_impact,
-        capacity_impact=capacity_impact, status="draft",
-    ))
+        price_delta=computed, reason=reason.strip(), service_impact=service_impact,
+        risk_impact=risk_impact, capacity_impact=capacity_impact,
+        requested_by=actor.id if actor else None,
+        approval_exception_id=authorising.id if authorising is not None else None,
+        status="draft",
+    )
+    db.add(co)
+    db.flush()
+    audit(db, actor=actor, action="commercial.change_order.create", target_type="change_order",
+          target_id=co.id, org_id=_order_org_id(db, order.id), reason=co.reason,
+          price_delta=str(computed), direction="increase" if computed >= 0 else "decrease",
+          prior_order_version=order.order_version,
+          lines_added=len(planned), lines_removed=len(removing),
+          approval_exception_id=None if authorising is None else str(authorising.id),
+          approval_exception_type=None if authorising is None else authorising.exception_type)
+    db.commit()
+    db.refresh(co)
+    return co
 
 
 def _persist_change_order(db: Session, co: ChangeOrder) -> ChangeOrder:
@@ -2235,30 +2938,110 @@ def _persist_change_order(db: Session, co: ChangeOrder) -> ChangeOrder:
 
 
 def accept_change_order(db: Session, change_order: ChangeOrder, actor: User) -> ChangeOrder:
-    """Customer acceptance, then apply: bumps the order's version and total rather than
-    editing prior lines in place (doc T4 — corrections are additive)."""
+    """Customer acceptance, then apply: materialize the line changes, bump the order version.
+
+    The prior version's EventOrderVersion snapshot is never touched, so removing a line does
+    not destroy history — the removed line survives verbatim in the snapshot of the version
+    that carried it (doc T4: corrections are additive). That is what makes deleting the live
+    row safe rather than lossy.
+
+    The subtotal is RECOMPUTED from the resulting lines rather than incremented by the delta,
+    so the order's total and its own lines can never disagree — the previous implementation
+    only moved the total and left every line untouched.
+    """
     if change_order.status not in ("draft", "pending_acceptance"):
         raise ValueError(f"Cannot accept a change order in status '{change_order.status}'")
     order = db.get(EventOrder, change_order.event_order_id)
     if order.order_version != change_order.prior_order_version:
         raise ValueError("This change order is stale — a newer version has already been applied")
+    if order.status not in ("accepted", "active"):
+        raise ValueError(f"Cannot apply a change order to an order in status '{order.status}'")
+
+    # Re-validate at apply time: the catalog or the order's lines may have moved since the
+    # change order was raised, and applying a stale plan would be how an unpriced or
+    # foreign-catalog line slips in.
+    planned, removing, computed = _plan_change_order_lines(db, order, change_order.changes or {})
+    if computed != Decimal(change_order.price_delta):
+        raise ValueError(
+            f"This change order's line operations now compute to {computed}, not the "
+            f"{change_order.price_delta} recorded when it was raised — the underlying catalog or "
+            "order lines have changed. Raise a fresh change order against the current state"
+        )
+
+    # Capture the removed rows' identity BEFORE deleting them — once gone, the only other
+    # record is the previous version's snapshot, and `applied_lines` is what makes "which lines
+    # did THIS change order touch" answerable without diffing two snapshots.
+    removed_evidence = [
+        {"id": str(line.id), "service_code": line.service_code,
+         "quantity": str(line.quantity), "unit_price": str(line.unit_price),
+         "line_total": str(line.line_total)}
+        for line in removing
+    ]
+    for line in removing:
+        db.delete(line)
+    added_evidence = []
+    for spec in planned:
+        catalog_line = spec["catalog_line"]
+        new_line = EventOrderLine(
+            event_order_id=order.id, catalog_line_id=catalog_line.id,
+            service_code=catalog_line.service_code, description=catalog_line.name,
+            quantity=spec["quantity"], unit_price=spec["unit_price"], line_total=spec["line_total"],
+            tax_treatment=catalog_line.tax_treatment, unit_basis=catalog_line.unit_basis,
+            is_addon=spec["is_addon"], is_complimentary=spec["is_complimentary"],
+        )
+        db.add(new_line)
+        added_evidence.append(new_line)
+    db.flush()
+    change_order.applied_lines = {
+        "added": [
+            {"id": str(l.id), "service_code": l.service_code, "quantity": str(l.quantity),
+             "unit_price": str(l.unit_price), "line_total": str(l.line_total)}
+            for l in added_evidence
+        ],
+        "removed": removed_evidence,
+    }
+
     change_order.customer_acceptance = True
     change_order.accepted_at = datetime.now(timezone.utc)
     change_order.approved_by = actor.id
     change_order.effective_at = datetime.now(timezone.utc)
     change_order.status = "accepted"
     order.order_version += 1
-    order.subtotal = (order.subtotal or Decimal(0)) + change_order.price_delta
+    # Authoritative: the sum of the order's actual lines.
+    remaining = db.scalars(
+        select(EventOrderLine).where(EventOrderLine.event_order_id == order.id)
+    ).all()
+    order.subtotal = sum((Decimal(l.line_total) for l in remaining), Decimal(0))
     # A price delta moves the tax basis, so any existing determination is stale — clear it
     # and force a re-determination before the changed order can be invoiced again (doc L4).
     _clear_tax_determination(order)
     order.total_amount = order.subtotal
     # The prior version's snapshot already exists and is never touched; this adds the NEW
     # version alongside it, so both remain readable (doc Section 28: corrections are additive).
+    #
+    # EXPIRE the lines relationship rather than refreshing the order: snapshot_order_version
+    # iterates order.lines, which is stale after the inserts/deletes above. db.refresh(order)
+    # would reload them — and also discard the still-pending subtotal, order_version and
+    # cleared-tax attributes set just above, writing a snapshot (and a row) with the OLD
+    # economics. Expiring one relationship reloads exactly what is stale.
+    db.expire(order, ["lines"])
     snapshot_order_version(db, order, actor=actor, change_order=change_order)
     audit(db, actor=actor, action="commercial.change_order.accept", target_type="change_order",
-          target_id=change_order.id, price_delta=str(change_order.price_delta),
-          order_version=order.order_version)
+          target_id=change_order.id, org_id=_order_org_id(db, order.id),
+          reason=change_order.reason,
+          price_delta=str(change_order.price_delta), order_version=order.order_version,
+          new_subtotal=str(order.subtotal), lines_added=len(planned), lines_removed=len(removing),
+          requested_by=None if not change_order.requested_by else str(change_order.requested_by),
+          approved_by=str(actor.id),
+          approval_exception_id=(None if not change_order.approval_exception_id
+                                 else str(change_order.approval_exception_id)),
+          # Clearing the determination IS the tax-recalculation trigger: the order cannot be
+          # invoiced or charged again until Finance records a new one against the new subtotal.
+          tax_determination_cleared=True)
+    event = db.get(Event, order.event_id)
+    if event is not None:
+        sync_lifecycle(db, event, order, actor=actor, trigger="change_order.accept",
+                        reason=change_order.reason)
     db.commit()
     db.refresh(change_order)
     return change_order
@@ -2266,15 +3049,26 @@ def accept_change_order(db: Session, change_order: ChangeOrder, actor: User) -> 
 
 # ── Cancellation workflow (doc Section 9/E) ──────────────────────────────────────────────
 
+def cancellation_lead_time_hours(event: Event, requested_at: datetime | None = None) -> float:
+    """Hours between the request and the event start. `inf` when the event has no start time —
+    an unscheduled event is maximally far out, which lands it in the most generous published
+    band rather than the least."""
+    requested_at = requested_at or datetime.now(timezone.utc)
+    if event.start_time is None:
+        return float("inf")
+    return max((event.start_time - requested_at).total_seconds() / 3600, 0)
+
+
 def calculate_cancellation(db: Session, event: Event, order: EventOrder, *, requested_at: datetime | None = None):
     """Returns (policy, refund_amount) or (None, None) if no policy is configured for this
     vertical/risk-tier/lead-time — the caller must treat that as a fail-closed block on
-    automatic cancellation, not invent a percentage (doc E1)."""
-    requested_at = requested_at or datetime.now(timezone.utc)
-    if event.start_time is None:
-        lead_time_hours = float("inf")
-    else:
-        lead_time_hours = max((event.start_time - requested_at).total_seconds() / 3600, 0)
+    automatic cancellation, not invent a percentage (doc E1).
+
+    `refund_amount` is the POLICY ENTITLEMENT — a percentage of the contracted total. It is
+    deliberately NOT capped here, because the policy figure and the refundable figure answer
+    different questions and Finance needs to see both; `cancel_order` applies the cap.
+    """
+    lead_time_hours = cancellation_lead_time_hours(event, requested_at)
     policy = find_cancellation_policy(
         db, vertical=event.category or "unspecified", risk_tier=order.risk_tier, lead_time_hours=lead_time_hours,
     )
@@ -2284,13 +3078,46 @@ def calculate_cancellation(db: Session, event: Event, order: EventOrder, *, requ
     return policy, refund_amount.quantize(Decimal("0.01"))
 
 
-def cancel_order(db: Session, event: Event, order: EventOrder, actor: User, *, reason: str) -> dict:
-    policy, refund_amount = calculate_cancellation(db, event, order)
+def cancel_order(db: Session, event: Event, order: EventOrder, actor: User, *, reason: str,
+                  correlation_id: str | None = None) -> dict:
+    """Cancel an order: release capacity, and raise refund remedies for money actually held.
+
+    Three defects are closed here.
+
+    1. There was NO status guard, so cancelling twice re-ran the whole routine and filed a
+       second set of refunds against the same order.
+    2. The refund was a percentage of `order.total_amount` with no reference to what had been
+       collected, so cancelling an UNPAID order produced a positive refund obligation for money
+       never received. The policy entitlement is now capped at the refundable cash.
+    3. The RefundCredit was created with `source_payment_id` NULL, which made
+       `execute_refund_credit` skip the provider call entirely — the remedy reached `executed`
+       with the payment still `paid` and nothing returned. Refunds are now bound to real
+       payments via allocate_refund_across_payments.
+
+    Both figures are returned: `policy_refund_amount` (the entitlement) and `refund_amount`
+    (what will actually be returned). When the cap bites, that difference is the number
+    Finance has to reconcile, so it is surfaced rather than silently collapsed.
+    """
+    if order.status in ("canceled", "terminated"):
+        raise ValueError(f"Order is already '{order.status}' — it cannot be cancelled again")
+    if order.status == "completed":
+        raise ValueError(
+            "This order is completed — the event was delivered. Post-delivery money movement is "
+            "a credit or refund remedy against the delivered order, not a cancellation "
+            "(doc Section 15/K)"
+        )
+    correlation_id = correlation_id or new_correlation_id()
+    policy, policy_refund = calculate_cancellation(db, event, order)
     if policy is None:
         raise ValueError(
             "No published cancellation policy matches this event's vertical/risk tier/lead time — "
             "cancellation is blocked until Commercial/Finance configures one (doc E1, fail closed)"
         )
+
+    # A refund may never exceed the cash we are actually holding for this order.
+    settlement = order_settlement(db, order.id)
+    refund_amount = min(policy_refund or Decimal(0), settlement["refundable"])
+
     order.status = "canceled"
     # Release every state that still holds inventory, not just hard reservations — a soft
     # hold on a canceled order would otherwise keep occupying its pool until it expired
@@ -2302,20 +3129,248 @@ def cancel_order(db: Session, event: Event, order: EventOrder, actor: User, *, r
         )
     ).all()
     for r in reservations:
-        release_capacity(db, r, reason="order_canceled")
-    refund_credit = None
-    if refund_amount and refund_amount > 0:
-        refund_credit = RefundCredit(
-            event_order_id=order.id, type="refund", amount=refund_amount, reason_code="customer_cancellation",
-            policy_version=policy.version_label, requested_by=actor.id, status="pending",
+        release_capacity(db, r, reason="order_canceled", actor=actor, correlation_id=correlation_id)
+
+    refund_credits = []
+    if refund_amount > 0:
+        refund_credits = allocate_refund_across_payments(
+            db, order, refund_amount, reason_code="customer_cancellation",
+            policy_version=policy.version_label, actor=actor,
         )
-        db.add(refund_credit)
     audit(db, actor=actor, action="commercial.order.cancel", target_type="event_order", target_id=order.id,
-        org_id=event.org_id, reason=reason, refund_amount=str(refund_amount))
+          org_id=event.org_id, correlation_id=correlation_id, reason=reason,
+          policy_version=policy.version_label,
+          policy_refund_amount=str(policy_refund), refund_amount=str(refund_amount),
+          refundable_at_cancellation=str(settlement["refundable"]),
+          capped=bool((policy_refund or Decimal(0)) > refund_amount),
+          released_reservations=len(reservations), refund_credits=len(refund_credits))
+    sync_lifecycle(db, event, order, actor=actor, trigger="order.cancel",
+                    correlation_id=correlation_id, reason=reason)
     db.commit()
-    if refund_credit:
-        db.refresh(refund_credit)
-    return {"order": order, "policy": policy, "refund_amount": refund_amount, "refund_credit": refund_credit}
+    for rc in refund_credits:
+        db.refresh(rc)
+    return {
+        "order": order, "policy": policy,
+        # The entitlement the policy computed, before the refundable-cash cap.
+        "policy_refund_amount": policy_refund,
+        "refund_amount": refund_amount,
+        # Preserved for existing callers (routers/commercial.py's CancellationResult); a
+        # cancellation can now legitimately produce several remedies, one per source payment.
+        "refund_credit": refund_credits[0] if refund_credits else None,
+        "refund_credits": refund_credits,
+    }
+
+
+# ── Reschedule (doc Section 9 — move the window, preserve the history) ───────────────────
+
+def reschedule_event(db: Session, event: Event, order: EventOrder | None, actor: User, *,
+                     new_start: datetime, new_end: datetime | None, reason: str,
+                     correlation_id: str | None = None) -> dict:
+    """Move an event's window, releasing the capacity held for the old one.
+
+    Three things make this a workflow rather than a field update.
+
+    1. HISTORY. The previous window is what the customer was contracted to receive, and a bare
+       `event.start_time = x` destroys it. EventReschedule keeps the original, the order version
+       that was effective, and the lead time at the moment of the request.
+
+    2. CAPACITY. A reservation covers a specific window (doc C1) — an operator rostered for
+       Tuesday 14:00 does not cover Thursday. Carrying the old reservation across would leave
+       the event appearing capacity-backed by inventory that does not cover it, so every holding
+       reservation is RELEASED and must be re-held against the new window. The event visibly
+       drops out of CONFIRMED until that happens, which is the honest state.
+
+    3. NO INVENTED FEE. There is no published reschedule-fee policy registry, and inventing a
+       percentage is exactly what doc E1 forbids. Any commercial consequence is raised as a
+       normal ChangeOrder and linked via `change_order_id`. The lead-time band the request fell
+       into is recorded so Commercial can decide on the facts.
+
+    Refuses once the event is delivering or delivered: at that point the thing to move no longer
+    exists, and the remedy is cancellation or a credit.
+    """
+    if new_end is not None and new_end <= new_start:
+        raise ValueError("Reschedule end_time must be after start_time")
+    if event.status in _EVENT_STATES_LIVE:
+        raise ValueError(
+            f"Cannot reschedule an event that is '{event.status}' — it is delivering now. End it, "
+            "then cancel or credit the order (doc Section 9)"
+        )
+    if event.status in _EVENT_STATES_COMPLETED or event.status == "cancelled":
+        raise ValueError(f"Cannot reschedule a '{event.status}' event")
+    if order is not None and order.status in ("canceled", "terminated", "completed"):
+        raise ValueError(f"Cannot reschedule against a '{order.status}' order")
+
+    correlation_id = correlation_id or new_correlation_id()
+    lead_time = cancellation_lead_time_hours(event)
+    previous_start, previous_end = event.start_time, event.end_time
+
+    reservations = db.scalars(
+        select(CapacityReservation).where(
+            CapacityReservation.event_id == event.id,
+            CapacityReservation.state.in_(("soft_held", "hard_reserved")),
+        )
+    ).all()
+    released = {str(r.id): r.resource_type for r in reservations}
+    for r in reservations:
+        release_capacity(db, r, reason="event_rescheduled", actor=actor,
+                          correlation_id=correlation_id)
+
+    event.start_time = new_start
+    event.end_time = new_end
+    record = EventReschedule(
+        event_id=event.id, event_order_id=order.id if order is not None else None,
+        previous_start_time=previous_start, previous_end_time=previous_end,
+        new_start_time=new_start, new_end_time=new_end, reason=reason,
+        order_version=order.order_version if order is not None else None,
+        released_reservations=released or None,
+        # inf (an event with no start time) is not representable as a Numeric — record NULL.
+        lead_time_hours_at_request=(
+            None if lead_time == float("inf") else Decimal(str(round(lead_time, 2)))
+        ),
+        requested_by=actor.id, correlation_id=correlation_id,
+    )
+    db.add(record)
+    db.flush()
+    audit(db, actor=actor, action="commercial.event.reschedule", target_type="event",
+          target_id=event.id, org_id=event.org_id, correlation_id=correlation_id, reason=reason,
+          previous_start=previous_start.isoformat() if previous_start else None,
+          new_start=new_start.isoformat(),
+          lead_time_hours_at_request=None if lead_time == float("inf") else round(lead_time, 2),
+          released_reservations=len(reservations),
+          event_order_id=None if order is None else str(order.id))
+    lifecycle = sync_lifecycle(db, event, order, actor=actor, trigger="event.reschedule",
+                                correlation_id=correlation_id, reason=reason)
+    db.commit()
+    db.refresh(record)
+    return {
+        "reschedule": record, "event": event, "order": order,
+        "released_reservations": len(reservations),
+        "lifecycle_state": lifecycle["state"],
+        # Re-holding is a deliberate separate step; say so rather than implying it happened.
+        "capacity_requires_rehold": bool(reservations),
+    }
+
+
+def list_reschedules(db: Session, event_id) -> list[EventReschedule]:
+    """Append-only reschedule history, oldest first."""
+    return db.scalars(
+        select(EventReschedule)
+        .where(EventReschedule.event_id == event_id)
+        .order_by(EventReschedule.created_at)
+    ).all()
+
+
+# ── Write-off (doc Section 25 — the RBAC matrix's fifth financial action) ─────────────────
+
+def execute_write_off(db: Session, exception: CommercialException, actor: User, *,
+                      correlation_id: str | None = None) -> RefundCredit:
+    """Turn an APPROVED write-off exception into an executed credit against the order.
+
+    `write_off` existed as an RBAC action in security.COMMERCIAL_ACTIONS with no endpoint and
+    no code path behind it — the permission gated nothing. A write-off is the decision to stop
+    pursuing an amount the customer owes: no cash moves, but the balance must stop being
+    outstanding, otherwise the order sits in FINANCIAL_HOLD forever and blocks delivery.
+
+    Implemented as a `fee_waiver` RefundCredit rather than a new mechanism, because
+    order_settlement already treats waivers as satisfying a balance without being refundable
+    cash. Maker-checker is inherited from the exception it is executing: this cannot run until
+    a DIFFERENT human approved that exception, so no single actor can write off a balance.
+    """
+    if exception.exception_type != "write_off":
+        raise ValueError(
+            f"Exception {exception.id} is a '{exception.exception_type}', not a write_off"
+        )
+    if exception.status != "approved":
+        raise ValueError(
+            f"Cannot execute a write-off from an exception in status '{exception.status}' — it "
+            "must be approved by someone other than the requester first (doc Section 25)"
+        )
+    if exception.event_order_id is None:
+        raise ValueError("A write-off exception must target an order")
+    if exception.amount_exposure is None or exception.amount_exposure <= 0:
+        raise ValueError(
+            "A write-off requires a positive amount_exposure — the amount being written off is "
+            "the whole substance of the decision and cannot be left unstated"
+        )
+    order = db.get(EventOrder, exception.event_order_id)
+    if order is None:
+        raise ValueError("Write-off references an order that no longer exists")
+    existing = db.scalar(
+        select(RefundCredit).where(
+            RefundCredit.event_order_id == order.id,
+            RefundCredit.reason_code == f"write_off:{exception.id}",
+        )
+    )
+    if existing is not None:
+        # Idempotent: re-executing an approved write-off must not waive the amount twice.
+        return existing
+
+    correlation_id = correlation_id or new_correlation_id()
+    credit = RefundCredit(
+        event_order_id=order.id, type="fee_waiver", amount=exception.amount_exposure,
+        reason_code=f"write_off:{exception.id}", policy_version=None,
+        requested_by=exception.requested_by, approved_by=exception.approver_id,
+        status="executed",
+    )
+    db.add(credit)
+    db.flush()
+    reallocate_schedules(db, order.id)
+    audit(db, actor=actor, action="commercial.write_off.execute", target_type="refund_credit",
+          target_id=credit.id, org_id=_order_org_id(db, order.id), correlation_id=correlation_id,
+          amount=str(exception.amount_exposure), exception_id=str(exception.id),
+          requested_by=str(exception.requested_by), approved_by=str(exception.approver_id),
+          reason=exception.rationale)
+    event = db.get(Event, order.event_id)
+    if event is not None:
+        sync_lifecycle(db, event, order, actor=actor, trigger="write_off.execute",
+                        correlation_id=correlation_id, reason=exception.rationale)
+    db.commit()
+    db.refresh(credit)
+    return credit
+
+
+# ── Ledger 3: audience/organizer commerce (doc H3/H4, Section 3) ─────────────────────────
+# Ledger 3 is DELIBERATELY UNBUILT. Nothing in this codebase lets an audience member or an
+# organizer pay for anything, and Ledger 2's money is isolated from it by construction:
+# a Payment references an EventOrder, an EventOrder is owned by a CommercialAccount, and an
+# Invoice carries ledger="live_event".
+#
+# The risk this guard addresses is not today's code — it is the future feature that wires an
+# audience payment into the nearest available payment path, which is Ledger 2's. Separation by
+# absence is separation only until someone adds something. So:
+#   * AUDIENCE_COMMERCE_ENABLED is the single switch a future Ledger 3 must flip.
+#   * assert_audience_commerce_disabled() is the call any such entry point must make.
+#   * assert_ledger_isolation() refuses to settle a Ledger 2 invoice with non-Ledger-2 money.
+# A regression test asserts no audience-payable route exists (test_commercial_lifecycle.py).
+
+AUDIENCE_COMMERCE_ENABLED = False
+LIVE_EVENT_LEDGER = "live_event"
+AUDIENCE_COMMERCE_LEDGER = "audience_commerce"
+
+
+def assert_audience_commerce_disabled(context: str = "audience payment") -> None:
+    """Refuse any attempt to take money from an audience member or organizer.
+
+    Ledger 3 is a separate, unbuilt product (doc H3/H4). Until it exists WITH its own payment
+    routing, seller identity and invoice series, an audience payment has nowhere legitimate to
+    land — and the nearest available landing place is a Live Event order, which is exactly the
+    cross-ledger settlement doc Section 3 prohibits.
+
+    Deliberately has no caller today: there is no audience payment path to guard. It is the
+    named switch and the refusal a future Ledger 3 entry point must go through, so enabling
+    audience commerce is a decision someone makes here rather than a side effect of wiring a
+    payment into the nearest available ledger.
+
+    A companion "assert_ledger_isolation(invoice, payment)" was written and then removed: with
+    Payment -> EventOrder <- Invoice, cross-ledger settlement is not expressible, so the check
+    could never fire and would only have looked like enforcement.
+    """
+    if not AUDIENCE_COMMERCE_ENABLED:
+        raise ValueError(
+            f"Audience/organizer commerce is not enabled ({context}). Ledger 3 is a separate "
+            "product with its own payment routing and invoice series; it must never settle "
+            "against a ZoikoStream Live Event order or a platform subscription (doc Section 3)"
+        )
 
 
 # ── Remedies / refunds / credits (doc Section 15/K, maker-checker) ──────────────────────
@@ -2344,16 +3399,32 @@ def execute_refund_credit(db: Session, refund_credit: RefundCredit, *, actor: Us
     if refund_credit.status != "approved":
         raise ValueError("Refund/credit must be approved before it can be executed (maker-checker)")
     correlation_id = correlation_id or new_correlation_id()
-    if refund_credit.type in ("refund",) and refund_credit.source_payment_id:
+    if refund_credit.type == "refund":
+        # A refund with no source payment cannot move money — the provider call below is what
+        # returns it, and that needs a payment reference. This used to fall through silently:
+        # the remedy reached `executed` with nothing refunded and the payment still `paid`,
+        # which is how a cancellation refund became a customer email and no money
+        # (see cancel_order / allocate_refund_across_payments).
+        if not refund_credit.source_payment_id:
+            raise ValueError(
+                "This refund is not bound to a source payment, so no money can be returned. "
+                "A refund must name the payment it comes out of — raise it against a payment, "
+                "or record it as a `credit` if no cash is to be returned"
+            )
         payment = db.get(Payment, refund_credit.source_payment_id)
         if payment is None:
             raise ValueError("Refund references a payment that no longer exists")
-        if refund_credit.amount > payment.amount:
+        # Cap against what is STILL refundable, not the payment's face value: the previous
+        # check compared against payment.amount alone, so the same payment could be refunded
+        # in full repeatedly.
+        refundable = payment_refundable_amount(db, payment)
+        if refund_credit.amount > refundable:
             raise ValueError(
-                f"Refund of {refund_credit.amount} exceeds the payment's {payment.amount} — "
-                "a remedy may not return more than was taken"
+                f"Refund of {refund_credit.amount} exceeds the {refundable} still refundable on "
+                f"this payment (face value {payment.amount}, already refunded "
+                f"{Decimal(payment.amount) - refundable}) — a remedy may not return more than was taken"
             )
-        target = "part_refunded" if refund_credit.amount < payment.amount else "refunded"
+        target = "part_refunded" if refund_credit.amount < refundable else "refunded"
         error = payment_transition_error(payment.state, target)
         if error:
             audit(db, actor=actor, action="commercial.payment.transition_rejected", target_type="payment",
@@ -2368,8 +3439,14 @@ def execute_refund_credit(db: Session, refund_credit: RefundCredit, *, actor: Us
         refund_credit.provider_ref = result.provider_payment_ref
         apply_payment_state(db, payment, target, actor=actor, correlation_id=correlation_id,
                             source="refund_execute", refund_credit_id=str(refund_credit.id))
-        reallocate_schedules(db, payment.event_order_id)
+
+    # Mark executed BEFORE re-deriving allocation. order_settlement only counts remedies in
+    # status `executed`, so reallocating first would net this refund out of nothing and leave
+    # the milestones showing money that has just been returned.
     refund_credit.status = "executed"
+    db.flush()
+    order = db.get(EventOrder, refund_credit.event_order_id)
+    reallocate_schedules(db, refund_credit.event_order_id)
     if refund_credit.incident_id:
         incident = db.get(EventIncident, refund_credit.incident_id)
         if incident:
@@ -2377,7 +3454,15 @@ def execute_refund_credit(db: Session, refund_credit: RefundCredit, *, actor: Us
     audit(db, actor=actor, action="commercial.refund_credit.execute", target_type="refund_credit",
           target_id=refund_credit.id, org_id=_order_org_id(db, refund_credit.event_order_id),
           correlation_id=correlation_id, amount=str(refund_credit.amount), type=refund_credit.type,
-          provider_ref=refund_credit.provider_ref)
+          provider_ref=refund_credit.provider_ref,
+          source_payment_id=None if not refund_credit.source_payment_id else str(refund_credit.source_payment_id))
+    # Returning money can un-satisfy financial readiness, which can drop the order out of
+    # CONFIRMED — that regression is a recorded lifecycle transition, not a silent change.
+    if order is not None:
+        event = db.get(Event, order.event_id)
+        if event is not None:
+            sync_lifecycle(db, event, order, actor=actor, trigger="refund_credit.execute",
+                            correlation_id=correlation_id)
     db.commit()
     db.refresh(refund_credit)
     return refund_credit
@@ -2423,16 +3508,224 @@ def open_dispute(db: Session, payment: Payment, actor: User, *, reason_code: str
     return dispute
 
 
+# Which payment state a dispute status implies. Only won/lost move money: a dispute that is
+# merely open means the funds are contested, not returned (doc P4). `withdrawn` (Stripe's
+# `warning_closed`) means the inquiry was dropped before becoming a chargeback, so the payment
+# returns to the state it was contested from.
+_DISPUTE_PAYMENT_STATE = {
+    "evidence_required": "disputed",
+    "evidence_submitted": "disputed",
+    "opened": "disputed",
+    "won": "paid",
+    "withdrawn": "paid",
+    "lost": "reversed",
+}
+
+
+def ingest_dispute_event(db: Session, *, provider: str, provider_event_id: str, event_type: str,
+                         raw_body: bytes, signature_verified: bool, dispute: dict,
+                         payload: dict | None = None, occurred_at: datetime | None = None,
+                         correlation_id: str | None = None,
+                         provider_payment_ref: str | None = None,
+                         idempotency_key_hint: str | None = None) -> dict:
+    # `provider_payment_ref` and `idempotency_key_hint` arrive as part of the shared
+    # provider-event envelope the webhook router passes to every ingest function. Accepted so
+    # that envelope stays uniform — special-casing the call site is how one ingest path drifts
+    # out of step with the others. The DISPUTE payload's own payment reference wins: it is the
+    # charge the network is actually disputing, and on a dispute object the envelope's ref is
+    # derived from the same field anyway.
+    """Apply an inbound chargeback event to its PaymentDispute case and its Payment.
+
+    This is the bridge that was missing. The case workflow, the DISPUTE_STATES vocabulary and
+    the `paid -> disputed -> paid|reversed` transitions all existed; dispute events were filed
+    as evidence and never reached them, so a real chargeback left the ledger reading `paid`
+    while the money was gone.
+
+    Ownership stays where it belongs:
+      * the CARD NETWORK decides won/lost — we never invent an outcome, we map Stripe's own
+        dispute.status through payments_stripe_events.STRIPE_DISPUTE_STATUS_MAP;
+      * the PAYMENT STATE MACHINE decides whether the implied move is legal — a dispute on a
+        `failed` payment is refused and audited, not assigned;
+      * the INVOICE and the original payment AMOUNT are never touched (doc P4: "a disputed
+        payment does not silently rewrite the original invoice or delivered event record").
+
+    Idempotent on two levels: the provider event claim (exactly-once per Stripe event id) and
+    the case identity (`provider`, `provider_dispute_ref`), so a redelivered or superseded
+    dispute update advances the existing case rather than opening a second one.
+    """
+    claimed, duplicate_response = _claim_provider_event(
+        db, provider=provider, provider_event_id=provider_event_id, event_type=event_type,
+        raw_body=raw_body, signature_verified=signature_verified,
+        provider_payment_ref=dispute.get("provider_payment_ref"), payload=payload,
+        occurred_at=occurred_at, correlation_id=correlation_id,
+    )
+    if claimed is None:
+        return duplicate_response
+    record = claimed
+    correlation_id = record.correlation_id
+
+    def finish(status: str, result: dict, error: str | None = None) -> dict:
+        record.processing_status = status
+        record.processing_result = result
+        record.processing_error = error
+        record.processed_at = datetime.now(timezone.utc)
+        db.commit()
+        return {"duplicate": False, "applied": bool(result.get("applied")),
+                "provider_event_id": str(record.id), "processing_status": status,
+                "result": result, "correlation_id": correlation_id}
+
+    if not signature_verified:
+        audit(db, actor=None, action="commercial.provider_event.rejected",
+              target_type="provider_event", target_id=record.id, correlation_id=correlation_id,
+              reason="signature_not_verified", provider=provider, event_type=event_type)
+        return finish("rejected", {"applied": False, "reason": "signature_not_verified"},
+                      "signature not verified")
+
+    case_status = dispute.get("status")
+    if case_status is None:
+        # An unmapped Stripe status. Retained rather than guessed — a status we do not
+        # understand must not silently become "opened" and move a payment.
+        return finish("processed", {"applied": False,
+                                    "reason": f"unmapped dispute status "
+                                              f"'{dispute.get('provider_status')}'",
+                                    "follow_up_required": True})
+
+    payment_ref = dispute.get("provider_payment_ref") or provider_payment_ref
+    payment = None
+    if payment_ref:
+        payment = db.scalar(
+            select(Payment).where(Payment.provider == provider,
+                                  Payment.provider_payment_ref == payment_ref)
+        )
+    if payment is None:
+        # Disputed money we cannot attribute. Parked for controlled matching exactly like any
+        # other unattributable settlement (doc P5) — never guessed onto an order.
+        settlement = UnmatchedSettlement(
+            provider=provider, provider_payment_ref=payment_ref, provider_event_id=record.id,
+            event_type=event_type, amount=dispute.get("amount"),
+            currency=dispute.get("currency"), occurred_at=occurred_at,
+            received_at=record.received_at, status="open", correlation_id=correlation_id,
+            reason=(f"Dispute {dispute['provider_dispute_ref']} references payment "
+                    f"'{payment_ref}', which does not exist here"),
+        )
+        db.add(settlement)
+        db.flush()
+        audit(db, actor=None, action="commercial.settlement.unmatched",
+              target_type="unmatched_settlement", target_id=settlement.id,
+              correlation_id=correlation_id, provider=provider, event_type=event_type,
+              reason="dispute_for_unknown_payment",
+              provider_dispute_ref=dispute["provider_dispute_ref"])
+        return finish("processed", {"applied": False, "reason": "dispute_payment_unmatched",
+                                    "unmatched_settlement_id": str(settlement.id)})
+
+    record.payment_id = payment.id
+    org_id = _order_org_id(db, payment.event_order_id)
+
+    # Currency must agree, or the case would attach the wrong money to this order. Amount is
+    # NOT compared: a partial chargeback of a larger payment is legitimate.
+    currency = dispute.get("currency")
+    if currency and currency.upper() != (payment.currency or "").upper():
+        reason = (f"currency mismatch: dispute says {currency.upper()}, payment is "
+                  f"{payment.currency}")
+        audit(db, actor=None, action="commercial.provider_event.rejected",
+              target_type="provider_event", target_id=record.id, org_id=org_id,
+              correlation_id=correlation_id, reason=reason, provider=provider,
+              event_type=event_type)
+        return finish("rejected", {"applied": False, "reason": reason}, reason)
+
+    existing = db.scalar(
+        select(PaymentDispute).where(
+            PaymentDispute.provider == provider,
+            PaymentDispute.provider_dispute_ref == dispute["provider_dispute_ref"],
+        )
+    )
+    disputed_amount = dispute.get("amount") or Decimal(payment.amount)
+    reserve = dispute.get("reserve_amount")
+    created_case = existing is None
+    if existing is None:
+        case = PaymentDispute(
+            id=uuid.uuid4(), payment_id=payment.id, event_order_id=payment.event_order_id,
+            provider=provider, provider_dispute_ref=dispute["provider_dispute_ref"],
+            reason_code=dispute.get("reason_code") or "unspecified",
+            amount=disputed_amount, currency=payment.currency,
+            reserve_amount=reserve if reserve is not None else Decimal(0),
+            status=case_status, evidence_due_by=dispute.get("evidence_due_by"),
+            # No case owner: a webhook cannot assign a human. Finance picks it up from the
+            # dispute list, and the audit entry is the notification.
+            case_owner_id=None,
+        )
+        db.add(case)
+        db.flush()
+    else:
+        case = existing
+        # Never rewind a decided case. A redelivered `created` after a `won` must not reopen it.
+        if case.status in ("won", "lost", "withdrawn") and case_status not in ("won", "lost"):
+            return finish("replayed", {"applied": False, "reason": "case_already_resolved",
+                                       "dispute_id": str(case.id), "status": case.status})
+        case.status = case_status
+        if dispute.get("evidence_due_by"):
+            case.evidence_due_by = dispute["evidence_due_by"]
+        if reserve is not None:
+            case.reserve_amount = reserve
+    if case_status in ("won", "lost", "withdrawn") and case.resolved_at is None:
+        case.resolved_at = datetime.now(timezone.utc)
+
+    target_state = _DISPUTE_PAYMENT_STATE[case_status]
+    applied, error = apply_payment_state(
+        db, payment, target_state, actor=None, correlation_id=correlation_id,
+        source=f"dispute:{provider}", dispute_id=str(case.id),
+        provider_status=dispute.get("provider_status"), event_type=event_type,
+    )
+    audit(db, actor=None,
+          action="commercial.dispute.opened_from_provider" if created_case
+                 else "commercial.dispute.updated_from_provider",
+          target_type="payment_dispute", target_id=case.id, org_id=org_id,
+          correlation_id=correlation_id, provider=provider, event_type=event_type,
+          provider_dispute_ref=case.provider_dispute_ref,
+          provider_status=dispute.get("provider_status"), status=case_status,
+          amount=str(case.amount), reserve_amount=str(case.reserve_amount),
+          payment_id=str(payment.id), payment_state=payment.state,
+          reason=dispute.get("reason_code"),
+          transition_applied=applied, transition_error=error)
+    return finish("processed", {
+        "applied": True, "dispute_id": str(case.id), "created": created_case,
+        "status": case_status, "payment_id": str(payment.id),
+        "payment_state": payment.state, "transition_applied": applied,
+        "transition_error": error,
+    })
+
+
 def submit_dispute_evidence(db: Session, dispute: PaymentDispute, actor: User, *, evidence: dict) -> PaymentDispute:
     """doc P4 'evidence package'. Submitting evidence doesn't resolve the case — the
     provider/card network decides won/lost, reflected later via resolve_dispute (in
     production, from another webhook)."""
     if dispute.status not in ("opened", "evidence_required"):
         raise ValueError(f"Cannot submit evidence for a dispute in status '{dispute.status}'")
-    dispute.evidence = {**(dispute.evidence or {}), **evidence}
+    # APPEND, never merge. A dict merge silently overwrote any key a previous submission had
+    # already set, so the evidence a case was actually argued on could be replaced without
+    # trace — in the one workflow whose entire purpose is holding evidence. Submissions are now
+    # an ordered list, so superseded evidence stays readable alongside what replaced it.
+    previous = dispute.evidence or {}
+    submissions = list(previous.get("submissions") or [])
+    if not submissions and previous:
+        # Carry a pre-existing flat evidence dict in as the first submission rather than
+        # discarding it (rows written before this change).
+        submissions.append({
+            "submitted_at": None, "submitted_by": None, "evidence": {
+                k: v for k, v in previous.items() if k != "submissions"
+            },
+        })
+    submissions.append({
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+        "submitted_by": str(actor.id),
+        "evidence": evidence,
+    })
+    dispute.evidence = {"submissions": submissions}
     dispute.status = "evidence_submitted"
     audit(db, actor=actor, action="commercial.dispute.evidence_submitted",
-          target_type="payment_dispute", target_id=dispute.id)
+          target_type="payment_dispute", target_id=dispute.id,
+          org_id=_order_org_id(db, dispute.event_order_id),
+          submission_number=len(submissions), evidence_keys=sorted(evidence.keys()))
     db.commit()
     db.refresh(dispute)
     return dispute
@@ -2508,11 +3801,59 @@ _CHECK_CODES = {
     "requires_full_rehearsal": "full_rehearsal",
 }
 
+# Check codes not driven by a single ServiceProfile boolean.
+COMMAND_OWNER_CHECK = "command_owner"
+# doc Section 13: an R3 event needs a recorded human sign-off that operations accept the
+# delivery plan. Recorded as an ordinary ReadinessCheck rather than a new table — the check
+# rows are already append-only, actor-stamped and evidence-bearing, which is exactly what
+# operational acceptance needs.
+OPERATIONAL_ACCEPTANCE_CHECK = "operational_acceptance"
+
+# Risk tiers at which a commercial order must carry a published ServiceProfile. R0 is the
+# self-service tier and legitimately has none; from R1 up, the profile is what DEFINES the
+# mandatory controls, so an unprofiled managed event has no requirements at all — which reads
+# as "nothing outstanding" when the truth is "nobody said what is required".
+_PROFILE_REQUIRED_TIERS = ("r1", "r2", "r3")
+
 
 def required_readiness_checks(profile: ServiceProfile | None) -> list[str]:
+    """Check codes this profile makes mandatory (doc I3)."""
     if profile is None:
         return []
-    return [code for flag, code in _CHECK_CODES.items() if getattr(profile, flag)]
+    codes = [code for flag, code in _CHECK_CODES.items() if getattr(profile, flag)]
+    # Managed-only means the event is not self-servable: a Zoiko command owner must be on it,
+    # whether or not requires_command_owner was separately ticked. That is what makes the gate
+    # non-waivable for this profile rather than another optional box (doc Section 10).
+    if getattr(profile, "managed_only", False) and COMMAND_OWNER_CHECK not in codes:
+        codes.append(COMMAND_OWNER_CHECK)
+    if profile.risk_tier == "r3" and OPERATIONAL_ACCEPTANCE_CHECK not in codes:
+        codes.append(OPERATIONAL_ACCEPTANCE_CHECK)
+    return codes
+
+
+def assured_event_reasons(order: EventOrder | None, profile: ServiceProfile | None) -> list[str]:
+    """Why this order's elected Assured Event commitment is not currently valid (doc Sec. 10).
+
+    `assured_event_eligible` was a stored flag that no code path read — an order could be sold
+    as Assured against a profile with no independent recording and no backup contribution path,
+    which is precisely the commitment an Assured Event is. Election is validated at acceptance
+    (accept_order) and the delivery preconditions are re-validated here, because a profile can
+    be superseded between acceptance and delivery.
+    """
+    if order is None or not getattr(order, "assured_event", False):
+        return []
+    if profile is None:
+        return ["Assured Event has no service profile bound to validate it against"]
+    reasons = []
+    if not profile.assured_event_eligible:
+        reasons.append(
+            f"service profile '{profile.version_label}' is not Assured-Event-eligible"
+        )
+    if not profile.requires_dual_recording:
+        reasons.append("Assured Event requires a service profile mandating dual recording")
+    if not profile.requires_backup_contribution:
+        reasons.append("Assured Event requires a service profile mandating backup contribution")
+    return reasons
 
 
 def record_readiness_check(db: Session, event: Event, *, check_code: str, status: str, actor: User,
@@ -2524,6 +3865,17 @@ def record_readiness_check(db: Session, event: Event, *, check_code: str, status
         required_by_risk_tier=event.risk_tier,
     )
     db.add(check)
+    db.flush()
+    # Operational evidence (doc Section 13/30). Check rows are already append-only — a new
+    # attestation never overwrites an earlier one, and evaluate_readiness reads the latest per
+    # code — so the audit entry records WHO attested WHAT against WHICH evidence, immutably.
+    audit(db, actor=actor, action="commercial.readiness.record", target_type="readiness_check",
+          target_id=check.id, org_id=event.org_id, check_code=check_code, status=status,
+          risk_tier=event.risk_tier, evidence_reference=evidence_reference,
+          exception_id=None if exception_id is None else str(exception_id))
+    # Passing (or failing) a required check can move the event in or out of READY.
+    sync_lifecycle(db, event, get_current_order(db, event.id), actor=actor,
+                    trigger="readiness.record")
     db.commit()
     db.refresh(check)
     return check
@@ -2561,6 +3913,39 @@ def contributor_readiness_reasons(rows: list[tuple[str, ContributorSession | Non
     return reasons
 
 
+def technical_readiness_reasons(db: Session, event: Event) -> list[str]:
+    """Required delivery infrastructure (doc I3 "configuration ... contribution ... recording").
+
+    Exactly ONE check: the media plane must be configured. Without LiveKit credentials there is
+    no room to publish into, so the event physically cannot deliver, and calling it READY is a
+    false promise. It is also the only infrastructure fact this layer can verify without
+    inventing a threshold.
+
+    Two conditions gate it, both load-bearing:
+      * commercial classification only — a demo/internal event legitimately runs against no
+        media plane, and blocking those breaks local and QA use for no commercial reason;
+      * platform_settings.require_media_plane — an explicit Operations switch, because
+        otherwise the readiness verdict would silently depend on ambient env vars and every
+        go-live test would fail in any environment without LiveKit credentials (dev and CI
+        included). See that function for why it defaults off.
+
+    Notably NOT checked here: bitrate ceilings, region capacity, egress health. Those are
+    operational telemetry (services/ops.py) or unconfigured platform settings, and asserting
+    them from this function would mean inventing the thresholds the standard forbids.
+    """
+    if event.billing_classification != "commercial":
+        return []
+    if not platform_settings.require_media_plane(db):
+        return []
+    from ..services import livekit
+    if not livekit.configured():
+        return [
+            "delivery infrastructure is not configured (no media plane credentials) — a "
+            "commercial event cannot be marked ready to deliver without somewhere to deliver it"
+        ]
+    return []
+
+
 def evaluate_readiness(db: Session, event: Event, order: EventOrder | None) -> dict:
     """doc I3: READY is computed from payment/credit, capacity, configuration, rehearsal/
     checks, contribution, recording, access and command evidence — never one flag."""
@@ -2594,6 +3979,12 @@ def evaluate_readiness(db: Session, event: Event, order: EventOrder | None) -> d
             (full_name or email, sessions.get(user_id)) for user_id, full_name, email in speaker_rows
         ]))
 
+    # Deliberately does NOT sweep lapsed soft holds. Both capacity gates below read only
+    # HARD_RESERVED rows, so a lapsed soft hold cannot change this verdict — sweeping here
+    # would be a hidden write (expire_stale_soft_holds commits) on what every caller treats as
+    # a read, including the readiness GET endpoint. The sweep belongs where it affects an
+    # outcome: the claim path (soft_hold_capacity, where a lapsed hold would wrongly refuse a
+    # new one) and the operator/scheduler endpoint.
     if not capacity_confirmed(db, event):
         reasons.append("required capacity is not hard-reserved")
 
@@ -2601,11 +3992,36 @@ def evaluate_readiness(db: Session, event: Event, order: EventOrder | None) -> d
     if envelope_reason:
         reasons.append(envelope_reason)
 
+    # ── Risk tier must have a published profile behind it (doc Section 10/F) ──
+    # R0 self-service legitimately has none. From R1 up the profile IS the control set, so its
+    # absence is a missing definition rather than an absence of requirements.
+    if event.billing_classification == "commercial" and event.risk_tier in _PROFILE_REQUIRED_TIERS:
+        if profile is None:
+            reasons.append(
+                f"{event.risk_tier.upper()} commercial event has no service profile bound — the "
+                "profile defines its mandatory controls and cannot be omitted"
+            )
+        elif profile.status != "published":
+            reasons.append(
+                f"service profile '{profile.version_label}' is '{profile.status}', not published"
+            )
+        elif profile.risk_tier != event.risk_tier:
+            reasons.append(
+                f"service profile '{profile.version_label}' is for {profile.risk_tier.upper()} but "
+                f"this event is {event.risk_tier.upper()}"
+            )
+
+    reasons.extend(assured_event_reasons(order, profile))
+    reasons.extend(technical_readiness_reasons(db, event))
+
     # Exceptions that are actively carrying a gate, so the caller can tell NORMAL PASS from
     # EXCEPTION APPROVED from BLOCKED rather than seeing one undifferentiated "ready" flag.
     exceptions_applied: list[dict] = []
 
-    if order is not None:
+    # Commercial acceptance (doc B1/S1): an order that exists but has not been ACCEPTED is not
+    # a commitment. This previously keyed only on the order's existence, so a commercial event
+    # with a draft order passed the acceptance gate while nobody had agreed to anything.
+    if order is not None and order.status in ("accepted", "active", "completed"):
         fin_state = financial_readiness_state(db, order)
         if fin_state == "approved_exception":
             exc = active_exception(db, exception_type="financial_hold_override",
@@ -2706,6 +4122,57 @@ def get_replay_entitlement(db: Session, event_id, *, scope: str = "audience") ->
     )
 
 
+def replay_access_expired(entitlement: ReplayEntitlement | None, *,
+                          now: datetime | None = None) -> bool:
+    """Whether this entitlement's retention window has passed (doc Section 14/J).
+
+    `expires_at` was settable and stored but READ BY NOTHING — routers/events.py gated replay
+    playback on publish_state and watermark_status alone, so a replay whose retention had
+    lapsed was still served indefinitely. This is the check that closes it.
+
+    Also treats an explicit `expired` publish_state as expired, so the maintenance sweep and
+    this live check can never disagree about a given row: whichever notices first, access
+    stops.
+    """
+    if entitlement is None:
+        return False
+    if entitlement.publish_state == "expired":
+        return True
+    if entitlement.expires_at is None:
+        return False                     # no retention window set = no expiry
+    return entitlement.expires_at < (now or datetime.now(timezone.utc))
+
+
+def expire_lapsed_replay_entitlements(db: Session, *, actor: User | None = None) -> int:
+    """Mark published replays whose retention window has passed as EXPIRED.
+
+    Only flips the state — the stored object is NOT deleted. Retention lapsing means access
+    ends, not that the evidence of what was delivered disappears (doc T4: financial and
+    delivery records are additive). Deleting the media is a separate storage-lifecycle decision
+    with its own approval, and doing it silently from a sweep would destroy a customer's
+    recording on a date nobody confirmed.
+    """
+    now = datetime.now(timezone.utc)
+    lapsed = db.scalars(
+        select(ReplayEntitlement).where(
+            ReplayEntitlement.publish_state == "published",
+            ReplayEntitlement.expires_at.is_not(None),
+            ReplayEntitlement.expires_at < now,
+        )
+    ).all()
+    for entitlement in lapsed:
+        entitlement.publish_state = "expired"
+        event = db.get(Event, entitlement.event_id)
+        audit(db, actor=actor, action="commercial.replay.expired",
+              target_type="replay_entitlement", target_id=entitlement.id,
+              org_id=event.org_id if event is not None else None,
+              reason="retention window lapsed", scope=entitlement.scope,
+              expires_at=entitlement.expires_at.isoformat())
+    if lapsed:
+        db.commit()
+    return len(lapsed)
+
+
 def get_or_create_replay_entitlement(db: Session, event: Event, *, scope: str = "audience") -> ReplayEntitlement:
     """Idempotent counterpart to create_replay_entitlement — services/validation.py calls
     this from the recording lifecycle (not a human), so it must never create a duplicate
@@ -2786,9 +4253,19 @@ def list_capacity_orphans(db: Session):
 
 
 def list_unmatched_settlements(db: Session):
-    """doc P5: unmatched settlements route to a reconciliation exception queue rather than
-    being auto-allocated by guess."""
-    return db.scalars(select(Payment).where(Payment.state == "unmatched")).all()
+    """doc P5/Section 29 "Daily payment reconciliation": provider settlement money that could
+    not be attributed to a payment.
+
+    This queried `Payment.state == "unmatched"` — a state NO code path has ever written. The
+    unmatched-money record is an `UnmatchedSettlement` row (written by ingest_provider_event),
+    not a Payment, so the control was structurally blind: `GET /commercial/reconciliation`
+    always reported zero and `close_period` never filed the exception, while the real
+    settlements sat in a table only the separate /unmatched-settlements endpoint read.
+
+    Now reads the same OPEN rows that endpoint does, so the report, the period-close exception
+    queue and the operator's work list are three views of one fact.
+    """
+    return list_open_unmatched_settlements(db)
 
 
 def list_orders_missing_invoice(db: Session):
@@ -2802,6 +4279,30 @@ def list_orders_missing_invoice(db: Session):
     ).all()
     invoiced_order_ids = {i.event_order_id for i in db.scalars(select(Invoice)).all()}
     return [o for o in accepted if o.id not in invoiced_order_ids]
+
+
+def list_orders_missing_seller_entity(db: Session):
+    """Accepted commercial orders whose commercial account has no ACTIVE registered seller
+    legal entity (doc L1, Section 29).
+
+    Such an order can be quoted, accepted, taxed and PAID, and then cannot be invoiced —
+    issue_invoice fails closed on it. That is the right refusal at the wrong time: the money
+    is already collected. Surfacing it as a reconciliation exception moves the discovery to
+    period close, where Finance can assign the entity before anyone is charged.
+    """
+    accepted = db.scalars(
+        select(EventOrder).where(
+            EventOrder.status.in_(("accepted", "active", "completed")),
+            EventOrder.billing_classification == "commercial",
+        )
+    ).all()
+    out = []
+    for order in accepted:
+        try:
+            resolve_seller_entity(db, order)
+        except ValueError:
+            out.append(order)
+    return out
 
 
 def list_events_missing_classification(db: Session):
@@ -2892,9 +4393,14 @@ def _file_exceptions(db: Session, period: FinancialPeriod) -> list[Reconciliatio
     for event in list_events_missing_classification(db):
         file("event_without_classification", "event", event.id,
              f"Event {event.id} is billing_classification=commercial with no accepted order")
-    for payment in list_unmatched_settlements(db):
-        file("unmatched_settlement", "payment", payment.id,
-             f"Payment {payment.id} settled unmatched to any order/invoice")
+    for order in list_orders_missing_seller_entity(db):
+        file("order_without_seller_entity", "event_order", order.id,
+             f"Accepted commercial order {order.id} has no active registered seller legal "
+             "entity — it cannot be invoiced")
+    for settlement in list_unmatched_settlements(db):
+        file("unmatched_settlement", "unmatched_settlement", settlement.id,
+             f"Provider settlement {settlement.provider_payment_ref or '(no reference)'} "
+             f"({settlement.provider}) could not be attributed to any payment: {settlement.reason}")
     return filed
 
 

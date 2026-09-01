@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
+import { fatalDisconnect } from "./livekitDisconnect";
 
 // Subscribes to whatever is being published in the room and attaches every remote track
 // (video AND audio, from the host AND from any promoted speaker) to ONE <video> element —
@@ -21,8 +22,16 @@ import { Room, RoomEvent, Track } from "livekit-client";
 // useLiveKitPublish's handling of the same event on the host side. Without this, a viewer
 // whose connection drops (network blip, backgrounded tab) was stuck on a frozen frame
 // forever with no recovery attempt.
-const MAX_RECONNECT_ATTEMPTS = 5;
+//
+// Audit fix: same as the publish side — this used to give up permanently after
+// MAX_RECONNECT_ATTEMPTS with no way back short of a manual page refresh. Retries now
+// continue indefinitely at a capped, jittered cadence (matching hooks/useEventStream.js's
+// proven reconnect loop); past SLOW_ATTEMPTS_AFTER the message says so honestly instead of
+// claiming the stream is unrecoverable.
 const BASE_RECONNECT_DELAY_MS = 1500;
+const MAX_RECONNECT_DELAY_MS = 15000;
+const SLOW_ATTEMPTS_AFTER = 5;
+const jitter = (ms) => ms * (0.7 + Math.random() * 0.6);
 
 export default function useLiveKitViewer({ enabled, url, token, canPublish = false }) {
   const mediaRef = useRef(null);
@@ -75,13 +84,22 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
           setError(null);
         }
       });
-      room.on(RoomEvent.Disconnected, () => {
+      room.on(RoomEvent.Disconnected, (reason) => {
         room.off(RoomEvent.TrackSubscribed, onSubscribed);
         room.off(RoomEvent.TrackUnsubscribed, onUnsubscribed);
         setHasVideo(false);
         setHasAudio(false);
         if (cancelled) return;
         setConnected(false);
+        // ROOM_DELETED (the event genuinely ended) and DUPLICATE_IDENTITY (this viewer has
+        // another tab open on the same event) are never fixed by retrying — see
+        // livekitDisconnect.js. Stop and say so instead of retrying into a room that's gone.
+        const fatal = fatalDisconnect(reason);
+        if (fatal) {
+          setReconnecting(false);
+          setError(fatal);
+          return;
+        }
         scheduleRetry();
       });
 
@@ -98,14 +116,15 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
 
     const scheduleRetry = () => {
       if (cancelled) return;
-      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
-        setReconnecting(false);
-        setError("Lost connection to the stream and couldn't reconnect. Try refreshing the page.");
-        return;
-      }
       attempt += 1;
-      setReconnecting(true);
-      const delay = BASE_RECONNECT_DELAY_MS * 2 ** (attempt - 1);
+      const stillFast = attempt <= SLOW_ATTEMPTS_AFTER;
+      setReconnecting(stillFast);
+      setError(
+        stillFast ? null
+          : "Lost connection to the stream — still trying to reconnect in the background. "
+            + "Refreshing the page will also retry immediately."
+      );
+      const delay = jitter(Math.min(BASE_RECONNECT_DELAY_MS * 2 ** (attempt - 1), MAX_RECONNECT_DELAY_MS));
       retryTimer = setTimeout(() => {
         if (cancelled) return;
         connectOnce().catch(() => scheduleRetry());

@@ -119,6 +119,78 @@ def test_join_window_error_no_window_at_all():
 
 # ── the preflight -> admit gate (mirrors the poll-vote / chat-gate style tests) ────────
 
+# ── enforcement gate (audit fix: bring_live/mute/remove must not persist state LiveKit
+# never actually granted) ───────────────────────────────────────────────────────
+
+def test_enforced_reads_the_action_result_frame():
+    frames = [
+        ("participants", "participant.update", {}),
+        ("moderator", "action.result", {"op": "stage", "identity": "u1", "enforced": False}),
+    ]
+    assert c._enforced(frames) is False
+
+    frames_ok = [("moderator", "action.result", {"op": "stage", "identity": "u1", "enforced": True})]
+    assert c._enforced(frames_ok) is True
+
+
+def test_enforced_defaults_true_when_frame_is_missing():
+    """No action.result frame at all (a string error return before _participant_action was
+    even called, or a future op that doesn't emit one) must never be treated as a silent
+    enforcement failure — only an EXPLICIT enforced=False blocks the state transition."""
+    assert c._enforced([]) is True
+    assert c._enforced([("participants", "participant.update", {})]) is True
+
+
+def _bring_live_state(*, participant_connected: bool, enforced: bool) -> str:
+    """Drives _operator_action("bring_live") against a stubbed DB + LiveKit and reports the
+    state the ContributorSession was left in. Only the two boundaries the branch actually
+    consults are stubbed (mod.tx, and the LiveKit stage/presence calls)."""
+    session = _session(state="ready")
+
+    async def fake_participant_action(ctx, payload, op):
+        return [("moderator", "action.result",
+                 {"op": "stage", "identity": payload["identity"], "enforced": enforced})]
+
+    async def fake_participant_connected(room, identity):
+        return participant_connected
+
+    async def fake_tx(fn):
+        return fn(None)
+
+    orig = (m._participant_action, c.mod.tx, c.livekit.participant_connected,
+            c._session_by_identity)
+    m._participant_action = fake_participant_action
+    c.mod.tx = fake_tx
+    c.livekit.participant_connected = fake_participant_connected
+    c._session_by_identity = lambda db, event_id, identity: session
+    try:
+        asyncio.run(c._operator_action(_ctx(), {"identity": "u1"}, "bring_live"))
+    finally:
+        (m._participant_action, c.mod.tx, c.livekit.participant_connected,
+         c._session_by_identity) = orig
+    return session.state
+
+
+def test_bring_live_proceeds_when_the_contributor_is_not_in_the_room_yet():
+    """The deadlock this guards against (found by the Playwright E2E suite, not theory):
+    Backstage.jsx only opens its PUBLISHING LiveKit connection once state is "live", so at
+    bring_live time the contributor is in the room only under their tagged monitor identity.
+    set_stage against their bare publishing identity therefore 404s — normal, not a refusal.
+    Gating the transition on that alone meant state could never reach "live", so the browser
+    never connected, so set_stage could never succeed: nobody could ever go live."""
+    assert _bring_live_state(participant_connected=False, enforced=False) == "live"
+
+
+def test_bring_live_still_refuses_when_a_connected_contributor_is_not_staged():
+    """The audit fix this must not undo: when the contributor IS in the room and LiveKit
+    still refused to grant publish, the console must not claim they are live."""
+    assert _bring_live_state(participant_connected=True, enforced=False) == "ready"
+
+
+def test_bring_live_transitions_on_a_clean_enforcement():
+    assert _bring_live_state(participant_connected=True, enforced=True) == "live"
+
+
 def test_preflight_result_requires_camera_mic_and_browser():
     result_ok = {"camera_ok": True, "mic_ok": True, "browser_supported": True,
                  "speaker_ok": False, "framing_ok": False}

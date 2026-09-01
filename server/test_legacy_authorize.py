@@ -181,6 +181,7 @@ class TestLegacyAuthorizeHardened:
                 ("DELETE FROM payment_schedules WHERE event_order_id=:o", {"o": ids.order_id}),
                 ("DELETE FROM event_order_versions WHERE event_order_id=:o", {"o": ids.order_id}),
                 ("DELETE FROM event_order_lines WHERE event_order_id=:o", {"o": ids.order_id}),
+                ("DELETE FROM commercial_state_transitions WHERE event_order_id=:o", {"o": ids.order_id}),
                 ("DELETE FROM event_orders WHERE id=:o", {"o": ids.order_id}),
                 ("DELETE FROM catalog_lines WHERE id=:l", {"l": ids.line_id}),
                 ("DELETE FROM events WHERE id=:e", {"e": ids.event_id}),
@@ -353,6 +354,7 @@ class TestLegacyAuthorizeHardened:
                 for sql, params in [
                     ("DELETE FROM audit_logs WHERE org_id=:g", {"g": other.org_id}),
                     ("DELETE FROM payments WHERE id=:p", {"p": other.payment_id}),
+                    ("DELETE FROM commercial_state_transitions WHERE event_order_id=:o", {"o": other.order_id}),
                     ("DELETE FROM event_orders WHERE id=:o", {"o": other.order_id}),
                     ("DELETE FROM events WHERE id=:e", {"e": other.event_id}),
                     ("DELETE FROM catalog_versions WHERE id=:c", {"c": other.catalog_id}),

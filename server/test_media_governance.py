@@ -1027,10 +1027,19 @@ def test_expiry_is_enforced_before_it_is_announced():
                                  source_recording_id=rid)
         assert replay_comms.is_expired(_ent(eid)) is True
 
-        source = inspect.getsource(m.app.routes[0].endpoint) if False else ""
+        # Pinned to the ENFORCEMENT, not to a helper name. After merging main the gate is
+        # crud.commercial.replay_access_expired (main's version, which also honours an
+        # explicit `expired` publish_state); replay_comms.is_expired now delegates to it.
+        # Asserting on the helper name would pass on a mere comment mentioning it, so the
+        # check is that watch_event actually consults an expiry before serving a replay.
         import app.routers.events as events_router
-        assert "replay_comms.is_expired" in inspect.getsource(events_router), (
-            "replay expiry must be enforced at the access layer")
+
+        gate = inspect.getsource(events_router.watch_event)
+        assert "replay_access_expired" in gate, (
+            "replay expiry must be enforced at the access layer, not just swept")
+        assert "replay_published" in gate
+        # ...and that the two paths agree on what "expired" means.
+        assert replay_comms.is_expired(_ent(eid)) is True
 
         cap, ctx = _capture()
         with ctx:

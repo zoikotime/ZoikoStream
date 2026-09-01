@@ -249,14 +249,56 @@ def test_ambiguous_refund_payload_takes_the_weaker_claim():
     assert stripe_events.translate(event).generic_event_type == "refund_partial"
 
 
+def dispute_event(*, event_type="charge.dispute.created", status="needs_response",
+                   dispute_id="dp_test_1", intent_id="pi_test_1", amount=10000,
+                   currency="usd", event_id=None) -> dict:
+    """A Stripe-shaped `charge.dispute.*` event."""
+    return {
+        "id": event_id or f"evt_{uuid.uuid4().hex[:16]}",
+        "object": "event", "type": event_type, "created": int(time.time()),
+        "data": {"object": {
+            "id": dispute_id, "object": "dispute", "payment_intent": intent_id,
+            "amount": amount, "currency": currency, "status": status,
+            "reason": "fraudulent", "evidence_details": {"due_by": int(time.time()) + 604800},
+            "balance_transactions": [],
+        }},
+    }
+
+
 @pytest.mark.parametrize("dispute_type", [
     "charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed",
     "charge.dispute.funds_withdrawn", "charge.dispute.funds_reinstated",
 ])
-def test_dispute_events_are_evidence_only_with_follow_up(dispute_type):
-    """Section 22: record, do not invent an outcome, do not half-implement the workflow."""
-    t = stripe_events.translate(intent_event(event_type=dispute_type))
+def test_dispute_events_are_translated_into_case_facts(dispute_type):
+    """Section 22 used to say "record, do not half-implement the workflow" — dispute events
+    were evidence-only, which meant a real chargeback left the ledger reading `paid`.
+
+    They are now translated into case facts for crud.ingest_dispute_event. Still NOT financial
+    instructions: the payment consequence is derived from the case status by the commercial
+    layer, never from the generic event map."""
+    t = stripe_events.translate(dispute_event(event_type=dispute_type))
+    assert t.is_dispute is True
     assert t.is_financial is False
+    assert t.generic_event_type is None
+    assert t.dispute["provider_dispute_ref"] == "dp_test_1"
+    assert t.dispute["provider_payment_ref"] == "pi_test_1"
+    assert t.dispute["status"] == "evidence_required"
+
+
+def test_a_dispute_status_stripe_may_add_later_is_not_guessed():
+    """An unmapped status must not silently become "opened" and move a payment."""
+    t = stripe_events.translate(dispute_event(status="some_future_stripe_status"))
+    assert t.is_dispute is True
+    assert t.dispute["status"] is None
+
+
+def test_a_dispute_object_with_no_identifier_stays_evidence_only():
+    """Without a dispute id there is no case identity to be idempotent against, so it cannot
+    be attached to a payment."""
+    event = dispute_event()
+    del event["data"]["object"]["id"]
+    t = stripe_events.translate(event)
+    assert t.is_dispute is False
     assert t.follow_up_required is True
     assert "dispute" in t.evidence_reason
 
@@ -394,6 +436,7 @@ class TestStripeWebhookProcessing:
                  {"o": ids.org_id, "u": ids.user_id}),
                 ("DELETE FROM payment_schedules WHERE event_order_id = :o", {"o": ids.order_id}),
                 ("DELETE FROM payments WHERE event_order_id = :o", {"o": ids.order_id}),
+                ("DELETE FROM commercial_state_transitions WHERE event_order_id=:o", {"o": ids.order_id}),
                 ("DELETE FROM event_orders WHERE id = :o", {"o": ids.order_id}),
                 ("DELETE FROM events WHERE id = :e", {"e": ids.event_id}),
                 ("DELETE FROM catalog_versions WHERE id = :c", {"c": ids.catalog_id}),
@@ -688,6 +731,7 @@ class TestStripeWebhookProcessing:
                     ("DELETE FROM provider_events WHERE payment_id=:p", {"p": other.payment_id}),
                     ("DELETE FROM audit_logs WHERE org_id=:o", {"o": other.org_id}),
                     ("DELETE FROM payments WHERE id=:p", {"p": other.payment_id}),
+                    ("DELETE FROM commercial_state_transitions WHERE event_order_id=:o", {"o": other.order_id}),
                     ("DELETE FROM event_orders WHERE id=:o", {"o": other.order_id}),
                     ("DELETE FROM events WHERE id=:e", {"e": other.event_id}),
                     ("DELETE FROM catalog_versions WHERE id=:c", {"c": other.catalog_id}),
@@ -738,27 +782,42 @@ class TestStripeWebhookProcessing:
                           .bindparams(o=ids.order_id))
             assert n == 0
 
-    # ── 22. disputes: evidence only ──────────────────────────────────────────────────────
-    def test_dispute_event_is_recorded_without_mutating_the_payment(self, ctx):
+    # ── 22. disputes: the case record and the payment both move ──────────────────────────
+    def test_dispute_event_opens_a_case_and_disputes_the_payment(self, ctx):
+        """Replaces the old evidence-only expectation. A chargeback used to be filed and
+        forgotten, so the ledger read `paid` while the money was contested."""
         client, ids = ctx
         self._send(client, ids, event_type="payment_intent.succeeded")
         eid = self._evt_id(ids)
-        event = {
-            "id": eid, "object": "event", "type": "charge.dispute.created",
-            "created": int(time.time()),
-            "data": {"object": {"id": "dp_1", "object": "dispute",
-                                "payment_intent": ids.intent_id, "amount": 10000,
-                                "currency": "usd", "status": "needs_response"}},
-        }
-        r = post(client, event)
-        assert r.status_code == 200 and r.json()["applied"] is False
-        assert r.json()["result"]["follow_up_required"] is True
+        r = post(client, dispute_event(event_id=eid, intent_id=ids.intent_id,
+                                        dispute_id=f"dp_{uuid.uuid4().hex[:10]}"))
+        assert r.status_code == 200 and r.json()["applied"] is True
         with Session(engine) as db:
-            assert db.get(Payment, ids.payment_id).state == "paid"     # NOT 'disputed'
+            assert db.get(Payment, ids.payment_id).state == "disputed"
             rec = db.scalar(select(ProviderEvent).where(ProviderEvent.provider_event_id == eid))
             assert rec.processing_status == "processed"
             assert db.scalar(text("SELECT count(*) FROM payment_disputes WHERE payment_id=:p")
-                             .bindparams(p=ids.payment_id)) == 0
+                             .bindparams(p=ids.payment_id)) == 1
+            db.execute(text("DELETE FROM payment_disputes WHERE payment_id=:p"),
+                        {"p": ids.payment_id})
+            db.commit()
+
+    def test_a_dispute_never_rewrites_the_payment_amount(self, ctx):
+        """doc P4: a disputed payment does not silently rewrite the original record. Only the
+        STATE moves; the amount and currency are untouched."""
+        client, ids = ctx
+        self._send(client, ids, event_type="payment_intent.succeeded")
+        with Session(engine) as db:
+            before = db.get(Payment, ids.payment_id)
+            amount, currency = before.amount, before.currency
+        post(client, dispute_event(event_id=self._evt_id(ids), intent_id=ids.intent_id,
+                                    dispute_id=f"dp_{uuid.uuid4().hex[:10]}"))
+        with Session(engine) as db:
+            after = db.get(Payment, ids.payment_id)
+            assert after.amount == amount and after.currency == currency
+            db.execute(text("DELETE FROM payment_disputes WHERE payment_id=:p"),
+                        {"p": ids.payment_id})
+            db.commit()
 
     # ── 25. unknown events ───────────────────────────────────────────────────────────────
     def test_unknown_event_type_mutates_nothing_and_returns_200(self, ctx):

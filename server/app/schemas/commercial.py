@@ -85,6 +85,9 @@ class ServiceProfileCreate(BaseModel):
     requires_reserved_capacity: bool = False
     requires_change_freeze: bool = False
     requires_full_rehearsal: bool = False
+    # Makes the command-owner readiness gate non-waivable for this profile — the event cannot
+    # be self-served (doc Section 10 managed-only launch).
+    managed_only: bool = False
     assured_event_eligible: bool = False
 
 
@@ -102,6 +105,7 @@ class ServiceProfileOut(BaseModel):
     requires_reserved_capacity: bool
     requires_change_freeze: bool
     requires_full_rehearsal: bool
+    managed_only: bool = False
     assured_event_eligible: bool
     status: str
     effective_at: datetime | None = None
@@ -256,6 +260,11 @@ class OrderOut(BaseModel):
     billing_classification: str
     billing_source: str
     status: str
+    assured_event: bool = False
+    # Derived commercial lifecycle state as last observed. Read-only and never accepted on
+    # input — the state is computed from committed facts (crud.commercial_lifecycle_state), so
+    # there is deliberately no field a client could set to move it.
+    lifecycle_state: str | None = None
     terms_version: str | None = None
     accepted_at: datetime | None = None
     accepted_by: uuid.UUID | None = None
@@ -267,6 +276,78 @@ class OrderOut(BaseModel):
 
 class OrderAccept(BaseModel):
     terms_version: str | None = None
+    # Electing an Assured Event is a commercial decision made at acceptance. Validated against
+    # the bound service profile's assured_event_eligible flag (crud.accept_order) — a client
+    # cannot assert assurance the profile does not support.
+    assured_event: bool = False
+
+
+# ── Commercial lifecycle (doc Section 28) ─────────────────────────────────────────────
+
+class LifecycleTransitionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    event_order_id: uuid.UUID | None = None
+    event_id: uuid.UUID
+    from_state: str | None = None
+    to_state: str
+    trigger: str
+    reason: str | None = None
+    illegal: bool
+    blocking_reasons: list[str] | None = None
+    financial_state: str | None = None
+    capacity_satisfied: bool | None = None
+    actor_id: uuid.UUID | None = None
+    created_at: datetime | None = None
+
+
+class LifecycleOut(BaseModel):
+    """Current derived state plus the evidence behind it and the append-only history."""
+    state: str
+    financial_state: str | None = None
+    capacity_satisfied: bool | None = None
+    capacity_held: bool = False
+    blocking_reasons: list[str] = []
+    readiness_verdict: str | None = None
+    # What the lifecycle graph permits from here — so a console can show the next legitimate
+    # step rather than guessing it.
+    allowed_next: list[str] = []
+    history: list[LifecycleTransitionOut] = []
+
+
+# ── Reschedule (doc Section 9) ────────────────────────────────────────────────────────
+
+class RescheduleCreate(BaseModel):
+    new_start_time: datetime
+    new_end_time: datetime | None = None
+    reason: str = Field(..., min_length=3, max_length=2000)
+
+
+class RescheduleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    event_id: uuid.UUID
+    event_order_id: uuid.UUID | None = None
+    previous_start_time: datetime | None = None
+    previous_end_time: datetime | None = None
+    new_start_time: datetime
+    new_end_time: datetime | None = None
+    reason: str
+    order_version: int | None = None
+    released_reservations: dict | None = None
+    lead_time_hours_at_request: Decimal | None = None
+    change_order_id: uuid.UUID | None = None
+    requested_by: uuid.UUID | None = None
+    created_at: datetime | None = None
+
+
+class RescheduleResult(BaseModel):
+    reschedule: RescheduleOut
+    released_reservations: int
+    lifecycle_state: str
+    # True when capacity was released and must be re-held against the new window before the
+    # event can be confirmed again. Stated explicitly so a console cannot imply it carried over.
+    capacity_requires_rehold: bool
 
 
 # ── Capacity ──────────────────────────────────────────────────────────────────────────
@@ -470,6 +551,11 @@ class CommercialExceptionCreate(BaseModel):
     exception_type: Literal[
         "price_override", "waiver", "exceptional_cancellation",
         "financial_hold_override", "risk_tier_reduction", "complimentary_event",
+        # write_off: stop pursuing an owed amount (executed via POST
+        # /commercial-exceptions/{id}/execute-write-off). discount: authorise a revenue
+        # reduction, which crud.create_change_order requires before it will accept a negative
+        # price delta. Both are money-affecting, so both require evidence.
+        "write_off", "discount",
     ]
     rationale: str = Field(..., min_length=1)
     event_id: uuid.UUID | None = None
@@ -651,8 +737,19 @@ class InvoiceOut(BaseModel):
 # ── Change orders ─────────────────────────────────────────────────────────────────────
 
 class ChangeOrderCreate(BaseModel):
+    """`changes` must carry catalog-backed line operations:
+
+        {"add_lines": [{"catalog_line_id": ..., "quantity": "2", "is_addon": false}],
+         "remove_line_ids": [order_line_id, ...]}
+
+    `price_delta` is DERIVED from those lines. Send it only to assert what you expect — a value
+    that disagrees with the computed delta is refused rather than silently substituted. Omit it
+    (null) to accept the computed figure.
+    """
     changes: dict = Field(default_factory=dict)
-    price_delta: Decimal = Decimal(0)
+    price_delta: Decimal | None = None
+    # Mandatory: a commercial delta with no stated grounds is not auditable (doc Section 25).
+    reason: str = Field(..., min_length=3, max_length=2000)
     service_impact: str | None = None
     risk_impact: str | None = None
     capacity_impact: str | None = None
@@ -664,13 +761,19 @@ class ChangeOrderOut(BaseModel):
     event_order_id: uuid.UUID
     prior_order_version: int
     changes: dict
+    # The line rows actually created/destroyed at acceptance. None while still draft.
+    applied_lines: dict | None = None
     price_delta: Decimal
+    reason: str | None = None
     service_impact: str | None = None
     risk_impact: str | None = None
     capacity_impact: str | None = None
     customer_acceptance: bool
+    requested_by: uuid.UUID | None = None
     accepted_at: datetime | None = None
     approved_by: uuid.UUID | None = None
+    # The approved exception that authorised a revenue reduction, if this is a decrease.
+    approval_exception_id: uuid.UUID | None = None
     effective_at: datetime | None = None
     status: str
     created_at: datetime | None = None
@@ -685,8 +788,16 @@ class CancelOrderRequest(BaseModel):
 class CancellationResult(BaseModel):
     order: OrderOut
     policy_version: str
+    # What will actually be returned: the policy entitlement capped at the refundable cash.
     refund_amount: Decimal
+    # The uncapped policy entitlement. Surfaced separately because when the two differ, that
+    # difference is a real commercial fact — the customer is entitled to more than we hold —
+    # and collapsing them would hide it from Finance.
+    policy_refund_amount: Decimal | None = None
+    # First remedy, kept for existing clients. A cancellation now raises one remedy per source
+    # payment, so `refund_credit_ids` is the complete list.
     refund_credit_id: uuid.UUID | None = None
+    refund_credit_ids: list[uuid.UUID] = []
 
 
 # ── Refunds / credits ─────────────────────────────────────────────────────────────────
@@ -884,5 +995,11 @@ class ReplayEntitlementOut(BaseModel):
 class ReconciliationReport(BaseModel):
     reservations_without_order: list[CapacityOut]
     reservations_with_missing_order: list[CapacityOut]
-    unmatched_settlements: list[PaymentOut]
+    # Was list[PaymentOut], fed by a query on `Payment.state == "unmatched"` — a state nothing
+    # ever writes, so this array was permanently empty. Unmatched money is an
+    # UnmatchedSettlement row, which is what the field now carries.
+    unmatched_settlements: list[UnmatchedSettlementOut]
     orders_missing_invoice: list[OrderOut]
+    # Accepted commercial orders with no active registered seller entity: chargeable today,
+    # un-invoiceable forever (doc L1).
+    orders_missing_seller_entity: list[OrderOut] = []

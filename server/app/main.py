@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -23,6 +24,7 @@ from .routers.contact import router as contact_router
 from .security import ALGORITHM
 from .services import bus
 from .services import platform_settings
+from .services import livekit
 from .services.broadcast import run_sampler
 from .services.moderation import run_scheduler
 from .services.org_comms import run_invitation_reminders
@@ -38,12 +40,17 @@ from .services.webhooks import run_webhook_retries
 from .services.delivery import run_watermark_processor
 from .services.validation import run_validation_processor
 from .config import settings
-from .db import DB_MAX_CONNECTIONS, SessionLocal
+from .db import (
+    DB_MAX_CONNECTIONS, SessionLocal, holds_ticker_leadership,
+    release_ticker_leadership, try_acquire_ticker_leadership,
+)
+
+log = logging.getLogger(__name__)
 
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Nine background tickers, each owning its own domain (which is also what keeps
+    """Thirteen background tickers, each owning its own domain (which is also what keeps
     moderation and broadcast from having to import each other):
       * scheduler  — fires scheduled polls/announcements, closes timed-out polls
       * sampler    — writes analytics snapshots (the retention graph) and pushes live counters
@@ -59,10 +66,19 @@ async def lifespan(_: FastAPI):
                      (services/support_access.py)
       * governance — access-review reminders/overdue and ownership-transfer expiry
                      (services/org_governance.py)
+      * credential — API-credential expiry warnings and dormancy (services/credential_lifecycle.py)
+      * signing    — webhook signing-secret rotation overlap windows (services/signing_rotation.py)
+      * media      — governed live-input signal transitions (services/media_comms.py)
+      * retention  — recording retention warnings and replay-availability expiry, both
+                     deadline-driven so neither has a request or webhook that could carry
+                     them (services/media_retention.py)
     The bus releases its Redis client on the way out.
-    ponytail: all nine run per PROCESS. With multiple workers, run them in one worker (or a
-    cron worker) or a scheduled poll (or a webhook delivery, a watermark burn, or a
-    validation pass) fires once per worker.
+
+    All thirteen run in the LEADER process only, elected by a Postgres advisory lock (see
+    db.try_acquire_ticker_leadership). They previously ran in every process, so a deployment
+    with more than one instance fired each scheduled poll, webhook delivery and watermark burn
+    once per instance. A follower serves HTTP normally and simply runs no tickers; it retries
+    election periodically, so a leader that dies is replaced without operator action.
 
     The default-executor swap is the other half of the DB pool sizing in db.py: every
     socket action reaches Postgres via services.moderation.tx() -> asyncio.to_thread, which
@@ -74,44 +90,131 @@ async def lifespan(_: FastAPI):
     executor = ThreadPoolExecutor(max_workers=DB_MAX_CONNECTIONS, thread_name_prefix="zoiko-db")
     loop.set_default_executor(executor)
 
-    tasks = [asyncio.create_task(run_scheduler()), asyncio.create_task(run_sampler()),
-             asyncio.create_task(run_metric_sampler()), asyncio.create_task(run_webhook_retries()),
-             asyncio.create_task(run_watermark_processor()), asyncio.create_task(run_validation_processor()),
-             asyncio.create_task(run_invitation_reminders()),
-             asyncio.create_task(run_support_access_sweeper()),
-             asyncio.create_task(run_governance_sweeper()),
-             asyncio.create_task(run_credential_sweeper()),
-             asyncio.create_task(run_signing_rotation_sweeper()),
-             asyncio.create_task(run_media_sweeper()),
-             # ZST-EC-001 MED-009 / MED-011. Retention warnings and replay expiry are both
-             # deadline-driven, so neither has a request or a webhook that could carry it.
-             asyncio.create_task(run_retention_sweeper())]
+    # Same "loudly flagged at startup" posture as config.py's SECRET_KEY check: a bad GCS
+    # credential (e.g. a Console URL instead of a downloaded service-account key file — the
+    # exact misconfiguration the live-streaming audit found in this deployment's .env)
+    # otherwise only ever shows up as a silent "not captured" recording, discovered by a host
+    # long after the fact. Recording is optional (many events run with none configured at
+    # all), so this warns rather than refusing to boot. Runs in every process (leader or
+    # follower) — unlike the tickers below, this is a per-process config check, not a job
+    # that would duplicate if it ran more than once.
+    gcs_error = livekit.gcs_config_error()
+    if gcs_error:
+        log.warning("Recording uploads will not work: %s", gcs_error)
+
+    supervisor = asyncio.create_task(_ticker_supervisor())
     try:
         yield
     finally:
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        supervisor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await supervisor
         await bus.shutdown()
+        release_ticker_leadership()
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+# How often a follower retries election, and how often the leader re-verifies it still holds
+# the lock. One interval of duplicate-free downtime after a leader dies is an acceptable price
+# for never running a ticker twice; the alternative (a shorter poll) is a lock round-trip per
+# instance per few seconds for no operational gain.
+TICKER_ELECTION_INTERVAL = 30.0
+
+
+def _start_tickers() -> list:
+    return [
+        asyncio.create_task(run_scheduler()),
+        asyncio.create_task(run_sampler()),
+        asyncio.create_task(run_metric_sampler()),
+        asyncio.create_task(run_webhook_retries()),
+        asyncio.create_task(run_watermark_processor()),
+        asyncio.create_task(run_validation_processor()),
+        # ZST-EC-001 communication tickers. Every one of these sends email, so running them
+        # in more than one process would mail the same person twice - the duplicate-work
+        # problem leader election exists to solve, in its most visible form.
+        asyncio.create_task(run_invitation_reminders()),
+        asyncio.create_task(run_support_access_sweeper()),
+        asyncio.create_task(run_governance_sweeper()),
+        asyncio.create_task(run_credential_sweeper()),
+        asyncio.create_task(run_signing_rotation_sweeper()),
+        asyncio.create_task(run_media_sweeper()),
+        # MED-009 / MED-011. Retention warnings and replay expiry are both deadline-driven,
+        # so neither has a request or a webhook that could carry it.
+        asyncio.create_task(run_retention_sweeper()),
+    ]
+
+
+async def _stop_tickers(tasks: list) -> None:
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def _ticker_supervisor() -> None:
+    """Run the tickers only while this process is the elected leader.
+
+    One supervisor gates all thirteen rather than each ticker checking for itself: the invariant is
+    "these jobs run in one process", so it belongs in one place. Thirteen independent checks
+    would be thirteen chances for one of them to drift out of step.
+
+    If leadership is LOST mid-flight (the lock's connection dropped) the tickers are cancelled
+    immediately, because by then a follower may already have been promoted. Stopping is always
+    safe — every ticker is a periodic sweep that picks up where it left off — whereas
+    continuing would mean two processes doing the same work.
+    """
+    tasks: list = []
+    try:
+        while True:
+            leader = holds_ticker_leadership()
+            if not leader:
+                try:
+                    leader = await asyncio.to_thread(try_acquire_ticker_leadership)
+                except Exception as exc:
+                    # A database blip must not kill the supervisor: without it this process
+                    # could never become leader again, and if it is the only instance the
+                    # tickers would stay dead until a restart.
+                    log.warning("ticker election failed, retrying: %s", exc)
+                    leader = False
+
+            if leader and not tasks:
+                tasks = _start_tickers()
+                log.info("background tickers started (this process is the ticker leader)")
+            elif not leader and tasks:
+                await _stop_tickers(tasks)
+                tasks = []
+                log.warning("ticker leadership lost — background tickers stopped")
+
+            await asyncio.sleep(TICKER_ELECTION_INTERVAL)
+    except asyncio.CancelledError:
+        await _stop_tickers(tasks)
+        raise
 
 
 # ponytail: schema is applied by `python create_tables.py`, not on startup — an app boot
 # should not be able to mutate the database.
 app = FastAPI(title="ZoikoStream API", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
-    # ponytail: any localhost port — Vite bumps to 5175+ when 5173/5174 are taken,
-    # and a port outside the allowlist silently kills login (CORS-blocked). Prod uses CORS_ORIGINS above.
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS. The localhost escape hatch exists because Vite bumps to 5175+ when 5173/5174 are
+# taken, and an origin outside the allowlist silently kills login (CORS-blocked) rather than
+# erroring usefully.
+#
+# It is now GATED ON ENVIRONMENT. Previously the regex applied unconditionally, so a production
+# deployment permanently accepted every `http://localhost:*` origin WITH allow_credentials —
+# meaning any page served from the victim's own machine could make credentialed cross-origin
+# calls against the live API and read the responses. In production the configured
+# CORS_ORIGINS allowlist is the only thing honoured.
+_CORS_KWARGS = {
+    "allow_origins": [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+    "allow_credentials": True,
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+}
+if not settings.is_production():
+    _CORS_KWARGS["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+
+app.add_middleware(CORSMiddleware, **_CORS_KWARGS)
 
 @app.middleware("http")
 async def measure_requests(request: Request, call_next):

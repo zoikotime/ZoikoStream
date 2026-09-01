@@ -186,8 +186,17 @@ def expire(db: Session, entitlement):
 
 
 def is_expired(entitlement) -> bool:
-    return (entitlement.expires_at is not None
-            and entitlement.expires_at <= datetime.now(timezone.utc))
+    """Whether replay availability has lapsed.
+
+    Delegates to crud.commercial.replay_access_expired rather than re-deriving the rule.
+    That function is what routers/events.py enforces access with, so sharing it is what
+    stops the MED-009 expiry sweep from announcing an expiry the access layer has not
+    applied - or vice versa. Two implementations of "is this expired" is exactly the drift
+    this family exists to avoid.
+    """
+    from ..crud import commercial as commercial_crud
+
+    return commercial_crud.replay_access_expired(entitlement)
 
 
 # ── notifications ───────────────────────────────────────────────────────────────────────

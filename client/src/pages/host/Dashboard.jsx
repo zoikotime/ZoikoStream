@@ -80,6 +80,29 @@ export default function HostDashboard() {
     });
   };
 
+  // Turn the preview ON, idempotently — never off. The deck's Preview key is a toggle (that
+  // is what a host expects of it), but every "Start preview" affordance means exactly one
+  // thing, and wiring those to the toggle made them destructive in the one state that shows
+  // them: while getUserMedia is still pending, the stage read "Preview is off", and a host
+  // who clicked the CTA it offered cancelled their own pending camera request. See
+  // StudioStage's acquiring branch.
+  const startPreview = () => {
+    setPreviewOn((on) => {
+      if (!on && canHost) send("broadcast.preview", {});
+      return true;
+    });
+  };
+
+  // Re-arm a preview that FAILED. startPreview alone cannot do this: previewOn is already
+  // true after a failed attempt, so setting it to true again changes nothing and the
+  // acquisition effect never re-runs. Turning it off and straight back on is what actually
+  // retries — the off pass also runs the hook's cleanup, which stops any half-open device and
+  // clears the stale error.
+  const retryPreview = () => {
+    setPreviewOn(false);
+    setTimeout(() => setPreviewOn(true), 0);
+  };
+
   // Publishes whatever the preview above is currently holding — camera/mic tracks, muted
   // state and all — into the LiveKit room once the broadcast is actually live. Gated on
   // media.active (not just previewOn) so publishing waits for getUserMedia to have really
@@ -221,7 +244,8 @@ export default function HostDashboard() {
           <div className="flex flex-1 flex-col gap-2 p-3 sm:px-4 sm:py-3 lg:min-h-0 lg:overflow-y-auto">
             <SummaryCards analytics={state.analytics} live={live} />
             <StudioStage
-              onTogglePreview={togglePreview}
+              onStartPreview={startPreview}
+              onRetryPreview={retryPreview}
               broadcast={state.broadcast}
               recording={state.recording}
               analytics={state.analytics}
@@ -236,6 +260,7 @@ export default function HostDashboard() {
               isPublishing={isPublishing}
               isReconnecting={isReconnecting}
               publishError={publishError}
+              eventStatus={state.event?.status}
             />
           </div>
 
@@ -255,10 +280,11 @@ export default function HostDashboard() {
             onToggleScreen={toggleScreen}
             goLivePending={goLivePending}
             goLiveError={state.goLiveError}
+            ready={state.ready}
             onGoLive={() => {
               // A host who never clicked "Preview" still needs a live stream to publish —
               // arm it now so useLiveKitPublish has tracks to grab once `live` flips true.
-              if (!previewOn) togglePreview();
+              startPreview();
               // Double-click / duplicate-send guarding lives in sendGoLive itself (state.
               // goLivePending), not here.
               sendGoLive();
@@ -320,7 +346,7 @@ export default function HostDashboard() {
         eventTitle={state.event?.title}
         onConfirm={() => {
           setShowStartPrompt(false);
-          if (!previewOn) togglePreview();
+          startPreview();
         }}
         onDismiss={() => setShowStartPrompt(false)}
       />
