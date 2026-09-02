@@ -48,7 +48,7 @@ export function ActionButton({ icon: Icon, label, title, tone = "slate", active 
     >
       <Icon className="shrink-0 text-sm" aria-hidden="true" />
       {/* Container query, not `lg:`. These panels render at ~380px in the host console's
-          rail and at ~700px in the moderator console's centre column, from the SAME viewport
+          rail and at wider widths when the panel stacks full-width, from the SAME viewport
           — so a viewport breakpoint showed labels in both and wrapped the action row into
           three lines in the rail. `@lg` (32rem) is the panel's own inline size. Requires an
           ancestor marked `@container`; Panel does that below, and the two consoles mark their

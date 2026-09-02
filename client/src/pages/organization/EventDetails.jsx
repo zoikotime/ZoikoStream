@@ -25,7 +25,10 @@ import ContributorInviteModal from "./ContributorInviteModal";
 import InviteViewersModal from "./InviteViewersModal";
 import EventCommercial from "../../components/organization/EventCommercial";
 
-const TABS = ["Overview", "Hosts", "Moderators", "Speakers", "Registration", "Feedback", "Billing", "Recording", "Reports", "Analytics", "Settings"];
+// No "Moderators" tab: the role is retired and GET/PATCH /events/{id}/moderators no longer
+// exist, so the tab could neither load nor save. Hosts now hold the audience-management
+// capabilities it used to represent.
+const TABS = ["Overview", "Hosts", "Speakers", "Registration", "Feedback", "Billing", "Recording", "Reports", "Analytics", "Settings"];
 
 function Meta({ icon: Icon, label, children }) {
   return (
@@ -258,7 +261,7 @@ export default function EventDetails() {
   const navigate = useNavigate();
   const [tab, setTab] = useState("Overview");
   const [busy, setBusy] = useState(false);
-  const [manageRole, setManageRole] = useState(null); // "Host" | "Moderator" | "Speaker" | null
+  const [manageRole, setManageRole] = useState(null); // "Host" | "Speaker" | null
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteSpeaker, setInviteSpeaker] = useState(null); // speaker user object, or null
 
@@ -266,7 +269,6 @@ export default function EventDetails() {
     Promise.all([
       api.get(`/events/${id}`).then((r) => r.data),
       api.get(`/events/${id}/hosts`).then((r) => r.data),
-      api.get(`/events/${id}/moderators`).then((r) => r.data),
       api.get(`/events/${id}/speakers`).then((r) => r.data),
       api.get(`/events/${id}/registrations`).then((r) => r.data),
       // Feedback is a viewer-only signal (the host console no longer collects its own —
@@ -275,8 +277,8 @@ export default function EventDetails() {
       // same average-rating rollup the host's own console shows (components/host/
       // HostPanel's Feedback tab).
       api.get(`/events/${id}/feedback`, { params: { role: "viewer" } }).then((r) => r.data),
-    ]).then(([event, hosts, moderators, speakers, viewers, feedback]) => ({
-      event, hosts, moderators, speakers, viewers, feedback,
+    ]).then(([event, hosts, speakers, viewers, feedback]) => ({
+      event, hosts, speakers, viewers, feedback,
     }))
   );
 
@@ -292,7 +294,7 @@ export default function EventDetails() {
   if (loading) return <div className="space-y-4">{back}<PageSpinner label="Loading event…" /></div>;
   if (error) return <div className="space-y-4">{back}<OrganizationErrorState error={error} onRetry={reload} title="Couldn't load this event" /></div>;
 
-  const { event, hosts, moderators, speakers, viewers, feedback } = data;
+  const { event, hosts, speakers, viewers, feedback } = data;
   const st = statusMeta(event.status);
 
   const copyLink = () => {
@@ -370,7 +372,7 @@ export default function EventDetails() {
   };
   const armStep = ARM_STEP[event.status];
 
-  const ROLE_LIST = { Host: hosts, Moderator: moderators, Speaker: speakers };
+  const ROLE_LIST = { Host: hosts, Speaker: speakers };
 
   const removeFromRole = async (role, userId) => {
     const remaining = ROLE_LIST[role].filter((u) => u.id !== userId).map((u) => u.id);
@@ -444,9 +446,8 @@ export default function EventDetails() {
 
       {tab === "Overview" && (
         <div className="space-y-6">
-          <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 xl:grid-cols-3">
             <StatCard label="Hosts" value={hosts.length} />
-            <StatCard label="Moderators" value={moderators.length} />
             <StatCard label="Speakers" value={speakers.length} />
             <StatCard label="Duration (min)" value={event.duration_minutes ?? 0} />
           </div>
@@ -469,9 +470,6 @@ export default function EventDetails() {
 
       {tab === "Hosts" && (
         <PeoplePanel people={hosts} role="Host" onManage={() => setManageRole("Host")} onRemove={(uid) => removeFromRole("Host", uid)} />
-      )}
-      {tab === "Moderators" && (
-        <PeoplePanel people={moderators} role="Moderator" onManage={() => setManageRole("Moderator")} onRemove={(uid) => removeFromRole("Moderator", uid)} />
       )}
       {tab === "Speakers" && (
         <PeoplePanel

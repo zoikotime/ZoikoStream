@@ -9,7 +9,7 @@
 //
 // SCOPE NOTE: components/moderation/* are shared with /moderator/dashboard, so this file
 // restyles only the panel CHROME it owns (tab rail, waiting room, analytics). Restyling the
-// roster or chat internals would have changed the moderator console too.
+// roster or chat internals is now used by this console alone.
 //
 // The tab rail is a 6-column GRID, not a scrolling flex row. The old row overflowed at the
 // 380px sidebar width and put a horizontal scrollbar between the operator and their tabs;
@@ -515,12 +515,13 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, event
                 {muteArmed ? "Confirm — mute everyone?" : "Mute all except staff"}
               </button>
             )}
-            {/* The moderator console's roster, unchanged — search, filters, sort, profile
+            {/* The shared roster — search, filters, sort, profile
                 drawer and the full action set all come for free. */}
             <ParticipantsPanel
               className="min-h-0 flex-1 !rounded-lg"
               participants={participants.filter((p) => !p.waiting)}
               canModerate={canModerate}
+              canHost={state.canHost}
               loading={!ready}
               send={send}
             />

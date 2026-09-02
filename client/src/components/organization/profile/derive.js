@@ -26,7 +26,6 @@ export const roleLabel = (role) =>
     org_admin: "Organization Owner",
     super_admin: "Super Admin",
     host: "Host",
-    moderator: "Moderator",
     speaker: "Speaker",
     viewer: "Viewer",
   })[role] || (role ? role.replace(/_/g, " ") : "Member");

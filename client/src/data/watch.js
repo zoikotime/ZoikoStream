@@ -30,7 +30,7 @@ export const chatSeed = [
   { id: 1, name: "Jordan Lee", text: "Audio + video are perfect from Berlin 👏", time: "10:31" },
   { id: 2, name: "Elena Rossi", text: "This keynote is 🔥", time: "10:34" },
   { id: 3, name: "Sam Rivera", text: "Can someone drop the docs link?", time: "10:36" },
-  { id: 4, name: "Moderator", text: "Docs are here → zoikostream.dev/docs 📚", time: "10:37", pinned: true },
+  { id: 4, name: "Host", text: "Docs are here → zoikostream.dev/docs 📚", time: "10:37", pinned: true },
   { id: 5, name: "Taylor Quinn", text: "Those latency numbers are wild.", time: "10:39" },
   { id: 6, name: "Morgan Lee", text: "Replay will be available after, right?", time: "10:41" },
 ];

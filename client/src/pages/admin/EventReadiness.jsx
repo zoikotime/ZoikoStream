@@ -16,7 +16,7 @@ import ReadinessRecordDrawer from "./ReadinessRecordDrawer";
 //
 // It is a gate, not a score: there is no percentage anywhere on this page. A gate is
 // derived from an event's REAL configuration (title set, start time scheduled, host
-// assigned, moderator assigned, recording enabled, account in good standing, no unresolved
+// assigned, recording enabled, account in good standing, no unresolved
 // single-path override) — nothing here is edited by hand; resolve the underlying
 // configuration (assign a host, enable recording, ...) and the verdict changes itself.
 const VERDICT_LABEL = { blocked: "Blocked", conditional: "Conditional", passed: "Passed" };
@@ -145,7 +145,7 @@ export default function EventReadiness() {
   return (
     <ConsoleScreen
       title="Event Readiness"
-      subtitle="Pre-broadcast gate for upcoming events, derived from each event's real configuration — assigned host/moderator, recording, account standing, and any unresolved single-path override."
+      subtitle="Pre-broadcast gate for upcoming events, derived from each event's real configuration — assigned host, recording, account standing, and any unresolved single-path override."
       ageSeconds={ageSeconds}
       loading={loading}
       error={error}

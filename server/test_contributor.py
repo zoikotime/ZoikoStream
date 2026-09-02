@@ -58,8 +58,9 @@ def test_operator_actions_are_not_self_service():
 
 
 def test_operator_actions_are_not_host_only():
-    """Mirrors the existing stage.* precedent (broadcast.py) — a moderator can already do
-    equivalent audience-management things, so contributor ops stay open to moderators."""
+    """Mirrors the existing stage.* precedent (broadcast.py) — audience management already
+    covers equivalent actions, so contributor operator ops stay on the can_moderate gate
+    rather than being narrowed to can_host."""
     for action in ("contributor.admit", "contributor.bring_live", "contributor.mute"):
         assert action not in m.HOST_ONLY, action
 

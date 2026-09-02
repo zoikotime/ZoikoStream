@@ -10,9 +10,10 @@ import { playAlertChime, unlockAudio } from "../utils/sound";
 // The whole data layer for a live event console — event resolution, the socket, and one
 // reducer over the server's envelopes.
 //
-// BOTH consoles use this: the moderator console (audience management) and the host console
-// (broadcast control) are two layouts over the same live state, so the reducer lives here
-// once instead of in each page. Channels a given console doesn't render simply go unused.
+// BOTH live surfaces use this: the host console (broadcast control AND audience
+// management, which the retired moderator console used to split out) and the viewer watch
+// page are layouts over the same live state, so the reducer lives here once instead of in
+// each page. Channels a given surface doesn't render simply go unused.
 //
 // The server sends a full snapshot on every connect, so a reconnect REPLACES state rather
 // than patching it — that's what makes a dropped connection self-heal instead of leaving
@@ -359,10 +360,10 @@ export default function useLiveEvent() {
       notify.error(env.data?.error || "This event cannot go live yet.");
     }
     // Live sound + toast alert for EVERY viewer-initiated action — chat, Q&A, and poll
-    // votes — so the host/moderator console doesn't have to keep every tab open to notice
+    // votes — so the host console doesn't have to keep every tab open to notice
     // audience activity. `actor_role` (server/app/services/moderation.py _actor_role) is
     // populated by the server on every chat/qa/poll envelope; it's only ever "viewer" here
-    // since a host's/moderator's own actions are never notified back to themselves.
+    // since an operator's own actions are never notified back to themselves.
     //
     // THE BUG THIS FIXES: these checks used to compare against `env.data.actor_role`
     // before the server ever sent that field, so they silently never matched — no toast,

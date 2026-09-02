@@ -34,7 +34,9 @@ export const SESSION_TIMEOUTS = ["1 hour", "8 hours", "24 hours", "7 days", "Nev
 export const PASSWORD_LENGTHS = [8, 10, 12, 16];
 
 // User Permissions — Owner always has full access, so it isn't editable here.
-export const ROLES = ["Admin", "Moderator", "Host", "Member"];
+// "Moderator" was removed with the role — the matrix rendered a column for a role that no
+// longer exists (see server/app/models/user.py ROLES).
+export const ROLES = ["Admin", "Host", "Member"];
 export const PERMISSIONS = [
   { key: "events", label: "Create & manage events" },
   { key: "recordings", label: "Manage recordings" },
@@ -45,7 +47,6 @@ export const PERMISSIONS = [
 ];
 export const permissionDefaults = {
   Admin: ["events", "recordings", "analytics", "users", "billing", "settings"],
-  Moderator: ["events", "recordings", "analytics"],
   Host: ["events", "recordings", "analytics"],
   Member: ["analytics"],
 };

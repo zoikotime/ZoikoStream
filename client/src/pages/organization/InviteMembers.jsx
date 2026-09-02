@@ -16,8 +16,10 @@ import { cx, focusRing } from "../../ui/tokens";
 import { Label } from "../../ui/forms";
 import { fmtDate } from "../../data/events";
 
-const ROLES = ["org_admin", "host", "moderator", "speaker", "viewer"];
-const ROLE_LABEL = { org_admin: "Admin", host: "Host", moderator: "Moderator", speaker: "Speaker", viewer: "Viewer" };
+// Mirrors the backend's ORG_ASSIGNABLE_ROLES (routers/organization.py) — "moderator" was
+// removed from both together, so the form cannot offer a role the API would reject.
+const ROLES = ["org_admin", "host", "speaker", "viewer"];
+const ROLE_LABEL = { org_admin: "Admin", host: "Host", speaker: "Speaker", viewer: "Viewer" };
 const roleLabel = (r) => ROLE_LABEL[r] || r;
 
 const INVITE_TONE = { pending: "warning", accepted: "success", cancelled: "neutral", expired: "danger", rejected: "danger" };

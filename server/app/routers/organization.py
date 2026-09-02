@@ -119,7 +119,7 @@ from ..services import support_access as support_svc
 from ..services import report as report_svc
 
 # Roles an org admin may assign/invite. Excludes super_admin (platform-only, never via this API).
-ORG_ASSIGNABLE_ROLES = ("org_admin", "host", "moderator", "speaker", "viewer")
+ORG_ASSIGNABLE_ROLES = ("org_admin", "host", "speaker", "viewer")
 
 log = logging.getLogger(__name__)
 

@@ -1,5 +1,5 @@
 from .organization import Organization, ORG_STATUSES
-from .user import User, ROLES, STAFF_COMMERCIAL_ROLES
+from .user import User, LEGACY_USER_ROLES, ROLES, STAFF_COMMERCIAL_ROLES
 from .plan import Plan
 from .subscription import Subscription, SUBSCRIPTION_STATUSES
 from .audit_log import AuditLog
@@ -141,6 +141,7 @@ from .event import (
     EVENT_STATUSES,
     EVENT_VISIBILITY,
     ASSIGNMENT_ROLES,
+    LEGACY_ASSIGNMENT_ROLES,
 )
 from .live import (
     AnalyticsSnapshot,

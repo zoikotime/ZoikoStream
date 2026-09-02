@@ -13,13 +13,27 @@ if TYPE_CHECKING:
 
 # Phase 1 role set. "org_admin" is the existing slug for the organization admin
 # (kept as-is — renaming to organization_admin would ripple through auth, dashboard,
-# the frontend, and seeded rows). "host"/"moderator" added for the streaming modules.
+# the frontend, and seeded rows). "host" was added for the streaming modules.
 # "billing_admin" (doc ZST-LE-COM-001 Section 25) is a customer-side commercial role
 # below org_admin: real commercial-acceptance/change authority, no refund/write-off
 # authority, no elevated streaming privileges — deliberately NOT part of the linear
-# _ROLE_RANK ladder in security.py, since it isn't "above" or "below" host/moderator on
-# any single scale. Gated via security.commercial_can(), not require_min_role().
-ROLES = ("super_admin", "org_admin", "billing_admin", "host", "moderator", "speaker", "viewer")
+# _ROLE_RANK ladder in security.py, since it isn't "above" or "below" host on any single
+# scale. Gated via security.commercial_can(), not require_min_role().
+#
+# "moderator" was REMOVED: host now covers every capability it had (it always did — an
+# assigned host has always resolved to can_moderate AND can_host, see
+# services/moderation.resolve_ctx). This column is a plain VARCHAR with no enum and no
+# CHECK constraint, so a legacy row carrying "moderator" is still storable and readable;
+# it simply matches no ladder rung and no route. See LEGACY_USER_ROLES below and
+# retire_moderator_role.py for the one-shot data migration that clears them.
+ROLES = ("super_admin", "org_admin", "billing_admin", "host", "speaker", "viewer")
+
+# Retired role slugs that may still exist in `users.role` on a database written before the
+# role was removed. Listed so a reader can tell "value we no longer issue" from "value that
+# was never valid", and so a display layer can label such a row honestly instead of showing
+# it as a generic member (see services/org._role_label). Grants nothing: no rung in
+# security._ROLE_RANK, no route, no console capability.
+LEGACY_USER_ROLES = ("moderator",)
 
 # Zoiko-internal staff sub-roles (doc Section 25's five staff rows). Meaningful only on a
 # super_admin row (see User.staff_commercial_role): unset means "full access, today's

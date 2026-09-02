@@ -11,7 +11,6 @@ import { Field, PasswordField, SubmitButton } from "../../ui/forms";
 const ROLE_LABEL = {
   org_admin: "Organization Admin",
   host: "Host",
-  moderator: "Moderator",
   speaker: "Speaker",
   viewer: "Viewer",
 };

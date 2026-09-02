@@ -3,7 +3,7 @@
 // consent, then a private waiting area (return-feed monitor, self mic/camera, request
 // help) until an operator admits/brings the contributor live. Route:
 // /speaker/backstage?event=<id> (the link routers/events.py's invite email sends).
-// Standalone full-screen page, same shape as /host/dashboard and /moderator/dashboard.
+// Standalone full-screen page, same shape as /host/dashboard.
 import { useCallback, useEffect, useReducer, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {

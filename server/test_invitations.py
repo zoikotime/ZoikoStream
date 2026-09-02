@@ -55,10 +55,10 @@ def test_unique_username_appends_suffix():
 
 
 def test_accept_creates_member_and_marks_accepted():
-    inv = SimpleNamespace(org_id="o1", email="a@x.com", role="moderator",
+    inv = SimpleNamespace(org_id="o1", email="a@x.com", role="host",
                           status="pending", accepted_at=None)
     user = crud.accept_invitation(FakeDB(), inv, "Ann", "ann", "hash")
-    assert user.org_id == "o1" and user.role == "moderator" and user.is_active is True
+    assert user.org_id == "o1" and user.role == "host" and user.is_active is True
     assert inv.status == "accepted" and inv.accepted_at is not None
 
 

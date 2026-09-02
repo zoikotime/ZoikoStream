@@ -333,7 +333,7 @@ export function ChatTab({ messages, typing, canModerate, send }) {
                     <ActionButton icon={FiCheck} label="Approve" tone="emerald" onClick={() => send("chat.approve", { id: m.id })} />
                   )}
                   <ActionButton icon={FiBookmark} label={m.pinned ? "Unpin" : "Pin"} tone="amber" active={m.pinned} onClick={() => send("chat.pin", { id: m.id })} />
-                  <ActionButton icon={FiEdit3} title="Add moderator note" tone="amber" onClick={() => setNoteFor(m)} />
+                  <ActionButton icon={FiEdit3} title="Add staff note" tone="amber" onClick={() => setNoteFor(m)} />
                   {m.user_id && (
                     <>
                       <ActionButton icon={FiMicOff} title={`Mute ${m.name}`} tone="amber" onClick={() => send("participant.mute", { identity: m.user_id, muted: true })} />
@@ -347,7 +347,7 @@ export function ChatTab({ messages, typing, canModerate, send }) {
 
             {noteFor?.id === m.id && (
               <form onSubmit={saveNote} className="ml-8 mt-2 flex items-center gap-2">
-                <Input variant="console" name="note" defaultValue={m.note || ""} placeholder="Moderator-only note…" aria-label="Moderator note" autoFocus />
+                <Input variant="console" name="note" defaultValue={m.note || ""} placeholder="Staff-only note…" aria-label="Staff note" autoFocus />
                 <button type="submit" className={cx(PANEL_PRIMARY, "h-8")}>Save</button>
                 <button type="button" onClick={() => setNoteFor(null)} className="rounded-lg px-2 py-1.5 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Cancel</button>
               </form>
@@ -469,10 +469,10 @@ export function QATab({ questions, speakers, canModerate, send }) {
                 : cx("border-slate-200 dark:border-slate-800", PANEL.cardHover)
             )}
           >
-            {/* Vote control — a moderator can also up/down-weight the running order. */}
+            {/* Vote control — an operator can also up/down-weight the running order. */}
             <div className="flex shrink-0 flex-col items-center gap-0.5">
               {/* Position in the running order (pinned first, then most-voted), so a
-                  moderator reading questions aloud can say "number three". Derived from
+                  host reading questions aloud can say "number three". Derived from
                   render order — it is not a field on the question. */}
               <span className={cx("text-[10px] font-semibold tabular-nums", PANEL.faint)} aria-hidden="true">
                 #{String(i + 1).padStart(2, "0")}

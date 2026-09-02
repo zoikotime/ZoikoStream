@@ -27,10 +27,10 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..crud import event as event_crud
 from ..db import get_db
-from ..models import EventRegistration, User
+from ..models import EventRegistration, Organization, User
 from ..ratelimit import SlidingWindow
 from ..security import ALGORITHM, decode_registration_token
-from ..services import bus, livekit
+from ..services import bus, livekit, org_state
 from ..services import moderation as mod
 # Importing these registers the host/producer actions and the contributor-backstage
 # actions into mod.ACTIONS, the host-only permission set, and their snapshot
@@ -42,7 +42,7 @@ from ..services import contributor  # noqa: F401
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/live", tags=["live"])
 
-# Rate limit per CONNECTION (not per user): a moderator with two tabs gets two budgets,
+# Rate limit per CONNECTION (not per user): an operator with two tabs gets two budgets,
 # which is correct — the limit exists to stop one socket flooding the bus. The window
 # itself is ratelimit.SlidingWindow, shared with the HTTP limiter so there is one
 # implementation of the algorithm.
@@ -95,6 +95,28 @@ async def _accept(websocket: WebSocket, event_id: uuid.UUID) -> bool:
         return False
 
 
+async def _connect_failed(websocket: WebSocket, event_id: uuid.UUID, ctx, stage: str,
+                          accepted: bool = False) -> None:
+    """Close a socket that could not be set up, deliberately and audibly.
+
+    The client tells "do not retry" from "retry later" purely by close code
+    (useEventStream.js FATAL_CODES). An exception escaping the connect path produced neither:
+    the socket died abnormally, the browser retried on a backoff forever, and the only trace
+    of WHY was an unhandled-error line with no event context. 1011 stays RETRYABLE on purpose
+    - a Redis blip or a slow database should be retried - but the client is now told that is
+    what happened, and the log names the stage and the event.
+
+    Logs identifiers only: event, org, user, failing stage. Never the token."""
+    log.exception("live socket connect failed at %s for event %s (org %s, user %s)",
+                  stage, event_id, getattr(ctx, "org_id", None), getattr(ctx, "user_id", None))
+    try:
+        if accepted or await _accept(websocket, event_id):
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR,
+                                  reason="Live service is temporarily unavailable")
+    except (RuntimeError, WebSocketDisconnect):
+        pass   # already gone; the log above is the record that matters
+
+
 @router.websocket("/events/{event_id}/ws")
 async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | None = None, reg: str | None = None, link: str | None = None):
     # Real device/platform mix for the host's analytics panel, straight off the handshake.
@@ -108,9 +130,24 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
         # logged-in user is from the wrong org, we still allow a valid event-specific link
         # to admit them as a guest rather than letting the unrelated JWT block the share link.
         registration = _registration_from_reg_token(reg, event_id, db)
+        # ZST-EC-001 ORG-010, enforced here rather than as a router dependency. The HTTP
+        # adapter (services/org_state.require_operational_org_access, applied to the
+        # organization/events/commercial/deliveries routers in main.py) needs a `Request` and
+        # HTTPBearer, neither of which exists in a WebSocket scope — applying it to this
+        # router made every live socket 500 in dependency resolution. Calling the same policy
+        # core keeps the rule identical while letting the refusal travel as a close code.
+        #
+        # Same semantics as the HTTP gate, deliberately: only a SIGNED-IN caller is subject to
+        # it (a registration/access-link visitor has not claimed to belong to an organization,
+        # so `user is None` passes through untouched, exactly as the dependency does), and the
+        # verdict is keyed on the caller's own org, not the event's.
+        org_blocked = None
+        if user is not None:
+            org = db.get(Organization, user.org_id) if user.org_id else None
+            org_blocked = org_state.blocked_reason(org, websocket.url.path)
     finally:
         db.close()
-    # Org isolation + per-event moderator check happen BEFORE any envelope is sent, so an
+    # Org isolation + per-event authorization happen BEFORE any envelope is sent, so an
     # unauthorized socket never sees application data. We still `accept()` right before each
     # rejection: a WebSocket close code can only reach the BROWSER once the handshake has
     # completed — closing pre-accept is reported to the ASGI server as a bare HTTP 403 and
@@ -121,6 +158,19 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
         if not await _accept(websocket, event_id):
             return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired session")
+        return
+
+    if org_blocked is not None:
+        # A restricted/suspended/deleted organization loses operational access, and running a
+        # live event is operational access. 1008 (not 1011) on purpose: this is a deliberate
+        # policy refusal the client must NOT retry, and useEventStream's FATAL_CODES already
+        # treats it that way — retrying would hammer the socket for as long as the
+        # restriction lasts.
+        if not await _accept(websocket, event_id):
+            return
+        label = org_state.STATE_LABELS.get(org_blocked, org_blocked)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION,
+                              reason=f"This organization is {label}")
         return
 
     ctx = None
@@ -158,31 +208,55 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
 
     # Rehydrate this event's live settings before anyone joins, so a freshly-booted worker
     # applies the host's waiting-room / chat state instead of serving defaults.
-    state = await broadcast.ensure_state(ctx)
+    try:
+        state = await broadcast.ensure_state(ctx)
+    except Exception:  # noqa: BLE001 - see _connect_failed's docstring
+        return await _connect_failed(websocket, event_id, ctx, "ensure_state")
 
     if not await _accept(websocket, event_id):
         return
     limiter = SlidingWindow(RATE_LIMIT, RATE_WINDOW)
 
     async with bus.subscribe(ctx.event_id) as queue:
-        # This connection is a participant too — one presence record per identity, so a
-        # moderator watching from two tabs still counts once.
-        role = "host" if ctx.can_host else "moderator" if ctx.can_moderate else \
-            "speaker" if ctx.can_contribute else "viewer"
-        if ctx.can_contribute:
-            await asyncio.to_thread(contributor.mark_connected, ctx.event_id, ctx.user_id)
-        # Waiting room holds plain attendees for the host to admit; staff never wait.
-        waiting = bool(state.get("waiting_room")) and role == "viewer"
-        rec = await bus.presence_upsert(ctx.event_id, ctx.identity, {
-            "name": ctx.name, "role": role, "waiting": waiting,
-            "muted": False, "speaking": False, "hand": False, "quality": "excellent",
-            **agent,
-        })
-        await websocket.send_json(bus.envelope("moderator", "snapshot", await mod.snapshot(ctx)))
-        await bus.publish(ctx.event_id, "participants", "participant.join", rec)
-        if waiting:
-            # Surfaces in the host console's waiting-room queue.
-            await bus.publish(ctx.event_id, "stage", "waiting.join", rec)
+        # This connection is a participant too — one presence record per identity, so an
+        # operator watching from two tabs still counts once.
+        #
+        # There is no longer a separate "moderator" presence label: the role was retired and
+        # anyone who can run the audience is event staff, shown as "host". A connection whose
+        # can_moderate comes from a legacy moderator assignment (models/event.
+        # LEGACY_ASSIGNMENT_ROLES) is labelled "host" HERE, in presence only — that is a
+        # roster badge and a waiting-room bypass, not an authorization. Its actual authority
+        # is still ctx.can_host, which stays False, so it cannot reach any HOST_ONLY action.
+        role = "host" if ctx.can_moderate else "speaker" if ctx.can_contribute else "viewer"
+        # Everything up to and including the opening snapshot is guarded. It used to sit
+        # OUTSIDE the try below (which only starts at the receive loop), so a failure in
+        # any of it - Redis unreachable, a slow DB, LiveKit token minting, a payload that
+        # will not serialise - escaped the endpoint entirely. The browser then saw an
+        # ABNORMAL close rather than a deliberate one, which is not in useEventStream's
+        # FATAL_CODES, so the client reconnected forever and the console sat on
+        # "Offline - <n>" with no snapshot: can_host never arrives, so the UI falls back
+        # to its unauthorised defaults and claims the host is not assigned. Closing
+        # deliberately gives the client something it can reason about, and puts the real
+        # reason in the server log instead of nowhere.
+        try:
+            if ctx.can_contribute:
+                await asyncio.to_thread(contributor.mark_connected, ctx.event_id, ctx.user_id)
+            # Waiting room holds plain attendees for the host to admit; staff never wait.
+            waiting = bool(state.get("waiting_room")) and role == "viewer"
+            rec = await bus.presence_upsert(ctx.event_id, ctx.identity, {
+                "name": ctx.name, "role": role, "waiting": waiting,
+                "muted": False, "speaking": False, "hand": False, "quality": "excellent",
+                **agent,
+            })
+            await websocket.send_json(bus.envelope("moderator", "snapshot", await mod.snapshot(ctx)))
+            await bus.publish(ctx.event_id, "participants", "participant.join", rec)
+            if waiting:
+                # Surfaces in the host console's waiting-room queue.
+                await bus.publish(ctx.event_id, "stage", "waiting.join", rec)
+        except (WebSocketDisconnect, RuntimeError):
+            return   # client went away mid-handshake; nothing to report to anyone
+        except Exception:  # noqa: BLE001 - see the comment above
+            return await _connect_failed(websocket, event_id, ctx, "snapshot", accepted=True)
 
         async def writer():
             """Only this task writes to the socket, so sends never interleave.
@@ -218,7 +292,7 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
                     frame = await asyncio.wait_for(websocket.receive_json(), timeout=IDLE_TIMEOUT)
                 except ValueError:
                     # Malformed JSON (JSONDecodeError subclasses ValueError). One bad frame
-                    # is not a reason to drop a moderator mid-event.
+                    # is not a reason to drop an operator mid-event.
                     continue
                 if not isinstance(frame, dict):
                     continue
@@ -327,7 +401,7 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
         # still shows the mute icon as on — presence, not LiveKit, is what the UI trusts.
         # Presence is the source of truth for "should this identity be muted right now",
         # so re-assert the enforcement on every fresh publish rather than only at the
-        # moment a moderator clicked mute.
+        # moment an operator clicked mute.
         if kind == "track_published" and rec.get("muted"):
             await livekit.mute_participant(evt.room.name, p.identity, True)
 

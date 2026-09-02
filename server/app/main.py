@@ -297,11 +297,26 @@ async def maintenance_gate(request: Request, call_next):
 # auth_router and admin_router are deliberately NOT gated: identity must keep working
 # (IDN-008 owns identity restriction, not this), and platform staff must still be able to
 # act on a restricted tenant.
+#
+# live_router is NOT gated here either, and that is a correctness requirement rather than an
+# exemption from ORG-010. It carries the live WebSocket (routers/live.py::live_socket), and
+# this dependency is HTTP-only: it takes a `Request` and resolves the caller through
+# HTTPBearer. FastAPI cannot build either for a WebSocket scope, so applying it to that
+# router made EVERY live socket fail dependency resolution with
+# `TypeError: HTTPBearer.__call__() missing 1 required positional argument: 'request'`,
+# answered as HTTP 500 before the endpoint ran — the console never received a snapshot, so
+# can_host never arrived and Go Live could not start at all.
+#
+# ORG-010 is still enforced on that socket. live_socket calls the same policy core this
+# dependency wraps (services/org_state.blocked_reason) at connect time and closes with a
+# policy-violation code, which is the only way a WebSocket can carry a refusal to the
+# browser. The other route on live_router is the LiveKit webhook, which is server-to-server
+# and carries no session, so the dependency was already a no-op there (user is None).
 _ORG_STATE_GATE = [Depends(require_operational_org_access)]
 
-for router in (auth_router, dashboard_router, admin_router, contact_router):
+for router in (auth_router, dashboard_router, admin_router, contact_router, live_router):
     app.include_router(router, prefix="/api")
-for router in (organization_router, events_router, live_router, commercial_router,
+for router in (organization_router, events_router, commercial_router,
                deliveries_router):
     app.include_router(router, prefix="/api", dependencies=_ORG_STATE_GATE)
 

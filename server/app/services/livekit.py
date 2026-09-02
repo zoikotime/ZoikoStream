@@ -1,6 +1,6 @@
 """LiveKit access tokens + server-side room control.
 
-The room-control helpers are what make a moderator action REAL: without them, muting a
+The room-control helpers are what make a moderation action REAL: without them, muting a
 participant only repaints the console. Every one of them no-ops (returns False) when
 LiveKit is unconfigured, so the moderation console still works end-to-end in dev — the
 state change and the broadcast happen either way, the media enforcement is what's missing.
@@ -144,7 +144,7 @@ async def _with_room(fn):
     try:
         await fn(lk.room)
         return True
-    except Exception as exc:  # noqa: BLE001 - LiveKit errors must not fail a moderator action
+    except Exception as exc:  # noqa: BLE001 - LiveKit errors must not fail a moderation action
         log.warning("livekit room control failed: %s", exc)
         return False
     finally:

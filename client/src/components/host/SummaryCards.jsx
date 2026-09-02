@@ -2,7 +2,7 @@
 // Producer KPI row — every value is live socket state, so these move on their own.
 //
 // This uses a LOCAL tile rather than ui/StatsCard on purpose. ui/StatsCard is shared with
-// the org dashboard, the admin console and the moderator console; its hover lifts the card
+// the org dashboard and the admin console; its hover lifts the card
 // and drops a large shadow, and its 44px icon tile pushed the label into truncation at
 // six-up ("Particip…", "Engage…" in the old layout). Restyling it would have restyled four
 // other pages, so the studio keeps its own denser tile and StatsCard stays exactly as is.

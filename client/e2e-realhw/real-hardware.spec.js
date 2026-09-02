@@ -23,7 +23,7 @@ test("real webcam + microphone: host publishes, viewer receives, audio survives 
   await hostPage.getByRole("button", { name: "Start" }).click();
 
   // --- real capture -------------------------------------------------------
-  const preview = await waitFor(async () => {
+  await waitFor(async () => {
     const st = await mediaElementState(hostPage, "video").catch(() => null);
     return st?.hasVideoTrack && st?.hasAudioTrack ? st : null;
   }, { timeout: 60_000, message: "the REAL camera and microphone to open" });

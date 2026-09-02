@@ -5,10 +5,12 @@ import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import MemberPicker from "./MemberPicker";
 
-// PATCH /events/{id}/{hosts|moderators|speakers} replaces the WHOLE assignee set in one
+// PATCH /events/{id}/{hosts|speakers} replaces the WHOLE assignee set in one
 // call, so this modal works off a local selection and submits it in full rather than
 // diffing adds/removes against the server.
-export const ROLE_PATH = { Host: "hosts", Moderator: "moderators", Speaker: "speakers" };
+// Maps a role tab to its /events/{id}/<path> endpoint. "Moderator" is gone because the
+// endpoint is gone (routers/events.py) — the role is retired.
+export const ROLE_PATH = { Host: "hosts", Speaker: "speakers" };
 
 export default function AssignPeopleModal({ open, onClose, eventId, role, assigned, onSaved }) {
   const [selected, setSelected] = useState(() => new Set());

@@ -16,7 +16,10 @@ def test_role_ladder():
     # host and everything above clears the host gate
     for role in ("host", "org_admin", "super_admin"):
         assert host_gate(_user(role)).role == role
-    # everything below is rejected
+    # Everything below is rejected. "moderator" stays in this list deliberately: the role was
+    # retired, so it is no longer a rung in the ladder and now resolves to rank -1 — the same
+    # treatment as "nonsense". A legacy row still carrying the value must be DENIED, never
+    # admitted by accident, and this is the assertion that proves it.
     for role in ("moderator", "speaker", "viewer", "nonsense"):
         try:
             host_gate(_user(role))

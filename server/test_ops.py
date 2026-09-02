@@ -137,9 +137,10 @@ def test_readiness_gates_scale_with_impact():
         assert mine["verdict"] == "blocked", mine
         assert "Host assigned" in mine["failing"]
 
-        # Assign a host and a moderator -> every mandatory gate passes.
-        for role in ("host", "moderator"):
-            db.add(EventAssignment(event_id=unrepeatable.id, user_id=admin.id, role=role))
+        # Assign a host -> every mandatory gate passes. There is no longer a separate
+        # "Moderator assigned" gate: the role was retired, so that gate could never pass again
+        # and would have permanently blocked every unrepeatable event (see services/ops._GATES).
+        db.add(EventAssignment(event_id=unrepeatable.id, user_id=admin.id, role="host"))
         db.flush()
         mine = next(e for e in ops.event_readiness(db, include_test=True, limit=50)
                     if e["id"] == str(unrepeatable.id))

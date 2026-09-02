@@ -7,7 +7,9 @@ import useApi from "../../hooks/useApi";
 import UserModal from "./UserModal";
 import { ROLES, roleLabel } from "./roleInfo";
 
-const ROLE_TONE = { super_admin: "brand", org_admin: "info", host: "info", moderator: "warning", speaker: "neutral", viewer: "neutral" };
+// No "moderator" key: the role is retired. A not-yet-migrated legacy row falls through to
+// the default tone rather than showing a role the platform no longer has.
+const ROLE_TONE = { super_admin: "brand", org_admin: "info", host: "info", speaker: "neutral", viewer: "neutral" };
 
 // Field skins come from the console tokens so a hover or focus change lands on every filter
 // row at once, instead of being re-typed per page.

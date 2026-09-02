@@ -4,9 +4,9 @@ Scoped like every other table: `org_id` is copied from the event so a query can 
 org-isolated without a join. Presence/participants are deliberately NOT here — they
 are ephemeral and live in Redis (services/bus.py).
 
-Moderator actions are audited into the existing `audit_logs` table (models/audit_log.py)
-rather than a parallel moderator_actions table — it already carries actor, action,
-target, org and a meta blob.
+Moderation actions are audited into the existing `audit_logs` table (models/audit_log.py)
+rather than a parallel table of their own — it already carries actor, action, target, org
+and a meta blob.
 
 ponytail: pinned/deleted messages are COLUMNS here, not their own tables — "persist
 pinned messages / deleted messages" is a flag on the row, and a soft delete keeps the
@@ -50,7 +50,7 @@ class _EventScoped(Base):
 
 class LiveMessage(_EventScoped):
     """One chat message. `flags` holds automatic detections (profanity | spam | link |
-    duplicate) so moderators can filter without re-scanning text."""
+    duplicate) so an operator can filter without re-scanning text."""
 
     __tablename__ = "live_messages"
 
@@ -62,7 +62,7 @@ class LiveMessage(_EventScoped):
     flags: Mapped[list | None] = mapped_column(JSON, default=list)
     reactions: Mapped[dict | None] = mapped_column(JSON, default=dict)   # emoji -> count
     reply_to: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    note: Mapped[str | None] = mapped_column(Text)                       # moderator-only note
+    note: Mapped[str | None] = mapped_column(Text)                       # staff-only note
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
@@ -298,7 +298,7 @@ class AnalyticsSnapshot(_EventScoped):
 
 class EventFeedback(_EventScoped):
     """One row per feedback submission — a viewer leaving the event (see
-    services/moderation._feedback_submit, which now rejects a host/moderator connection's
+    services/moderation._feedback_submit, which now rejects any console connection's
     submission outright). `role` is kept as a column for backward compatibility with rows
     written before that change, but every current row is "viewer" and every reader
     (the host console's own Feedback tab and the organization's event detail page) filters
@@ -435,7 +435,7 @@ SIGNAL_FLAP_THRESHOLD = 3
 class LiveActivity(_EventScoped):
     """Append-only event timeline, written by ONE helper (services/moderation.record).
     Exists so the feed survives a reconnect and stays searchable/exportable without
-    merging five tables at read time. Moderator actions land here AND in audit_logs —
+    merging five tables at read time. Moderation actions land here AND in audit_logs —
     different readers: this one is the in-console timeline, that one is compliance."""
 
     __tablename__ = "live_activity"

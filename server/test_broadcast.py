@@ -3,7 +3,8 @@ enforcement, settings validation, and the analytics maths.
 
 Pure logic + the in-process bus — no database and no Redis. The point of most of these is
 that a control which *renders* as "off" is actually enforced server-side, and that a
-moderator cannot reach broadcast control.
+connection which can run the audience but is not the assigned host cannot reach broadcast
+control.
 Run: `python test_broadcast.py` (or pytest)."""
 import asyncio
 import types
@@ -29,21 +30,26 @@ def _ctx(*, can_moderate=False, can_host=False, role="viewer", event_id=None):
 # ── the host-only gate ────────────────────────────────────────────────────────
 
 def test_broadcast_control_is_host_only():
-    """A moderator runs the audience; they must not be able to end the stream or stop the
-    recording. This is the guard that makes that true."""
-    moderator = _ctx(can_moderate=True, role="moderator")
+    """can_moderate is NOT enough to end a stream — only can_host is. Still the right test
+    after the moderator role was retired: the audience-vs-broadcast split is now what keeps a
+    grandfathered moderator EventAssignment (models/event.LEGACY_ASSIGNMENT_ROLES, which
+    resolves to can_moderate with can_host False) away from go-live, end and recording.
+    Role label is "host" because presence no longer has a moderator label; the flags, not the
+    label, are what the gate reads."""
+    audience_only = _ctx(can_moderate=True, can_host=False, role="host")
     viewer = _ctx()
     for action in ("broadcast.golive", "broadcast.end", "broadcast.emergency_stop",
                    "broadcast.pause", "broadcast.settings", "recording.start", "recording.stop"):
         assert action in m.ACTIONS, f"{action} not registered"
         assert action in m.HOST_ONLY, f"{action} must be host-only"
-        assert asyncio.run(m.dispatch(moderator, action, {})), f"moderator reached {action}"
+        assert asyncio.run(m.dispatch(audience_only, action, {})), f"non-host reached {action}"
         assert asyncio.run(m.dispatch(viewer, action, {})), f"viewer reached {action}"
 
 
-def test_stage_controls_stay_open_to_moderators():
-    """Stage/mute controls are audience management — moderators already have participant.*
-    powers, so gating these to hosts would be a regression, not extra safety."""
+def test_stage_controls_stay_open_to_audience_management():
+    """Stage/mute controls are audience management — whoever runs the audience already has
+    participant.* powers, so gating these to can_host would be a regression, not extra safety.
+    It is also what lets a grandfathered moderator assignment keep doing its job."""
     for action in ("stage.mute_all", "stage.admit", "stage.admit_all", "stage.camera", "stage.share"):
         assert action in m.ACTIONS
         assert action not in m.HOST_ONLY
@@ -144,7 +150,10 @@ def test_settings_action_rejects_an_empty_patch():
 def test_split_counts_roles_and_excludes_waiting():
     people = [
         {"role": "host", "publishing": True},
-        {"role": "moderator"},
+        # A second staff connection. Presence has no "moderator" label any more — the role was
+        # retired and routers/live.py labels every staff connection "host" — so this counts
+        # towards `hosts`, and `_split` no longer emits a `moderators` key at all.
+        {"role": "host"},
         {"role": "speaker", "quality": "poor"},
         {"role": "viewer", "hand": True},
         {"role": "viewer", "quality": "lost"},
@@ -152,7 +161,8 @@ def test_split_counts_roles_and_excludes_waiting():
     ]
     s = bc._split(people)
     assert s["participants"] == 5 and s["waiting"] == 1
-    assert s["viewers"] == 2 and s["speakers"] == 1 and s["moderators"] == 1 and s["hosts"] == 1
+    assert s["viewers"] == 2 and s["speakers"] == 1 and s["hosts"] == 2
+    assert "moderators" not in s, "the retired role must not linger as a permanently-zero counter"
     assert s["hands"] == 1 and s["poor_connections"] == 2 and s["publishing"] == 1
 
 

@@ -5,7 +5,7 @@ import Panel from "../Panel";
 // Upcoming high-impact events with their readiness verdict.
 //
 // The verdict is computed, not stored: every gate reads one real field on the event or its
-// assignments (title, start time, host, moderator, recording, account standing, redundancy).
+// assignments (title, start time, host, recording, account standing, redundancy).
 // A gate that is mandatory for the event's impact class BLOCKS it; a non-mandatory failure
 // makes it CONDITIONAL. Hovering a card lists exactly which gates failed, so "Blocked" is
 // never a dead end.

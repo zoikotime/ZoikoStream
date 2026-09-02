@@ -65,7 +65,7 @@ function Row({ label, value }) {
 }
 
 // Full-width labelled action. Labels (not icons) because an icon-only "ban" in a 300px
-// row is how a moderator bans the wrong person.
+// row is how an operator bans the wrong person.
 function Action({ icon: Icon, label, tone = "slate", onClick }) {
   return (
     <button
@@ -85,7 +85,7 @@ function Action({ icon: Icon, label, tone = "slate", onClick }) {
 }
 
 // The full action set for one participant, in a drawer so each action can be labelled.
-function ProfileDrawer({ p, open, onClose, canModerate, send }) {
+function ProfileDrawer({ p, open, onClose, canModerate, canHost, send }) {
   const [minutes, setMinutes] = useState(5);
   if (!p) return null;
 
@@ -145,11 +145,28 @@ function ProfileDrawer({ p, open, onClose, canModerate, send }) {
             label={onStage ? "Remove from stage" : "Invite to stage"}
             onClick={() => act("participant.stage", { on_stage: !onStage })}
           />
-          <Action
-            icon={FiArrowUpCircle}
-            label={role === "viewer" ? "Promote to speaker" : "Promote to moderator"}
-            onClick={() => act("participant.role", { role: role === "viewer" ? "speaker" : "moderator" })}
-          />
+          {/* The promotion ladder is viewer -> speaker -> host now that the moderator rung
+              is retired. The top rung is rendered ONLY for canHost: promoting to host hands
+              over broadcast control (go live / end / emergency stop / recording), and the
+              server refuses it outright for anyone who does not already hold it
+              (services/moderation._participant_action -> "Only the event host can grant host
+              access"). Offering a button that is guaranteed to fail is worse than not
+              offering it — and this is the visible half of a real authorization boundary,
+              not decoration: someone whose can_moderate comes from a legacy moderator
+              assignment has can_host false and must not be able to mint a host. */}
+          {role === "viewer" ? (
+            <Action
+              icon={FiArrowUpCircle}
+              label="Promote to speaker"
+              onClick={() => act("participant.role", { role: "speaker" })}
+            />
+          ) : canHost ? (
+            <Action
+              icon={FiArrowUpCircle}
+              label="Promote to host"
+              onClick={() => act("participant.role", { role: "host" })}
+            />
+          ) : null}
           <Action icon={FiArrowDownCircle} label="Demote to viewer" onClick={() => act("participant.role", { role: "viewer" })} />
           <Action icon={FiUserX} label="Remove from event" tone="rose" onClick={() => { act("participant.remove"); onClose(); }} />
           <Action icon={FiSlash} label="Ban (cannot rejoin)" tone="rose" onClick={() => { act("participant.ban"); onClose(); }} />
@@ -159,7 +176,7 @@ function ProfileDrawer({ p, open, onClose, canModerate, send }) {
   );
 }
 
-export default function ParticipantsPanel({ participants, canModerate, loading, send, className }) {
+export default function ParticipantsPanel({ participants, canModerate, canHost, loading, send, className }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [sort, setSort] = useState("role");
@@ -268,7 +285,7 @@ export default function ParticipantsPanel({ participants, canModerate, loading, 
 
                 {/* Role first (what they are), then transient state (what they're doing).
                     Gated on the PANEL's width (@xs = 20rem), not the viewport: this roster is
-                    380px in the host rail (badge fits) but 300px in the moderator column,
+                    380px in the host rail (badge fits) but narrower on small viewports,
                     where the badge stole enough room to crush names to "na…".
                     The gate lives on a WRAPPER, not on the Badge: Badge sets `inline-flex` in
                     its own base classes, and between two unprefixed display utilities the
@@ -322,7 +339,7 @@ export default function ParticipantsPanel({ participants, canModerate, loading, 
         </div>
       )}
 
-      <ProfileDrawer p={active} open={!!active} onClose={() => setSelected(null)} canModerate={canModerate} send={send} />
+      <ProfileDrawer p={active} open={!!active} onClose={() => setSelected(null)} canModerate={canModerate} canHost={canHost} send={send} />
     </Panel>
   );
 }

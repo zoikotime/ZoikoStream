@@ -50,7 +50,10 @@ log = logging.getLogger(__name__)
 ORG_ADMIN_ROLES = ("org_admin",)
 
 # User-facing role names. The email must never expose the raw stored identifier when a
-# human-readable name exists.
+# human-readable name exists. "moderator" is retained as a DISPLAY label only: the role is
+# retired and nothing issues it, but a database written before the migration can still hold
+# the value (models/user.LEGACY_USER_ROLES), and emailing such a person the raw slug — or
+# nothing — would be worse than naming the role they were given. Grants nothing.
 ROLE_LABELS = {
     "super_admin": "Platform Administrator",
     "org_admin": "Administrator",

@@ -17,7 +17,6 @@ export function roleFromEmail(email) {
   const local = addr.split("@")[0];
   if (/(^|[._-])(superadmin|platform)/.test(local)) return "super_admin";
   if (/(^|[._-])host/.test(local)) return "host";
-  if (/(^|[._-])(moderator|mod)/.test(local)) return "moderator";
   if (/(^|[._-])(viewer|watch|attendee)/.test(local)) return "viewer";
   return "org_admin";
 }
@@ -41,7 +40,6 @@ export function fakeSession(email, { role, full_name, organization_name } = {}) 
 // One runnable check (no test runner in this project): runs on import in dev, dropped in prod.
 if (import.meta.env?.DEV) {
   console.assert(roleFromEmail("host@acme.com") === "host", "roleFromEmail host");
-  console.assert(roleFromEmail("mod@acme.com") === "moderator", "roleFromEmail moderator");
   console.assert(roleFromEmail("viewer@acme.com") === "viewer", "roleFromEmail viewer");
   console.assert(roleFromEmail("superadmin@zoiko.com") === "super_admin", "roleFromEmail super");
   console.assert(roleFromEmail("info@zoikostream.com") === "super_admin", "roleFromEmail platform admin email");

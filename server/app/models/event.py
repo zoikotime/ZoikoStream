@@ -24,7 +24,31 @@ EVENT_STATUSES = (
     "degraded", "ending", "processing", "replay_ready", "ended", "cancelled", "archived", "blocked",
 )
 EVENT_VISIBILITY = ("public", "private", "unlisted")
-ASSIGNMENT_ROLES = ("host", "moderator", "speaker")
+ASSIGNMENT_ROLES = ("host", "speaker")
+
+# ── Retired: EventAssignment(role="moderator") ─────────────────────────────────────────
+# The moderator role was removed. Host was never missing any of its capabilities: an
+# assigned host has always resolved to can_moderate AND can_host together
+# (services/moderation.resolve_ctx), so retiring moderator granted host nothing new and
+# took nothing away from it — the change is purely subtractive.
+#
+# What it DID take away is the only thing a moderator assignment ever granted on its own:
+# can_moderate without can_host. A real database can still hold such rows, written before
+# this change, and they are the sole reason those people can open a console at all. Making
+# them inert would have silently revoked audience management (chat, Q&A, polls,
+# participants) mid-flight on already-published events, so resolve_ctx deliberately keeps
+# reading them — as can_moderate ONLY, never can_host.
+#
+# That asymmetry is the whole point and must not be "tidied" into role="host": broadcast
+# control (go live, end, emergency stop, recording) is host-only by design, and a large
+# share of these rows are held by users whose platform role is speaker. Promoting them
+# would hand the power to end a live broadcast to people explicitly denied it today.
+#
+# Nothing WRITES this value any more — no endpoint, no socket action, no UI, no fixture.
+# It is a read-only grandfather clause with a defined end: run
+# retire_moderator_role.py --assignments to list and then clear the rows, and once a
+# deployment's count is zero the read in resolve_ctx can be deleted with no behaviour change.
+LEGACY_ASSIGNMENT_ROLES = ("moderator",)
 
 
 class Event(Base):
@@ -102,9 +126,13 @@ class Event(Base):
 
 
 class EventAssignment(Base):
-    """Per-event role assignment. One table serves host/moderator/speaker — no parallel
-    assignment tables. Org membership stays on User.org_id; this only records who fills
-    which event role. Assignees must belong to the event's org (enforced in the router)."""
+    """Per-event role assignment. One table serves host/speaker — no parallel assignment
+    tables. Org membership stays on User.org_id; this only records who fills which event
+    role. Assignees must belong to the event's org (enforced in the router).
+
+    `role` holds a value from ASSIGNMENT_ROLES, or — on a pre-existing row only — one from
+    LEGACY_ASSIGNMENT_ROLES. Plain VARCHAR with no enum and no CHECK constraint, which is
+    why retiring a role needed no schema migration."""
 
     __tablename__ = "event_assignments"
     __table_args__ = (UniqueConstraint("event_id", "user_id", "role", name="uq_event_user_role"),)
@@ -112,7 +140,7 @@ class EventAssignment(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), nullable=False, index=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), nullable=False)  # host | moderator | speaker
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # host | speaker (legacy: moderator)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped["Event"] = relationship(back_populates="assignments")

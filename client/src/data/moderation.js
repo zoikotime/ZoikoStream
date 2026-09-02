@@ -1,5 +1,5 @@
 // client/src/data/moderation.js
-// Static vocabulary for the Moderator Console. The dashboard's DATA is now live (one
+// Static vocabulary for the live-event consoles. The dashboard's DATA is now live (one
 // WebSocket, see hooks/useEventStream.js) — what's left here is the labels, tone maps and
 // templates that don't come from the server.
 
@@ -25,9 +25,13 @@ export const accentFor = (key = "") => {
 
 // ── participants ──────────────────────────────────────────────────────────────
 
-export const ROLE_TONE = { host: "brand", moderator: "info", speaker: "success", viewer: "neutral" };
-// Host first, viewers last — the people a moderator acts on most sit at the top.
-export const ROLE_ORDER = { host: 0, moderator: 1, speaker: 2, viewer: 3 };
+export const ROLE_TONE = { host: "brand", speaker: "success", viewer: "neutral" };
+// Host first, viewers last — the people an operator acts on most sit at the top.
+// The retired "moderator" role is absent from both maps. Presence never labels a
+// connection that way any more (routers/live.py calls every staff connection "host"), so
+// an entry here could only ever be dead. Both maps are read with a fallback, so an
+// unexpected value still renders as a neutral badge sorted last rather than crashing.
+export const ROLE_ORDER = { host: 0, speaker: 1, viewer: 2 };
 
 export const PARTICIPANT_FILTERS = [
   { key: "all", label: "All" },
@@ -89,7 +93,7 @@ export const QA_STATUS_TONE = { pending: "warning", approved: "info", answered: 
 
 export const POLL_STATUS_TONE = { live: "success", draft: "neutral", scheduled: "warning", closed: "info" };
 
-// Countdown presets, in seconds. 0 = no timer (moderator closes it by hand).
+// Countdown presets, in seconds. 0 = no timer (the operator closes it by hand).
 export const POLL_DURATIONS = [
   { value: 0, label: "No timer" },
   { value: 30, label: "30s" },

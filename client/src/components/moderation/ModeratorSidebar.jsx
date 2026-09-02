@@ -16,7 +16,6 @@ import {
 } from "react-icons/fi";
 import { cx, focusRing } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
-import Skeleton from "../../ui/Skeleton";
 import { Input, Select } from "../../ui/forms";
 import EmptyState from "../organization/OrganizationEmptyState";
 import Panel, { ActionButton } from "./Panel";
@@ -270,7 +269,7 @@ export function Announcements({ announcements, canModerate, send }) {
     <Panel title="Announcements" count={announcements.length} scroll={false}>
       {canModerate && (
         <form onSubmit={post} className="mb-3 space-y-2">
-          {/* Templates — the sentences a moderator types on every event. */}
+          {/* Templates — the sentences an operator types on every event. */}
           <div className="flex flex-wrap gap-1">
             {ANNOUNCEMENT_TEMPLATES.map((t) => (
               <button
@@ -448,19 +447,11 @@ export function ActivityFeed({ activity }) {
   );
 }
 
-export default function ModeratorSidebar({ className, polls, announcements, activity, canModerate, loading, send }) {
-  if (loading) {
-    return (
-      <div className={cx("flex min-h-0 flex-col gap-4 overflow-y-auto", className)} aria-hidden="true">
-        {[0, 1, 2].map((i) => <Skeleton key={i} variant="block" className="shrink-0" />)}
-      </div>
-    );
-  }
-  return (
-    <div className={cx("flex min-h-0 flex-col gap-4 overflow-y-auto", className)}>
-      <PollManagement polls={polls} canModerate={canModerate} send={send} />
-      <Announcements announcements={announcements} canModerate={canModerate} send={send} />
-      <ActivityFeed activity={activity} />
-    </div>
-  );
-}
+// The default export that used to live here composed the three panels above into a single
+// column for the retired /moderator/dashboard. That page is gone and nothing else ever
+// imported it — the host console composes the SAME three as named imports, one per tab (see
+// components/host/HostPanel.jsx) — so it went with the console rather than staying as an
+// unreachable second layout. The named exports above are the real API of this module.
+//
+// The filename is deliberately unchanged: renaming it would touch HostPanel's import for no
+// behavioural gain, and this file is about polls/announcements/activity, not about a role.

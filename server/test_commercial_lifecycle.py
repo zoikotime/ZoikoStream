@@ -344,7 +344,7 @@ def test_unscoped_super_admin_keeps_full_access():
 
 @pytest.mark.parametrize("action", ["finance", "reconcile", "capacity", "readiness", "configure"])
 def test_no_customer_role_holds_a_zoiko_side_action(action):
-    for role in ("org_admin", "billing_admin", "host", "moderator", "viewer"):
+    for role in ("org_admin", "billing_admin", "host", "viewer"):
         assert not security.commercial_can(_customer(role), action), f"{role} has {action}"
 
 

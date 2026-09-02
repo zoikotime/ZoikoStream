@@ -6,7 +6,7 @@
 //   * End and Emergency stop ask for confirmation inline (a second click on the same
 //     button) rather than firing immediately.
 //   * Everything that changes the broadcast is disabled without `canHost` — the server
-//     enforces the same rule, so a moderator sees why instead of getting a silent rejection.
+//     enforces the same rule, so an operator sees why instead of getting a silent rejection.
 //
 // ORDERING is the point of the layout. The tool keys form one compact cluster on the left,
 // ordered by blast radius: CAPTURE (affects only this machine) → ENGAGEMENT (opens a modal,
