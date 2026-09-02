@@ -218,7 +218,7 @@ def soft_delete_event(db, event: Event) -> None:
     db.commit()
 
 
-# ── Assignments (host / moderator / speaker) ──────────────────────────────────
+# ── Assignments (host / speaker) ───────────────────────────────────────────────
 
 def valid_member_ids(db, org_id, user_ids) -> set:
     """Subset of user_ids that are live members of this org."""

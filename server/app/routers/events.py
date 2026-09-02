@@ -6,7 +6,7 @@ _can_edit's and watch_event's own super_admin carve-outs elsewhere in this file.
 event_id from another org resolves to None -> 404 for everyone else.
 
 Permissions:
-  create / delete / assign host|moderator|speaker  -> org admin only
+  create / delete / assign host|speaker             -> org admin only
   edit (PATCH)                                     -> org admin, or a host who owns/hosts it
   read (list / get / view assignees)               -> any org member
 """
@@ -496,7 +496,7 @@ async def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_ad
     crud.soft_delete_event(db, ev)  # soft delete: retained, excluded from listings
 
 
-# ── Assignments (host / moderator / speaker) ──────────────────────────────────
+# ── Assignments (host / speaker) ───────────────────────────────────────────────
 # Reads: any member. Writes: org admin. Assignees must be live members of the same org.
 # Newly-added assignees (not already holding the role) get a best-effort notification email.
 
@@ -509,8 +509,6 @@ def _console_url(role: str, event_id: uuid.UUID) -> str:
     base = settings.APP_URL.rstrip("/")
     if role == "host":
         return f"{base}/host/dashboard?event={event_id}"
-    if role == "moderator":
-        return f"{base}/moderator/dashboard?event={event_id}"
     if role == "speaker":
         return f"{base}/speaker/backstage?event={event_id}"
     return base
@@ -548,15 +546,12 @@ def set_hosts(event_id: uuid.UUID, data: AssignmentUpdate, background: Backgroun
     return _set_role(db, admin, event_id, "host", data.user_ids, background)
 
 
-@router.get("/{event_id}/moderators", response_model=list[AdminUserOut])
-def get_moderators(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _list_role(db, user, event_id, "moderator")
-
-
-@router.patch("/{event_id}/moderators", response_model=list[AdminUserOut])
-def set_moderators(event_id: uuid.UUID, data: AssignmentUpdate, background: BackgroundTasks,
-                   admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
-    return _set_role(db, admin, event_id, "moderator", data.user_ids, background)
+# GET/PATCH /{event_id}/moderators were REMOVED with the moderator role. The PATCH was the
+# last remaining writer of EventAssignment(role="moderator") anywhere in the system, so
+# deleting it is what makes the retirement real rather than cosmetic. The GET went with it:
+# with no writer, it could only ever list grandfathered rows, and a read-only tab offering
+# no action is worse than no tab — the cleanup path for those rows is
+# retire_moderator_role.py, not a console screen.
 
 
 @router.get("/{event_id}/speakers", response_model=list[AdminUserOut])
@@ -574,7 +569,7 @@ def set_speakers(event_id: uuid.UUID, data: AssignmentUpdate, background: Backgr
 # EventAssignment(role="speaker") above is only eligibility. Inviting is a separate,
 # repeatable act — its own join window/expiry/consent notice, sent as a REST call (not a
 # socket action) because it can happen well before any live socket exists, same reasoning
-# as host/moderator assignment above.
+# as host/speaker assignment above.
 
 def _assigned_speaker_or_404(db, admin, event_id, user_id) -> tuple[Event, User]:
     ev = _get_event_or_404(db, admin, event_id)

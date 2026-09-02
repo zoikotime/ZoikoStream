@@ -130,13 +130,20 @@ def require_super_admin(user: User = Depends(get_current_user)) -> User:
 
 # Role privilege ladder, lowest to highest. super_admin sits on top: it clears every
 # require_* gate and bypasses org isolation. Keep in sync with models.user.ROLES.
+#
+# "moderator" was REMOVED from this ladder (see models/event.py's LEGACY_ASSIGNMENT_ROLES
+# for the whole story). It sat at rank 2, between speaker and host, and no gate in the
+# codebase ever had a threshold at or below it — the only thresholds ever built are
+# "host" and "org_admin" — so a moderator already failed every require_* gate that exists.
+# Dropping it therefore changes NO endpoint's authorization; it only stops the role being
+# a recognised rung. A row still carrying role="moderator" resolves to -1 below, i.e. it
+# fails every gate exactly as it did before.
 _ROLE_RANK = {
     "viewer": 0,
     "speaker": 1,
-    "moderator": 2,
-    "host": 3,
-    "org_admin": 4,
-    "super_admin": 5,
+    "host": 2,
+    "org_admin": 3,
+    "super_admin": 4,
 }
 
 
@@ -154,9 +161,12 @@ def require_min_role(minimum: str):
 
 
 # Named gates for the common cases; each also admits everything above it in the ladder.
+# `require_moderator` used to be defined here alongside these. It was never referenced by a
+# single router, and because it was built as require_min_role("moderator") every host,
+# org_admin and super_admin already cleared it — so it was both dead and, had it ever been
+# used, weaker than require_host. Removed with the role.
 require_org_admin = require_min_role("org_admin")
 require_host = require_min_role("host")
-require_moderator = require_min_role("moderator")
 
 
 # ── Commercial RBAC (doc ZST-LE-COM-001 Section 25, "Canonical Access Matrix") ──────────
@@ -195,7 +205,8 @@ def _grants(**allowed: bool) -> dict:
 
 
 # Customer-side rows (Organization Owner == org_admin, Billing Admin, Event Producer/
-# Operator == host). Event Organizer/moderator get no commercial authority in the doc.
+# Operator == host). The doc's "Event Organizer" row (the retired moderator role) held no
+# commercial authority, so retiring the role removes no cell from this table.
 # No customer role holds ANY of the five new Zoiko-side actions: a customer never configures
 # the catalog, reserves platform capacity, issues an invoice or runs reconciliation.
 _CUSTOMER_COMMERCIAL = {

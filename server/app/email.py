@@ -3124,7 +3124,7 @@ def _event_created_html(organizer: str, title: str, start: datetime | None, stat
         <tr><td style="padding:10px 0;color:#888;">Status</td>
             <td style="padding:10px 0;text-align:right;">{html.escape(status.title())}</td></tr>
       </table>
-      <p>You can now invite hosts, assign moderators, add speakers, and publish the event
+      <p>You can now invite hosts, add speakers, and publish the event
          when you're ready.</p>
       <p style="text-align:center;margin:32px 0;">
         <a href="{_base_url()}" style="background:#7ac142;color:#fff;text-decoration:none;

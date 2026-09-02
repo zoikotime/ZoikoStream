@@ -711,7 +711,7 @@ def test_exception_authorization_is_split_across_two_authorities():
 
     assert "require_super_admin" in deps("/commercial-exceptions", "POST")
     # No customer-side role may approve a financial override.
-    for role in ("org_admin", "billing_admin", "host", "moderator", "speaker", "viewer"):
+    for role in ("org_admin", "billing_admin", "host", "speaker", "viewer"):
         assert not commercial_can(SimpleNamespace(role=role, staff_commercial_role=None), "write_off")
     # Nor may non-finance Zoiko staff.
     for staff in ("sales", "live_ops", "support", "security"):

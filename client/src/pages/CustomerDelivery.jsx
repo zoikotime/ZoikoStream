@@ -142,7 +142,14 @@ function EventReportView({ data }) {
       </h2>
       <div className="mt-2 space-y-1.5 text-sm text-slate-600 dark:text-slate-300">
         <p>Host: {operations.hosts?.length ? operations.hosts.join(", ") : "—"}</p>
-        <p>Moderators: {operations.moderators?.length ? operations.moderators.join(", ") : "—"}</p>
+        {/* Only rendered when the report actually names moderators. The role is retired, so
+            no event run after the retirement can have any — but a report generated for an
+            event that DID is a compliance record of who held console access, and dropping the
+            line would under-report it. Conditional rather than "—": a row that is empty for
+            every current event is noise on a customer-facing page. */}
+        {operations.moderators?.length ? (
+          <p>Moderators: {operations.moderators.join(", ")}</p>
+        ) : null}
       </div>
 
       {(r.recordings || []).length > 0 && (

@@ -4,7 +4,7 @@ management and analytics.
 This module EXTENDS services/moderation.py rather than standing beside it: its actions are
 registered into the same dispatcher (one socket, one auth check, one audit path) and its
 snapshot contribution is registered as a snapshot extra. Nothing here duplicates the
-moderator console's chat/Q&A/poll/announcement logic — the host console reuses it.
+moderation module's chat/Q&A/poll/announcement logic — the host console reuses it.
 
 Import direction is one-way (broadcast -> moderation) to keep it acyclic; routers/live.py
 imports this module, which is what performs the registration.
@@ -193,7 +193,7 @@ def recording_out(r: LiveRecording) -> dict:
 
 def record_egress_result(egress_info) -> dict | None:
     """Called from the egress_ended webhook — no Ctx here, this is LiveKit talking to us
-    server-to-server, not a signed-in moderator. Finds the LiveRecording row by egress_id
+    server-to-server, not a signed-in operator. Finds the LiveRecording row by egress_id
     and writes back what actually happened: real size, final status, any error LiveKit
     reported. file_url is NOT touched — it already holds the object key we told LiveKit to
     write to (see _recording_start), which is what services.livekit.signed_url() needs;
@@ -1020,8 +1020,12 @@ async def _stage_mute_all(ctx, payload):
     LiveKit confirmed; the rest are logged and counted separately in the activity note so a
     host isn't left thinking the whole room went quiet when part of it didn't."""
     people = await bus.presence_all(ctx.event_id)
+    # "Mute all except staff." Presence labels every staff connection "host" now that the
+    # moderator role is retired (routers/live.py), so that single value IS the staff set —
+    # the old ("host", "moderator") tuple would silently stop excluding anyone the day
+    # presence stopped emitting the second label.
     targets = [p for p in people
-               if p.get("role") not in ("host", "moderator") and not p.get("muted")]
+               if p.get("role") != "host" and not p.get("muted")]
     frames = []
     failed = 0
     for p in targets:
@@ -1079,7 +1083,9 @@ def _split(people: list[dict]) -> dict:
         "waiting": len(people) - len(active),
         "viewers": sum(1 for p in active if (p.get("role") or "viewer") == "viewer"),
         "speakers": sum(1 for p in active if p.get("role") == "speaker" or p.get("on_stage")),
-        "moderators": sum(1 for p in active if p.get("role") == "moderator"),
+        # "moderators" used to be counted here. The role was retired and routers/live.py now
+        # labels every staff connection "host", so the count could only ever have been 0 —
+        # a permanently-zero readout in the console header is worse than no readout.
         "hosts": sum(1 for p in active if p.get("role") == "host"),
         "hands": sum(1 for p in active if p.get("hand")),
         "poor_connections": sum(1 for p in active if p.get("quality") in ("poor", "lost")),
@@ -1395,8 +1401,10 @@ ACTIONS = {
     "stage.mute_all": _stage_mute_all,
 }
 
-# Broadcast + recording control is host-only. Stage controls stay available to moderators
-# (they already have participant.* powers, and muting the room is audience management).
+# Broadcast + recording control is host-only. Stage controls deliberately stay on the
+# default can_moderate gate instead (whoever runs the audience already has participant.*
+# powers, and muting the room is audience management) — which is also what keeps a legacy
+# moderator assignment able to do its job without reaching the controls that end a stream.
 HOST_ONLY = {a for a in ACTIONS if a.startswith(("broadcast.", "recording."))}
 
 mod.ACTIONS.update(ACTIONS)

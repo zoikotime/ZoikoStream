@@ -6,7 +6,7 @@ ONE logical bus per event. Every message is an envelope:
 
 `channel` is the spec's channel taxonomy — moderator | chat | participants | poll |
 qa | announcement | activity | presence. They are *logical* channels multiplexed
-over a single WebSocket per client: seven sockets per moderator would multiply
+over a single WebSocket per client: seven sockets per operator would multiply
 connections and reconnect logic 7x and buy nothing, since every panel of the
 console is open at once anyway.
 
@@ -31,9 +31,11 @@ from ..config import settings
 
 log = logging.getLogger(__name__)
 
-# Logical channels. "moderator" is the PRIVATE per-socket channel (snapshot, pong, error)
-# — it predates the host console and keeps its name so the moderator client stays working;
-# read it as "this connection's own control channel", not "moderators only".
+# Logical channels. "moderator" is the PRIVATE per-socket channel (snapshot, pong, error).
+# The NAME is wire protocol, not a role: the client matches on it verbatim (useLiveEvent.js,
+# EventWatch.jsx, Backstage.jsx), so renaming it would be a breaking change to every live
+# surface at once for no behavioural gain — and it long outlived the role it was named after,
+# which is now retired. Read it as "this connection's own control channel".
 CHANNELS = (
     "moderator", "chat", "participants", "poll", "qa", "announcement", "activity", "presence",
     # host console additions

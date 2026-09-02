@@ -70,7 +70,7 @@ def test_parse_dt():
 
 def test_viewer_actions_are_the_safe_subset():
     """A viewer may participate, never moderate. This is the guard the socket relies on,
-    so a new destructive action added to ACTIONS is moderator-only by default."""
+    so a new destructive action added to ACTIONS requires can_moderate by default."""
     for action in ("chat.delete", "chat.bulk", "participant.ban", "participant.remove",
                    "poll.create", "poll.close", "announce.send", "qa.dismiss"):
         assert action in m.ACTIONS, action
@@ -182,7 +182,10 @@ def test_socket_loop():
 
             join = ws.receive_json()
             assert join["type"] == "participant.join"
-            assert join["data"]["name"] == "Ava Chen" and join["data"]["role"] == "moderator"
+            # "host", not "moderator": the role was retired and routers/live.py now labels
+            # every staff connection "host" in presence (its authority is still the separate
+            # can_host flag, which this connection does not need for a snapshot).
+            assert join["data"]["name"] == "Ava Chen" and join["data"]["role"] == "host"
 
             ws.send_json({"action": "ping", "t": 12345})
             pong = ws.receive_json()

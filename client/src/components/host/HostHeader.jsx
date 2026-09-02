@@ -114,6 +114,10 @@ export default function HostHeader({
   latency,
   attempt = 0,
   canHost = false,
+  // Whether the opening snapshot has arrived (hooks/useLiveEvent state.ready). Defaults true
+  // so any caller that does not pass it keeps the old behaviour rather than reading as
+  // permanently connecting.
+  ready = true,
   recovering = false,
   media,                 // { actual } from useMediaPreview — measured capture, may be null
 }) {
@@ -167,7 +171,13 @@ export default function HostHeader({
           {event?.name || "Live event"}
         </p>
         <p className={cx("truncate text-[11px] leading-tight", STUDIO.muted)}>
-          {event?.host ? `Hosted by ${event.host}` : "No host assigned"}
+          {/* "No host assigned" is a statement about the EVENT; it must not be made from a
+              console that has not been told anything yet. Before the opening snapshot lands
+              (state.ready false — which is what a failing control socket looks like, see the
+              "Offline" connection badge) event is null, and this line was asserting that a
+              correctly-assigned host was not assigned at all. */}
+          {!ready ? "Connecting to the studio…"
+            : event?.host ? `Hosted by ${event.host}` : "No host assigned"}
         </p>
       </div>
 
@@ -221,7 +231,14 @@ export default function HostHeader({
           );
         })()}
 
-        {!canHost && (
+        {/* Same rule: canHost defaults to false in the reducer's EMPTY state, so this badge
+            accused a real host of not being one whenever the snapshot had not arrived.
+            Authorisation is unchanged — only the claim made while it is still UNKNOWN. */}
+        {!ready ? (
+          <Badge tone="warning" dot title="Waiting for the studio connection before broadcast controls unlock">
+            <FiShield aria-hidden="true" /> Connecting…
+          </Badge>
+        ) : !canHost && (
           <Badge tone="warning" dot title="You aren't assigned as host, so broadcast controls are disabled">
             <FiShield aria-hidden="true" /> View only
           </Badge>
@@ -252,17 +269,22 @@ export default function HostHeader({
           </Readout>
         </Cluster>
 
-        {/* Room — who is in it. Roster split is stage / moderators / total connected. */}
+        {/* Room — who is in it. Roster split is stage / staff / total connected.
+            The middle figure used to be `a.moderators`. That counter is gone from the
+            server (services/broadcast._split) along with the role: presence now labels
+            every staff connection "host", so a moderator count could only ever have read 0
+            and a permanently-zero readout in a control room is a lie, not a metric. It
+            shows `a.hosts` instead — the same slot, a number that is actually true. */}
         <Cluster className="hidden md:flex">
           <Readout
             icon={FiUsers}
-            srLabel="On stage, moderators, total connected"
-            title="On stage · moderators · total connected"
+            srLabel="On stage, staff, total connected"
+            title="On stage · staff · total connected"
           >
             <span className={valSm}>
               <span className="text-green-600 dark:text-green-400">{a.speakers ?? 0}</span>
               <span className={STUDIO.faint}> / </span>
-              <span className="text-blue-600 dark:text-blue-400">{a.moderators ?? 0}</span>
+              <span className="text-blue-600 dark:text-blue-400">{a.hosts ?? 0}</span>
               <span className={STUDIO.faint}> / </span>
               <span className={STUDIO.heading}>{a.participants ?? 0}</span>
             </span>

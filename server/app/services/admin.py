@@ -151,21 +151,17 @@ ROLE_META = {
         "Manage organization profile, branding, domain and settings",
         "Invite, edit and remove members",
         "Create, edit and delete events",
-        "Assign hosts, moderators and speakers",
+        "Assign hosts and speakers",
         "Host and moderate any event in the organization",
     ]),
-    "host": ("Host", "Runs the broadcast for events they are assigned to.", [
+    "host": ("Host", "Runs the broadcast AND the audience for events they are assigned to.", [
         "Go live, pause, resume and end the broadcast",
         "Start, pause and stop recording",
         "Control stage, waiting room and live settings",
         "Edit events they own or are assigned to host",
-        "Full moderation on their assigned events",
-    ]),
-    "moderator": ("Moderator", "Runs the audience for events they are assigned to.", [
         "Approve, pin, delete and annotate chat",
         "Manage Q&A, polls and announcements",
         "Mute, timeout, stage, ban and remove participants",
-        "Cannot end the broadcast or stop the recording",
     ]),
     "speaker": ("Speaker", "Presents on stage when invited by a host.", [
         "Publish audio and video once granted the stage",
@@ -345,7 +341,8 @@ def event_detail(db: Session, event_id) -> dict | None:
             "enforced": recording.enforced, "size_bytes": recording.size_bytes,
         },
         "hosts": [_member_out(u) for u in event_crud.list_assignees(db, event_id, "host")],
-        "moderators": [_member_out(u) for u in event_crud.list_assignees(db, event_id, "moderator")],
+        # No "moderators" key: the role is retired and nothing assigns it. Grandfathered rows
+        # are surfaced by retire_moderator_role.py, not by this console read.
         "speakers": [_member_out(u) for u in event_crud.list_assignees(db, event_id, "speaker")],
     }
 

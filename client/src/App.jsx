@@ -1,9 +1,10 @@
 import { lazy } from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { roleHome } from "./auth/roleHome";
 import ProtectedRoute from "./components/ProtectedRoute";
+import { PageSpinner } from "./ui/Spinner";
 import RoleRoute from "./components/RoleRoute";
 import MainLayout from "./layouts/MainLayout";
 import OrganizationLayout from "./layouts/OrganizationLayout";
@@ -27,7 +28,6 @@ import EventRegistration from "./pages/EventRegistration";
 import CustomerDelivery from "./pages/CustomerDelivery";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
-import ModeratorDashboard from "./pages/moderator/Dashboard";
 import SpeakerBackstage from "./pages/speaker/Backstage";
 import Landing from "./pages/Landing";
 import Contact from "./pages/Contact";
@@ -87,7 +87,11 @@ function Placeholder({ title }) {
 // Roles without an app home (viewers) fall through to the public homepage.
 function RootRedirect() {
   const { user, loading } = useAuth();
-  if (loading) return null;
+  // `loading` is now real (AuthContext validates the token against /auth/me), so this window
+  // is a live moment rather than a never-taken branch. A spinner, not null: deciding WHERE to
+  // send someone depends on their server-confirmed role, and a blank screen while that
+  // resolves reads as a broken page.
+  if (loading) return <PageSpinner />;
   if (!user) return <Navigate to="/login" replace />;
   return <Navigate to={roleHome(user.role) || "/"} replace />;
 }
@@ -96,10 +100,20 @@ function RootRedirect() {
 // (viewers); logged-in staff/admins go to their dashboard.
 function LandingOrDashboard() {
   const { user, loading } = useAuth();
-  if (loading) return null;
+  // Only ever true when a token exists (see AuthContext) — a signed-out visitor renders the
+  // landing page on the first paint with no spinner and no flash.
+  if (loading) return <PageSpinner />;
   const home = user && roleHome(user.role);
   if (home) return <Navigate to={home} replace />;
   return <Landing />;
+}
+
+// The retired moderator console's URL. Forwards to the host console, carrying ?event=<id>
+// through so an old assignment email still opens the RIGHT event rather than the bare
+// dashboard. `replace` so the dead URL doesn't sit in the browser's back history.
+function LegacyModeratorRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={`/host/dashboard${search}`} replace />;
 }
 
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
@@ -148,18 +162,43 @@ export default function App() {
             {/* Viewer Portal — attendee watch page from an invite link (public) */}
             <Route path="/events/:eventId/watch" element={<EventWatch />} />
 
-            {/* Host broadcasting studio + moderator console — standalone full-screen pages
-                (own header/sidebar). Unauthenticated -> /login; wrong role -> their own home.
-                Assignment to a *specific* event is still enforced server-side (canHost/
-                canModerate from resolve_ctx) — this only stops an anonymous or wrong-role
-                visitor from ever loading the console in the first place. */}
+            {/* Host broadcasting studio — standalone full-screen page (own header/sidebar).
+                Unauthenticated -> /login; wrong role -> their own home. Assignment to a
+                *specific* event is still enforced server-side (canHost/canModerate from
+                resolve_ctx) — this only stops an anonymous or wrong-role visitor from ever
+                loading the console in the first place.
+
+                The separate moderator console that used to live here is gone: it was never
+                more than a second layout over the SAME hook and the SAME
+                components/moderation/* widgets the host console already composes as tabs
+                (see components/host/HostPanel.jsx), so removing it took no capability with
+                it.
+
+                "moderator" stays in this allow-list on purpose, as a TRANSITIONAL entry.
+                It is not a capability — this guard only decides who may load the page shell;
+                every control inside is gated on canModerate/canHost from the server's
+                snapshot, so a legacy moderator sees exactly what resolve_ctx says they may
+                do and no more. It is here because roleHome() maps the retired role to this
+                same path: dropping it from the list while roleHome points here would make
+                RoleRoute redirect the role to a route that rejects it, i.e. an infinite
+                redirect loop. Remove BOTH together once the backend's
+                retire_moderator_role.py has run everywhere and no `users.role` row carries
+                the value. */}
             <Route element={<RoleRoute allow={["host", "moderator", "org_admin", "super_admin"]} />}>
               <Route path="/host/dashboard" element={<HostDashboard />} />
-              <Route path="/moderator/dashboard" element={<ModeratorDashboard />} />
             </Route>
 
-            {/* Contributor (speaker) backstage — same standalone-page pattern as host/
-                moderator above. Assignment to a *specific* event as a speaker is enforced
+            {/* Compatibility redirect, not a route: assignment-notification emails sent
+                before the role was retired still point at /moderator/dashboard?event=<id>,
+                and so do bookmarks. Dropping the path outright would send those to the
+                catch-all and lose the event id, so this forwards to the host console with
+                the query string intact. Deliberately OUTSIDE the RoleRoute above — an
+                unauthenticated visitor should be redirected and then asked to sign in by
+                that route, which preserves the destination through login (see RoleRoute). */}
+            <Route path="/moderator/dashboard" element={<LegacyModeratorRedirect />} />
+
+            {/* Contributor (speaker) backstage — same standalone-page pattern as the host
+                console above. Assignment to a *specific* event as a speaker is enforced
                 server-side (can_contribute from resolve_ctx); this route gate only stops a
                 wrong-role visitor from loading the page shell. */}
             <Route element={<RoleRoute allow={["speaker", "org_admin", "super_admin"]} />}>

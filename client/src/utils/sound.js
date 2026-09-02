@@ -1,10 +1,10 @@
 // client/src/utils/sound.js
 // A tiny notification chime, synthesized with the Web Audio API — no audio file to bundle
 // or fetch, so it plays instantly and works offline. Used to alert:
-//   - the host/moderator console (hooks/useLiveEvent.js) whenever a VIEWER does something —
+//   - the host console (hooks/useLiveEvent.js) whenever a VIEWER does something —
 //     sends a chat message, asks a Q&A question, or votes on a poll — so a host mid-
 //     broadcast doesn't have to keep every tab open to notice audience activity.
-//   - the viewer watch page (pages/watch/EventWatch.jsx) whenever the HOST/moderator does
+//   - the viewer watch page (pages/watch/EventWatch.jsx) whenever an OPERATOR does
 //     something — sends a chat message, starts a poll, answers a question, or posts an
 //     announcement — so a viewer with the tab in the background still notices.
 // Same chime for both directions; call sites decide what to notify.

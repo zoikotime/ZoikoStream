@@ -22,6 +22,42 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Broadcast when a request proves the stored session is dead. This module cannot touch React
+// state, so AuthContext listens for this and drops `user`, which is what makes the route
+// guards react immediately rather than on the next page load.
+export const AUTH_EXPIRED_EVENT = "zoiko:auth-expired";
+
+// Endpoints where a 401 is the ANSWER, not a verdict on the caller's session: signing in with
+// the wrong password, redeeming a spent verification/reset challenge. Clearing the session on
+// those would be wrong in the one place a user is actively trying to establish one.
+const AUTH_ENDPOINT = /^\/auth\/(login|register|forgot-password|reset-password|verify-email|resend-verification|recover)/;
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const { status, config } = { status: error?.response?.status, config: error?.config };
+    // Three conditions, all required:
+    //   • 401 specifically. A 403 means "authenticated but not allowed" — a real answer about
+    //     permissions, and logging someone out for hitting a page above their role would be a
+    //     bug, not security.
+    //   • The request actually CARRIED a token. Without this, a 401 from a public,
+    //     token-less call (a bad delivery/registration link) would clear a perfectly good
+    //     session belonging to whoever happened to be signed in.
+    //   • Not one of the sign-in endpoints above.
+    const sentToken = !!config?.headers?.Authorization;
+    const path = config?.url || "";
+    if (status === 401 && sentToken && !AUTH_ENDPOINT.test(path)) {
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+      // No retry and no redirect — this only clears state and announces it. A retry would
+      // fail identically (nothing refreshes the token), and looping is exactly the failure
+      // mode a response interceptor invites; the route guards own where to send the user.
+      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+    }
+    return Promise.reject(error);
+  }
+);
+
 export default api;
 
 // Turn an axios error into a readable string for toasts. Must always return a

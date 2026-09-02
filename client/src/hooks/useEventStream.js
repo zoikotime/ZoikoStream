@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { API_BASE } from "../api";
 
 // ONE WebSocket to a live event, carrying every logical channel (chat, participants,
-// polls, q&a, announcements, activity, moderator). See server/app/services/bus.py.
+// polls, q&a, announcements, activity, and the per-socket control channel still named
+// "moderator" on the wire). See server/app/services/bus.py.
 //
 //   const { status, latency, send } = useEventStream(eventId, onEnvelope);
 //

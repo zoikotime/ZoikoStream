@@ -14,7 +14,7 @@ const slugify = (s) =>
   s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 // New organizations only. The creator automatically becomes the Organization Admin —
-// no role/username field. Hosts/Moderators/Viewers never land here (they're invited).
+// no role/username field. Hosts/Speakers/Viewers never land here (they're invited).
 export default function CreateOrganization() {
   // ZST-EC-001 IDN-001: registration no longer returns a session. The API answers
   // 202 EMAIL_VERIFICATION_REQUIRED with a masked address, and the account stays

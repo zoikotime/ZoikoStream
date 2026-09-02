@@ -52,7 +52,6 @@ from ..models import (
 )
 from . import admin as admin_svc
 from . import ops as ops_svc
-from .broadcast import engagement_score
 
 # Ranges the overview toolbar offers. Mirrors the console's vocabulary.
 RANGES = {"1h": timedelta(hours=1), "24h": timedelta(hours=24),
@@ -327,6 +326,7 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
         buckets[label]["watch_hours"] += per_event[e.id]["watch_hours"]
 
     def event_engagement(info: dict) -> int:
+        from .broadcast import engagement_score
         return engagement_score(
             {"messages": info["messages"], "questions": info["questions"],
              "poll_votes": 0, "reactions": info["reactions"]}, info["peak"])
@@ -834,10 +834,15 @@ def upcoming_events(db: Session, org_id, include_test: bool = True, limit: int =
     return mine
 
 
-# The gates that represent readiness WORK — somebody has to roster a host, roster a
-# moderator, turn recording on. The others (title, schedule, account standing, redundancy)
-# pass on their own, so they say nothing about whether readiness has been started.
-_WORK_GATES = ("host", "moderator", "recording")
+# The gates that represent readiness WORK — somebody has to roster a host and turn
+# recording on. The others (title, schedule, account standing, redundancy) pass on their
+# own, so they say nothing about whether readiness has been started.
+#
+# "moderator" was dropped alongside the gate itself (services/ops._GATES). Leaving it here
+# would have been worse than cosmetic: _readiness_state below compares done-work against
+# total-work, so a gate that can never pass would have pinned every fully-prepared event at
+# "in_progress" and stopped it ever reporting "passed".
+_WORK_GATES = ("host", "recording")
 
 
 def _readiness_state(ev: dict) -> str:
@@ -891,6 +896,10 @@ def console_state(db: Session, org: Organization, user: User) -> dict:
 
 
 def _role_label(role: str | None) -> str:
+    """Display label for a platform role. "moderator" is kept here deliberately: the role is
+    retired and no new row can carry it, but a database written before the migration still
+    can (models/user.LEGACY_USER_ROLES), and labelling such a person a generic "Member"
+    would misreport who they are. Display only — grants nothing."""
     return {"org_admin": "Organization Owner", "host": "Host", "moderator": "Moderator",
             "speaker": "Speaker", "viewer": "Viewer",
             "super_admin": "Super Admin"}.get(role or "", "Member")

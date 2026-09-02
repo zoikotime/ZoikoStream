@@ -3,12 +3,12 @@ one dispatcher every realtime action goes through.
 
 Why one dispatcher instead of ~30 REST endpoints: the console is a socket-first surface.
 Actions arriving on the same socket that carries the updates means one auth check, one
-permission table, one audit path and one broadcast path — and a moderator action shows
+permission table, one audit path and one broadcast path — and a moderation action shows
 up in every other console in a single round trip.
 
 Threading note: the app uses SYNC SQLAlchemy. Calling it directly from an async socket
 handler would block the event loop for every other connection, which is exactly what
-breaks at the 100-moderator target. So all DB work goes through `tx()`, which runs a
+breaks at the 100-operator target. So all DB work goes through `tx()`, which runs a
 short-lived Session in a worker thread. Short-lived also matters against the Supabase
 pooler: a socket open for two hours must not pin a pooled connection for two hours.
 """
@@ -27,6 +27,7 @@ from sqlalchemy import delete, select
 from ..crud.admin import create_audit_log
 from ..db import SessionLocal
 from ..models import (
+    LEGACY_ASSIGNMENT_ROLES,
     Event,
     EventAssignment,
     EventFeedback,
@@ -43,14 +44,14 @@ from ..models import (
 from . import bus, livekit
 
 # How much history a reconnecting console loads. ponytail: a fixed window, not paging —
-# a moderator needs the recent room, and the full chat log is an export concern.
+# an operator needs the recent room, and the full chat log is an export concern.
 HISTORY_LIMIT = 200
 DUPLICATE_WINDOW = timedelta(minutes=2)
 
 
 # ── automatic content detection ───────────────────────────────────────────────
 # ponytail: heuristics, not ML. They only FLAG (never auto-delete), so a false positive
-# costs a moderator one glance. Swap in a real classifier behind flag_text() if that stops
+# costs an operator one glance. Swap in a real classifier behind flag_text() if that stops
 # being good enough — nothing else needs to change.
 
 _PROFANITY = frozenset(
@@ -109,11 +110,13 @@ class Ctx:
     identity: str             # LiveKit identity; matches the presence record key
     role: str                 # platform role
     can_moderate: bool
-    # Broadcast control (go live, end, record, emergency stop) is HOST-only. A moderator
-    # runs the audience; they must not be able to end the stream.
+    # Broadcast control (go live, end, record, emergency stop) is HOST-only. Kept as a
+    # SEPARATE flag from can_moderate even though an assigned host now holds both: it is
+    # what stops a legacy moderator assignment (see models/event.LEGACY_ASSIGNMENT_ROLES)
+    # from ever reaching the controls that end a live stream.
     can_host: bool = False
     # An assigned speaker's backstage privileges (contributor.* actions, join-window gate
-    # in routers/live.py). Independent of can_moderate — a speaker is not a moderator.
+    # in routers/live.py). Independent of can_moderate — a speaker runs no audience.
     can_contribute: bool = False
 
     @property
@@ -134,13 +137,13 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
         if ev is None:
             return None
 
-        # Org admins and above moderate any event in their org. A moderator/host/speaker
-        # must be ASSIGNED to this specific event — an org's moderator is not automatically
-        # a moderator of every event in it. The assignment check runs for every non-admin
-        # platform role (not just "moderator"/"host"): EventAssignment.role is independent
-        # of User.role — an org admin can assign anyone as host/moderator/speaker regardless
-        # of their platform role — so gating the query on platform role left a real "speaker"
-        # user unable to pick up their own EventAssignment(role="speaker") row at all.
+        # Org admins and above moderate any event in their org. A host/speaker must be
+        # ASSIGNED to this specific event — an org's host is not automatically the host of
+        # every event in it. The assignment check runs for every non-admin platform role
+        # (not just "host"): EventAssignment.role is independent of User.role — an org admin
+        # can assign anyone as host/speaker regardless of their platform role — so gating the
+        # query on platform role left a real "speaker" user unable to pick up their own
+        # EventAssignment(role="speaker") row at all.
         can = can_host = can_contribute = False
         if user.role in ("org_admin", "super_admin"):
             can = can_host = True
@@ -151,9 +154,18 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
                     EventAssignment.user_id == user.id,
                 )
             ).all())
-            can = bool(roles & {"moderator", "host"})
+            # An assigned host has ALWAYS satisfied both of these together, which is why
+            # retiring the moderator role granted host nothing it did not already have.
+            #
+            # LEGACY_ASSIGNMENT_ROLES is the grandfather clause described in models/event.py:
+            # rows written before the role was retired, kept readable here so audience
+            # management is not silently revoked mid-flight on events that are already
+            # published. Read for can_moderate ONLY — deliberately absent from can_host
+            # below, because broadcast control is host-only and many of these rows belong to
+            # users whose platform role is speaker. Nothing writes this value any more.
+            can = bool(roles & ({"host"} | set(LEGACY_ASSIGNMENT_ROLES)))
             # Only an assigned HOST gets broadcast control — being the org's host role is
-            # not enough, and a moderator assignment never grants it.
+            # not enough, and a legacy moderator assignment never grants it.
             can_host = "host" in roles
             can_contribute = "speaker" in roles
 
@@ -253,7 +265,7 @@ def _iso(dt):
 def _actor_role(ctx: "Ctx") -> str:
     """Two-bucket role label for live-event notification routing (see useLiveEvent.js and
     EventWatch.jsx on the client): "host" for anyone who can moderate this event (host,
-    moderator, org_admin, super_admin), "viewer" for everyone else — an anonymous guest, a
+    org_admin, super_admin), "viewer" for everyone else — an anonymous guest, a
     self-registered attendee, or a logged-in member with no moderation rights on THIS
     event. This is deliberately coarser than ctx.role (which carries the platform role
     verbatim): the client only ever needs to know which side of the console/watch-page
@@ -357,12 +369,12 @@ def _row(db, model, ctx: Ctx, row_id):
 async def feed_activity(event_id: str, kind: str, text: str, *, actor: str = "LiveKit",
                         persist: bool = False) -> None:
     """Push one line onto the activity feed for an event we have no Ctx for (LiveKit
-    webhooks: the actor is the media server, not a signed-in moderator). `record()` is the
-    Ctx-bound equivalent used by moderator actions.
+    webhooks: the actor is the media server, not a signed-in operator). `record()` is the
+    Ctx-bound equivalent used by moderation actions.
 
     ponytail: joins/leaves are NOT persisted (persist=False). At the 10k-viewer target that
     would be a write storm for information the presence snapshot already answers ("who is
-    here now"). Room/recording milestones ARE persisted — they're the timeline a moderator
+    here now"). Room/recording milestones ARE persisted — they're the timeline an operator
     scrolls back through.
     """
     if persist:
@@ -395,7 +407,7 @@ def event_id_from_room(name: str | None) -> str | None:
 def record(db, ctx: Ctx, kind: str, text: str, *, audit: str | None = None,
            target_type: str | None = None, target_id=None, meta: dict | None = None) -> dict:
     """Append to the console timeline; also write the compliance audit row when `audit`
-    is given (every moderator action passes one). Single writer for both."""
+    is given (every moderation action passes one). Single writer for both."""
     row = LiveActivity(event_id=ctx.event_id, org_id=ctx.org_id, kind=kind, text=text,
                        actor_name=ctx.name, meta=meta)
     db.add(row)
@@ -1097,29 +1109,39 @@ def _user_id_from_identity(identity: str) -> uuid.UUID | None:
         return None
 
 
+# Every standing elevated grant this event can hold for one person, including the retired
+# moderator value. Used by BOTH helpers below: a promotion replaces whatever was there and a
+# demotion clears it, so neither can leave a legacy moderator row behind as a hidden second
+# grant that survives the action the operator just took. This is the one place that still
+# WRITES against the legacy value — and it only ever deletes it.
+_ELEVATED_ASSIGNMENT_ROLES = ("host", *LEGACY_ASSIGNMENT_ROLES)
+
+
 def _grant_event_role(db, event_id: uuid.UUID, user_id: uuid.UUID, role: str) -> None:
-    """Persist a moderator/host promotion. resolve_ctx() (this module) decides can_moderate
-    / can_host by reading event_assignments — NOT the live presence "role" label — so
-    writing only the presence patch would make the button cosmetic: the badge would say
-    "moderator" but the person still couldn't moderate anything, and the label itself would
-    disappear the moment they reconnect. This is what actually grants the access the
-    console claims to grant. Replaces any prior moderator/host grant for this person on
-    this event, since a participant holds one standing elevated role at a time."""
+    """Persist a host promotion. resolve_ctx() (this module) decides can_moderate/can_host by
+    reading event_assignments — NOT the live presence "role" label — so writing only the
+    presence patch would make the button cosmetic: the badge would say "host" but the person
+    still couldn't do anything, and the label itself would disappear the moment they
+    reconnect. This is what actually grants the access the console claims to grant. Replaces
+    any prior elevated grant for this person on this event (a legacy moderator row included),
+    since a participant holds one standing elevated role at a time."""
     db.execute(delete(EventAssignment).where(
         EventAssignment.event_id == event_id,
         EventAssignment.user_id == user_id,
-        EventAssignment.role.in_(("moderator", "host")),
+        EventAssignment.role.in_(_ELEVATED_ASSIGNMENT_ROLES),
     ))
     db.add(EventAssignment(event_id=event_id, user_id=user_id, role=role))
 
 
 def _revoke_event_role(db, event_id: uuid.UUID, user_id: uuid.UUID) -> None:
-    """Demote: drop any standing moderator/host grant so a demoted participant can't just
-    reconnect (or open a second tab) and keep the access they were just stripped of."""
+    """Demote: drop any standing elevated grant so a demoted participant can't just
+    reconnect (or open a second tab) and keep the access they were just stripped of. Clears
+    a legacy moderator row too — otherwise demoting someone who held one would appear to
+    work and then silently restore their audience-management rights on reconnect."""
     db.execute(delete(EventAssignment).where(
         EventAssignment.event_id == event_id,
         EventAssignment.user_id == user_id,
-        EventAssignment.role.in_(("moderator", "host")),
+        EventAssignment.role.in_(_ELEVATED_ASSIGNMENT_ROLES),
     ))
 
 
@@ -1147,29 +1169,33 @@ async def _participant_action(ctx, payload, op: str):
         enforced = await livekit.set_stage(ctx.room, identity, on)
         text = "{name} was " + ("invited to the stage" if on else "removed from the stage")
     elif op == "role":
-        role = payload.get("role") if payload.get("role") in ("host", "speaker", "moderator", "viewer") else "viewer"
+        # "moderator" is deliberately NOT accepted here any more — this was the only socket
+        # path that could mint a new moderator assignment. An unknown/retired value falls
+        # through to "viewer", the same way it always has for any other junk input, so an
+        # old client still sending role="moderator" DEMOTES rather than silently promoting.
+        role = payload.get("role") if payload.get("role") in ("host", "speaker", "viewer") else "viewer"
 
         # Granting "host" hands over broadcast control (go live / end / record / emergency
-        # stop) — a moderator running the audience must not be able to grant that, only the
-        # host themself can. Promoting to "moderator" is a normal moderation action and
-        # stays available to any moderator, same as every other action in this table.
+        # stop), so only someone who already holds it can pass it on. This check is what
+        # stops a legacy moderator assignment (can_moderate without can_host) from promoting
+        # itself — or anyone else — into broadcast control.
         if role == "host" and not ctx.can_host:
             return "Only the event host can grant host access"
 
         target_user_id = _user_id_from_identity(identity)
-        if role in ("host", "moderator"):
+        if role == "host":
             if target_user_id is None:
                 return "Only a signed-in participant can be promoted — this person joined as a guest"
             await tx(lambda db: _grant_event_role(db, ctx.event_id, target_user_id, role))
         elif target_user_id is not None:
-            # Demoted to viewer/speaker: revoke any standing moderator/host grant they held.
+            # Demoted to viewer/speaker: revoke any standing elevated grant they held.
             await tx(lambda db: _revoke_event_role(db, ctx.event_id, target_user_id))
 
         # "speaker" IS the stage role — becoming one has to be a real LiveKit publish
         # grant (same call participant.stage makes), not just a badge that says
         # "speaker" while the person still has no mic. Symmetrically, moving OFF speaker
-        # revokes it. Promoting/demoting moderator or host doesn't touch stage rights —
-        # those are about the console, not the room.
+        # revokes it. Promoting/demoting host doesn't touch stage rights — that's about
+        # the console, not the room.
         if role == "speaker":
             enforced = await livekit.set_stage(ctx.room, identity, True)
             patch = {"role": role, "on_stage": True}
@@ -1237,7 +1263,7 @@ async def _feedback_submit(ctx, payload):
     page averages to show how the audience felt about the event, not how the host felt
     running it. The host console no longer shows the modal at all (see
     pages/host/Dashboard.jsx), but this guard keeps a stray/legacy `feedback.submit` from
-    a host or moderator connection from landing in that same average.
+    any console connection from landing in that same average.
 
     Both fields are optional on their own (a submitter can rate without commenting, or
     comment without rating), but a submission with neither is a no-op, not an empty row —
@@ -1310,9 +1336,11 @@ ACTIONS: dict[str, callable] = {
 }
 
 # Broadcast-control actions, filled in by services/broadcast.py at import (which is
-# imported by routers/live.py). They live in the same registry so the host and moderator
-# consoles share ONE socket, one permission gate and one audit path — but they are gated
-# on can_host, so a moderator cannot end the stream or stop the recording.
+# imported by routers/live.py). They live in the same registry so the console and the watch
+# page share ONE socket, one permission gate and one audit path — but they are gated on
+# can_host specifically, not on can_moderate, so a connection that can run the audience
+# without being the assigned host (a legacy moderator assignment — see
+# models/event.LEGACY_ASSIGNMENT_ROLES) cannot end the stream or stop the recording.
 HOST_ONLY: set[str] = set()
 
 
@@ -1329,7 +1357,7 @@ async def dispatch(ctx: Ctx, action: str, payload: dict) -> str | None:
         if not ctx.can_host:
             return "Only the event host can control the broadcast"
     elif action not in VIEWER_ACTIONS and not ctx.can_moderate:
-        return "You are not a moderator of this event"
+        return "You are not authorized to run this event"
 
     result = await handler(ctx, payload)
     if isinstance(result, str):
@@ -1353,7 +1381,7 @@ def _due(db) -> list[tuple[str, str, dict]]:
                                                LivePoll.scheduled_at <= now)).all():
         p.status, p.launched_at = "live", now
         # No Ctx here — this is a scheduler tick, not a live socket action — but a
-        # scheduled poll going live is conceptually a host/moderator action (they're the
+        # scheduled poll going live is conceptually a host action (they're the
         # only ones who can schedule one), so it's labeled "host" for the same viewer-side
         # "poll.new"-style alert a manually-launched poll gets.
         out.append((str(p.event_id), "poll.update", poll_out(p, actor_role="host")))

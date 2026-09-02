@@ -204,7 +204,6 @@ export default function AdminEventDetail() {
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <PeopleList title="Hosts" people={ev.hosts} />
-        <PeopleList title="Moderators" people={ev.moderators} />
         <PeopleList title="Speakers" people={ev.speakers} />
       </div>
 

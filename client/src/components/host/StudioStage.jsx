@@ -42,7 +42,7 @@ function RecordingTimer({ recording }) {
 }
 
 // Shared go-live countdown: every console counts down to ONE server deadline, so the host
-// and the moderators see the same number.
+// and every other operator sees the same number.
 function Countdown({ until, onDone }) {
   const target = new Date(until).getTime();
   const [left, setLeft] = useState(() => Math.max(0, Math.ceil((target - Date.now()) / 1000)));
@@ -78,6 +78,8 @@ function Countdown({ until, onDone }) {
 // unbounded time after a real disconnect — see services/broadcast.py mark_degraded).
 const STATE_CHIP = {
   live: "bg-rose-600 text-white",
+  // Amber, not the on-air red: the session is live but no media is reaching viewers yet.
+  going_live: "bg-amber-500 text-white",
   reconnecting: "bg-amber-500 text-white",
   degraded: "bg-amber-600 text-white",
   paused: "bg-amber-500 text-white",
@@ -85,7 +87,7 @@ const STATE_CHIP = {
   preview: "bg-slate-950/70 text-slate-200 ring-1 ring-white/15 backdrop-blur-sm",
 };
 const STATE_LABEL = {
-  live: "On air", reconnecting: "Reconnecting", degraded: "At risk",
+  live: "On air", going_live: "Going live…", reconnecting: "Reconnecting", degraded: "At risk",
   paused: "Paused", ended: "Ended", preview: "Preview",
 };
 
@@ -110,10 +112,26 @@ export default function StudioStage({
   // says "live" when the session is live AND the publisher isn't mid-reconnect AND the
   // backend hasn't confirmed the media dropped — otherwise it downgrades to a state that
   // matches the (already-honest) publish banner lower on the stage.
-  const displayStatus = status === "live"
-    ? (isReconnecting ? "reconnecting" : eventStatus === "degraded" ? "degraded" : "live")
+  // "On air" now requires the PUBLISHER to be up, not just the backend session. Going live
+  // flips broadcast.status to "live" the moment the server accepts it, but LiveKit publishing
+  // completes a beat later — and in that window the chip showed a saturated red ON AIR while
+  // nothing was reaching a single viewer, directly contradicting the honesty banner below it
+  // ("Connecting the publisher — this feed will reach viewers in a moment"). Same applies to
+  // a host who is live with the preview off: no media is going out, so the chip must not
+  // claim otherwise.
+  const backendLive = status === "live";
+  const displayStatus = backendLive
+    ? (isReconnecting ? "reconnecting"
+      : eventStatus === "degraded" ? "degraded"
+        : isPublishing ? "live"
+          : "going_live")
     : status;
-  const live = displayStatus === "live";
+  // Two different questions, deliberately two variables: `live` is "the backend session is
+  // live" (what the publish banner branches on, so it can say "connecting the publisher"
+  // rather than "local preview only"), `onAir` is "media is actually going out" (what the
+  // chip and its pulsing dot claim to the operator).
+  const live = backendLive;
+  const onAir = displayStatus === "live";
   const viewers = analytics?.viewers ?? 0;
 
   // Fullscreen is a CSS state change on the EXISTING monitor node, never a re-parent into a
@@ -212,7 +230,7 @@ export default function StudioStage({
                 STATE_CHIP[displayStatus] || STATE_CHIP.preview
               )}
             >
-              {live && (
+              {onAir && (
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white motion-reduce:animate-none" />
               )}
               {STATE_LABEL[displayStatus] || displayStatus}

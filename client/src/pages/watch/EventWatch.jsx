@@ -51,7 +51,6 @@ function watchToMockEvent(watch) {
     end: "",
     timezone: "UTC",
     host: watch.host_name || watch.organization_name || "Host",
-    moderators: [],
     speakers: [],
     category: watch.category || null,
     endISO: watch.end_time || null, // raw, for the countdown card and the .ics DTEND

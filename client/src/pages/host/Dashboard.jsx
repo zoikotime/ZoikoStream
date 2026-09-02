@@ -2,8 +2,8 @@
 // Host / Producer console — broadcast control room. Route: /host/dashboard (optionally ?event=<id>).
 // Standalone full-screen page (NOT the Organization Dashboard).
 //
-// Live state comes from hooks/useLiveEvent — the same socket and reducer the moderator
-// console uses. Local camera/mic come from hooks/useMediaPreview (native getUserMedia).
+// Live state comes from hooks/useLiveEvent — the same socket and reducer the viewer watch
+// page uses. Local camera/mic come from hooks/useMediaPreview (native getUserMedia).
 //
 // LAYOUT: three fixed bands (header / workspace / control deck) with the workspace split
 // into a scrolling main column and a fixed-width panel rail. Only the main column and the
@@ -29,7 +29,7 @@ import FeatureModal from "../../components/host/FeatureModal";
 import StartMeetingPrompt from "../../components/host/StartMeetingPrompt";
 export default function HostDashboard() {
   const navigate = useNavigate();
-  const { state, resolved, loading, error, status, latency, attempt, send, sendGoLive } = useLiveEvent();
+  const { state, resolved, loading, error, status, closeReason, latency, attempt, send, sendGoLive } = useLiveEvent();
 
   // Local capture state. Deliberately NOT server state: whether this host's camera is on is
   // a property of this machine, not of the broadcast.
@@ -55,6 +55,22 @@ export default function HostDashboard() {
   // event sees the same targets.
   const settings = useMemo(() => state.broadcast?.settings || {}, [state.broadcast]);
   const media = useMediaPreview({ enabled: previewOn, camera, mic, settings });
+
+  // Honest control-plane state for the producer console. Deliberately says nothing about
+  // host authorisation (that is canHost, which requires the snapshot) and nothing about media
+  // (that is the publish banner on the stage) — this line is only ever about the socket.
+  const controlNotice =
+    status === "unauthorized"
+      ? { tone: "error",
+          text: closeReason
+            ? `The studio connection was refused — ${closeReason}. Refresh the page, or sign in again.`
+            : "The studio connection was refused. Refresh the page, or sign in again." }
+      : status === "offline"
+        ? { tone: "error",
+            text: `Can't reach the studio service (attempt ${attempt}) — still retrying. Broadcast controls unlock once it connects.` }
+        : status === "reconnecting"
+          ? { tone: "warn", text: "Reconnecting to the studio…" }
+          : null;
 
   const canHost = state.canHost;
   const live = state.broadcast?.status === "live";
@@ -231,6 +247,7 @@ export default function HostDashboard() {
         latency={latency}
         attempt={attempt}
         canHost={canHost}
+        ready={state.ready}
         recovering={state.recovering}
         media={media}
       />
@@ -351,12 +368,24 @@ export default function HostDashboard() {
         onDismiss={() => setShowStartPrompt(false)}
       />
 
-      {status === "unauthorized" && (
+      {/* The CONTROL SOCKET's state — not a verdict on this user's host assignment.
+          `status` here comes from useEventStream and means the socket was refused or has
+          dropped; it never consults EventAssignment. It used to render "You're not signed in
+          as a host of this event", which is a claim the console has no basis for and which
+          was actively wrong in production: a correctly-assigned host whose socket was failing
+          (header "Offline · 11") was told they were not the host. The real host verdict is
+          canHost, and it only exists once the snapshot arrives. */}
+      {controlNotice && (
         <p
           role="alert"
-          className="shrink-0 border-t border-rose-200 bg-rose-50 px-4 py-1.5 text-center text-[12px] font-medium text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
+          className={cx(
+            "shrink-0 border-t px-4 py-1.5 text-center text-[12px] font-medium",
+            controlNotice.tone === "error"
+              ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
+              : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
+          )}
         >
-          You&apos;re not signed in as a host of this event, so broadcast controls are disabled.
+          {controlNotice.text}
         </p>
       )}
     </div>

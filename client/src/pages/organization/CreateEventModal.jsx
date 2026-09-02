@@ -199,7 +199,7 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         </>
       }
     >
-      {/* ponytail: media upload has no storage endpoint yet. Moderators/speakers are
+      {/* ponytail: media upload has no storage endpoint yet. Speakers are
           assigned from the event page after creation (see AssignPeopleModal) — hosts get
           a picker here too since that's the most common thing to set up-front. */}
       {/* Modal already height-caps its panel and scrolls its body (see ui/Modal), so the

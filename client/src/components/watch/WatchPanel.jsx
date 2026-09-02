@@ -1,6 +1,6 @@
 // client/src/components/watch/WatchPanel.jsx
 // Viewer Portal right column — tabbed Chat / Q&A / Polls. All three are real, over the
-// live socket EventWatch opens (see its `liveReducer`) — same backend the host/moderator
+// live socket EventWatch opens (see its `liveReducer`) — same backend the host
 // consoles use. An unidentified visitor (no login, no self-serve registration) sees the
 // IdentifyForm instead of dead controls — never a "sign in" prompt; a name+email is enough.
 //
@@ -128,7 +128,7 @@ function SlowModeIndicator({ seconds }) {
   );
 }
 
-// Real chat, wired to the same live socket the host/moderator consoles use. Reaching this
+// Real chat, wired to the same live socket the host console uses. Reaching this
 // component at all means the caller (WatchPanel) has already confirmed the visitor is
 // identified — logged in or self-registered — so there's no gate to check here.
 const Chat = memo(function Chat({ messages = [], typing = {}, send, connected, slowModeSeconds = null }) {

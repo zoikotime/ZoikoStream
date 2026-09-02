@@ -1,4 +1,4 @@
-// Client-side CSV export. The moderator console exports the activity feed, chat log and
+// Client-side CSV export. The host console exports the activity feed, chat log and
 // poll results — all three are already in memory, so an export endpoint would only
 // re-fetch what the socket already delivered.
 // ponytail: no papaparse. Quote-escaping is the whole job.

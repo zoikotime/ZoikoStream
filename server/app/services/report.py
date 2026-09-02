@@ -17,6 +17,7 @@ from ..crud import admin as admin_crud
 from ..crud import delivery as delivery_crud
 from ..email import send_event_report_email
 from ..models import (
+    LEGACY_ASSIGNMENT_ROLES,
     AnalyticsSnapshot,
     BroadcastSession,
     Event,
@@ -90,7 +91,17 @@ def _operations(db, event: Event) -> dict:
     ).all())
     return {
         "hosts": _assigned(db, event.id, "host"),
-        "moderators": _assigned(db, event.id, "moderator"),
+        # KEPT after the moderator role was retired, unlike every other read of it. A report
+        # is a point-in-time compliance record of who was rostered to run the event, and for
+        # an event that really did have moderators that is a fact, not a stale role name —
+        # dropping it would under-report who held console access. Nothing writes the value
+        # any more, so on any event created after the retirement this is simply []. Sourced
+        # from LEGACY_ASSIGNMENT_ROLES so the intent is unambiguous at the call site.
+        "moderators": [
+            person
+            for legacy_role in LEGACY_ASSIGNMENT_ROLES
+            for person in _assigned(db, event.id, legacy_role)
+        ],
         "activity_counts": activity_counts,
         # models.platform_ops.Incident has no event_id column — incidents aren't
         # correlated to a specific event anywhere in this stack, so this is honestly
@@ -116,7 +127,7 @@ def generate_event_report(db, event: Event, actor=None) -> tuple:
             "evidence_sources": [
                 "BroadcastSession (peak_viewers)", "AnalyticsSnapshot (watch_hours, 15s samples)",
                 "EventRegistration (registrations, show_rate)", "LiveRecording (recordings)",
-                "EventAssignment (hosts, moderators)", "LiveActivity (activity_counts)",
+                "EventAssignment (hosts; legacy moderators)", "LiveActivity (activity_counts)",
             ],
         },
     }

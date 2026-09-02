@@ -580,23 +580,28 @@ def stage_health(db: Session, health: dict, since: datetime, stages: tuple[str, 
 # Readiness gates, evaluated against the event's own stored configuration. `required_for`
 # lists the impact classes where failing the gate BLOCKS the event; for lower classes the
 # same failure is a conditional pass. Nothing here is a guess — each gate reads a column.
+# The "moderator" gate ("Moderator assigned", mandatory for unrepeatable events) was
+# REMOVED here, not renamed. The moderator role is retired, so nobody can be assigned as one
+# any more and the gate could never pass again — leaving it would have permanently blocked
+# readiness for every unrepeatable-impact event. A second-operator requirement is a real
+# operational idea, but expressing it needs a rostering concept that does not exist yet
+# (an event has one host list), so inventing one here would be a guessed gate. The "host"
+# gate below already covers "somebody is rostered to run this".
 _GATES = (
     ("title", "Title set", ("high", "unrepeatable")),
     ("schedule", "Start time scheduled", ("high", "unrepeatable")),
     ("host", "Host assigned", ("high", "unrepeatable")),
-    ("moderator", "Moderator assigned", ("unrepeatable",)),
     ("recording", "Recording enabled", ("unrepeatable",)),
     ("account", "Account in good standing", ("high", "unrepeatable")),
     ("redundancy", "No unresolved single-path override", ("unrepeatable",)),
 )
 
 
-def _gate_results(ev: Event, hosts: dict, moderators: dict, single_path: set) -> list[dict]:
+def _gate_results(ev: Event, hosts: dict, single_path: set) -> list[dict]:
     checks = {
         "title": bool(ev.title),
         "schedule": ev.start_time is not None,
         "host": bool(hosts.get(ev.id)),
-        "moderator": bool(moderators.get(ev.id)),
         "recording": bool(ev.recording_enabled),
         "account": bool(ev.organization and ev.organization.status != "suspended"),
         "redundancy": ev.id not in single_path,
@@ -653,13 +658,8 @@ def event_readiness(db: Session, include_test: bool, limit: int = 8,
 
     ids = [e.id for e in events]
     hosts = _event_hosts(db, ids)
-    moderators = {}
-    for event_id, name in db.execute(
-        select(EventAssignment.event_id, User.full_name)
-        .join(User, User.id == EventAssignment.user_id)
-        .where(EventAssignment.event_id.in_(ids), EventAssignment.role == "moderator")
-    ).all():
-        moderators.setdefault(event_id, name)
+    # The per-event moderator lookup that used to sit here went with the "moderator" gate
+    # above — one fewer query per readiness page, since nothing reads it any more.
     single_path = set(db.scalars(
         select(GovernanceRecord.event_id).where(
             GovernanceRecord.kind == "single_path_override",
@@ -670,7 +670,7 @@ def event_readiness(db: Session, include_test: bool, limit: int = 8,
 
     out = []
     for ev in events:
-        gates = _gate_results(ev, hosts, moderators, single_path)
+        gates = _gate_results(ev, hosts, single_path)
         commercial_gate = _commercial_gate(db, ev)
         if commercial_gate is not None:
             gates = gates + [commercial_gate]

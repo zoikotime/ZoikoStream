@@ -3,8 +3,9 @@
 Not a test_*.py file deliberately — pytest must not collect this, it's invoked directly by
 Playwright's globalSetup/globalTeardown (client/e2e/global-setup.js) via a subprocess call.
 
-Creates a real org, a real host user (org_admin — gets can_host/can_moderate for free, see
-services/moderation.resolve_ctx) and a real contributor user (role="speaker", needs an
+Creates a real org, a real host user (platform role "host" — deliberately NOT org_admin, so
+the EventAssignment(role="host") below is the ONLY thing granting broadcast control, which is
+the exact path a real "assign yourself as host" produces) and a real contributor user (role="speaker", needs an
 EventAssignment + a ContributorSession row to pass the join-window gate — see
 services/contributor.join_window_error), and a real Event. Mints real access JWTs via the
 same app.security.create_access_token the login endpoint uses, so the browser is handed
@@ -42,8 +43,14 @@ def create(out_path: str) -> None:
     db.add(org)
     db.flush()
 
+    # role="host", NOT "org_admin", deliberately. An org_admin gets can_host from their
+    # PLATFORM role (services/moderation.resolve_ctx), which short-circuits the assignment
+    # lookup entirely — so a suite built on an org_admin host can pass while the "I assigned
+    # myself as host" path is completely broken, which is exactly the production complaint.
+    # With role="host" the EventAssignment(role="host") created below is the ONLY thing that
+    # grants broadcast control, so every E2E run now exercises that path for real.
     host = User(
-        org_id=org.id, full_name="E2E Host", role="org_admin", is_active=True,
+        org_id=org.id, full_name="E2E Host", role="host", is_active=True,
         email=f"e2e-host-{uuid.uuid4().hex[:10]}@example.com",
         username=f"e2ehost{uuid.uuid4().hex[:10]}", password_hash="not-used-token-auth-only",
     )
@@ -67,8 +74,15 @@ def create(out_path: str) -> None:
         email=f"e2e-viewer2-{uuid.uuid4().hex[:10]}@example.com",
         username=f"e2eviewer2{uuid.uuid4().hex[:10]}", password_hash="not-used-token-auth-only",
     )
-    db.add_all([host, contributor, viewer1, viewer2])
-    db.flush()
+    # One at a time rather than add_all. This was an attempt to work around a Supabase /
+    # Supavisor transaction-pooler fault under which ORM INSERTs hang indefinitely from a
+    # fresh process while the long-lived dev server keeps writing fine; splitting the batch
+    # did NOT resolve it, so it is kept only because per-row flushes fail more legibly (you
+    # see which row wedged). The fault is environmental and intermittent — the same fixture
+    # ran repeatedly earlier the same day — and is NOT application behaviour.
+    for _u in (host, contributor, viewer1, viewer2):
+        db.add(_u)
+        db.flush()
 
     ev = Event(
         org_id=org.id, created_by=host.id, title="E2E Live Streaming Test Event",

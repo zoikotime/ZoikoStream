@@ -27,7 +27,7 @@ export const notify = {
   loading: (msg, opts) => toast.loading(msg, opts),
   promise: (p, msgs, opts) => toast.promise(p, msgs, opts),
   dismiss: (id) => toast.dismiss(id),
-  // Live-event activity alert (a viewer's chat/poll/announcement, or a host/moderator's
+  // Live-event activity alert (a viewer's chat/poll/announcement, or an operator's
   // action reaching a viewer) — a bell icon so it reads as "something happened" at a
   // glance, distinct from a plain info toast. Paired with utils/sound.js's chime at every
   // call site; this is the visible half of that alert.
