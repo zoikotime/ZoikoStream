@@ -438,6 +438,26 @@ def test_20_resend_failure_does_not_roll_back_verification():
 
 def test_17_existing_users_are_not_emailed_by_migration_or_startup():
     """Applying the schema must not mail anyone, and must not look like it did."""
+    # A grandfathered account is CREATED here rather than assumed to be lying around. The
+    # `verified_legacy > 0` assertion below is what stops the invariant check being vacuously
+    # true, and it used to be satisfied only by rows other tests had left behind — so this test
+    # passed against a well-used database and failed against a freshly created one with
+    # "expected grandfathered accounts to exist". The shape it needs is exactly what the IDN-001
+    # migration leaves: email_verified TRUE, account_ready_sent_at NULL.
+    legacy_email = f"legacy-{uuid.uuid4().hex[:10]}@t.test"
+    db = SessionLocal()
+    try:
+        org = Organization(name=f"legacy-org-{uuid.uuid4().hex[:8]}")
+        db.add(org)
+        db.flush()
+        db.add(User(org_id=org.id, full_name="Grandfathered", email=legacy_email,
+                    username=f"legacy{uuid.uuid4().hex[:8]}", password_hash="x", role="viewer",
+                    email_verified=True, email_verified_at=datetime.now(timezone.utc),
+                    account_ready_sent_at=None))
+        db.commit()
+    finally:
+        db.close()
+
     db = SessionLocal()
     try:
         verified_legacy = db.query(User).filter(
@@ -475,6 +495,8 @@ def test_17_existing_users_are_not_emailed_by_migration_or_startup():
     stmts = " ".join(create_tables._USER_COLUMNS + create_tables._USER_BACKFILL).lower()
     assert "account_ready_sent_at timestamptz" in stmts, "column must be added"
     assert "update users set account_ready_sent_at" not in stmts,         "the migration must never stamp a send marker onto existing rows"
+
+    _cleanup(legacy_email)
     assert "account_ready_sent_at" not in " ".join(create_tables._USER_BACKFILL).lower(),         "the backfill must not touch the IDN-002 marker"
 
     # Nothing in the module can send mail at import or schema time. Checked against actual

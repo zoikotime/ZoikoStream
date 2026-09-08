@@ -166,6 +166,29 @@ class DisputeResult:
 
 
 @dataclass
+class SubscriptionCheckoutResult:
+    """Outcome of creating a provider-hosted SUBSCRIPTION checkout session (Ledger 1).
+
+    Distinct from CheckoutSessionResult because the references differ in kind: a subscription
+    session yields a customer and a subscription, not a payment intent. Deliberately carries no
+    amount, currency or state — the price lives on the provider's Price object, and the
+    subscription's commercial state is decided by the Section 12 state machine, never by the
+    provider (ZST-COM-PLAN-001 Section 13: the Commerce Adapter "never becomes product-state
+    authority").
+
+    Both reference fields are Optional: for a hosted session Stripe assigns the customer and
+    subscription when the payer completes checkout, so at creation time they are usually
+    absent. The caller must correlate on `checkout_session_ref` until the webhook supplies them
+    rather than have a value invented here.
+    """
+
+    checkout_session_ref: str
+    checkout_url: str
+    stripe_customer_id: str | None = None
+    stripe_subscription_id: str | None = None
+
+
+@dataclass
 class CheckoutSessionResult:
     """Outcome of creating a provider-hosted checkout session.
 

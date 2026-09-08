@@ -110,7 +110,7 @@ def create_event(data: EventCreate, background: BackgroundTasks, admin: User = D
         slug = crud.unique_event_slug(db, admin.org_id, data.title)
     else:
         slug = None
-    event = crud.create_event(db, admin.org_id, admin.id, data, slug)
+    event = crud.create_event(db, admin.org_id, admin.id, data, slug, actor=admin)
 
     # After the response, same as signup's welcome mail — a Resend outage never delays or
     # breaks event creation (send_event_created_email is best-effort and logs its own errors).
@@ -447,7 +447,7 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
     if start and end and end <= start:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end_time must be after start_time")
 
-    return crud.update_event(db, ev, fields)
+    return crud.update_event(db, ev, fields, actor=user)
 
 
 @router.post("/{event_id}/end", response_model=EventOut)

@@ -1,0 +1,2 @@
+endpoint_id,url,label,events,status,health,enabled,signing_fingerprint,verified_at,last_success_at,consecutive_failures,created_at
+cc1eb6be-2199-43d7-bfae-cab7fd1c5b10,https://example.com/hooks/zoiko,hook,recording.ready,verified,healthy,True,AB9F-3131,2026-09-02 20:25:34.232207+05:30,,0,2026-09-02 20:25:34.194146+05:30

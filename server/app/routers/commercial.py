@@ -45,6 +45,7 @@ belonging to another org must 404, not leak existence.
 """
 
 import logging
+import time
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
@@ -52,6 +53,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..crud import admin as admin_crud
 from ..crud import commercial as crud
 from ..db import get_db
 from ..email import (
@@ -65,6 +67,10 @@ from ..models import (
     FinancialPeriod, Invoice, Payment, PaymentDispute, ProviderEvent, Quote, ReadinessCheck,
     ReconciliationException, RefundCredit, ReplayEntitlement, SellerLegalEntity, ServiceProfile,
     UnmatchedSettlement, User,
+    # Ledger 1 (platform subscription). Only the Section 12 transition PREDICATE is imported —
+    # this router asks the state machine whether a move is legal and never writes a status
+    # itself; crud.admin.apply_subscription_provider_event remains the only writer.
+    subscription_transition_error,
 )
 from ..services import replay_comms
 from ..schemas.commercial import (
@@ -72,7 +78,7 @@ from ..schemas.commercial import (
     CapacityHoldCreate, CapacityOut, CatalogLineCreate, CatalogLineOut, CatalogVersionCreate,
     CheckoutSessionCreate, CheckoutSessionOut,
     CatalogVersionOut, ChangeOrderCreate, ChangeOrderOut, CommercialAccountOut, DisputeEvidenceCreate,
-    DisputeOpenCreate, DisputeResolveCreate, ExceptionResolveCreate, FinancialPeriodOut, IncidentCreate,
+    DisputeOpenCreate, DisputeResolveCreate, ExceptionConfirmCreate, ExceptionResolveCreate, FinancialPeriodOut, IncidentCreate,
     IncidentOut, InvoiceCreate, InvoiceOut, OrderAccept, OrderCreate, OrderLineCreate, OrderLineOut,
     OrderOut, PaymentAuthorizeCreate, PaymentDisputeOut, PaymentOut, PaymentScheduleCreate,
     PaymentScheduleOut, PaymentWebhookIn, PeriodCreate, QuoteCreate, QuoteOut,
@@ -87,7 +93,8 @@ from ..schemas.commercial import (
     RescheduleCreate, RescheduleOut, RescheduleResult,
 )
 from ..models.commercial import COMMERCIAL_LIFECYCLE_TRANSITIONS
-from ..security import get_current_user, org_scoped, require_commercial, require_org_admin, require_super_admin
+from ..security import (SchedulerIdentity, get_current_user, org_scoped, require_commercial,
+                        require_org_admin, require_scheduler_identity, require_super_admin)
 from ..services import maintenance, payments as payment_svc, platform_settings
 from ..services import payments_stripe_events as stripe_events
 
@@ -647,6 +654,72 @@ def run_maintenance(admin: User = Depends(require_commercial("reconcile")),
     """
     return maintenance.run_all(db, actor=admin)
 
+
+@router.post("/maintenance/scheduled-run")
+def run_scheduled_maintenance(scheduler: SchedulerIdentity = Depends(require_scheduler_identity),
+                               db: Session = Depends(get_db)):
+    """The SCHEDULER's entry point to the same maintenance sweep. Cloud Scheduler -> OIDC.
+
+    Why a second route rather than widening the one above: the two callers have genuinely
+    different trust models. `/maintenance/run` authenticates a PERSON with a ZoikoStream JWT
+    and Finance authority; this authenticates a Google SERVICE IDENTITY with an OIDC token.
+    Fusing them into one dependency would mean one code path where a weakening of either check
+    opens the other — and the operator route is left byte-identical here on purpose.
+
+    It runs exactly the same `maintenance.run_all`, so there is no duplicated maintenance
+    logic and no behaviour that only the scheduler can trigger.
+
+    SECURITY POSTURE:
+      * `require_scheduler_identity` refuses with 503 unless BOTH the allowed service account
+        and the expected OIDC audience are configured. There is no unauthenticated path here.
+      * An ordinary organization user cannot reach this: our own JWTs are signed with
+        SECRET_KEY and fail Google's signature check outright.
+      * A valid Google token from some other principal is refused on the identity comparison,
+        and a token minted for another service is refused on the audience.
+
+    IDEMPOTENT, so Cloud Scheduler's retries are safe: every job is individually idempotent and
+    `apply_due_plan_changes` re-claims each subscription under a row lock, so a retry (or an
+    overlapping run) cannot apply a plan twice, double-audit, or double-call Stripe.
+
+    Returns per-job results including failures rather than a 500 that would hide the jobs that
+    succeeded — a scheduler needs to know "6 of 7 ran" and which one didn't.
+    """
+    started = time.monotonic()
+    # Invocation is logged BEFORE the work, so a sweep that dies mid-flight still leaves
+    # evidence that it started. Identity only — never the token.
+    _log.info("scheduled maintenance invoked by=%s", scheduler.email)
+
+    result = maintenance.run_all(db, actor=None)
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    result["duration_ms"] = duration_ms
+    result["invoked_by"] = scheduler.email
+
+    # Flatten the plan-change job's counters into the log line so the sweep can be diagnosed
+    # from logs alone: how many were due, applied, contended by a concurrent run, or refused.
+    plan_job = next((j for j in result.get("jobs", [])
+                     if j.get("job") == "apply_due_plan_changes"), {})
+    _log.info(
+        "scheduled maintenance complete by=%s duration_ms=%s failed_jobs=%s "
+        "plan_changes_applied=%s plan_changes_rejected=%s plan_changes_contended=%s "
+        "plan_changes_provider_failed=%s",
+        scheduler.email, duration_ms, result.get("failed") or "none",
+        plan_job.get("applied"), plan_job.get("rejected"), plan_job.get("contended"),
+        plan_job.get("provider_failed"),
+    )
+
+    # A failed job is audited, not merely logged: these jobs move subscriptions and money, so a
+    # failure needs a durable record an operator can find later without log retention.
+    if result.get("failed"):
+        crud.audit(db, actor=None, action="commercial.maintenance.job_failed",
+                   target_type="maintenance", target_id=None,
+                   correlation_id=crud.new_correlation_id(),
+                   failed_jobs=result["failed"], invoked_by=scheduler.email,
+                   duration_ms=duration_ms)
+        db.commit()
+
+    return result
+
 @router.get("/events/{event_id}/capacity", response_model=list[CapacityOut])
 def list_capacity(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, user, event_id)
@@ -901,7 +974,7 @@ def issue_invoice(order_id: uuid.UUID, data: InvoiceCreate, admin: User = Depend
                    db: Session = Depends(get_db)):
     order = _get_order_or_404(db, admin, order_id)
     try:
-        return crud.issue_invoice(db, order, due_date=data.due_date)
+        return crud.issue_invoice(db, order, due_date=data.due_date, actor=admin)
     except ValueError as e:
         # Undetermined tax basis — a business validation failure, not a server error (doc L4).
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
@@ -1187,11 +1260,28 @@ def create_period(data: PeriodCreate, admin: User = Depends(require_commercial("
 
 @router.post("/periods/{period_id}/close", response_model=FinancialPeriodOut)
 def close_period(period_id: uuid.UUID, admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
+    """Maker-checker PREPARE step: freezes the snapshot and moves the period to
+    `pending_close`. Does not lock it — see confirm_period_close_endpoint."""
     period = db.get(FinancialPeriod, period_id)
     if period is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Period not found")
     try:
         return crud.close_period(db, period, admin)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.post("/periods/{period_id}/confirm-close", response_model=FinancialPeriodOut)
+def confirm_period_close_endpoint(period_id: uuid.UUID, admin: User = Depends(require_commercial("reconcile")),
+                                   db: Session = Depends(get_db)):
+    """Maker-checker CONFIRM step: a DIFFERENT admin than whoever called /close locks the
+    period. Same `reconcile` permission as the prepare step — the dual-control check itself
+    lives in crud.confirm_period_close, not in a separate role."""
+    period = db.get(FinancialPeriod, period_id)
+    if period is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Period not found")
+    try:
+        return crud.confirm_period_close(db, period, admin)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
@@ -1204,11 +1294,29 @@ def list_period_exceptions(period_id: uuid.UUID, admin: User = Depends(require_c
 @router.patch("/exceptions/{exception_id}", response_model=ReconciliationExceptionOut)
 def resolve_exception(exception_id: uuid.UUID, data: ExceptionResolveCreate,
                        admin: User = Depends(require_commercial("reconcile")), db: Session = Depends(get_db)):
+    """`investigating` applies immediately. A terminal status ("resolved"/"accepted_risk") is
+    only PROPOSED (maker-checker PREPARE step) — see confirm_exception_resolution_endpoint."""
     exception = db.get(ReconciliationException, exception_id)
     if exception is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Reconciliation exception not found")
     try:
         return crud.resolve_exception(db, exception, admin, status=data.status, resolution_notes=data.resolution_notes)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+@router.post("/exceptions/{exception_id}/confirm", response_model=ReconciliationExceptionOut)
+def confirm_exception_resolution_endpoint(exception_id: uuid.UUID, data: ExceptionConfirmCreate,
+                                           admin: User = Depends(require_commercial("reconcile")),
+                                           db: Session = Depends(get_db)):
+    """Maker-checker CONFIRM step: a DIFFERENT admin than whoever proposed the resolution
+    ratifies it. Applies exactly the proposed status — there is no way to choose a different
+    one here, matching approve_commercial_exception's yes/no posture."""
+    exception = db.get(ReconciliationException, exception_id)
+    if exception is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Reconciliation exception not found")
+    try:
+        return crud.confirm_exception_resolution(db, exception, admin, resolution_notes=data.resolution_notes)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
@@ -1256,6 +1364,129 @@ async def payment_webhook(request: Request, data: PaymentWebhookIn, db: Session 
     )
     # Deterministic: the same event always produces the same response, first time or replayed.
     return result
+
+
+def _handle_subscription_event(db: Session, event: dict, *, correlation_id: str,
+                                raw_body: bytes) -> dict | None:
+    """Process a Ledger 1 subscription event, or return None if this is not one.
+
+    Idempotency is the SAME mechanism Ledger 2 uses — `crud.record_provider_event_evidence`
+    claims `(provider, provider_event_id)` under a DB unique constraint, so a redelivery is
+    answered from the stored result instead of applying twice. Nothing here re-implements it.
+
+    State changes go through crud.admin.apply_subscription_provider_event, which asks the
+    Section 12 machine whether the transition is legal and refuses (audited) if not.
+    """
+    facts = stripe_events.subscription_facts(event)
+    checkout = stripe_events.checkout_subscription_facts(event) if facts is None else None
+    if facts is None and checkout is None:
+        return None
+
+    claim = crud.record_provider_event_evidence(
+        db, provider=stripe_events.PROVIDER_NAME, provider_event_id=event["id"],
+        event_type=event["type"], raw_body=raw_body, signature_verified=True,
+        reason="ledger1_subscription_event", correlation_id=correlation_id,
+    )
+    if claim.get("duplicate"):
+        # Already processed — return the stored answer, unchanged.
+        return {"received": True, "stripe_event_type": event["type"], **claim}
+
+    ref = checkout or facts
+    sub = admin_crud.subscription_by_provider_ref(
+        db,
+        checkout_session_ref=(checkout or {}).get("checkout_session_ref"),
+        stripe_subscription_id=ref.get("stripe_subscription_id"),
+    )
+    if sub is None:
+        # Unattributable: recorded as evidence, never guessed onto a tenant. Matching on
+        # anything softer than our own reference is how one tenant's billing lands on another.
+        _log.warning("stripe subscription event matched no subscription correlation_id=%s",
+                     correlation_id)
+        db.commit()
+        return {"received": True, "stripe_event_type": event["type"],
+                "applied": False, "reason": "no_matching_subscription", **claim}
+
+    if checkout is not None:
+        # Correlation — binding Stripe's ids to our row. Explicitly NOT an activation:
+        # Section 18 forbids unlocking on a completed checkout alone. The activation arrives as
+        # customer.subscription.created/updated and goes through the state machine below.
+        if checkout.get("stripe_customer_id") and not sub.stripe_customer_id:
+            sub.stripe_customer_id = checkout["stripe_customer_id"]
+        if checkout.get("stripe_subscription_id") and not sub.stripe_subscription_id:
+            sub.stripe_subscription_id = checkout["stripe_subscription_id"]
+
+        # Section 12's PRE-ACTIVATION step. The transcribed graph offers exactly one route from
+        # a trial to a paid subscription — TRIALING -> CONVERSION_PENDING -> ACTIVE — so a
+        # converting tenant must pass through CONVERSION_PENDING or it can never legally reach
+        # ACTIVE at all. A completed checkout is precisely that fact: the payer has committed,
+        # and the provider has not yet confirmed activation.
+        #
+        # This is NOT a back-door activation, for two independent reasons:
+        #   * CONVERSION_PENDING is absent from SUBSCRIPTION_ENTITLED_STATES, so it unlocks
+        #     nothing. Section 18 is satisfied by the state's own definition, not by a promise.
+        #   * The move is attempted only where the Section 12 graph already permits it from the
+        #     current state. Nothing is special-cased to `trialing`; the graph decides, so a
+        #     subscription in PENDING_ACTIVATION (whose only legal successor is ACTIVE) is left
+        #     untouched here rather than being dragged sideways.
+        advanced = False
+        if subscription_transition_error(sub.status, "conversion_pending") is None:
+            advanced, _ = admin_crud.apply_subscription_provider_event(
+                db, sub, new_state="conversion_pending",
+                reason=f"stripe:{event['type']}",
+            )
+        admin_crud.create_audit_log(
+            db, actor=None, action="subscription.checkout_completed",
+            target_type="subscription", target_id=sub.id, org_id=sub.org_id,
+            meta={"checkout_session_ref": checkout["checkout_session_ref"],
+                  "stripe_subscription_id": sub.stripe_subscription_id,
+                  "advanced_to_conversion_pending": advanced},
+        )
+        db.commit()
+        return {"received": True, "stripe_event_type": event["type"],
+                "applied": advanced, "subscription_state": sub.status,
+                "reason": "checkout_correlated", **claim}
+
+    if not facts.get("state"):
+        # A Stripe status with no Section 12 counterpart (incomplete, paused, ...). Retained as
+        # evidence; inventing a state for it would be a commercial rule we have no authority for.
+        db.commit()
+        return {"received": True, "stripe_event_type": event["type"], "applied": False,
+                "reason": f"unmapped_provider_status:{facts.get('provider_status')}", **claim}
+
+    # Which plan the tenant bought, resolved from the price Stripe is ACTUALLY billing and
+    # cross-checked against the operator's approved price configuration. Never from the request
+    # body (there isn't one), never from `metadata.org_id`, and never from `metadata.plan_slug`
+    # — see crud.admin.resolve_plan_for_provider_price. `sub` was located by our OWN provider
+    # reference above, so the organization is derived from our row: nothing in this payload can
+    # aim a purchase at a tenant that did not start the checkout.
+    plan, plan_error = admin_crud.resolve_plan_for_provider_price(db, facts.get("price_ids"))
+    applied, error = admin_crud.apply_subscription_provider_event(
+        db, sub, new_state=facts["state"],
+        stripe_customer_id=facts.get("stripe_customer_id"),
+        stripe_subscription_id=facts.get("stripe_subscription_id"),
+        plan=plan,
+        # Stripe's own period boundary — the anchor the approved effective-date rule for a
+        # scheduled plan change depends on. Provider-authoritative, so it comes from the
+        # verified event and is never computed locally.
+        current_period_end=facts.get("current_period_end"),
+        reason=f"stripe:{event['type']}",
+    )
+    if plan is None and facts["state"] == "active" and plan_error:
+        # Activating against a price we cannot map is not fatal — the lifecycle fact is real and
+        # refusing it would strand the tenant — but it must never pass silently, because the
+        # plan on record then does not describe what is being billed.
+        admin_crud.create_audit_log(
+            db, actor=None, action="subscription.plan_unresolved",
+            target_type="subscription", target_id=sub.id, org_id=sub.org_id,
+            meta={"reason": plan_error, "price_ids": facts.get("price_ids"),
+                  "stripe_subscription_id": sub.stripe_subscription_id},
+        )
+        _log.warning("stripe subscription activated with unresolved plan correlation_id=%s "
+                     "reason=%s", correlation_id, plan_error)
+    db.commit()
+    return {"received": True, "stripe_event_type": event["type"], "applied": applied,
+            "subscription_state": sub.status, "error": error,
+            "plan_slug": plan.slug if plan else None, "plan_error": plan_error, **claim}
 
 
 @router.post("/webhooks/stripe", status_code=status.HTTP_200_OK)
@@ -1306,6 +1537,33 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         _log.warning("stripe webhook signature rejected correlation_id=%s reason=%s",
                      correlation_id, e)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid Stripe signature")
+
+    mismatch = stripe_events.livemode_mismatch(event, settings.STRIPE_SECRET_KEY)
+    if mismatch:
+        # Authentic (signature already verified), but for the wrong mode — never a signature
+        # problem, and never processed as a financial instruction. Retained as evidence so a
+        # test-mode event reaching a live-configured deployment (or vice versa) leaves a
+        # visible, auditable trail instead of either being silently applied or vanishing.
+        # 200 because retrying changes nothing — this is a "deliberately rejected" outcome,
+        # not a transient failure.
+        result = crud.record_provider_event_evidence(
+            db, provider=stripe_events.PROVIDER_NAME, provider_event_id=event["id"],
+            event_type=event["type"], raw_body=raw_body, signature_verified=True,
+            reason=f"livemode_mismatch: {mismatch}", correlation_id=correlation_id,
+        )
+        _log.warning("stripe webhook livemode mismatch correlation_id=%s reason=%s",
+                     correlation_id, mismatch)
+        return {"received": True, "stripe_event_type": event["type"], **result}
+
+    # ── Ledger 1: platform subscription events ───────────────────────────────────────────
+    # Handled BEFORE Ledger 2 translation and returned from here, so a subscription event can
+    # never fall through into the event-order payment path. The two ledgers share this endpoint
+    # (one Stripe account, one signing secret) but nothing else: this branch touches only
+    # Subscription, and the Ledger 2 branch below touches only Payment/EventOrder.
+    sub_result = _handle_subscription_event(db, event, correlation_id=correlation_id,
+                                            raw_body=raw_body)
+    if sub_result is not None:
+        return sub_result
 
     try:
         translated = stripe_events.translate(event)

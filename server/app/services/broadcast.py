@@ -35,6 +35,7 @@ from ..crud import commercial as commercial_crud
 from ..crud.admin import get_feature_flag_by_key
 from ..crud.event import is_memorial_category
 from ..models import (
+    SUBSCRIPTION_ENTITLED_STATES,
     AnalyticsSnapshot,
     BroadcastSession,
     Event,
@@ -339,12 +340,19 @@ def _storage_over_limit(db, org_id) -> bool:
     org = db.get(Organization, org_id)
     if org is None:
         return False
-    sub = db.scalar(
-        select(Subscription).where(
-            Subscription.org_id == org_id, Subscription.status.in_(("active", "trial", "past_due")))
-        .order_by(Subscription.started_at.desc())
-    )
-    plan = sub.plan if sub else None
+    # ENFORCEMENT resolution, not display resolution. This used to run the entitled-only query
+    # itself, so a trial_expired / canceled / closed / suspended subscription resolved to
+    # plan=None and the plan ceiling silently dropped out of `limits` below — leaving only the
+    # platform ceiling, or none at all. Losing entitlement therefore RAISED the storage cap
+    # (measured: 50 GB while trialing, 5000 GB once expired).
+    #
+    # Approved decision: an existing subscription's plan remains the quantitative ceiling even
+    # when its state is not entitled. `enforcement_plan` answers exactly that and nothing more —
+    # it does not make the organization entitled.
+    # Imported inside the function: services/org.py imports engagement_score from this
+    # module, so a module-level import here would be circular.
+    from . import org as org_svc
+    plan = org_svc.enforcement_plan(db, org_id)
     limits = [l for l in (plan.max_storage_gb if plan else None, platform_settings.storage_ceiling_gb(db)) if l is not None]
     if not limits:
         return False

@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +20,43 @@ DEV_SECRET_KEY = "dev-secret-change-me"
 # must not silently fall through to development behaviour — that would defeat every guard
 # keyed off this list.
 PRODUCTION_ENVIRONMENTS = ("production", "prod")
+
+# Billing cadences the approved price book publishes (Approved Price Book & Stripe Billing
+# Wireframe v1.0: Developer $49/mo or $490/yr, Business $249/mo or $2,490/yr). The NAMES live
+# here; the amounts do not — each cadence's amount lives on its Stripe Price, so nothing
+# price-bearing is duplicated in application code.
+MONTHLY = "monthly"
+ANNUAL = "annual"
+BILLING_INTERVALS = (MONTHLY, ANNUAL)
+
+# The trial the price book approves: 14 days, no card required, and it never converts itself
+# into a paid subscription. A single constant so the length cannot drift between the state
+# machine, the console and the emails.
+TRIAL_DAYS = 14
+
+# A Stripe Price ID is "price_" followed by ASCII word characters and nothing else.
+#
+# Deliberately NOT a length rule. The temptation is to require ~24 characters because real ids
+# are that long, but Stripe does not document a minimum and inventing one would reject a
+# legitimate id it might issue tomorrow. The charset is the part that can be asserted safely,
+# and it is what actually catches the failures seen in practice: an elided `price_…` or a
+# truncated `price_1UARwq…` both carry a non-ASCII ellipsis, and a bare `price_` carries nothing.
+_STRIPE_PRICE_ID = re.compile(r"^price_[A-Za-z0-9_]+$")
+
+
+def _is_stripe_price_id(value: str) -> bool:
+    """Whether `value` has the shape of a Stripe Price ID.
+
+    Exists because a prefix check was not enough, and the failure it let through was
+    customer-visible. A documentation example pasted into .env verbatim gave `price_…` with a
+    literal U+2026; it satisfied startswith("price_"), was accepted as approved configuration,
+    made the plan render as purchasable — and then failed at Stripe with "No such price" only
+    AFTER the payer clicked Upgrade. Truncated ids failed identically.
+
+    Rejecting here means such an entry is dropped and the plan simply shows as unpriced, which
+    is the fail-closed posture the rest of this file already takes.
+    """
+    return bool(_STRIPE_PRICE_ID.match((value or "").strip()))
 
 
 class Settings(BaseSettings):
@@ -77,10 +115,102 @@ class Settings(BaseSettings):
     # frontend rebuild. Nothing on the server reads it; it exists for the payment UI.
     STRIPE_PUBLISHABLE_KEY: str = ""
 
+    # Ledger 1 (platform subscription) plan -> approved Stripe Price ID, as
+    # "plan_slug=price_id,plan_slug=price_id". CONFIGURATION, never a code constant:
+    # ZST-COM-PLAN-001 Section 18 forbids embedding a price or allowance in service constants,
+    # and Section 24 states numeric prices "are intentionally not supplied" by that document —
+    # they belong to ZST-COM-PRICE-001 and the approved catalog.
+    #
+    # Blank by default, which is the correct fail-closed posture: with no mapping, subscription
+    # checkout refuses rather than charging an invented amount. Populating this is a
+    # Finance/Commercial action against an approved price book, not an engineering default.
+    #
+    # The amount, currency and billing interval all live on the Stripe Price itself, so nothing
+    # price-bearing is duplicated here — this is only the plan -> approved-price pointer.
+    STRIPE_SUBSCRIPTION_PRICES: str = ""
+
     def stripe_configured(self) -> bool:
         """Whether the Stripe provider can be constructed at all. Deliberately a method and
         not a cached flag: a deployment may inject the secret after import."""
         return bool(self.STRIPE_SECRET_KEY.strip())
+
+    def subscription_price_map(self) -> dict[tuple[str, str], str]:
+        """{(plan_slug, billing_interval): stripe_price_id} from STRIPE_SUBSCRIPTION_PRICES.
+
+        Two accepted entry forms, so adding annual pricing does not invalidate an existing
+        deployment's configuration:
+
+            developer=price_x            -> ("developer", "monthly")
+            developer:annual=price_y     -> ("developer", "annual")
+
+        The bare form means MONTHLY because that is what every existing deployment's value
+        already denotes; reading it as anything else would silently re-bill live tenants on a
+        different cadence.
+
+        Malformed entries are dropped rather than guessed at: a half-parsed mapping that
+        silently charged the wrong plan or the wrong cadence would be worse than no mapping at
+        all. A method, not a cached property, for the same reason as stripe_configured() —
+        configuration may be injected after import.
+        """
+        mapping: dict[tuple[str, str], str] = {}
+        for pair in (self.STRIPE_SUBSCRIPTION_PRICES or "").split(","):
+            key, sep, price_id = pair.partition("=")
+            key, price_id = key.strip(), price_id.strip()
+            if not sep or not key:
+                continue
+            slug, _, interval = key.partition(":")
+            slug = slug.strip()
+            interval = (interval.strip() or MONTHLY).lower()
+            # A Stripe Price ID is "price_" followed by a run of ASCII alphanumerics. Checking
+            # the PREFIX ALONE was not enough: a documentation example pasted in verbatim gave
+            # `price_…` (a literal U+2026 ellipsis), which passed startswith("price_"), was
+            # accepted as a real mapping, and only failed at Stripe with "No such price" — after
+            # a customer had already clicked Upgrade. A truncated id like `price_1UARwq…` failed
+            # the same way. Both are now rejected here, before they can reach a payer.
+            if slug and interval in BILLING_INTERVALS and _is_stripe_price_id(price_id):
+                mapping[(slug, interval)] = price_id
+        return mapping
+
+    def purchasable_intervals(self, plan_slug: str) -> list[str]:
+        """Which billing intervals an operator has actually priced for this plan.
+
+        The Billing page offers only these, so a cadence with no approved Stripe Price is never
+        presented as buyable — the same fail-closed posture as the plan-level CTA split.
+        """
+        priced = self.subscription_price_map()
+        return [i for i in BILLING_INTERVALS if (plan_slug, i) in priced]
+
+    # ── Scheduled maintenance (Cloud Scheduler -> Cloud Run, OIDC) ────────────────────────
+    #
+    # The billing maintenance sweep must be driven by an external scheduler: it applies
+    # subscription plan changes at their effective date, and nothing in-process may do that on
+    # Cloud Run (one run per instance, dying mid-sweep on a scale-down).
+    #
+    # Cloud Scheduler authenticates with a GOOGLE-SIGNED OIDC TOKEN rather than a shared
+    # secret: it is asymmetric (nothing to leak from our side), short-lived (so a captured
+    # token cannot be replayed for long) and audience-bound (so a token minted for another
+    # service is refused). google-auth is already available transitively via
+    # google-cloud-storage, so this needs no new dependency.
+    #
+    # BOTH blank by default, and that is a REFUSAL, not a permissive default: with either unset
+    # the scheduler route answers 503 and runs nothing. An unconfigured deployment must never
+    # expose an unauthenticated way to move customers between paid plans.
+    #
+    # MAINTENANCE_SCHEDULER_SERVICE_ACCOUNT — the exact service-account email allowed to invoke
+    #   it. Verifying only that a token is a VALID Google token would let any Google customer
+    #   in; the identity check is what makes it ours.
+    # MAINTENANCE_OIDC_AUDIENCE — the audience the scheduler job was configured with, normally
+    #   this service's own https URL. Binding it stops a token issued for a different service
+    #   being replayed here.
+    MAINTENANCE_SCHEDULER_SERVICE_ACCOUNT: str = ""
+    MAINTENANCE_OIDC_AUDIENCE: str = ""
+
+    def scheduler_auth_configured(self) -> bool:
+        """Whether the scheduler route can authenticate anyone at all. A method, not a cached
+        flag, for the same reason as stripe_configured(): a deployment may inject either value
+        after import."""
+        return bool(self.MAINTENANCE_SCHEDULER_SERVICE_ACCOUNT.strip()
+                    and self.MAINTENANCE_OIDC_AUDIENCE.strip())
 
     RESEND_API_KEY: str = ""  # blank = welcome emails skipped (logged), registration still works
     # Where the public contact form delivers. SERVER-SIDE ONLY: the browser posts the message

@@ -11,13 +11,16 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..crud import event as event_crud
-from ..models import BroadcastSession, Event, LiveRecording, Organization, Plan, Subscription, User
+from ..models import (
+    BroadcastSession, Event, LiveRecording, Organization, Plan, Subscription, User,
+    SUBSCRIPTION_REVENUE_STATES, SUBSCRIPTION_TERMINATED_STATES,
+)
 from ..security import _ROLE_RANK
 from . import livekit
 
 # Excluded from customer-facing counts — it only holds the super admin (matches dashboard.py).
 PLATFORM_ORG_NAME = "ZoikoStream Platform"
-_MRR_STATUSES = ("active", "trial")
+_MRR_STATUSES = SUBSCRIPTION_REVENUE_STATES
 
 
 def _customer_orgs():
@@ -122,7 +125,7 @@ def _revenue_series(db: Session) -> list[dict]:
         select(func.date_trunc("month", Subscription.started_at).label("m"),
                func.coalesce(func.sum(Plan.price_monthly), 0))
         .join(Plan, Subscription.plan_id == Plan.id)
-        .where(Subscription.status != "cancelled")
+        .where(Subscription.status.not_in(SUBSCRIPTION_TERMINATED_STATES))
         .group_by("m").order_by("m")
     ).all()
     return [{"label": m.strftime("%b %Y"), "value": round(float(v), 2)} for m, v in rows if m]

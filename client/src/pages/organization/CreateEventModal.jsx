@@ -98,7 +98,13 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
   const setCategory = (value) => {
     setForm((f) => ({
       ...f, category: value,
-      ...(value === MEMORIAL_CATEGORY && { chat_enabled: false, polls_enabled: false, qa_enabled: false }),
+      // The server forces visibility to "private" for memorial events too
+      // (crud.event._enforce_memorial_features / MEMORIAL_VISIBILITY) — never public or
+      // unlisted, a "controlled family download" is the whole point of the category. Matches
+      // the toggle-reset above so the form never shows a value the save would silently revert.
+      ...(value === MEMORIAL_CATEGORY && {
+        chat_enabled: false, polls_enabled: false, qa_enabled: false, visibility: "private",
+      }),
     }));
   };
   const toggleHost = (id) => {
@@ -249,25 +255,40 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         </Section>
 
         <Section title="Visibility">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            {VISIBILITY.map(({ value, label: l, desc, icon: Icon }) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => set("visibility", value)}
-                className={cx(
-                  "flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition",
-                  form.visibility === value
-                    ? "border-violet-500 bg-violet-50/60 ring-1 ring-violet-500/30 dark:bg-violet-500/10"
-                    : "border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600"
-                )}
-              >
-                <Icon className={cx("text-lg", form.visibility === value ? "text-violet-600 dark:text-violet-400" : "text-slate-400")} />
-                <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{l}</span>
-                <span className="text-xs text-slate-500 dark:text-slate-400">{desc}</span>
-              </button>
-            ))}
+          <div className={cx("grid grid-cols-1 gap-3 sm:grid-cols-3", isMemorial && "pointer-events-none")}>
+            {VISIBILITY.map(({ value, label: l, desc, icon: Icon }) => {
+              // Memorial events are locked to Private server-side — this only reflects that
+              // (disabled + visually inert), it never decides it; crud.event enforces it
+              // regardless of what this form would have submitted.
+              const locked = isMemorial && value !== "private";
+              const active = isMemorial ? value === "private" : form.visibility === value;
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  disabled={locked}
+                  onClick={() => set("visibility", value)}
+                  className={cx(
+                    "flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition",
+                    active
+                      ? "border-violet-500 bg-violet-50/60 ring-1 ring-violet-500/30 dark:bg-violet-500/10"
+                      : "border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600",
+                    locked && "opacity-40",
+                  )}
+                >
+                  <Icon className={cx("text-lg", active ? "text-violet-600 dark:text-violet-400" : "text-slate-400")} />
+                  <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{l}</span>
+                  <span className="text-xs text-slate-500 dark:text-slate-400">{desc}</span>
+                </button>
+              );
+            })}
           </div>
+          {isMemorial && (
+            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+              Funeral / Memorial events are always Private — a controlled, family-only replay,
+              never public or unlisted.
+            </p>
+          )}
         </Section>
 
         <Section title="Registration">

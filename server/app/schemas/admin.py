@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
+from ..config import BILLING_INTERVALS
+
 # ── Generic ────────────────────────────────────────────────────────────────
 
 class Page(BaseModel):
@@ -138,9 +140,20 @@ class SubscriptionOut(BaseModel):
 
 
 class SubscriptionUpdate(BaseModel):
+    # Deliberately still a plain `str`, not a Literal: the authority for a valid value is the
+    # §12 state machine in models/subscription.py, and duplicating the vocabulary here would be
+    # two places to keep in sync (same convention as schemas/commercial.py's server-computed
+    # workflow states). crud.update_subscription validates the TRANSITION, which a Literal
+    # could not do anyway — it would accept `canceled -> active`.
     status: str | None = None
     seats: int | None = Field(None, ge=1)
     plan_slug: str | None = None
+    # Optional cadence for an administrative plan change. Omitted keeps the subscription's
+    # current interval — support changing the PLAN must not silently also re-cadence the
+    # customer. Same closed vocabulary as the customer-facing request; the price for the pair
+    # is still resolved server-side from approved configuration.
+    billing_interval: str | None = Field(
+        None, pattern=f"^({'|'.join(BILLING_INTERVALS)})$")
     current_period_end: datetime | None = None
 
 

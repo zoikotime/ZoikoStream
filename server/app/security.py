@@ -1,3 +1,5 @@
+import hmac
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +12,8 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .db import get_db
 from .models import EventRegistration, User
+
+log = logging.getLogger(__name__)
 
 ALGORITHM = "HS256"
 _bearer = HTTPBearer(auto_error=True)
@@ -256,6 +260,100 @@ def require_commercial(action: str):
         return user
 
     return _dep
+
+
+# ── Scheduler service identity (Cloud Scheduler -> Cloud Run, OIDC) ──────────────────────
+
+class SchedulerIdentity:
+    """A verified non-human caller. Deliberately NOT a User.
+
+    Returning a User here would be the dangerous shortcut: every downstream helper that takes a
+    User would then treat the scheduler as a person with an organization, and `org_scoped`
+    would silently scope platform-wide maintenance to some tenant. This type has no org_id and
+    no role precisely so it cannot be passed anywhere a user is expected.
+    """
+
+    __slots__ = ("email", "subject")
+
+    def __init__(self, email: str, subject: str | None = None):
+        self.email = email
+        self.subject = subject
+
+    def __repr__(self) -> str:            # no token material, ever
+        return f"SchedulerIdentity(email={self.email!r})"
+
+
+def require_scheduler_identity(
+    creds: HTTPAuthorizationCredentials = Depends(_bearer),
+) -> SchedulerIdentity:
+    """Gate a route on a Google-signed OIDC token from THE configured scheduler account.
+
+    Four checks, each closing a distinct hole, in this order:
+
+      1. CONFIGURED? Both the allowed service account and the expected audience must be set,
+         or the route answers 503 and runs nothing. An unconfigured deployment must never
+         expose an unauthenticated way to move customers between paid plans — so the default
+         is refusal, never allow-all.
+      2. GOOGLE-SIGNED and UNEXPIRED? `verify_oauth2_token` checks the signature against
+         Google's published keys, the issuer, and `exp`. This is what a user's own JWT cannot
+         satisfy: ours are signed with SECRET_KEY, so presenting one here fails at the
+         signature and an ordinary org user can never reach this route.
+      3. RIGHT AUDIENCE? Verified as part of (2). A token Google minted for a different
+         service cannot be replayed against this one.
+      4. RIGHT IDENTITY? A valid Google token proves only that SOME Google principal called.
+         Comparing the email to the configured account is what makes it OURS, and the compare
+         is constant-time so it cannot be probed character by character.
+
+    Replay window is the token's own lifetime (Cloud Scheduler mints short-lived tokens); there
+    is no nonce store, which would need shared state this deployment does not have. Combined
+    with audience binding and an idempotent target operation, that is the practical protection.
+
+    Raises 503 when unconfigured and 403 for every authentication failure — never 401, which
+    would invite a client to retry with different credentials against a route no credential
+    should reach except the scheduler's.
+    """
+    if not settings.scheduler_auth_configured():
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Scheduled maintenance is not configured on this deployment.",
+        )
+
+    # Imported lazily: available transitively via google-cloud-storage, but nothing at import
+    # time should depend on it being installed for the rest of the app to boot.
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token as google_id_token
+    except ImportError as exc:                    # pragma: no cover - dependency present
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Scheduler authentication is unavailable: google-auth is not installed.",
+        ) from exc
+
+    try:
+        claims = google_id_token.verify_oauth2_token(
+            creds.credentials,
+            google_requests.Request(),
+            audience=settings.MAINTENANCE_OIDC_AUDIENCE.strip(),
+        )
+    except Exception as exc:                      # noqa: BLE001 - any failure is a refusal
+        # The reason is logged, never returned: telling a caller WHICH check failed helps them
+        # iterate towards a valid forgery.
+        log.warning("scheduler token rejected: %s", type(exc).__name__)
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Not authorized to run scheduled maintenance") from exc
+
+    email = (claims.get("email") or "").strip()
+    expected = settings.MAINTENANCE_SCHEDULER_SERVICE_ACCOUNT.strip()
+    if not email or not hmac.compare_digest(email.lower(), expected.lower()):
+        log.warning("scheduler token carried an unexpected identity")
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Not authorized to run scheduled maintenance")
+    if claims.get("email_verified") is False:
+        log.warning("scheduler token identity is not verified")
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Not authorized to run scheduled maintenance")
+
+    return SchedulerIdentity(email=email, subject=claims.get("sub"))
 
 
 def org_scoped(stmt, model, user: User):

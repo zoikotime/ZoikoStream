@@ -8,6 +8,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..crud import admin as admin_crud
 from ..crud import identity as identity_crud
 from ..crud import recovery as recovery_crud
 from ..services import org_policy
@@ -218,6 +219,22 @@ def register(data: RegisterIn, background: BackgroundTasks, request: Request,
         email_verified=False,
     )
     db.add(user)
+
+    # Initial subscription: Developer, `trialing`, 14 days from now (approved Product
+    # decision). This path created NO subscription at all before, which is why 2149 existing
+    # organizations have none — self-registration is how almost all of them were created, and
+    # without a subscription row they can neither be metered against a plan nor buy one
+    # (`create_subscription_checkout` returns 409 "no subscription record to upgrade").
+    #
+    # Added BEFORE the commit below on purpose: the organization, its first user and its
+    # subscription then land in ONE transaction, so registration can never persist an
+    # organization with a half-written subscription beside it. The helper does not commit for
+    # exactly this reason.
+    #
+    # Touches no payment surface — no card is collected, no Stripe subscription is created and
+    # no charge is raised. It is also idempotent, so a retried registration cannot double it.
+    admin_crud.provision_initial_subscription(db, org)
+
     db.commit()
     db.refresh(user)
 

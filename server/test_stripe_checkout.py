@@ -636,10 +636,19 @@ def test_commercial_domain_still_has_no_stripe_knowledge():
 def test_no_hardcoded_commercial_values_in_the_checkout_path():
     from app.services import payments_stripe
     src = code_only(payments_stripe)
-    for token in ("price_id", "PRICE_ID", "prices.create", "products.create",
+    for token in ("prices.create", "products.create",
                   "DEFAULT_CURRENCY", "TAX_RATE", "GST", "0.18", "zoiko_tech_inc",
                   "DEFAULT_CAPACITY", "price_monthly"):
         assert token not in src, f"hardcoded commercial value: {token!r}"
+
+    # The Live Event checkout path itself stays Price-ID-free — its amount comes from the
+    # catalog. Ledger 1's subscription checkout takes a Price ID by design (it is the approved
+    # commercial fact), but it must never carry a hardcoded ONE: assert it only ever receives
+    # the id as a parameter, with no literal Stripe price in the source.
+    import re
+    ledger2 = code_only(payments_stripe.StripePaymentProvider.create_checkout_session)
+    assert "price_id" not in ledger2, "Live Event checkout must not take a Stripe Price ID"
+    assert not re.search(r"price_[A-Za-z0-9]{6,}", src),         "a literal Stripe Price ID is hardcoded in the adapter"
 
 
 if __name__ == "__main__":

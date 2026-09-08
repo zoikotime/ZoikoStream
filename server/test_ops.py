@@ -28,7 +28,27 @@ NOW = datetime.now(timezone.utc)
 
 
 def _admin(db):
-    return db.scalar(select(User).where(User.role == "super_admin"))
+    """A super_admin, CREATED if this database does not already have one.
+
+    It used to be a bare lookup that returned None on a database with no super_admin, and the
+    five callers below then passed that None into services.ops — failing with
+    `'NoneType' object has no attribute 'id'` rather than anything that named the real problem.
+    That made these tests silently dependent on ambient rows left behind by other runs: they
+    passed against a well-used database and failed against a freshly created one, which is
+    exactly backwards for a suite whose isolation guard exists to insist on a dedicated
+    database. Creating one on demand makes them self-sufficient without changing a single
+    assertion.
+    """
+    existing = db.scalar(select(User).where(User.role == "super_admin"))
+    if existing is not None:
+        return existing
+    tag = uuid.uuid4().hex[:8]
+    org = _org(db, name=f"ops-admin-home-{tag}")
+    admin = User(org_id=org.id, full_name="Ops Admin", email=f"ops-admin-{tag}@t.test",
+                 username=f"opsadmin{tag}", password_hash="x", role="super_admin")
+    db.add(admin)
+    db.flush()
+    return admin
 
 
 def _org(db, name=None, **kw):

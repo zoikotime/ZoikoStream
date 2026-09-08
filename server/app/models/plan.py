@@ -48,4 +48,10 @@ class Plan(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="plan")
+    # Subscriptions CURRENTLY on this plan. `foreign_keys` is required because
+    # Subscription now has two foreign keys to plans.id (`plan_id` and `pending_plan_id`);
+    # without it SQLAlchemy cannot tell which path this collection follows. A subscription
+    # merely SCHEDULED to move onto this plan is deliberately not counted here — it is still
+    # being billed and entitled on its old plan until the effective date.
+    subscriptions: Mapped[list["Subscription"]] = relationship(
+        back_populates="plan", foreign_keys="Subscription.plan_id")
