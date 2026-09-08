@@ -151,3 +151,87 @@ if __name__ == "__main__":
             fn()
             print(f"  ok  {name}")
     print("watch-window self-check passed")
+
+
+# ── watch-link authorization + room identity (live-video audit) ────────────────
+# Added with the LiveKit publishing fix: the audit's "watch link authorization" and
+# "room ID consistency" items. These assert at the ROUTE level what
+# test_livekit_publish_flow.py asserts at the token level — that the credentials handed to a
+# browser are gated, and that a viewer's room is the producer's room.
+
+def _grants(token):
+    """The `video` claim LiveKit enforces on."""
+    import jwt
+
+    from app.config import settings
+    return jwt.decode(token, settings.LIVEKIT_API_SECRET, algorithms=["HS256"],
+                      options={"verify_aud": False})["video"]
+
+
+def test_a_private_event_refuses_an_invalid_watch_link():
+    """An unrecognised ?link= on a private event must not reach the room at all — no token,
+    and a 403 rather than a silently token-less 200 that reads like "not live yet"."""
+    db = SessionLocal()
+    client = TestClient(m.app)
+    org = _org(db)
+    user = _user(db, org)
+    # Built directly rather than via _event(), which pins visibility="public".
+    ev = Event(org_id=org.id, created_by=user.id, title="Private Window Test Event",
+               status="live", visibility="private", start_time=None, end_time=None)
+    db.add(ev)
+    db.flush()
+    db.commit()
+    try:
+        r = client.get(f"/api/events/{ev.id}/watch", params={"link": uuid.uuid4().hex})
+        assert r.status_code == 403, r.text
+        assert "livekit_token" not in r.text
+    finally:
+        _cleanup(db, org, user, ev)
+
+
+def test_an_unregistered_viewer_gets_no_livekit_credentials():
+    """registration_required gates the media credentials themselves (can_stream), not just
+    the page — otherwise the room grant is handed to anyone who loads the URL."""
+    db = SessionLocal()
+    client = TestClient(m.app)
+    org = _org(db)
+    user = _user(db, org)
+    ev = _event(db, org, user, registration_required=True, start_time=None, end_time=None)
+    db.commit()
+    try:
+        body = client.get(f"/api/events/{ev.id}/watch").json()
+        assert body["livekit_token"] is None, body
+        assert body["room"] is None, body
+    finally:
+        _cleanup(db, org, user, ev)
+
+
+def test_a_viewers_room_is_the_producers_room_and_the_token_cannot_publish():
+    """The reported bug's first two suspects, at the route level: the room the audience is
+    told to join must be services.livekit.room_for_event (the exact string the producer's
+    Ctx.room and its publish token use), and the audience token must be subscribe-only.
+
+    Skipped when the environment has no LiveKit credentials — there is no token to inspect,
+    which is correct behaviour, not a failure (services/livekit.configured())."""
+    from app.services import livekit as lk
+
+    db = SessionLocal()
+    client = TestClient(m.app)
+    org = _org(db)
+    user = _user(db, org)
+    ev = _event(db, org, user, start_time=None, end_time=None)
+    db.commit()
+    try:
+        body = client.get(f"/api/events/{ev.id}/watch").json()
+        if not lk.configured():
+            assert body["livekit_token"] is None, body
+            return
+        assert body["room"] == lk.room_for_event(ev.id), body
+        grants = _grants(body["livekit_token"])
+        # Identical to what services/broadcast.py mints for the host, by construction.
+        assert grants["room"] == lk.room_for_event(ev.id)
+        assert grants["roomJoin"] is True
+        assert grants["canSubscribe"] is True
+        assert grants["canPublish"] is False
+    finally:
+        _cleanup(db, org, user, ev)

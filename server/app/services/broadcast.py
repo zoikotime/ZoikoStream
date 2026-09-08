@@ -517,7 +517,15 @@ async def _golive(ctx, payload):
         # mark_degraded/mark_recovered). Either way, clear a stale degraded flag now rather
         # than waiting up to SAMPLE_SECONDS for the sampler to notice the publisher is back.
         await mark_recovered(str(ctx.event_id), str(ctx.org_id))
-    await bus.state_set(ctx.event_id, {"status": "live", "started_at": session["started_at"]})
+    # A new go-live has NOT been confirmed publishing yet, so the previous session's (or
+    # this session's pre-drop) report must not carry over — that stale True is exactly what
+    # would let a failed publish inherit a healthy LIVE. False, not None: the producer is
+    # expected to report, and until it does the honest answer is "not confirmed". The
+    # DEGRADE_GRACE_SECONDS window is what keeps this from degrading a normal warm-up.
+    await bus.state_set(ctx.event_id, {
+        "status": "live", "started_at": session["started_at"],
+        MEDIA_PUBLISHING_KEY: False,
+    })
     if act:  # only the transition that actually happened, not a redundant "already live" call
         await mod.tx(lambda db: webhooks.enqueue(db, ctx.org_id, "session.started", {
             "event_id": str(ctx.event_id), "session_id": session["id"],
@@ -684,6 +692,86 @@ async def mark_recovered(event_id: str, org_id: str) -> bool:
         except Exception:  # noqa: BLE001 — same reasoning as mark_degraded's own try/except
             log.exception("event %s: recovery persisted, but notifying consoles failed", event_id)
     return changed
+
+
+# ── authoritative media publication state ─────────────────────────────────────
+# The audit's core objection: "Go Live clicked -> backend says LIVE -> LiveKit publishing
+# fails -> event remains LIVE." _golive below cannot itself wait for the browser to finish
+# publishing (the click and the publish happen on opposite sides of a socket, and the room
+# has to exist before a publisher can join it), so the fix is the escape hatch the audit
+# allows: a SEPARATE, authoritative media-publication state, persisted independently of the
+# lifecycle status and exposed to viewers.
+#
+# Where it lives: the bus (services/bus.state_*), not a new BroadcastSession column. It is
+# hot, per-session, rewritten every few seconds, and already rehydratable — exactly what the
+# bus is for — and it needs no migration, so a deploy can't leave a declared column missing
+# from the database. The DURABLE half of the same fact is Event.status "degraded", which
+# mark_degraded/mark_recovered already persist and routers/events.py already exposes to
+# viewers as media_status.
+MEDIA_PUBLISHING_KEY = "media_publishing"
+MEDIA_PUBLISHING_AT_KEY = "media_publishing_at"
+
+
+async def media_publishing_get(event_id) -> bool | None:
+    """The producer's last verified publication report, or None if it has never reported.
+
+    None is NOT False: an event whose host console predates this reporting (or whose socket
+    hasn't delivered a report yet) must fall back to the webhook-driven presence signal
+    rather than be declared down on the strength of a report that never arrived.
+    """
+    state = await bus.state_get(event_id)
+    value = state.get(MEDIA_PUBLISHING_KEY)
+    return None if value is None else bool(value)
+
+
+async def _media_state(ctx, payload):
+    """The producer telling us what it ACTUALLY has published.
+
+    Sent by the host console whenever hooks/useLiveKitPublish.js's verified `publishing`
+    changes — that value is derived from room.localParticipant.videoTrackPublications /
+    audioTrackPublications, i.e. publications LiveKit acked, never from "the host clicked Go
+    Live" or "the local preview is on screen". A host watching their own camera proves
+    nothing about publication, which is precisely why this exists.
+
+    Writes the bus state, then reconciles the durable Event.status through the SAME
+    mark_degraded/mark_recovered pair the sampler uses — so there is one recovery path, not
+    two. The DEGRADE_GRACE_SECONDS window is honoured here too: a report of "not publishing"
+    arriving during the normal camera warm-up right after go-live must not degrade the event.
+    """
+    publishing = bool(payload.get("publishing"))
+    now = datetime.now(timezone.utc)
+    await bus.state_set(ctx.event_id, {
+        MEDIA_PUBLISHING_KEY: publishing,
+        MEDIA_PUBLISHING_AT_KEY: now.isoformat(),
+    })
+
+    state = await bus.state_get(ctx.event_id)
+    if state.get("status") != "live":
+        # Nothing to reconcile for a preview/paused/ended session.
+        return [("broadcast", "broadcast.media_state", {
+            "publishing": publishing,
+            "video": bool(payload.get("video")),
+            "audio": bool(payload.get("audio")),
+        })]
+
+    if publishing:
+        await mark_recovered(str(ctx.event_id), str(ctx.org_id))
+    else:
+        def _started_at(db):
+            session = _current_session(db, ctx)
+            return session.started_at if session else None
+
+        started = await mod.tx(_started_at)
+        past_grace = started is None or (now - started).total_seconds() > DEGRADE_GRACE_SECONDS
+        if past_grace:
+            await mark_degraded(str(ctx.event_id), str(ctx.org_id),
+                               "The producer reports no media is being published")
+
+    return [("broadcast", "broadcast.media_state", {
+        "publishing": publishing,
+        "video": bool(payload.get("video")),
+        "audio": bool(payload.get("audio")),
+    })]
 
 
 async def _preview(ctx, payload):
@@ -1244,11 +1332,30 @@ def _record_media_health(ctx, health: dict) -> dict:
     return health
 
 
-def health_of(split: dict, status: str, recording_enforced: bool | None) -> dict:
+def health_of(split: dict, status: str, recording_enforced: bool | None,
+              producer_publishing: bool | None = None) -> dict:
     """Live health from signals we actually have: is it live, is anybody publishing, how
-    many connections report poor quality, did the recording attach."""
+    many connections report poor quality, did the recording attach.
+
+    `producer_publishing` is the PRODUCER's own verified report (see media_publishing_get /
+    the broadcast.media_state action): the host's client checked
+    room.localParticipant's real track publications and told us whether LiveKit is actually
+    holding one. It is OR'd with presence's webhook-driven `publishing` count rather than
+    replacing it, because the two have different blind spots and neither alone is reliable:
+
+      * presence `publishing` is written ONLY by the LiveKit track_published/track_unpublished
+        webhook (routers/live.py). If the LiveKit project has no webhook pointing at this
+        deployment — nothing in this repo configures one, and SETUP_GUIDE.md never mentioned
+        the endpoint — that count is permanently 0, so EVERY live event looked like "No media
+        is being published" and the sampler degraded it ~20s after go-live.
+      * the producer's report can't see a publication that the SFU dropped without telling
+        the client.
+
+    Media is treated as flowing when EITHER says so, and as down only when NEITHER does.
+    """
+    media_live = bool(split["publishing"]) or bool(producer_publishing)
     issues = []
-    if status == "live" and not split["publishing"]:
+    if status == "live" and not media_live:
         issues.append("No media is being published")
     if status == "paused":
         issues.append("Broadcast is paused")
@@ -1256,7 +1363,7 @@ def health_of(split: dict, status: str, recording_enforced: bool | None) -> dict
         issues.append(f"{split['poor_connections']} participants on a poor connection")
     if recording_enforced is False:
         issues.append("Recording is not being captured")
-    level = "down" if status == "live" and not split["publishing"] else "warn" if issues else "ok"
+    level = "down" if status == "live" and not media_live else "warn" if issues else "ok"
     return {"level": level, "issues": issues}
 
 
@@ -1299,7 +1406,8 @@ async def snapshot_extra(ctx) -> dict:
         # this module or media_comms re-deriving health.
         "health": _record_media_health(
             ctx, health_of(split, session["status"],
-                           recording["enforced"] if recording else None)),
+                           recording["enforced"] if recording else None,
+                           await media_publishing_get(ctx.event_id))),
         "livekit_url": livekit.settings.LIVEKIT_URL or None,
         # Present only for hosts, and only when LiveKit is configured. This is the token
         # hooks/useLiveKitPublish.js connects and publishes with once `live` is true — see
@@ -1312,19 +1420,161 @@ async def snapshot_extra(ctx) -> dict:
 
 # ── analytics sampler ─────────────────────────────────────────────────────────
 
+# ── orphan / stale-session reconciliation (analytics_snapshots FK) ────────────
+# PRODUCTION BUG (Cloud Run): the sampler failed a whole tick with
+#   IntegrityError (ForeignKeyViolation): insert on "analytics_snapshots"
+#   violates "analytics_snapshots_event_id_fkey"
+#
+# `event_id` reaches AnalyticsSnapshot from exactly ONE place: the BroadcastSession rows
+# with ended_at IS NULL, below. It was read in one short-lived transaction (mod.tx) and the
+# snapshot written in a LATER, separate one, with no existence check in between — so a hard
+# delete of the events row landing in that window made the insert fail.
+#
+# Every FK referencing events.id is ON DELETE NO ACTION (verified against the production
+# schema), so an events row cannot be deleted while ANY dependent row — including the
+# BroadcastSession the sampler is holding — still references it. A genuinely missing event
+# therefore implies its session row was deleted first, in the same operation, moments
+# earlier. That is a reachable sequence (a maintenance/teardown job clearing an event's
+# dependents and then the event itself).
+#
+# Two DIFFERENT problems are fixed here, and they need different treatment:
+#
+#   1. THE RACE (rare, unavoidable): the events row disappears between the read and the
+#      insert. Existence is re-checked inside the SAME transaction as the insert, and the
+#      residual window is closed by catching ONLY a ForeignKeyViolation naming this
+#      constraint. Every other IntegrityError propagates.
+#
+#   2. THE LEAK (the routine case, and why ticks were generated forever): sessions whose
+#      Event is soft-deleted or has reached a terminal status still have ended_at IS NULL,
+#      so they were sampled every SAMPLE_SECONDS indefinitely. Measured on production:
+#      11 open sessions, oldest 29 days, 6 of them belonging to soft-deleted events, against
+#      ~548k analytics_snapshots rows. They leaked because _end never ran for them (host
+#      closed the tab, instance restarted, or the event ended through another route) and
+#      because bus.presence_clear is only ever called from the LiveKit room_finished
+#      webhook, which this deployment does not have configured. They are now retired once
+#      rather than skipped forever.
+#
+# Deliberately NOT done: dropping the FK, creating placeholder Event rows, or catching
+# generic Exception. The FK is the invariant that surfaced this, and it stays.
+_TERMINAL_EVENT_STATUSES = ("ended", "cancelled", "archived")
+
+# A session left open against a terminal/soft-deleted event is closed with this reason, so
+# the record distinguishes it from a host-ended or emergency-stopped broadcast
+# (BroadcastSession.ended_reason: host | emergency_stop | room_finished).
+STALE_SESSION_REASON = "stale_event"
+
+FK_VIOLATION_PGCODE = "23503"
+
+
+def _is_missing_event_fk(exc: IntegrityError) -> bool:
+    """True ONLY for "this snapshot's event_id has no events row".
+
+    Deliberately narrow. A unique-constraint regression, a different FK, or any other
+    IntegrityError is a real defect and must reach run_sampler's error log with its
+    traceback — so this matches on the SQLSTATE plus the constraint name psycopg2 reports in
+    `diag`, never on free-form message text (which is locale- and version-dependent).
+    """
+    orig = getattr(exc, "orig", None)
+    if getattr(orig, "pgcode", None) != FK_VIOLATION_PGCODE:
+        return False
+    diag = getattr(orig, "diag", None)
+    constraint = getattr(diag, "constraint_name", None) or ""
+    if constraint:
+        return constraint == "analytics_snapshots_event_id_fkey"
+    # Some psycopg2 builds leave diag.constraint_name empty. Already gated behind SQLSTATE
+    # 23503 above, so this fallback only has to identify WHICH foreign key.
+    table = getattr(diag, "table_name", None) or ""
+    return table == "analytics_snapshots" or "analytics_snapshots" in str(orig)
+
+
+# Returned by the snapshot writer when the event vanished under it — distinguishable from a
+# real counts dict, and from None.
+_EVENT_GONE = object()
+
+
+async def _retire_stale_session(session_id: str, event_id: str, reason: str) -> bool:
+    """Stop an un-endable session being a tick source forever, and drop the transient
+    runtime state that outlived it.
+
+    Closes the BroadcastSession (if it still exists — when the event was hard-deleted the
+    session row is already gone, since every FK to events is NO ACTION) and clears the
+    event's bus presence/state/bans/reactions, which nothing else clears on this deployment.
+
+    Does NOT call media_notify_ended: that emails operators that a broadcast ended, and this
+    is bookkeeping on a session which stopped existing in any meaningful sense days ago.
+    Does NOT touch Event.status either — reconciling a leaked session must never resurrect
+    or re-end an event's own lifecycle.
+    """
+    now = datetime.now(timezone.utc)
+
+    def work(db):
+        row = db.get(BroadcastSession, uuid.UUID(session_id))
+        if row is None or row.ended_at is not None:
+            return False
+        row.status = "ended"
+        row.ended_at = now
+        row.ended_reason = STALE_SESSION_REASON
+        row.paused_at = None
+        return True
+
+    closed = await mod.tx(work)
+    # Structured, WARNING, and emitted once per session rather than once per tick — the
+    # session leaves the query above the moment it is closed. No traceback: this is a known
+    # stale-state condition, not a failure needing a stack.
+    log.warning("analytics_sampler_orphan_event event_id=%s session_id=%s action=%s reason=%s",
+                event_id, session_id, "skip_snapshot", reason)
+    try:
+        await bus.presence_clear(event_id)
+    except Exception:  # noqa: BLE001 — a bus hiccup must not undo the DB reconciliation above
+        log.exception("analytics_sampler_orphan_event event_id=%s: bus state not cleared", event_id)
+    return closed
+
+
 async def _sample_once() -> list[tuple[str, dict]]:
     """One pass over every non-ended session. Runs on its own ticker (see main.lifespan) —
-    separate from the moderation scheduler so neither has to import the other."""
-    sessions = await mod.tx(lambda db: [
-        {"event_id": str(s.event_id), "org_id": str(s.org_id), "id": str(s.id),
-         "status": s.status, "peak": s.peak_viewers, "started_at": s.started_at}
-        for s in db.scalars(
-            select(BroadcastSession).where(BroadcastSession.ended_at.is_(None))).all()
-    ])
+    separate from the moderation scheduler so neither has to import the other.
+
+    PostgreSQL is the only authority for whether an Event exists: the join below and the
+    re-check inside the snapshot transaction both read the events table. Nothing here trusts
+    process memory or the bus for existence — those hold presence and settings, and both
+    outlive a deleted event (see _retire_stale_session).
+    """
+    def _open_sessions(db):
+        # LEFT JOIN, not a filter: a session whose event is missing must be VISIBLE here so
+        # it can be retired, rather than silently excluded and left to leak.
+        rows = db.execute(
+            select(BroadcastSession, Event.id, Event.status, Event.deleted_at)
+            .outerjoin(Event, Event.id == BroadcastSession.event_id)
+            .where(BroadcastSession.ended_at.is_(None))
+        ).all()
+        return [
+            {"event_id": str(sess.event_id), "org_id": str(sess.org_id), "id": str(sess.id),
+             "status": sess.status, "peak": sess.peak_viewers, "started_at": sess.started_at,
+             "event_exists": ev_id is not None,
+             "event_status": ev_status,
+             "event_deleted": ev_deleted is not None}
+            for sess, ev_id, ev_status, ev_deleted in rows
+        ]
+
+    sessions = await mod.tx(_open_sessions)
 
     out = []
     for s in sessions:
         event_id = s["event_id"]
+
+        # ── stale-session reconciliation, BEFORE any write ────────────────────
+        # Ahead of the snapshot so the routine cases never reach the insert at all. Each of
+        # these retires the session once, after which it drops out of the query above.
+        if not s["event_exists"]:
+            await _retire_stale_session(s["id"], event_id, "event_row_missing")
+            continue
+        if s["event_deleted"]:
+            await _retire_stale_session(s["id"], event_id, "event_soft_deleted")
+            continue
+        if s["event_status"] in _TERMINAL_EVENT_STATUSES:
+            await _retire_stale_session(s["id"], event_id, "event_status_" + str(s["event_status"]))
+            continue
+
         people = await bus.presence_all(event_id)
         # Nobody connected and never started: nothing worth a row.
         if not people and s["status"] == "preview":
@@ -1333,6 +1583,11 @@ async def _sample_once() -> list[tuple[str, dict]]:
         peak = max(s["peak"], split["viewers"])
 
         def write(db, s=s, split=split, peak=peak):
+            # Existence re-checked in the SAME transaction that inserts the snapshot, which
+            # is what makes the check meaningful — the join above ran in a different,
+            # already-committed transaction.
+            if db.get(Event, uuid.UUID(s["event_id"])) is None:
+                return _EVENT_GONE
             counts = _counts(db, uuid.UUID(s["event_id"]), uuid.UUID(s["org_id"]))
             db.add(AnalyticsSnapshot(
                 event_id=uuid.UUID(s["event_id"]), org_id=uuid.UUID(s["org_id"]),
@@ -1346,9 +1601,24 @@ async def _sample_once() -> list[tuple[str, dict]]:
                     session.peak_viewers = peak
             return counts
 
-        counts = await mod.tx(write)
+        # The residual race: the events row can still be deleted between write()'s own
+        # db.get and the COMMIT. mod.tx already rolls that transaction back and closes its
+        # session (moderation._run), so only THIS session's tick is affected — every
+        # remaining session is still sampled by the rest of this loop.
+        try:
+            counts = await mod.tx(write)
+        except IntegrityError as exc:
+            if not _is_missing_event_fk(exc):
+                raise
+            await _retire_stale_session(s["id"], event_id, "event_deleted_during_insert")
+            continue
+        if counts is _EVENT_GONE:
+            await _retire_stale_session(s["id"], event_id, "event_deleted_before_insert")
+            continue
+
         await bus.state_set(event_id, {"peak_viewers": peak})
-        health = health_of(split, s["status"], None)
+        health = health_of(split, s["status"], None,
+                           await media_publishing_get(event_id))
 
         # This IS the audit's "reconciliation" mechanism, not a separate ticker: every open
         # session gets its real, LiveKit-webhook-driven publishing state cross-checked
@@ -1396,6 +1666,7 @@ ACTIONS = {
     "broadcast.end": _end,
     "broadcast.emergency_stop": lambda c, p: _end(c, p, emergency=True),
     "broadcast.preview": _preview,
+    "broadcast.media_state": _media_state,
     "broadcast.countdown": _countdown,
     "broadcast.settings": _settings,
     "recording.start": _recording_start,

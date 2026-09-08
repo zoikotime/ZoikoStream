@@ -50,6 +50,37 @@ RATE_LIMIT = 30           # actions ...
 RATE_WINDOW = 10.0        # ... per this many seconds
 IDLE_TIMEOUT = 90.0       # no frame at all for this long -> reap the socket (client pings every 15s)
 
+# Reactions get their OWN budget rather than drawing on the shared one above, for two
+# reasons that both matter at once:
+#   * a viewer hammering the reaction bar must not be able to spend the budget their own
+#     chat/Q&A/poll actions need — before this, ~30 quick taps locked a viewer out of
+#     chatting for the rest of the window;
+#   * and the reverse: a chatty viewer must not lose the ability to react.
+# 12 per 3s is far above deliberate tapping (a human tops out around 5/s for a moment) and
+# far below a scripted flood, which is the abuse this exists to bound. Server-side and per
+# CONNECTION, so it holds regardless of what the browser does and regardless of which Cloud
+# Run instance the socket landed on.
+REACTION_LIMIT = 12
+REACTION_WINDOW = 3.0
+
+# Actions whose over-budget frames are dropped in SILENCE instead of answered with a
+# moderator/error frame. Only ephemeral, fire-and-forget visuals belong here: a reaction the
+# server declines to fan out leaves nothing for the viewer to do about it, and a toast per
+# dropped tap during a flood is itself the flood. Every other refusal is still reported —
+# a viewer whose chat message is rejected has to be told.
+SILENT_OVER_BUDGET = frozenset({"reaction.add"})
+
+
+def budget_for(action: str, general: SlidingWindow, reactions: SlidingWindow) -> SlidingWindow:
+    """Which of a connection's two budgets an action spends from.
+
+    A function rather than an inline conditional so the POLICY is assertable on its own
+    (test_viewer_reactions.py) — "a reaction flood must not exhaust the budget this socket's
+    chat needs" is a claim about behaviour, and it should be possible to prove it without
+    standing up a socket and timing 30 frames.
+    """
+    return reactions if action == "reaction.add" else general
+
 
 def _user_from_token(token: str | None, db: Session) -> User | None:
     """Same verification as security.get_current_user, but reading the token from the
@@ -216,6 +247,7 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     if not await _accept(websocket, event_id):
         return
     limiter = SlidingWindow(RATE_LIMIT, RATE_WINDOW)
+    reaction_limiter = SlidingWindow(REACTION_LIMIT, REACTION_WINDOW)
 
     async with bus.subscribe(ctx.event_id) as queue:
         # This connection is a participant too — one presence record per identity, so an
@@ -304,9 +336,10 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
                     await websocket.send_json(bus.envelope("moderator", "pong", {"t": frame.get("t")}))
                     continue
 
-                if not limiter.allow():
-                    await websocket.send_json(bus.envelope("moderator", "error", {
-                        "action": action, "message": "Slow down — too many actions"}))
+                if not budget_for(action, limiter, reaction_limiter).allow():
+                    if action not in SILENT_OVER_BUDGET:
+                        await websocket.send_json(bus.envelope("moderator", "error", {
+                            "action": action, "message": "Slow down — too many actions"}))
                     continue
 
                 error = await mod.dispatch(ctx, action, frame.get("payload") or {})

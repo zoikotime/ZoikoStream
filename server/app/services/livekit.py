@@ -95,17 +95,68 @@ def primary(identity: str) -> str:
     return identity
 
 
+# ── event -> LiveKit room name (THE source of truth) ──────────────────────────
+# Every token minted anywhere in this codebase, every server-side room-control call, and the
+# webhook's reverse lookup all go through these two functions. They used to be four separate
+# f"event_{ev.id}" literals (services/moderation.py's three Ctx builders + routers/events.py's
+# watch_event) plus a hand-rolled prefix strip in moderation.event_id_from_room — nothing
+# guaranteed they agreed, and a producer joining one room while viewers joined another is
+# invisible on both sides (each connects fine, subscribes to nothing, and reports healthy).
+# One helper is what makes "same room" a property of the code rather than of four copies
+# staying in sync. Frontend components must never build a room name themselves; they only
+# ever receive the token this module mints.
+ROOM_PREFIX = "event_"
+
+
+def room_for_event(event_id) -> str:
+    """The LiveKit room name for an event. Accepts a UUID or a str."""
+    if not event_id:
+        raise ValueError("room_for_event() needs an event id")
+    return f"{ROOM_PREFIX}{event_id}"
+
+
+def event_id_from_room(name: str | None) -> str | None:
+    """Reverse of room_for_event(). None for any room this app didn't name (another
+    feature's room, or a malformed one), which the webhook handler treats as "ignore"."""
+    import uuid as _uuid
+
+    if not name or not name.startswith(ROOM_PREFIX):
+        return None
+    try:
+        return str(_uuid.UUID(name[len(ROOM_PREFIX):]))
+    except ValueError:
+        return None
+
+
 def create_stream_token(
     identity: str,
     room_name: str,
     can_publish: bool
 ):
+    """A room-scoped access token. `can_publish` is the ONLY thing that separates a
+    producer's token from an audience one.
+
+    Both grants are written out explicitly rather than left to SDK defaults: a publish token
+    that silently lacked can_publish (or a playback token that silently carried it) is not
+    visible in any log or UI — the host simply gets "insufficient permissions" the moment it
+    tries to publish, which reads exactly like a network failure. The empty-argument guards
+    below exist for the same reason: minting a token against room "" or identity "" succeeds
+    and produces a client that connects to a room nobody else is in.
+    """
+    if not identity:
+        raise ValueError("create_stream_token() needs an identity")
+    if not room_name:
+        raise ValueError("create_stream_token() needs a room name")
 
     grant = api.VideoGrants(
         room_join=True,
         room=room_name,
         can_publish=can_publish,
-        can_subscribe=True
+        can_subscribe=True,
+        # Data messages ride the app's own socket, not LiveKit's data channel, so this is
+        # not load-bearing for chat/reactions. It is granted to publishers only, and stated
+        # explicitly, so the two token shapes differ in exactly the ways we intend.
+        can_publish_data=can_publish,
     )
 
 

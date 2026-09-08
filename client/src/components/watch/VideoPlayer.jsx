@@ -63,7 +63,19 @@ const fmtTime = (secs) => {
 export default function VideoPlayer({ event, viewers, watch, onStage = false, children }) {
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
-  const canStream = Boolean(watch?.status === "live" && watch?.livekit_token);
+  // The TOKEN is the gate, not a status string. GET /events/:id/watch only issues
+  // livekit_token when the backend has decided this visitor may stream right now
+  // (routers/events.py::watch_event's can_stream — which deliberately includes
+  // status "degraded", so a viewer can sit connected and recover automatically once the
+  // producer's media comes back). This used to also require watch.status === "live", which
+  // threw that away: the moment services/broadcast.py's sampler marked an event "degraded"
+  // (its normal reaction to a producer that isn't publishing), canStream went false, the
+  // <video> element below was never mounted, useLiveKitViewer was never enabled, and the
+  // page sat on the host placeholder with a "PREVIEW" badge — for an event the backend was
+  // still streaming and still handing out tokens for. Recovery needed a manual reload,
+  // because nothing re-armed when the host came back. Honest liveness messaging comes from
+  // media_status (see the placeholder below), never from refusing to connect.
+  const canStream = Boolean(watch?.livekit_token && watch?.livekit_url && !isEnded);
   const canReplay = isEnded && Boolean(watch?.recording_url);
 
   const {

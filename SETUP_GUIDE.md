@@ -339,3 +339,68 @@ gcloud scheduler jobs create http zoikostream-commercial-maintenance \
 Any cron that can hold a Finance-authorised session works equally well; nothing about the jobs
 assumes Google. Check the response body — `failed` lists any job that errored, and the others
 still ran.
+
+---
+
+## LiveKit Setup (live video) — including the webhook you must configure
+
+### Environment variables
+
+| Variable | Required | Notes |
+|---|---|---|
+| `LIVEKIT_URL` | **Yes, to stream** | Must be the **`wss://`** signalling URL (e.g. `wss://<project>.livekit.cloud`), not the `https://` dashboard URL. Both the browser publisher and the server-side room control read this one value, which is what guarantees producer and viewer land on the same deployment. |
+| `LIVEKIT_API_KEY` | **Yes, to stream** | `API...` |
+| `LIVEKIT_API_SECRET` | **Yes — server only** | Never exposed to the browser. The browser only ever receives a short-lived, room-scoped token minted by `services/livekit.py::create_stream_token`. |
+
+All three blank is a supported state: the app boots, the host console works end to end, and
+every media action reports "recorded, not enforced" rather than pretending a stream exists.
+
+### One room name, one source of truth
+
+`services/livekit.py::room_for_event(event_id)` produces `event_<uuid>` and is the **only**
+place a room name is constructed — the producer's token (`services/broadcast.py`), every
+audience token (`routers/events.py::watch_event`), server-side room control, ingress, and the
+webhook's reverse lookup (`event_id_from_room`) all go through it. Never build a room name in
+a frontend component or a new route; the browser only ever receives a token whose `room` grant
+already says which room to join. A producer in one room and viewers in another is invisible
+from both ends — each side connects successfully and simply subscribes to nothing.
+
+### Webhook endpoint (required for accurate media health)
+
+```
+POST /api/live/webhooks/livekit
+```
+
+Configure this in the LiveKit project (**LiveKit Cloud → Settings → Webhooks**, or
+`webhook.urls` in a self-hosted `livekit.yaml`) pointing at your deployed API. It is
+authenticated by the `Authorization` JWT LiveKit signs with your API key/secret, verified via
+`services/livekit.py::webhook_receiver`; with `LIVEKIT_API_SECRET` blank the endpoint returns
+**503** and refuses every call rather than trusting an unsigned body.
+
+**What breaks without it.** `track_published` / `track_unpublished` are what write a
+participant's `publishing` flag into presence, and that flag is one of the two inputs to
+`services/broadcast.py::health_of`. With no webhook the count stays permanently 0, so before
+the fix below every live event reported "No media is being published" and the analytics
+sampler marked it **degraded** roughly 20-35s after go-live — while the host console showed a
+healthy green publish banner.
+
+That single point of failure is now doubled up: the host console reports its **verified**
+publication state (derived from `room.localParticipant`'s real track publications) over the
+live socket as `broadcast.media_state`, and media is treated as flowing when **either** source
+says so. The webhook is still worth configuring — it is the only signal that can see a
+publication the SFU dropped without telling the client — but a deployment without it no longer
+degrades every broadcast. Also configure it if you use recording (`egress_ended` writes the
+real file size) or hardware ingress (`ingress_started`/`ingress_ended` drive endpoint state).
+
+### Verifying a real broadcast
+
+1. Host console → Preview: the camera appears. **This proves nothing about publishing** — it
+   is a local `getUserMedia` stream.
+2. Go Live. The stage banner must reach "Live — this feed is being published to viewers",
+   which is gated on verified publications, not on the room merely being connected. Anything
+   else ("Connected to the stream, but no camera or microphone track is published yet",
+   "Not publishing — …") is the truth, and offers a **Retry now** button.
+3. In a development build the console logs `[publish] verify` with the room, identity and each
+   publication's source/`trackSid`/muted state. Tokens are never logged.
+4. Open the watch link in another browser. The viewer logs `[viewer] …` with the room name —
+   it must match the producer's exactly.

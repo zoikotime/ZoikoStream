@@ -29,7 +29,13 @@ import FeatureModal from "../../components/host/FeatureModal";
 import StartMeetingPrompt from "../../components/host/StartMeetingPrompt";
 export default function HostDashboard() {
   const navigate = useNavigate();
-  const { state, resolved, loading, error, status, closeReason, latency, attempt, send, sendGoLive } = useLiveEvent();
+  // `reactions` is the live reaction channel, not state: hooks/useLiveEvent.js emits every
+  // `reaction.burst` envelope into it, and StudioStage passes it to the overlay over the
+  // monitor. Nothing here re-renders when the audience reacts.
+  const {
+    state, resolved, loading, error, status, closeReason, latency, attempt, send, sendGoLive,
+    reactions,
+  } = useLiveEvent();
 
   // Local capture state. Deliberately NOT server state: whether this host's camera is on is
   // a property of this machine, not of the broadcast.
@@ -123,7 +129,21 @@ export default function HostDashboard() {
   // state and all — into the LiveKit room once the broadcast is actually live. Gated on
   // media.active (not just previewOn) so publishing waits for getUserMedia to have really
   // resolved, rather than racing it.
-  const { connected: isPublishing, reconnecting: isReconnecting, publishError } = useLiveKitPublish({
+  // `publishing` (NOT `connected`) is what the console and the server treat as "on air":
+  // the hook derives it from room.localParticipant's real, LiveKit-acked track publications.
+  // `connected` only means the signalling session is up, and using it as isPublishing is what
+  // let the stage show "Live — this feed is being published to viewers" over a room with zero
+  // published tracks. `roomConnected` is kept separately so the banner can still distinguish
+  // "connecting the publisher" from "not publishing at all".
+  const {
+    connected: roomConnected,
+    publishing: isPublishing,
+    publishedVideo,
+    publishedAudio,
+    reconnecting: isReconnecting,
+    publishError,
+    retry: retryPublish,
+  } = useLiveKitPublish({
     enabled: live && media.active,
     url: state.livekitUrl,
     token: state.publishToken,
@@ -132,6 +152,31 @@ export default function HostDashboard() {
     screenAudioTrack,
     videoTrack: media.videoTrack,
   });
+
+  // Report the VERIFIED publication state to the server, which has no other reliable way to
+  // know it: the LiveKit track_published webhook is the only other source, and nothing in
+  // this repo provisions that webhook (see services/broadcast.py::health_of). This is what
+  // stops "the host clicked Go Live" from being mistaken for "media is reaching viewers" —
+  // services/broadcast.py's broadcast.media_state handler persists it and reconciles
+  // Event.status live <-> degraded, which routers/events.py exposes to viewers as
+  // media_status. Only sent on an actual change, and only while live, so it is a handful of
+  // frames per broadcast rather than a per-render stream.
+  const lastMediaReport = useRef(null);
+  useEffect(() => {
+    if (!canHost || !live || status !== "open") {
+      // Cleared (rather than kept) so the next open socket re-reports from scratch: a
+      // server restart or a worker failover loses the bus state this feeds, and a dedupe
+      // that survived the reconnect would leave the backend permanently unaware.
+      lastMediaReport.current = null;
+      return;
+    }
+    const report = { publishing: isPublishing, video: publishedVideo, audio: publishedAudio };
+    const key = `${report.publishing}|${report.video}|${report.audio}`;
+    if (lastMediaReport.current === key) return;
+    // Only remember it as reported if it actually went out — send() returns false when the
+    // socket isn't open, and recording the key regardless would drop the report silently.
+    if (send("broadcast.media_state", report)) lastMediaReport.current = key;
+  }, [canHost, live, status, isPublishing, publishedVideo, publishedAudio, send]);
 
   // Once, the first time this host lands on a console they're allowed to run: ask whether
   // to start, rather than making them hunt for the "Preview" button. Confirming just arms
@@ -275,9 +320,12 @@ export default function HostDashboard() {
               onCountdownDone={clearCountdown}
               publishToken={state.publishToken}
               isPublishing={isPublishing}
+              roomConnected={roomConnected}
               isReconnecting={isReconnecting}
               publishError={publishError}
+              onRetryPublish={retryPublish}
               eventStatus={state.event?.status}
+              reactionChannel={reactions}
             />
           </div>
 

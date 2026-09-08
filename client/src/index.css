@@ -136,16 +136,51 @@ p { text-wrap: pretty; }
 }
 .zk-pop { animation: zk-pop .32s cubic-bezier(0.22, 1, 0.36, 1); }
 
-/* Floating reaction burst over the video (components/watch/FloatingReactions.jsx) — one
-   emoji rises and fades, then its own JS timer removes the node from the DOM. Driven by
-   real reaction-count deltas over the socket, so every viewer sees the same taps float
-   up, not just the person who tapped. */
-@keyframes zk-rise-fade {
-  0% { transform: translateY(0) scale(0.6); opacity: 0; }
-  15% { opacity: 1; transform: translateY(-12px) scale(1); }
-  100% { transform: translateY(-170px) scale(1.05); opacity: 0; }
+/* Google-Meet-style floating reaction (components/live/ReactionOverlay.jsx). ONE emoji per
+   server `reactions`/`reaction.burst` envelope: it pops in near the bottom of the video,
+   rises with a slight sideways wander, fades, and is then removed from the DOM by the
+   overlay's own sweep. Shown on BOTH live surfaces — the viewer's player and the host's
+   Producer Console monitor — so a tap is visible to the audience and to the producer.
+
+   Only `transform` and `opacity` animate, so a screenful of these stays on the compositor
+   and never touches layout — that is what keeps it cheap enough to run over live video.
+
+   Two per-item custom properties, both set inline by the overlay:
+     --zk-reaction-drift  px of horizontal wander, so simultaneous reactions take different
+                          paths instead of stacking into one thick emoji
+     --zk-reaction-rise   how far up it travels; clamped to the viewport so the same
+                          animation reads correctly in a phone-sized player and in the
+                          host's fullscreen monitor. */
+@keyframes zk-reaction-float {
+  0% { opacity: 0; transform: translate3d(0, 12px, 0) scale(0.45); }
+  14% {
+    opacity: 1;
+    transform: translate3d(calc(var(--zk-reaction-drift) * 0.2), calc(var(--zk-reaction-rise) * -0.12), 0) scale(1.12);
+  }
+  30% {
+    transform: translate3d(calc(var(--zk-reaction-drift) * 0.5), calc(var(--zk-reaction-rise) * -0.34), 0) scale(1);
+  }
+  72% { opacity: 0.92; }
+  100% {
+    opacity: 0;
+    transform: translate3d(var(--zk-reaction-drift), calc(var(--zk-reaction-rise) * -1), 0) scale(0.86);
+  }
 }
-.zk-rise-fade { animation: zk-rise-fade 2.2s cubic-bezier(0.22, 1, 0.36, 1) both; }
+/* Opacity-only fallback for prefers-reduced-motion (applied in the media query below).
+   The reaction still APPEARS and still goes away on its own — hiding it outright would
+   take the host's only view of audience reactions away from anyone who asked their OS for
+   less animation, and this is the one signal the console is required to show. */
+@keyframes zk-reaction-hold {
+  0%, 100% { opacity: 0; }
+  10%, 72% { opacity: 1; }
+}
+.zk-reaction-float {
+  --zk-reaction-rise: clamp(96px, 30vh, 240px);
+  --zk-reaction-drift: 0px;
+  /* Duration is re-set inline from ReactionOverlay's REACTION_DURATION_MS, which is also
+     what times the node's removal — the two must not drift apart. */
+  animation: zk-reaction-float 3s cubic-bezier(0.25, 0.9, 0.3, 1) both;
+}
 
 .zk-flow-dot { animation: zk-flow 2.4s linear infinite; }
 .zk-float { animation: zk-float 6s ease-in-out infinite; }
@@ -236,7 +271,11 @@ p { text-wrap: pretty; }
   .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift, .zk-badge-glow,
   .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow, .zk-pop,
   .zk-pop-in, .zk-tip-in { animation: none; }
-  /* A static, full-opacity emoji stuck on the video for its full 2.2s is worse than no
-     effect at all — hide the burst outright rather than leave it motionless. */
-  .zk-rise-fade { display: none; }
+  /* Reactions are the exception to "animation: none": they are information, not decoration
+     (the host has no other view of audience reactions), so the emoji still fades in and out
+     on the same 3s clock — it just no longer travels or scales. See zk-reaction-hold. */
+  .zk-reaction-float {
+    animation-name: zk-reaction-hold;
+    animation-timing-function: linear;
+  }
 }

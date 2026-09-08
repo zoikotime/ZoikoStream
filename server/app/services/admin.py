@@ -232,7 +232,7 @@ def live_events(db: Session, state: str = "live") -> list[dict]:
             "title": ev.title if ev else None,
             "organization": org.name if org else None,
             "region": org.region if org else None,
-            "server": f"event_{s.event_id}",  # matches services.moderation.Ctx.room
+            "server": livekit.room_for_event(s.event_id),  # services.livekit.room_for_event == Ctx.room
             "started_at": s.started_at,
             "ended_at": s.ended_at,
             "health": "ok" if s.status in ("live", "paused") else None,

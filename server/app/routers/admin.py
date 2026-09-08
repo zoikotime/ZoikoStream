@@ -69,6 +69,7 @@ from .. import security
 from ..security import require_super_admin
 from ..services import admin as svc
 from ..services import broadcast as broadcast_svc
+from ..services import livekit
 from ..services import moderation as mod
 from ..services import ops as ops_svc
 
@@ -675,7 +676,7 @@ async def delete_event(
     was_live = ev.status in ("live", "paused")
     if was_live:
         ctx = mod.Ctx(
-            event_id=ev.id, org_id=ev.org_id, room=f"event_{ev.id}",
+            event_id=ev.id, org_id=ev.org_id, room=livekit.room_for_event(ev.id),
             user_id=admin.id, name=admin.full_name or admin.email,
             identity=f"admin-{admin.id}", role=admin.role,
             can_moderate=True, can_host=True,
