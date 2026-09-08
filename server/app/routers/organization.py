@@ -688,7 +688,7 @@ async def create_live_input(
     db.add(row)
     db.flush()
     identity = f"ingress-{row.id}"
-    info, error = await livekit.create_ingress(f"event_{ev.id}", data.input_type, data.title, identity)
+    info, error = await livekit.create_ingress(livekit.room_for_event(ev.id), data.input_type, data.title, identity)
     row.participant_identity = identity
     row.enforced = info is not None
     row.error = error

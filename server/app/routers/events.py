@@ -219,7 +219,10 @@ def watch_event(
     not_started = bool(ev.start_time and now < ev.start_time)
     expired = bool(ev.end_time and now > ev.end_time)
 
-    room = f"event_{ev.id}"
+    # The SAME helper the producer's Ctx.room and every server-side room-control call
+    # use (services/livekit.py::room_for_event) — never a second literal that has to
+    # be kept in sync by hand. Producer and viewer join one room by construction.
+    room = livekit.room_for_event(ev.id)
     token = url = None
     # "degraded" (persisted by services/broadcast.py's sampler/webhook-driven
     # mark_degraded/mark_recovered when the producer's media drops mid-broadcast) still gets
@@ -466,7 +469,7 @@ async def end_event(event_id: uuid.UUID, user: User = Depends(get_current_user),
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event is not live")
 
     ctx = mod.Ctx(
-        event_id=ev.id, org_id=ev.org_id, room=f"event_{ev.id}",
+        event_id=ev.id, org_id=ev.org_id, room=livekit.room_for_event(ev.id),
         user_id=user.id, name=user.full_name or user.email,
         identity=f"host-{user.id}", role=user.role,
         can_moderate=True, can_host=True,
@@ -486,7 +489,7 @@ async def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_ad
         # A soft delete alone would orphan the running broadcast_session at "live" forever —
         # nothing can ever reach it again to end it once the event is gone. Force-end first.
         ctx = mod.Ctx(
-            event_id=ev.id, org_id=ev.org_id, room=f"event_{ev.id}",
+            event_id=ev.id, org_id=ev.org_id, room=livekit.room_for_event(ev.id),
             user_id=admin.id, name=admin.full_name or admin.email,
             identity=f"admin-{admin.id}", role=admin.role,
             can_moderate=True, can_host=True,

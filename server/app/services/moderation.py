@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -172,7 +173,7 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
         return Ctx(
             event_id=ev.id,
             org_id=ev.org_id,
-            room=f"event_{ev.id}",
+            room=livekit.room_for_event(ev.id),
             user_id=user.id,
             name=user.full_name or user.email,
             identity=str(user.id),
@@ -202,7 +203,7 @@ def resolve_ctx_from_registration(event_id: uuid.UUID, registration: EventRegist
         return Ctx(
             event_id=ev.id,
             org_id=ev.org_id,
-            room=f"event_{ev.id}",
+            room=livekit.room_for_event(ev.id),
             user_id=registration.id,
             name=registration.name,
             identity=f"guest-{registration.id}",
@@ -244,7 +245,7 @@ def resolve_ctx_from_access_link(event_id: uuid.UUID, raw_token: str) -> Ctx | N
         return Ctx(
             event_id=ev.id,
             org_id=ev.org_id,
-            room=f"event_{ev.id}",
+            room=livekit.room_for_event(ev.id),
             user_id=link.id,
             name=link.label or "Viewer",
             identity=identity,
@@ -394,14 +395,12 @@ def _webhook_activity_row(db, event_id: str, kind: str, text: str, actor: str) -
 
 
 def event_id_from_room(name: str | None) -> str | None:
-    """Rooms are named `event_<uuid>` (see Ctx.room). Anything else belongs to another
-    feature and is ignored by the webhook handler."""
-    if not name or not name.startswith("event_"):
-        return None
-    try:
-        return str(uuid.UUID(name[len("event_"):]))
-    except ValueError:
-        return None
+    """Rooms are named by services.livekit.room_for_event (see Ctx.room). Anything else
+    belongs to another feature and is ignored by the webhook handler.
+
+    Delegates rather than re-deriving the prefix: this is the reverse of the mapping the
+    tokens are minted from, so the two cannot be allowed to drift apart."""
+    return livekit.event_id_from_room(name)
 
 
 def record(db, ctx: Ctx, kind: str, text: str, *, audit: str | None = None,
@@ -490,7 +489,9 @@ SNAPSHOT_EXTRAS: list = []
 async def snapshot(ctx: Ctx) -> dict:
     snap = await tx(lambda db: _snapshot(db, ctx))
     snap["participants"] = await bus.presence_all(ctx.event_id)
-    snap["reactions"] = _reaction_snapshot(await bus.reaction_all(ctx.event_id))
+    # Deliberately NO reaction data. Reactions are ephemeral events, not state: replaying a
+    # tally (or a backlog) into a reconnecting socket is exactly what would make a host's
+    # reconnect re-animate reactions that already happened.
     settings = await bus.state_get(ctx.event_id)
     # Read-only for a viewer — slow mode is a host moderation setting, not something the
     # viewer's own socket can flip, so only the current value is exposed here.
@@ -510,16 +511,11 @@ VIEWER_ACTIONS = frozenset({
     "participant.hand", "participant.state", "reaction.add", "feedback.submit",
 })
 
-# The viewer reaction bar under the player (components/watch/ReactionBar.jsx) — a fixed,
-# whole-event tap counter per emoji, distinct from chat.react above (which tags one chat
-# message). Keys match the frontend's REACTIONS list 1:1 so no mapping layer is needed.
+# The viewer reaction bar under the player (components/watch/ReactionBar.jsx) — one
+# ephemeral, Google-Meet-style reaction per tap, distinct from chat.react above (which tags
+# one chat message and IS a persisted count). Keys match the frontend's REACTIONS list 1:1
+# so no mapping layer is needed, and they are the only values ever accepted off the wire.
 REACTION_KEYS = ("like", "heart", "clap", "fire", "party")
-
-
-def _reaction_snapshot(counts: dict) -> dict:
-    """Zero-fill every known key so the envelope is always the complete state (a viewer
-    who has never seen a `fire` tap this session still needs to know it's 0, not missing)."""
-    return {k: counts.get(k, 0) for k in REACTION_KEYS}
 
 
 def _text(payload, key="text", limit=2000) -> str:
@@ -1076,25 +1072,54 @@ async def _participant_state(ctx, payload):
 # reactions ---------------------------------------------------------------------
 
 async def _reaction_add(ctx, payload):
-    """One tap on the viewer reaction bar. `key` is validated against the fixed set the
-    frontend renders (never trust a wire value into a dict key that gets broadcast).
-    The increment itself is bus.reaction_incr, which is atomic (Redis HINCRBY / a bare
-    dict bump with no intervening await) — concurrent taps from different viewers never
-    clobber each other the way a read-count/add-one/save-count round trip would."""
+    """One tap on the viewer reaction bar, published as ONE ephemeral event.
+
+    The Google-Meet model, not a scoreboard: this returns a single `reaction.burst`
+    envelope that every socket on the event — the host's Producer Console included — floats
+    over the video once and then forgets. There is no total in the envelope, no total in the
+    connect snapshot, and therefore nothing for a reconnect to replay.
+
+    Three things are deliberate here:
+
+    * `key` is checked against REACTION_KEYS before it goes anywhere. It ends up in a
+      broadcast payload and is used by the client to look up an emoji, so an arbitrary wire
+      string must never reach either.
+    * NO viewer identity is included. The host sees "somebody sent ❤️", never who — see
+      the payload below, which carries no identity, name, user id, registration or token.
+    * The bus tally is fire-and-forget analytics bookkeeping (bus.reaction_tally), kept
+      strictly separate from the animation and never sent to a client.
+    """
     key = payload.get("key")
     if key not in REACTION_KEYS:
         return "Unsupported reaction"
 
-    # Same toggle the host console already exposes (data/host.js "Reactions"); chat_gate
-    # reads the equivalent chat_enabled flag the same way, from the bus's hot settings
-    # copy rather than a query per tap.
+    # One read of the bus's hot settings copy covers both gates, the same way chat_gate
+    # reads chat_enabled rather than querying Postgres per message.
     settings = await bus.state_get(ctx.event_id)
+
+    # Same toggle the host console already exposes (data/host.js "Reactions"), and the
+    # non-waivable memorial-event lock (broadcast.py _seed_settings).
     if settings.get("reactions_enabled") is False:
         return "Reactions are turned off for this event"
 
-    counts = await bus.reaction_incr(ctx.event_id, key)
-    return [("reactions", "reaction.update", {
-        "event_id": str(ctx.event_id), "reactions": _reaction_snapshot(counts),
+    # Event state: live/paused/preview may react, an ENDED broadcast may not. A viewer
+    # sitting on a page whose socket is still open when the host ends the event would
+    # otherwise keep floating reactions over a recording.
+    if settings.get("status") == "ended":
+        return "This event has ended"
+
+    await bus.reaction_tally(ctx.event_id, key)
+    return [("reactions", "reaction.burst", {
+        # Echoed back so a client can refuse an envelope that is not for the event it is
+        # watching. The bus is already per-event (bus.publish keys on event_id), so this is
+        # a second, independent check rather than the only one.
+        "event_id": str(ctx.event_id),
+        "reaction": key,
+        # Unique per reaction INSTANCE: the overlay keys its DOM node on this, so two taps
+        # of the same emoji in the same millisecond are two independent floats rather than
+        # one React element that never re-animates.
+        "id": uuid.uuid4().hex,
+        "ts": time.time(),
     })]
 
 

@@ -4,6 +4,7 @@ import api from "../api";
 import useApi from "./useApi";
 import useEventStream from "./useEventStream";
 import useInterval from "./useInterval";
+import useReactionChannel from "./useReactionChannel";
 import { notify } from "../ui/Toast";
 import { playAlertChime, unlockAudio } from "../utils/sound";
 
@@ -122,8 +123,14 @@ export function reducer(state, env) {
         analytics: data.analytics || null,
         health: data.health || null,
         countdownUntil: data.countdown_until || null,
-        publishToken: data.publish_token || null,
-        livekitUrl: data.livekit_url || null,
+        // Sticky across reconnects. snapshot_extra mints a FRESH publish JWT on every
+        // socket accept, and hooks/useLiveKitPublish.js keys its connect effect on the
+        // token — so replacing it on every reconnect tore down and rebuilt the host's
+        // LiveKit room (and republished the camera) for a socket blip that had nothing to do
+        // with media. The token we already hold is still valid; keep it and let a genuinely
+        // new one in only when we have none.
+        publishToken: state.publishToken || data.publish_token || null,
+        livekitUrl: state.livekitUrl || data.livekit_url || null,
       };
     // A broadcast lifecycle action the server refused outright — e.g. go-live's readiness
     // gate (services/broadcast.py::_golive_gate / commercial_readiness_blocked). Published
@@ -308,6 +315,12 @@ export default function useLiveEvent() {
   const [params] = useSearchParams();
   const eventParam = params.get("event");
   const [state, dispatch] = useReducer(reducer, EMPTY);
+  // Audience reactions. Deliberately NOT part of `state`: a reaction is an ephemeral visual
+  // event, and putting it through the reducer would re-render the entire Producer Console
+  // (monitor, deck, KPI row, panel rail) once per tap in the audience. The channel's
+  // identity never changes, so emitting is invisible to React — only the mounted
+  // components/live/ReactionOverlay.jsx re-renders. See hooks/useReactionChannel.js.
+  const reactions = useReactionChannel();
 
   // Which event: ?event=<id>, else this org's currently-live event via the EXISTING events
   // API. An explicit id needs no request, and deriving it means changing the URL re-attaches
@@ -370,6 +383,21 @@ export default function useLiveEvent() {
     // and (for chat/polls) no sound either. The chime for Q&A used to fire unconditionally
     // on every question.new instead of being tied to who asked, which happened to work by
     // accident for the common case but would also have chimed for a host's own question.
+    // A viewer reaction (server/app/services/moderation.py::_reaction_add). THE host-side
+    // half of the requirement: every tap in the audience has to become a visible floating
+    // emoji on this console in real time, wherever the viewer's socket landed — the
+    // envelope reaches us through the Redis-backed event bus, so a viewer on one Cloud Run
+    // instance and a host on another still meet here.
+    //
+    // Emitted, never dispatched, and never accumulated: there is no reaction state to go
+    // stale, so a reconnect (which replays the full snapshot) has no old reactions to
+    // replay — the server does not send any, and this holds nothing.
+    //
+    // No identity is read off the payload because the server does not put one there: the
+    // console shows WHAT was sent, never who sent it.
+    if (env.channel === "reactions" && env.type === "reaction.burst") {
+      reactions.emit(env.data);
+    }
     const isViewer = env.data?.actor_role === "viewer";
     if (env.channel === "chat" && env.type === "message.new" && isViewer) {
       playAlertChime();
@@ -384,7 +412,7 @@ export default function useLiveEvent() {
       notify.alert("New vote on your poll");
     }
     dispatch(env);
-  }, []);
+  }, [reactions]);
 
   const stream = useEventStream(resolved?.id, onEnvelope);
 
@@ -425,5 +453,5 @@ export default function useLiveEvent() {
   useInterval(() => dispatch({ channel: "local", type: "typing.prune" }),
     1000, Object.keys(state.typing).length > 0);
 
-  return { state, resolved, loading, error, ...stream, sendGoLive };
+  return { state, resolved, loading, error, ...stream, sendGoLive, reactions };
 }

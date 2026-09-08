@@ -43,7 +43,8 @@ CHANNELS = (
     "recording",   # start / pause / resume / stop + timer + storage
     "analytics",   # viewer count, peak, retention samples, engagement, distributions
     "stage",       # stage roster, hand-raise queue, waiting room admissions
-    "reactions",   # 👍 ❤️ 👏 🔥 🎉 tap counters, broadcast to every viewer of the event
+    "reactions",   # one ephemeral tap per envelope (never a total), fanned out to
+                   # every socket on the event — host console included
     "session",     # per-connection lifecycle (e.g. "removed") — addressed by identity;
                    # broadcast like everything else, but only the matching socket acts on it
 )
@@ -297,14 +298,21 @@ async def is_banned(event_id, identity: str) -> bool:
     return bool(await r.sismember(_bkey(event_id), identity))
 
 
-# ── reactions (👍 ❤️ 👏 🔥 🎉 …) ─────────────────────────────────────────────────
-# Same shape as presence: ephemeral per-broadcast counters, not history. Concurrency is
-# the whole point of this store existing separately from bus.state_set's read-modify-write
-# — many viewers tap the same emoji at once, so "load count, add one, save count" WOULD
-# lose taps. Redis HINCRBY is a single atomic server-side op across every worker; the
-# in-process dict fallback increments synchronously with no `await` between the read and
-# the write, so one worker can't interleave two increments either — same guarantee the
-# no-Redis dev setup already relies on elsewhere in this module (presence, bans).
+# ── reactions (👍 ❤️ 👏 🔥 🎉 …) ──────────────────────────────────────────────────
+# What a viewer tap ACTUALLY produces is one ephemeral `reactions`/`reaction.burst`
+# envelope (services/moderation.py::_reaction_add) that every socket on the event animates
+# once and forgets — the Google-Meet model. No client is ever sent a total, and none is
+# stored here for a client to derive one from.
+#
+# The tally below is therefore NOT the transport and NOT a UI number: it is the internal
+# per-broadcast record of how many reaction events happened, kept so engagement analytics
+# has something to read, and dropped with the rest of the event's ephemeral state by
+# presence_clear when the room ends. Nothing renders it.
+#
+# Redis HINCRBY is a single atomic server-side op across every worker; the in-process dict
+# fallback increments synchronously with no `await` between the read and the write, so one
+# worker can't interleave two increments either — the same guarantee the no-Redis dev
+# setup already relies on elsewhere in this module (presence, bans).
 
 _reactions: dict[str, dict[str, int]] = {}   # event_id -> reaction_key -> count (no-Redis fallback)
 
@@ -313,23 +321,26 @@ def _rkey(event_id) -> str:
     return f"live:{eid(event_id)}:reactions"
 
 
-async def reaction_incr(event_id, key: str) -> dict:
-    """Atomically add one tap to `key` and return every counter for the event (not just
-    the one that changed), so the broadcast envelope is always the full authoritative
-    state and a client never has to merge partial updates."""
+async def reaction_tally(event_id, key: str) -> None:
+    """Record one reaction event against `key`. Write-only, by design.
+
+    This used to be `reaction_incr`, which also read the whole hash back because the
+    broadcast envelope carried authoritative totals. Nothing is broadcast a total any more,
+    so that HGETALL was pure per-tap cost on the hottest action a viewer has — the write is
+    all that is left, and no caller needs a return value.
+    """
     event_id = eid(event_id)
     r = await redis()
     if r is None:
         room = _reactions.setdefault(event_id, {})
         room[key] = room.get(key, 0) + 1
-        return dict(room)
+        return
     await r.hincrby(_rkey(event_id), key, 1)
-    raw = await r.hgetall(_rkey(event_id))
-    return {k: int(v) for k, v in raw.items()}
 
 
 async def reaction_all(event_id) -> dict:
-    """Current counters for the event — what a joining/reconnecting client's snapshot uses."""
+    """This broadcast's internal reaction-event tally, for analytics. Never sent to a
+    client: no viewer or host surface displays reaction totals (see the note above)."""
     event_id = eid(event_id)
     r = await redis()
     if r is None:

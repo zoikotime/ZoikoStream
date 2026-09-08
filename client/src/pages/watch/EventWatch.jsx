@@ -23,8 +23,8 @@ import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
 import EventInfo from "../../components/watch/EventInfo";
 import ReactionBar from "../../components/watch/ReactionBar";
-import FloatingReactions from "../../components/watch/FloatingReactions";
-import { REACTIONS } from "../../data/reactions";
+import ReactionOverlay from "../../components/live/ReactionOverlay";
+import useReactionChannel from "../../hooks/useReactionChannel";
 import RegistrationGate from "../../components/watch/RegistrationGate";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import FeedbackModal from "../../components/common/FeedbackModal";
@@ -33,7 +33,13 @@ import Logo from "../../ui/Logo";
 import { notify } from "../../ui/Toast";
 import { playAlertChime, unlockAudio } from "../../utils/sound";
 
-const STATUS_LABEL = { live: "Live", ended: "Completed" }; // anything else -> "Upcoming"
+// "degraded" is services/broadcast.py's marker for "this event IS live, but the producer's
+// media has stopped flowing" (mark_degraded). Leaving it out of this map sent it down the
+// "anything else" branch and labelled a live event "Upcoming", which is what put the
+// "PREVIEW" badge over a broadcast in progress and made every isLive-derived affordance on
+// this page (the LIVE chip, the viewer counter, the reaction bar) disappear mid-event.
+// Media health is reported separately, by media_status.
+const STATUS_LABEL = { live: "Live", degraded: "Live", ended: "Completed" }; // else -> "Upcoming"
 
 // The header/info/panel components speak the old mock Event shape (name, host, date,
 // start/end, accent…). Real watch data doesn't have most of that — fill in what's real,
@@ -75,10 +81,10 @@ const LIVE_EMPTY = {
   questions: [],
   polls: [],
   participants: {},
-  // Backend-authoritative reaction counts (server/app/services/bus.py reaction_all),
-  // keyed like ReactionBar's REACTIONS list. Empty until the snapshot/first update
-  // arrives — ReactionBar defaults any missing key to 0 rather than a fake baseline.
-  reactions: {},
+  // NOTE: there is deliberately no `reactions` here. Reactions are ephemeral events, not
+  // panel state — they arrive as `reactions`/`reaction.burst` envelopes and go straight to
+  // the overlay through hooks/useReactionChannel.js, so nothing about them is ever stored,
+  // counted or replayed. See onLiveEnvelope below.
   // Read-only for a viewer — the value the host set via the moderation console, surfaced
   // so the chat panel can show a status pill. Never sent by this socket, only received.
   slowModeSeconds: null,
@@ -92,6 +98,20 @@ const LIVE_EMPTY = {
   // it, so this never clears itself — the viewer has actually been removed.
   removed: null,
 };
+
+// Exported for the reaction regression tests only (see EventWatch.reactions.test.jsx) —
+// the page itself still drives this through useReducer below. Same convention
+// hooks/useLiveEvent.js already uses for its own reducer and initial state, so the live
+// state transitions are assertable without standing up a socket.
+//
+// The disable is the cost of that: react-refresh wants a component file to export nothing
+// but components, and it is right that the tidier home for these is a sibling module (the
+// way controlPlaneNotice.js was split out of this very file). Moving the whole reducer is a
+// bigger change than the reaction fix it would be riding along with, so it stays here for
+// now — the only consequence is that editing THIS file does a full reload instead of a hot
+// swap while the dev server is running.
+// eslint-disable-next-line react-refresh/only-export-components
+export { LIVE_EMPTY, liveReducer };
 
 function liveReducer(state, env) {
   const { channel, type, data } = env;
@@ -107,10 +127,6 @@ function liveReducer(state, env) {
         participants: Object.fromEntries(
           (data.participants || []).map((p) => [p.identity, p])
         ),
-        // A viewer joining (or reconnecting) sees the CURRENT tally immediately, not
-        // 0/0/0/0/0 waiting for the next tap — same guarantee the rest of the snapshot
-        // gives messages/questions/polls.
-        reactions: data.reactions || {},
         slowModeSeconds: data.slow_mode_seconds || null,
         you: data.you || null,
       };
@@ -164,11 +180,10 @@ function liveReducer(state, env) {
       return { ...state, polls: state.polls.map((p) => (p.id === data.id ? { ...p, ...data } : p)) };
     case "poll/poll.delete":
       return { ...state, polls: state.polls.filter((p) => p.id !== data.id) };
-    case "reactions/reaction.update":
-      // Every connected viewer of THIS event gets this envelope (server/app/services/
-      // bus.py publish is scoped per event_id), so event isolation is inherited for
-      // free — the reducer never has to check data.event_id against eventId here.
-      return { ...state, reactions: data.reactions || {} };
+    // `reactions/reaction.burst` intentionally has NO case: a reaction must not become
+    // reducer state. Dispatching it here would re-render the whole page (and the chat
+    // list, and the player) once per tap in the audience, for something that is already
+    // handled in onLiveEnvelope and lives entirely inside the overlay.
     default:
       return state;
   }
@@ -227,7 +242,18 @@ export default function EventWatch() {
     const accessParams = { ...(reg ? { reg } : {}), ...(link ? { link } : {}) };
     api
       .get(`/events/${eventId}/watch`, { params: Object.keys(accessParams).length ? accessParams : undefined })
-      .then(({ data }) => setWatch(data))
+      .then(({ data }) => setWatch((prev) => {
+        // create_stream_token() mints a FRESH JWT on every call, so a naive setWatch(data)
+        // handed useLiveKitViewer a brand-new `token` on every poll — and that hook keys its
+        // connect effect on the token, so the viewer tore down and rebuilt its LiveKit room
+        // every POLL_MS. Keep the token we already hold for the same room: it is still valid
+        // (services/livekit.py's PLAYBACK_TOKEN_TTL), and everything else in the payload
+        // (status, media_status, recording_url) still refreshes normally.
+        if (prev?.livekit_token && data?.livekit_token && prev.room && prev.room === data.room) {
+          return { ...data, livekit_token: prev.livekit_token, livekit_url: prev.livekit_url };
+        }
+        return data;
+      }))
       .catch((e) => {
         // A 403 here means the visitor was recognized but refused (private event, or an
         // invite link already claimed by another device) — worth a real reason, not the
@@ -247,13 +273,10 @@ export default function EventWatch() {
   const [alerts, setAlerts] = useState({ chat: false, qa: false, polls: false });
   const markAlert = useCallback((tabKey) => setAlerts((a) => ({ ...a, [tabKey]: true })), []);
   const clearAlert = useCallback((tabKey) => setAlerts((a) => (a[tabKey] ? { ...a, [tabKey]: false } : a)), []);
-  // Floating reaction bursts over the video (components/watch/FloatingReactions.jsx) —
-  // ephemeral visual events, not "state" the reducer needs to carry, so they live in
-  // their own array rather than inside `panel`. Spawned from real count deltas in
-  // onLiveEnvelope below (every viewer's tap, not just this one's), removed by the
-  // FloatingReactions component itself once their rise-and-fade animation finishes.
-  const [bursts, setBursts] = useState([]);
-  const removeBurst = useCallback((id) => setBursts((bs) => bs.filter((b) => b.id !== id)), []);
+  // Floating reactions over the player (components/live/ReactionOverlay.jsx). The channel
+  // is a stable pub/sub seam, not state: a reaction from anyone in the audience re-renders
+  // the overlay and nothing else on this page. See hooks/useReactionChannel.js.
+  const reactionChannel = useReactionChannel();
   // Real viewers only — staff and waiting-room entries never count as "watching".
   const viewers = Object.values(panel.participants || {}).filter(
     (participant) =>
@@ -329,37 +352,20 @@ export default function EventWatch() {
       if (nowOnStage && !wasOnStage) notify.success("The host invited you on stage — your mic is now live.");
       else if (!nowOnStage && wasOnStage) notify.info("You're no longer on stage.");
     }
-    // Turns the reaction bar's numbers into something that reads as alive: every viewer
-    // who tapped since the LAST update shows up here as a rising emoji, for every viewer
-    // watching — not just a local "I just tapped" flourish (ReactionBar's own pulse
-    // already covers that). Comparing against `panel.reactions` (still the PRE-update
-    // value here, since dispatchPanel hasn't run yet this tick) turns the server's
-    // always-authoritative totals into a delta without a second counter anywhere.
-    // Skipped on the initial moderator/snapshot (different channel/type) so a page
-    // load/reconnect never replays every pre-existing tap as a fresh burst.
-    if (env.channel === "reactions" && env.type === "reaction.update" && env.data?.reactions) {
-      const spawned = [];
-      for (const [key, count] of Object.entries(env.data.reactions)) {
-        const prev = panel.reactions?.[key] || 0;
-        const delta = count - prev;
-        if (delta <= 0) continue;
-        const emoji = REACTIONS.find((r) => r.key === key)?.emoji;
-        if (!emoji) continue;
-        // Capped per key so one enthusiastic viewer (or a big jump on reconnect) doesn't
-        // flood the video with dozens of identical emoji at once.
-        for (let i = 0; i < Math.min(delta, 4); i++) {
-          spawned.push({
-            id: `${key}-${count}-${i}-${Math.random().toString(36).slice(2, 8)}`,
-            emoji,
-            left: 10 + Math.random() * 70,
-            delayMs: Math.round(Math.random() * 250),
-          });
-        }
-      }
-      if (spawned.length) setBursts((bs) => [...bs, ...spawned].slice(-24));
+    // One reaction from someone in the audience — float it over the player. Straight to
+    // the overlay, never into the reducer: no count, no aggregation, and nothing kept, so
+    // a reconnect (which re-sends the full snapshot, and no reaction history — the server
+    // has none to send) cannot replay reactions that already happened.
+    //
+    // The event-id check is belt and braces. bus.publish is already scoped per event
+    // (server/app/services/bus.py), so an envelope from another event cannot reach this
+    // socket; this makes a reaction from event A appearing on event B impossible on the
+    // client side too, rather than trusting the transport alone.
+    if (env.channel === "reactions" && env.type === "reaction.burst") {
+      if (!env.data?.event_id || env.data.event_id === eventId) reactionChannel.emit(env.data);
     }
     dispatchPanel(env);
-  }, [fetchWatch, markAlert, panel.you, panel.participants, panel.reactions]);
+  }, [fetchWatch, markAlert, panel.you, panel.participants, eventId, reactionChannel]);
   const {
     status: liveStatus,
     closeReason: liveCloseReason,
@@ -431,6 +437,10 @@ export default function EventWatch() {
   // live, polling stays off — the live socket's own broadcast.update "ended" signal
   // (onLiveEnvelope above) is what triggers the one fetchWatch() that matters, instead of
   // a timer racing it.
+  // Also polls while "degraded": that is the one state whose media_status can change under
+  // the viewer without any socket frame (the sampler flips it server-side), and it is what
+  // drives the "host's connection dropped" / recovered wording in the player. Safe now that
+  // fetchWatch above preserves the LiveKit token, so a poll no longer reconnects the room.
   useInterval(fetchWatch, POLL_MS, Boolean(watch) && watch.status !== "live" && watch.status !== "ended");
 
   const event = watch ? watchToMockEvent(watch) : null;
@@ -590,7 +600,7 @@ export default function EventWatch() {
               <AccessWindowNotice variant="not_started" startTime={watch.start_time} />
             ) : (
               <VideoPlayer event={event} viewers={viewers} watch={watch} onStage={isOnStage}>
-                {watch.reactions_enabled && <FloatingReactions bursts={bursts} onExpire={removeBurst} />}
+                {watch.reactions_enabled && <ReactionOverlay channel={reactionChannel} className="z-30" />}
               </VideoPlayer>
             )}
             {/* reactions_enabled is False only for a memorial-category event (doc Sec.
@@ -598,7 +608,6 @@ export default function EventWatch() {
                 watch_event, since reactions have no persisted Event column of their own. */}
             {!timeGated && watch.reactions_enabled && (
               <ReactionBar
-                reactions={panel.reactions}
                 onReact={(key) => sendLive("reaction.add", { key })}
                 disabled={liveStatus !== "open"}
                 handRaised={handRaised}

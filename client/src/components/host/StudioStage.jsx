@@ -21,6 +21,7 @@ import {
   FiUploadCloud, FiPlay, FiMaximize, FiMinimize, FiX,
 } from "react-icons/fi";
 import useInterval from "../../hooks/useInterval";
+import ReactionOverlay from "../live/ReactionOverlay";
 import { cx } from "../../ui/tokens";
 import { STUDIO, focusOnStage, t150 } from "./studio";
 
@@ -94,7 +95,8 @@ const STATE_LABEL = {
 export default function StudioStage({
   broadcast, recording, analytics, media, screenShare, screenVideoRef, camera, mic,
   countdownUntil, onCountdownDone, publishToken, isPublishing, isReconnecting, publishError,
-  onStartPreview, onRetryPreview, eventStatus,
+  onStartPreview, onRetryPreview, eventStatus, roomConnected = false, onRetryPublish,
+  reactionChannel,
 }) {
   // Destructured so `videoRef` is a plain binding: passing the whole media bag around makes
   // every `media.*` read look like a ref access to the React hooks lint rules.
@@ -217,6 +219,20 @@ export default function StudioStage({
             screenShare ? "opacity-100" : "opacity-0"
           )}
         />
+
+        {/* ── audience reactions ─────────────────────────────────────────────── */}
+        {/* Viewer taps, floating over the monitor in real time — see
+            components/live/ReactionOverlay.jsx and hooks/useReactionChannel.js. Deliberately
+            INSIDE this node, not a sibling of the stage: this is the element that becomes
+            `fixed inset-0` when the host expands the monitor, so the overlay follows the
+            picture into fullscreen with no extra wiring, and `overflow-hidden` on the same
+            node keeps emoji inside the frame.
+            z-[3] places it above the video and the gradient scrims (z-[1]/z-[2]) but below
+            the go-live countdown (z-20) and every menu/modal (ui/Overlay is z-[60]), so a
+            busy audience can never obscure a control the producer needs. The layer is
+            pointer-events-none throughout, so the fullscreen and publish-retry buttons
+            underneath it stay clickable. */}
+        <ReactionOverlay channel={reactionChannel} className="z-[3]" />
 
         {countdownUntil && <Countdown until={countdownUntil} onDone={onCountdownDone} />}
 
@@ -442,13 +458,30 @@ export default function StudioStage({
                 <p className="flex items-center gap-1.5 text-[11px] font-medium text-rose-300">
                   <FiAlertTriangle aria-hidden="true" />
                   Not publishing — {publishError}
+                  {/* An explicit retry, so recovery never depends on waiting out the
+                      backoff (or on the host guessing that Go Live doubles as a retry).
+                      pointer-events-auto because the whole overlay above is
+                      pointer-events-none so it can't eat clicks on the video. */}
+                  {onRetryPublish && (
+                    <button
+                      type="button"
+                      onClick={onRetryPublish}
+                      className="pointer-events-auto ml-1 rounded-md bg-rose-500/20 px-2 py-0.5 font-semibold text-rose-100 underline-offset-2 transition hover:bg-rose-500/35 hover:underline"
+                    >
+                      Retry now
+                    </button>
+                  )}
                 </p>
               )}
               {previewActive && !isPublishing && !isReconnecting && !publishError && (
                 <p className="flex items-center gap-1.5 text-[11px] font-medium text-amber-300/90">
                   <FiUploadCloud aria-hidden="true" />
                   {live
-                    ? "Connecting the publisher — this feed will reach viewers in a moment."
+                    ? (roomConnected
+                      // Connected to the room, but LiveKit is holding no track of ours. The
+                      // honest reading of a state that used to be reported as fully live.
+                      ? "Connected to the stream, but no camera or microphone track is published yet."
+                      : "Connecting the publisher — this feed will reach viewers in a moment.")
                     : publishToken
                       ? "Local preview only — a publisher token is ready, but no media is being sent yet."
                       : "Local preview only — this feed is not being published to viewers."}
