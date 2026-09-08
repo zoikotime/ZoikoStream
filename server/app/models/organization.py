@@ -94,5 +94,19 @@ class Organization(Base):
     )
 
     subscriptions: Mapped[list["Subscription"]] = relationship(
-        back_populates="organization"
+        back_populates="organization",
+        # A Subscription cannot exist without its Organization — `subscriptions.org_id` is NOT
+        # NULL — so orphaning one is invalid by definition, and this cascade says so.
+        #
+        # Without it SQLAlchemy's default on `db.delete(org)` is to NULL the child's foreign
+        # key, which the NOT NULL constraint then rejects with
+        # `NotNullViolation: null value in column "org_id"`. That was latent for as long as
+        # almost no organization had a subscription: the one production path that hard-deletes
+        # an organization (crud.admin.delete_organization) hand-rolls the child delete first,
+        # so it never hit this. It surfaced the moment every organization began receiving one
+        # at creation.
+        #
+        # `delete_organization`'s explicit delete is now redundant but harmless, and is left
+        # alone: it also covers rows this relationship would not have loaded.
+        cascade="all, delete-orphan",
     )

@@ -75,18 +75,20 @@ export default function MainLayout() {
         </nav>
 
         <div className="p-3 space-y-3">
-          <div className="rounded-xl border border-slate-200 p-4">
-            <p className="text-sm font-semibold text-slate-800">Storage Usage</p>
-            <p className="mt-1 text-xs text-slate-500">
-              <span className="font-medium text-slate-700">245 GB</span> / 1 TB Used
-            </p>
-            <div className="mt-2 h-1.5 w-full rounded-full bg-slate-100">
-              <div className="h-full w-[24%] rounded-full bg-gradient-to-r from-violet-500 to-indigo-600" />
-            </div>
-            <button className="mt-3 w-full rounded-lg border border-slate-200 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
-              Upgrade Plan
-            </button>
-          </div>
+          {/* A hardcoded "245 GB / 1 TB Used" storage meter and a dead "Upgrade Plan" button
+              stood here. Both were literals: no props, no API call, no onClick, no route — yet
+              this layout is mounted for every authenticated non-admin role (App.jsx), so real
+              users were shown fabricated usage for their own account.
+
+              Removed rather than wired up. ZST-COM-PLAN-001 Section 16 requires the usage
+              surface to show "current plan/phase, catalog version, usage meters, limits,
+              add-ons, event allowances, pending plan change and renewal/effective date" — and
+              Section 08 requires those figures to come from canonical usage records, which do
+              not exist yet (there is no usage_record table and no meter vocabulary). Inventing
+              a number here is precisely what Section 18 forbids. The real, data-backed usage
+              bars already live on /organization/billing (Billing.jsx, fed by
+              GET /organization/overview); this panel was a duplicate of that surface built
+              from constants. */}
 
           <div className="flex items-center gap-3 rounded-xl px-2 py-2">
             <div className="h-9 w-9 rounded-full bg-gradient-to-br from-emerald-600 to-teal-700 text-white grid place-items-center text-sm font-semibold">

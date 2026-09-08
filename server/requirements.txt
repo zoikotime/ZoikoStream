@@ -19,3 +19,9 @@ livekit-api
 google-cloud-storage
 
 stripe>=15.3,<16
+
+# IANA timezone database. Windows ships no system tz database and slim Linux images often
+# omit one, so zoneinfo.ZoneInfo("Asia/Kolkata") raises ZoneInfoNotFoundError there. The
+# organization-timezone timestamps in customer email then fall back to UTC silently — the
+# message still sends, but every stated time is in the wrong zone.
+tzdata

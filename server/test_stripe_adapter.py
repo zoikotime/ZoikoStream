@@ -651,14 +651,33 @@ def test_adapter_contains_no_commercial_values():
     """No price, tax rate, discount, deposit, capacity, SLA, seller or default currency."""
     from app.services import payments_stripe
     src = code_only(payments_stripe)
+    # Module-wide: a literal commercial VALUE must never appear anywhere in the adapter,
+    # whichever ledger the code serves.
     forbidden = [
         "DEFAULT_CURRENCY", "default_currency", "TAX_RATE", "GST", "VAT_RATE", "0.18",
-        "DEFAULT_TAX", "price_id", "PRICE_ID", "Price.create", "prices.create",
+        "DEFAULT_TAX", "Price.create", "prices.create",
         "products.create", "zoiko_tech_inc", "SLA", "DEFAULT_CAPACITY", "discount",
         "deposit", "Plan", "price_monthly",
     ]
     for token in forbidden:
         assert token not in src, f"adapter contains commercial value/token {token!r}"
+
+    # `price_id` is NOT module-wide forbidden any more, and the distinction is the point:
+    #   * Ledger 2 (Live Events) computes an amount from a published CatalogVersion and hands
+    #     Stripe the RESULT inline — a Price ID there would move pricing authority to Stripe.
+    #   * Ledger 1 (platform subscription) is the mirror image: the price is an approved
+    #     commercial fact Stripe itself holds (ZST-COM-PLAN-001 Section 24 — numeric prices
+    #     "are intentionally not supplied" by the spec), so a Price ID is the ONLY correct
+    #     input and an inline amount would mean this code invented one.
+    # Each is asserted against its own function below, so neither can drift into the other.
+    ledger2 = code_only(payments_stripe.StripePaymentProvider.create_checkout_session)
+    assert "price_id" not in ledger2, "Live Event checkout must not take a Stripe Price ID"
+    assert "price_data" in ledger2, "Live Event checkout must pass an inline amount"
+
+    ledger1 = code_only(payments_stripe.StripePaymentProvider.create_subscription_checkout_session)
+    assert "price_data" not in ledger1, "subscription checkout must not invent an inline amount"
+    assert "unit_amount" not in ledger1, "subscription checkout must not compute an amount"
+    assert "price_id" in ledger1, "subscription checkout must use an approved Stripe Price ID"
 
 
 def test_adapter_never_reads_the_commercial_domain():
@@ -680,11 +699,40 @@ def test_no_stripe_price_or_product_api_is_used():
     """
     from app.services import payments_stripe
     src = code_only(payments_stripe)
-    # A Stripe Price/Product/Plan/Subscription object would make Stripe the pricing source.
+    # Module-wide: the adapter must never CREATE or READ a Stripe pricing object. Configuring
+    # what a plan costs is a Finance action in the Stripe Dashboard against an approved price
+    # book, never something this code does.
+    # `subscriptions.update` was on this list and is not any more, and the distinction is this
+    # test's own stated rule: the adapter must never CREATE OR READ A PRICING OBJECT. Moving an
+    # existing subscription onto a Price that Finance already created in the Dashboard does
+    # neither — it is the approved plan-change mechanism, and the Price ID it receives comes
+    # from operator configuration, never from this file. Creating or cancelling a subscription
+    # stays forbidden: both would bypass the checkout/webhook flow.
     for token in ("prices.create", "prices.retrieve", "products.create", "products.retrieve",
-                  "Price.retrieve", "Product.retrieve", "price_id", "PRICE_ID",
-                  "subscriptions.create", "Subscription"):
+                  "Price.retrieve", "Product.retrieve", "subscriptions.create",
+                  "subscriptions.cancel"):
         assert token not in src, f"adapter touches Stripe {token} — pricing must stay in the catalog"
+
+    # The replacement, STRICTER than the token it relaxes: at most one subscription mutation
+    # path may exist, it must be the plan-change item swap, it must send the approved
+    # no-proration behaviour explicitly, and it must never state an amount.
+    import re as _re
+    updates = _re.findall(r"\w*\.subscriptions\.update\(", src)
+    assert len(updates) <= 1, f"more than one subscription mutation path: {updates}"
+    if updates:
+        swap = code_only(payments_stripe.StripePaymentProvider.change_subscription_price)
+        assert ('"proration_behavior": "none"' in swap
+                or "'proration_behavior': 'none'" in swap), \
+            "the item swap must send the approved no-proration behaviour explicitly"
+        assert "price_id" in swap, "the Price ID must arrive as a parameter"
+        assert "unit_amount" not in swap, "the swap must never state an amount"
+
+    # Live Event checkout specifically must remain free of any Price/Subscription vocabulary:
+    # its amount comes from the CatalogVersion chain. (Ledger 1's subscription checkout
+    # legitimately references a Price ID — see test_adapter_contains_no_commercial_values.)
+    ledger2 = code_only(payments_stripe.StripePaymentProvider.create_checkout_session)
+    for token in ("price_id", "PRICE_ID", "Subscription", "subscription"):
+        assert token not in ledger2,             f"Live Event checkout touches {token} — pricing must stay in the catalog"
 
 
 def test_checkout_prices_inline_never_by_reference():

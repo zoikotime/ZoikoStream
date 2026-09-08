@@ -33,14 +33,31 @@ from create_tables import ensure_schema
 # max_users/max_storage_gb/max_streaming_hours are technical entitlement ceilings the
 # platform actually enforces (services/org.py, services/broadcast.py) — operational
 # constants, not commercial economics, so they stay.
+# Tier NAMES are ZST-COM-PLAN-001 Section 03's: Developer, Business, Enterprise. The
+# entitlement ceilings below are unchanged from the earlier Starter/Pro seeding — renaming the
+# tiers was a naming correction, not a re-quota'ing. An existing database is brought to these
+# names by migrate_plan_names.py; this list only governs a FRESH deployment.
+#
+# `price_monthly` now carries the APPROVED numbers. ZST-COM-PLAN-001 Section 24 withheld them
+# ("intentionally not supplied") and this file therefore held NULL; the Approved Price Book &
+# Stripe Billing Wireframe v1.0 supplies them, so the display price is no longer unpublished:
+# Developer $49/month, Business $249/month. Enterprise stays NULL with custom_pricing — it is
+# contract-priced and must never render a number.
+#
+# This is the DISPLAY price only. What a customer is actually charged comes from the Stripe
+# Price named in STRIPE_SUBSCRIPTION_PRICES, so the two must be kept in step by whoever changes
+# either — this column is not the charging authority and never feeds a Checkout Session.
 DEFAULT_PLANS = [
-    {"name": "Starter", "slug": "starter", "max_users": 5,
+    {"name": "Developer", "slug": "developer", "max_users": 5,
+     "price_monthly": 49, "currency": "USD",
      "max_storage_gb": 50, "max_streaming_hours": 20,
      "features": ["1 concurrent stream", "720p", "Community support"]},
-    {"name": "Pro", "slug": "pro", "max_users": 30,
+    {"name": "Business", "slug": "business", "max_users": 30,
+     "price_monthly": 249, "currency": "USD",
      "max_storage_gb": 500, "max_streaming_hours": 200,
      "features": ["5 concurrent streams", "1080p", "Recordings", "Email support"]},
     {"name": "Enterprise", "slug": "enterprise", "max_users": None,
+     "custom_pricing": True,
      "max_storage_gb": None, "max_streaming_hours": None,
      "features": ["Unlimited streams", "4K", "SSO", "Dedicated support"]},
 ]

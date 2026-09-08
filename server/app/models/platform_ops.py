@@ -159,3 +159,86 @@ class PlatformMetric(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (Index("ix_platform_metrics_name_time", "name", "recorded_at"),)
+
+
+# ── Commercial override (ZST-COM-PLAN-001 Section 14 + Section 19) ───────────────────────
+
+# Section 19's seven controlled exception types, transcribed verbatim from the table headings.
+# The vocabulary is closed: an override outside this list would be an exception class the
+# document does not authorize.
+COMMERCIAL_OVERRIDE_TYPES = (
+    "pilot_poc",
+    "complimentary_access",
+    "sales_demo",
+    "incident_continuity",
+    "contract_exception",
+    "partner_bundle",
+    "manual_override",
+)
+
+# What an override may target. Section 07 splits commercial rights into FEATURE (boolean
+# access) and QUANTITY/limit (count/capacity); Section 14's `commercial_override` names
+# "feature/limit override" as the scope. `plan` covers the case the platform can actually
+# express today — an administrative plan assignment — which Section 20 requires to go through
+# an approved override record rather than a direct database edit.
+COMMERCIAL_OVERRIDE_TARGETS = ("feature", "limit", "plan")
+
+
+class CommercialOverride(Base):
+    """An explicit, time-bound, approved and audited commercial exception.
+
+    ZST-COM-PLAN-001 Section 14 ("Minimum Engineering Data Model") specifies this object as:
+    "scope, feature/limit override, reason, approver, expiry, audit_ref". Section 19 adds the
+    control for the `manual_override` type: "Time-bound, reasoned, independently approved
+    where risk requires, immutable audit and automatic expiry."
+
+    Why a distinct table rather than another GovernanceRecord `kind`: GovernanceRecord is the
+    console's obligation QUEUE — it tracks that something needs attention and carries no
+    authority. This row is the GRANT itself, and it is read to decide access. Section 19's
+    heading states the purpose plainly: "Exceptions must be explicit enough that they cannot
+    become permanent shadow plans." A grant whose expiry is advisory is exactly that shadow
+    plan, so `expires_at` is NOT NULL here and is enforced on read (crud.active_overrides).
+
+    Deliberately NOT included: any price, discount percentage or monetary amount. Section 19's
+    `complimentary_access` is "Approved zero-charge commercial record; usage still metered and
+    attributable" — the zero-charge decision belongs to Finance and to the price book
+    (ZST-COM-PRICE-001), not to this row.
+    """
+
+    __tablename__ = "commercial_overrides"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # SCOPE — which tenant this applies to. Org-scoped only: Section 19's exceptions are all
+    # tenant-level, and an override that applied platform-wide would be a catalog change.
+    org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    override_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # FEATURE/LIMIT OVERRIDE — what is being overridden and to what. `target_key` is the
+    # entitlement key (Section 07's stable keys, e.g. `feature.webhooks.live`) or the plan
+    # slug; `target_value` is its JSON value so a boolean, a count and a plan identity can all
+    # be expressed without a column per shape.
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    target_value: Mapped[dict | None] = mapped_column(JSON)
+    # REASON — Section 19 requires every exception be "reasoned". Enforced non-empty in CRUD.
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # MAKER / APPROVER — "independently approved where risk requires". The requester is
+    # recorded so crud.assert_distinct_maker_checker can enforce two-person control on
+    # approval; both are FKs so a deleted actor cannot orphan the accountability trail.
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    approver_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[str] = mapped_column(String(20), default="requested", nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # EXPIRY — NOT NULL by design. Section 19: "automatic expiry". A nullable expiry would
+    # permit the permanent shadow plan the section exists to prevent.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # AUDIT_REF — correlation id threading this override to its AuditLog rows, matching the
+    # correlation_id convention already used across the commercial ledger.
+    audit_ref: Mapped[str | None] = mapped_column(String(60), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    organization = relationship("Organization")
+
+    __table_args__ = (
+        # Overrides are read by (tenant, still-valid) on every authorization decision.
+        Index("ix_commercial_overrides_org_expiry", "org_id", "expires_at"),
+    )

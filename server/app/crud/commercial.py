@@ -103,6 +103,32 @@ def new_correlation_id() -> str:
     return secrets.token_urlsafe(16)
 
 
+def assert_distinct_maker_checker(maker_id, checker: User | None, *, violation: str,
+                                   missing_maker: str) -> None:
+    """Two-person rule for a money-affecting action (doc Section 25). FAILS CLOSED.
+
+    Every call site previously spelled this as
+
+        if record.requested_by and str(record.requested_by) == str(approver.id):
+
+    which is null-PERMISSIVE: a row whose maker is NULL skips the comparison entirely and
+    self-approves. No production path creates such a row today (every creator takes a required
+    actor), so this was latent rather than exploitable — but a rule that silently stops applying
+    when a field is missing is not a control, and "fail closed" is the standard's own posture.
+
+    An absent maker or an unidentifiable checker is now a refusal, not a pass. Kept as one
+    helper so the four approval flows cannot drift apart again; the message wording stays
+    per-flow because each names a different pair of roles.
+    """
+    checker_id = getattr(checker, "id", None) if checker is not None else None
+    if checker_id is None:
+        raise ValueError(f"Maker-checker violation: {violation} (no identified approver)")
+    if maker_id is None:
+        raise ValueError(f"Maker-checker violation: {missing_maker}")
+    if str(maker_id) == str(checker_id):
+        raise ValueError(f"Maker-checker violation: {violation}")
+
+
 def _order_org_id(db: Session, order_id) -> uuid.UUID | None:
     """Tenant of an order, for audit scoping. Resolved from the order's own event — never
     from caller-supplied input, which is what keeps an unauthenticated webhook from
@@ -1525,8 +1551,11 @@ def approve_commercial_exception(db: Session, exception: CommercialException, ap
     refund the money and erase the evidence")."""
     if exception.status != "requested":
         raise ValueError(f"Cannot approve an exception in status '{exception.status}'")
-    if exception.requested_by and str(exception.requested_by) == str(approver.id):
-        raise ValueError("Maker-checker violation: the approver must differ from the requester")
+    assert_distinct_maker_checker(
+        exception.requested_by, approver,
+        violation="the approver must differ from the requester",
+        missing_maker="this exception records no requester, so approval cannot be separated from it",
+    )
     if exception.expiry_at is not None and exception.expiry_at < datetime.now(timezone.utc):
         raise ValueError("This exception has already expired and cannot be approved")
     exception.status = "approved"
@@ -2612,7 +2641,8 @@ def record_tax_determination(db: Session, order: EventOrder, actor: User, *, tax
 
 # ── Invoices (doc L2, Section 27) ────────────────────────────────────────────────────────
 
-def issue_invoice(db: Session, order: EventOrder, *, due_date: datetime | None = None) -> Invoice:
+def issue_invoice(db: Session, order: EventOrder, *, due_date: datetime | None = None,
+                   actor: User | None = None, correlation_id: str | None = None) -> Invoice:
     """Fails closed on an undetermined tax basis (doc L4: "Missing tax determination blocks
     invoice issuance for live commercial events"). The determination's facts are copied onto
     the invoice, not referenced, so the issued document stays immutable."""
@@ -2645,6 +2675,18 @@ def issue_invoice(db: Session, order: EventOrder, *, due_date: datetime | None =
         state="issued",
     )
     db.add(invoice)
+    # Flush BEFORE auditing, for two reasons: it assigns the row (surfacing any constraint
+    # violation — e.g. the one-active-invoice-per-order index — as an exception HERE), and it
+    # means a failed issuance can never leave a "successfully issued" audit row behind. The
+    # audit is added to the same transaction as the invoice, so the pair commits atomically.
+    db.flush()
+    audit(db, actor=actor, action="commercial.invoice.issue", target_type="invoice",
+          target_id=invoice.id, org_id=_order_org_id(db, order.id),
+          correlation_id=correlation_id, event_order_id=str(order.id),
+          number=invoice.number, ledger=ledger,
+          seller_legal_entity_id=seller_entity.code, currency=invoice.currency,
+          subtotal=str(invoice.subtotal), tax_amount=str(invoice.tax_amount),
+          total_amount=str(invoice.total_amount))
     db.commit()
     db.refresh(invoice)
     return invoice
@@ -3379,8 +3421,11 @@ def approve_refund_credit(db: Session, refund_credit: RefundCredit, approver: Us
     """Maker-checker: the approver must not be the requester (doc Section 25)."""
     if refund_credit.status != "pending":
         raise ValueError(f"Cannot approve a refund/credit in status '{refund_credit.status}'")
-    if refund_credit.requested_by and str(refund_credit.requested_by) == str(approver.id):
-        raise ValueError("Maker-checker violation: the approver must differ from the requester")
+    assert_distinct_maker_checker(
+        refund_credit.requested_by, approver,
+        violation="the approver must differ from the requester",
+        missing_maker="this refund/credit records no requester, so approval cannot be separated from it",
+    )
     refund_credit.approved_by = approver.id
     refund_credit.status = "approved"
     audit(db, actor=approver, action="commercial.refund_credit.approve", target_type="refund_credit",
@@ -4405,18 +4450,46 @@ def _file_exceptions(db: Session, period: FinancialPeriod) -> list[Reconciliatio
 
 
 def close_period(db: Session, period: FinancialPeriod, actor: User) -> FinancialPeriod:
-    """doc 29 'Period close': freeze the snapshot, file every open reconciliation exception,
-    lock the period. 'Subsequent corrections are separately dated' — there is deliberately
-    no reopen/edit path here; a correction after close belongs to a later period."""
+    """doc 29 'Period close', PREPARE step: freeze the snapshot, file every open reconciliation
+    exception, move the period to `pending_close`. Does NOT lock the period — see
+    confirm_period_close for that. 'Subsequent corrections are separately dated' — there is
+    deliberately no reopen/edit path once actually closed; a correction after close belongs to
+    a later period.
+
+    Maker-checker (doc Section 25 principle, extended here — audit 2026-08-27): a period
+    previously locked in one call by one actor. Locking now requires a SECOND, different actor
+    via confirm_period_close, the same way approve_commercial_exception/approve_refund_credit
+    require a different approver than the requester."""
     if period.status != "open":
         raise ValueError(f"Period '{period.label}' is already {period.status}")
     exceptions = _file_exceptions(db, period)
     period.snapshot = _period_snapshot(db, period)
+    period.status = "pending_close"
+    period.prepared_by = actor.id
+    period.prepared_at = datetime.now(timezone.utc)
+    audit(db, actor=actor, action="commercial.period.prepare_close", target_type="financial_period",
+          target_id=period.id, exceptions_filed=len(exceptions))
+    db.commit()
+    db.refresh(period)
+    return period
+
+
+def confirm_period_close(db: Session, period: FinancialPeriod, actor: User) -> FinancialPeriod:
+    """doc 29 'Period close', CONFIRM step: a DIFFERENT human locks the period prepared by
+    close_period. The snapshot was already frozen at prepare time and is never recomputed
+    here — confirming only decides whether the lock is applied, never what it contains."""
+    if period.status != "pending_close":
+        raise ValueError(f"Period '{period.label}' is not awaiting confirmation (status: {period.status})")
+    assert_distinct_maker_checker(
+        period.prepared_by, actor,
+        violation="the confirmer must differ from who prepared the close",
+        missing_maker="this period records no preparer, so the close cannot be independently confirmed",
+    )
     period.status = "closed"
     period.closed_by = actor.id
     period.closed_at = datetime.now(timezone.utc)
-    audit(db, actor=actor, action="commercial.period.close", target_type="financial_period",
-          target_id=period.id, exceptions_filed=len(exceptions))
+    audit(db, actor=actor, action="commercial.period.confirm_close", target_type="financial_period",
+          target_id=period.id, prepared_by=str(period.prepared_by))
     db.commit()
     db.refresh(period)
     return period
@@ -4424,16 +4497,66 @@ def close_period(db: Session, period: FinancialPeriod, actor: User) -> Financial
 
 def resolve_exception(db: Session, exception: ReconciliationException, actor: User, *,
                        status: str, resolution_notes: str | None = None) -> ReconciliationException:
+    """`investigating` applies immediately — it is a claim to work the item, not a financial or
+    accounting decision, so nothing to dual-control. A TERMINAL outcome ("resolved" /
+    "accepted_risk") is only PROPOSED here (status becomes `pending_review`); a different actor
+    must call confirm_exception_resolution to make it effective.
+
+    Maker-checker (doc Section 25 principle, extended here — audit 2026-08-27): mirrors
+    close_period/confirm_period_close and approve_commercial_exception's requester != approver
+    rule, applied to the reconciliation-exception queue."""
     if status not in ("resolved", "accepted_risk", "investigating"):
         raise ValueError(f"Invalid exception resolution status: '{status}'")
-    exception.status = status
+    if exception.status in ("resolved", "accepted_risk"):
+        raise ValueError(f"Exception is already {exception.status}")
+
+    if status == "investigating":
+        exception.status = "investigating"
+        exception.owner_id = actor.id
+        if resolution_notes:
+            exception.resolution_notes = resolution_notes
+        audit(db, actor=actor, action="commercial.reconciliation_exception.investigate",
+              target_type="reconciliation_exception", target_id=exception.id, status=status)
+        db.commit()
+        db.refresh(exception)
+        return exception
+
+    if exception.status == "pending_review":
+        raise ValueError("This exception already has a resolution awaiting a different confirmer")
+    exception.status = "pending_review"
+    exception.proposed_status = status
+    exception.prepared_by = actor.id
+    exception.prepared_at = datetime.now(timezone.utc)
     exception.owner_id = actor.id
     if resolution_notes:
         exception.resolution_notes = resolution_notes
-    if status in ("resolved", "accepted_risk"):
-        exception.resolved_at = datetime.now(timezone.utc)
-    audit(db, actor=actor, action="commercial.reconciliation_exception.resolve",
-          target_type="reconciliation_exception", target_id=exception.id, status=status)
+    audit(db, actor=actor, action="commercial.reconciliation_exception.propose_resolution",
+          target_type="reconciliation_exception", target_id=exception.id, proposed_status=status)
+    db.commit()
+    db.refresh(exception)
+    return exception
+
+
+def confirm_exception_resolution(db: Session, exception: ReconciliationException, actor: User, *,
+                                  resolution_notes: str | None = None) -> ReconciliationException:
+    """CONFIRM step: a different human ratifies the resolution proposed by resolve_exception.
+    Applies exactly the status that was proposed — confirming ratifies the maker's decision, it
+    never substitutes a different outcome (same posture as approve_commercial_exception, which
+    is a yes/no on the requester's proposal, not a fresh decision)."""
+    if exception.status != "pending_review":
+        raise ValueError(f"Cannot confirm a resolution for an exception in status '{exception.status}'")
+    assert_distinct_maker_checker(
+        exception.prepared_by, actor,
+        violation="the confirmer must differ from who proposed the resolution",
+        missing_maker="this exception records no proposer, so the resolution cannot be independently confirmed",
+    )
+    exception.status = exception.proposed_status
+    exception.resolved_at = datetime.now(timezone.utc)
+    if resolution_notes:
+        exception.resolution_notes = resolution_notes
+    audit(db, actor=actor, action="commercial.reconciliation_exception.confirm_resolution",
+          target_type="reconciliation_exception", target_id=exception.id,
+          status=exception.status, prepared_by=str(exception.prepared_by))
     db.commit()
     db.refresh(exception)
     return exception

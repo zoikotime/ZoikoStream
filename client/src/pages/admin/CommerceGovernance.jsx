@@ -18,7 +18,10 @@ import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { notify } from "../../ui/Toast";
 import { fmtDateTime } from "../../data/events";
-import { ExceptionDecisionModal, PeriodModal, PeriodCloseModal } from "./EventCommerceModals";
+import {
+  ExceptionDecisionModal, PeriodModal, PeriodCloseModal, PeriodConfirmCloseModal,
+  ReconciliationExceptionResolveModal, ReconciliationExceptionConfirmModal,
+} from "./EventCommerceModals";
 
 const label = (s) => (s || "—").split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
 
@@ -208,25 +211,86 @@ export function ExceptionsTab() {
 
 // ── Financial periods ─────────────────────────────────────────────────────────────────────
 
+const RECONCILIATION_EXCEPTION_TONE = {
+  open: "warning", investigating: "warning", pending_review: "warning",
+  resolved: "success", accepted_risk: "neutral",
+};
+
 function PeriodExceptions({ periodId }) {
-  const { data, loading } = useApi(() =>
+  const { data, loading, reload } = useApi(() =>
     api.get(`/commercial/periods/${periodId}/exceptions`).then((r) => r.data));
+  const [modal, setModal] = useState(null); // { kind: "resolve" | "confirm", exception }
+  const close = () => setModal(null);
+
+  const act = async (fn, success) => {
+    try {
+      await fn();
+      notify.success(success);
+      reload();
+    } catch (e) {
+      // Maker-checker violations surface here as the server's own message, same posture as
+      // ExceptionsTab.act above — the rule lives on the server, this never second-guesses it.
+      notify.error(errMsg(e));
+    }
+  };
+
   if (loading) return <p className="text-xs text-slate-400">Loading findings…</p>;
   if (!data || data.length === 0) {
     return <p className="text-xs text-emerald-600 dark:text-emerald-400">Closed with no findings.</p>;
   }
   return (
-    <ul className="space-y-1">
-      {data.map((x) => (
-        <li key={x.id} className="flex items-start justify-between gap-3 text-sm">
-          <span className="text-slate-600 dark:text-slate-300">
-            <span className="text-xs text-slate-400">{label(x.category)}</span>
-            <span className="mt-0.5 block">{x.description}</span>
-          </span>
-          <Badge status={x.status === "open" ? "warning" : "neutral"}>{label(x.status)}</Badge>
-        </li>
-      ))}
-    </ul>
+    <>
+      <ul className="space-y-2">
+        {data.map((x) => (
+          <li key={x.id} className="flex flex-wrap items-start justify-between gap-3 text-sm">
+            <span className="min-w-0 text-slate-600 dark:text-slate-300">
+              <span className="text-xs text-slate-400">{label(x.category)}</span>
+              <span className="mt-0.5 block">{x.description}</span>
+              {x.status === "pending_review" && (
+                <span className="mt-0.5 block text-xs text-slate-400">
+                  Proposed: {label(x.proposed_status)} by {x.prepared_by ? x.prepared_by.slice(0, 8) : "—"}
+                  {" · awaiting a different confirmer"}
+                </span>
+              )}
+            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <Badge status={RECONCILIATION_EXCEPTION_TONE[x.status] || "neutral"}>{label(x.status)}</Badge>
+              {(x.status === "open" || x.status === "investigating") && (
+                <Button variant="secondary" size="sm" onClick={() => setModal({ kind: "resolve", exception: x })}>
+                  Resolve
+                </Button>
+              )}
+              {x.status === "pending_review" && (
+                <Button size="sm" leftIcon={FiCheckCircle} onClick={() => setModal({ kind: "confirm", exception: x })}>
+                  Confirm
+                </Button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {modal?.kind === "resolve" && (
+        <ReconciliationExceptionResolveModal
+          exception={modal.exception}
+          onClose={close}
+          onCreate={(body) => act(
+            () => api.patch(`/commercial/exceptions/${modal.exception.id}`, body),
+            body.status === "investigating" ? "Marked as investigating" : "Resolution proposed — awaiting a different confirmer",
+          )}
+        />
+      )}
+      {modal?.kind === "confirm" && (
+        <ReconciliationExceptionConfirmModal
+          exception={modal.exception}
+          onClose={close}
+          onCreate={(body) => act(
+            () => api.post(`/commercial/exceptions/${modal.exception.id}/confirm`, body),
+            "Resolution confirmed",
+          )}
+        />
+      )}
+    </>
   );
 }
 
@@ -296,15 +360,17 @@ export function PeriodsTab() {
                     </p>
                     <p className="text-xs text-slate-400">
                       Created {fmtDateTime(p.created_at)}
+                      {p.prepared_at ? ` · prepared ${fmtDateTime(p.prepared_at)}` : ""}
+                      {p.prepared_by ? ` by ${p.prepared_by.slice(0, 8)}` : ""}
                       {p.closed_at ? ` · closed ${fmtDateTime(p.closed_at)}` : ""}
                       {p.closed_by ? ` by ${p.closed_by.slice(0, 8)}` : ""}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
-                    <Badge status={p.status === "closed" ? "neutral" : "success"}>
+                    <Badge status={p.status === "closed" ? "neutral" : p.status === "pending_close" ? "warning" : "success"}>
                       {label(p.status)}
                     </Badge>
-                    {p.status === "closed" && (
+                    {(p.status === "pending_close" || p.status === "closed") && (
                       <Button variant="secondary" size="sm"
                               onClick={() => setExpanded(expanded === p.id ? null : p.id)}>
                         {expanded === p.id ? "Hide findings" : "Findings"}
@@ -314,6 +380,12 @@ export function PeriodsTab() {
                       <Button size="sm" leftIcon={FiLock}
                               onClick={() => setModal({ kind: "close", period: p })}>
                         Close period
+                      </Button>
+                    )}
+                    {p.status === "pending_close" && (
+                      <Button size="sm" leftIcon={FiCheckCircle}
+                              onClick={() => setModal({ kind: "confirm-close", period: p })}>
+                        Confirm close
                       </Button>
                     )}
                   </div>
@@ -354,7 +426,16 @@ export function PeriodsTab() {
           period={modal.period} blockers={blockers} onClose={close}
           onCreate={() => act(
             () => api.post(`/commercial/periods/${modal.period.id}/close`),
-            "Period closed — snapshot frozen",
+            "Close prepared — snapshot frozen, awaiting a different admin to confirm",
+          )}
+        />
+      )}
+      {modal?.kind === "confirm-close" && (
+        <PeriodConfirmCloseModal
+          period={modal.period} onClose={close}
+          onCreate={() => act(
+            () => api.post(`/commercial/periods/${modal.period.id}/confirm-close`),
+            "Period closed and locked",
           )}
         />
       )}

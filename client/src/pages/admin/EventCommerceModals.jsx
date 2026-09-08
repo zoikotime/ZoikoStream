@@ -807,6 +807,92 @@ export function ExceptionDecisionModal({ exception, decision, onCreate, onClose 
   );
 }
 
+const RECONCILIATION_EXCEPTION_STATUSES = [
+  { value: "investigating", label: "Start investigating (no confirmation needed)" },
+  { value: "resolved", label: "Propose: Resolved" },
+  { value: "accepted_risk", label: "Propose: Accepted risk" },
+];
+
+// Reconciliation-exception resolution, maker-checker PREPARE step. Proposing "resolved" or
+// "accepted_risk" does not finalize it — a different admin must confirm via
+// ReconciliationExceptionConfirmModal below. "investigating" is a plain claim and applies
+// immediately, since it decides nothing financial.
+export function ReconciliationExceptionResolveModal({ exception, onCreate, onClose }) {
+  const [targetStatus, setTargetStatus] = useState("resolved");
+  const [notes, setNotes] = useState("");
+  const proposing = targetStatus !== "investigating";
+  return (
+    <ActionModal
+      title="Resolve reconciliation exception"
+      submitLabel={proposing ? "Propose resolution" : "Start investigating"}
+      onClose={onClose}
+      onSubmit={() => onCreate({ status: targetStatus, resolution_notes: notes.trim() || null })}
+    >
+      {proposing && (
+        <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
+          This only PROPOSES the outcome — a different admin must confirm it before it takes
+          effect (maker-checker). You will not be able to confirm your own proposal.
+        </p>
+      )}
+      <p className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300">
+        {exception.description}
+      </p>
+      <div>
+        <Label variant="console">Outcome</Label>
+        <Select variant="console" value={targetStatus} onChange={(e) => setTargetStatus(e.target.value)}>
+          {RECONCILIATION_EXCEPTION_STATUSES.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </Select>
+      </div>
+      <div>
+        <Label variant="console">Notes</Label>
+        <Textarea variant="console" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </div>
+    </ActionModal>
+  );
+}
+
+// Reconciliation-exception resolution, maker-checker CONFIRM step. `investigating` applies
+// immediately and never reaches this modal — only a proposed terminal outcome ("resolved" /
+// "accepted_risk") needs a second, different confirmer.
+export function ReconciliationExceptionConfirmModal({ exception, onCreate, onClose }) {
+  const [notes, setNotes] = useState("");
+  const proposedLabel = (exception.proposed_status || "").split("_")
+    .map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+  return (
+    <ActionModal
+      title="Confirm resolution"
+      submitLabel={`Confirm ${proposedLabel}`}
+      onClose={onClose}
+      onSubmit={() => onCreate({ resolution_notes: notes.trim() || null })}
+    >
+      <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
+        Maker-checker: the server refuses this if you are the admin who proposed the resolution.
+        Confirming applies exactly the proposed outcome below — it cannot be changed here.
+      </p>
+      <dl className="grid grid-cols-2 gap-2 text-sm">
+        <dt className="text-slate-400">Proposed outcome</dt>
+        <dd className="text-slate-700 dark:text-slate-200">{proposedLabel}</dd>
+        <dt className="text-slate-400">Proposed by</dt>
+        <dd className="text-slate-700 dark:text-slate-200">
+          {exception.prepared_by ? exception.prepared_by.slice(0, 8) : "—"}
+        </dd>
+      </dl>
+      <p className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300">
+        {exception.description}
+      </p>
+      {exception.resolution_notes && (
+        <p className="text-xs italic text-slate-400">{exception.resolution_notes}</p>
+      )}
+      <div>
+        <Label variant="console">Confirmation notes (optional)</Label>
+        <Textarea variant="console" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </div>
+    </ActionModal>
+  );
+}
+
 export function PeriodModal({ onCreate, onClose }) {
   const [form, setForm] = useState({ label: "", period_start: "", period_end: "" });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -853,15 +939,16 @@ export function PeriodCloseModal({ period, blockers, onCreate, onClose }) {
   return (
     <ActionModal
       title={`Close period ${period.label}`}
-      submitLabel="Close period"
+      submitLabel="Prepare close"
       disabled={!confirmed}
       onClose={onClose}
       onSubmit={onCreate}
     >
       <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
-        Closing freezes this period&apos;s snapshot and files an exception for every open
-        finding. There is <strong>no reopen</strong> — a correction after close belongs to a
-        later period.
+        This freezes the period&apos;s snapshot and files an exception for every open finding,
+        then waits for a <strong>different</strong> admin to confirm the lock (maker-checker —
+        the server refuses a confirmer who is also the preparer). Once confirmed there is
+        <strong> no reopen</strong> — a correction after close belongs to a later period.
       </p>
       {total === 0 ? (
         <p className="text-sm text-emerald-600 dark:text-emerald-400">
@@ -885,7 +972,39 @@ export function PeriodCloseModal({ period, blockers, onCreate, onClose }) {
       <label className="flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300">
         <input type="checkbox" className="mt-0.5 h-4 w-4" checked={confirmed}
                onChange={(e) => setConfirmed(e.target.checked)} />
-        I understand this period cannot be reopened.
+        I understand this period cannot be reopened once a different admin confirms the close.
+      </label>
+    </ActionModal>
+  );
+}
+
+export function PeriodConfirmCloseModal({ period, onCreate, onClose }) {
+  const [confirmed, setConfirmed] = useState(false);
+  return (
+    <ActionModal
+      title={`Confirm close — ${period.label}`}
+      submitLabel="Confirm close"
+      disabled={!confirmed}
+      onClose={onClose}
+      onSubmit={onCreate}
+    >
+      <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
+        Maker-checker: the server refuses this if you are the admin who prepared the close. The
+        snapshot was frozen at prepare time and will not change — confirming only applies the
+        lock. There is no reopen after this.
+      </p>
+      <dl className="grid grid-cols-2 gap-2 text-sm">
+        <dt className="text-slate-400">Prepared by</dt>
+        <dd className="text-slate-700 dark:text-slate-200">
+          {period.prepared_by ? period.prepared_by.slice(0, 8) : "—"}
+        </dd>
+        <dt className="text-slate-400">Prepared at</dt>
+        <dd className="text-slate-700 dark:text-slate-200">{fmtDateTime(period.prepared_at)}</dd>
+      </dl>
+      <label className="flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300">
+        <input type="checkbox" className="mt-0.5 h-4 w-4" checked={confirmed}
+               onChange={(e) => setConfirmed(e.target.checked)} />
+        I am not the admin who prepared this close, and I understand it cannot be reopened.
       </label>
     </ActionModal>
   );

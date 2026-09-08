@@ -1062,8 +1062,10 @@ class TestCommercialLifecycleDB:
             crud.release_capacity(db, reservation, "test", actor=db.get(User, ctx.user_id))
             actions = {a.action for a in db.scalars(
                 select(AuditLog).where(AuditLog.org_id == ctx.org_id)).all()}
-            for expected in ("commercial.capacity.soft_hold", "commercial.capacity.hard_reserve",
-                             "commercial.capacity.release"):
+            # Names matched to CAPACITY_AUDIT_EVENTS (models/commercial.py) — the canonical,
+            # validated vocabulary _capacity_audit() checks every call against, not a guess.
+            for expected in ("commercial.capacity.soft_hold_created", "commercial.capacity.hard_reserved",
+                             "commercial.capacity.released"):
                 assert expected in actions, f"{expected} left no audit trail"
 
     def test_a_lapsed_soft_hold_is_swept_and_returns_inventory(self, ctx):

@@ -36,7 +36,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, func,
+    Boolean, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text,
+    UniqueConstraint, func, text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -757,7 +758,23 @@ class Invoice(Base):
     # multi-entity accounting practice — so the constraint is the pair, and the allocator
     # (InvoiceNumberSequence) is keyed the same way. The old global UNIQUE(number) made
     # per-entity series impossible.
-    __table_args__ = (UniqueConstraint("seller_legal_entity_id", "number", name="uq_invoice_seller_number"),)
+    # One LIVE invoice per event order. `issue_invoice` had no duplicate guard in code, and the
+    # constraint above does not imply one — it makes NUMBERS unique per seller, not DOCUMENTS
+    # per order — so two concurrent POSTs to /orders/{id}/invoices produced two valid invoices
+    # for the same order, each with its own number. The reconciliation control
+    # `list_orders_missing_invoice` already treats invoice existence as binary per order, so
+    # one-per-order is the model's existing assumption; this enforces it in the database, where
+    # concurrent requests cannot race past it.
+    #
+    # PARTIAL on state <> 'void': `state` declares draft|issued|paid|void, so voiding a document
+    # and issuing a replacement is a path the model already allows. A blanket unique would
+    # forbid that re-issue — a behaviour change, not an integrity fix — so the index excludes
+    # voided rows and leaves the void-then-reissue path exactly as the model defines it.
+    __table_args__ = (
+        UniqueConstraint("seller_legal_entity_id", "number", name="uq_invoice_seller_number"),
+        Index("uq_invoice_active_per_order", "event_order_id",
+              unique=True, postgresql_where=text("state <> 'void'")),
+    )
 
     id: Mapped[uuid.UUID] = _id_col()
     event_order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_orders.id"), nullable=False, index=True)
@@ -1199,9 +1216,15 @@ RECONCILIATION_STATUSES = ("open", "investigating", "resolved", "accepted_risk")
 
 class FinancialPeriod(Base):
     """Freeze/materialize a period's commercial snapshot for accounting export (doc 29
-    "Period close"). `snapshot` is computed once at close time and never recomputed live —
-    "subsequent corrections are separately dated" (doc 29): a correction after close
-    becomes a NEW period's activity, it never mutates a closed period's numbers."""
+    "Period close"). `snapshot` is computed once — at PREPARE time, below — and never
+    recomputed live — "subsequent corrections are separately dated" (doc 29): a correction
+    after close becomes a NEW period's activity, it never mutates a closed period's numbers.
+
+    Maker-checker (doc Section 25 principle, extended here): closing a period is a two-step
+    state machine, `open -> pending_close -> closed`, mirroring approve_commercial_exception /
+    approve_refund_credit — one actor prepares (freezes the snapshot, files exceptions), a
+    DIFFERENT actor confirms (locks it). There is still no reopen path from `closed` — the
+    two-step only gates who may lock it, not whether it can be unlocked."""
 
     __tablename__ = "financial_periods"
     __table_args__ = (UniqueConstraint("label", name="uq_financial_period_label"),)
@@ -1210,8 +1233,14 @@ class FinancialPeriod(Base):
     label: Mapped[str] = mapped_column(String(20), nullable=False)  # e.g. "2026-08"
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    status: Mapped[str] = mapped_column(String(10), default="open", nullable=False)
+    # "open" -> "pending_close" -> "closed". Widened from String(10): "pending_close" is 13 chars.
+    status: Mapped[str] = mapped_column(String(20), default="open", nullable=False)
     snapshot: Mapped[dict | None] = mapped_column(JSON)
+    # Maker: who froze the snapshot and requested the close.
+    prepared_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    prepared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Checker: who confirmed the lock. Must differ from prepared_by — enforced in
+    # crud.confirm_period_close, not here (a DB column cannot compare itself to a sibling row).
     closed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -1223,7 +1252,15 @@ class ReconciliationException(Base):
     commercial ledger. Differences enter an exception queue..." `reference_type` +
     `reference_id` point at whatever object the mismatch concerns (an Event, EventOrder,
     CapacityReservation, Payment, ...) without a hard FK, since the category set spans
-    several unrelated tables."""
+    several unrelated tables.
+
+    Maker-checker (doc Section 25 principle, extended here): a TERMINAL resolution
+    ("resolved" / "accepted_risk") is a two-step state machine — `resolve_exception` proposes
+    it (status becomes "pending_review", `proposed_status` records the intended outcome,
+    `prepared_by` records who proposed it), and `confirm_exception_resolution` finalizes it,
+    refusing a confirmer who is the same person as `prepared_by`. "investigating" is NOT
+    terminal and applies immediately — it is a claim to work the item, not a financial or
+    accounting decision, so nothing to dual-control."""
 
     __tablename__ = "reconciliation_exceptions"
 
@@ -1233,9 +1270,15 @@ class ReconciliationException(Base):
     reference_type: Mapped[str] = mapped_column(String(40), nullable=False)
     reference_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    # "open" -> "investigating" (optional, non-terminal) -> "pending_review" (proposed terminal
+    # outcome, awaiting a different confirmer) -> "resolved" | "accepted_risk".
     status: Mapped[str] = mapped_column(String(20), default="open", nullable=False)
     owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     resolution_notes: Mapped[str | None] = mapped_column(Text)
+    # Maker: who proposed the terminal outcome below, while status == "pending_review".
+    prepared_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    prepared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proposed_status: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

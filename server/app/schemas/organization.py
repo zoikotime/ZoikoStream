@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from ..config import BILLING_INTERVALS, MONTHLY
+
 
 # ── Profile ──────────────────────────────────────────────────────────────────
 
@@ -480,3 +482,19 @@ class EventReportOut(BaseModel):
     data: dict
     created_at: datetime
     released_at: datetime | None = None
+
+
+class SubscriptionCheckoutCreate(BaseModel):
+    """Body for POST /organization/billing/checkout-session.
+
+    Carries ONLY two CANONICAL IDENTIFIERS: which plan, and which published billing cadence.
+    No amount, currency, price or Stripe Price ID is accepted — the server resolves the
+    approved price itself from operator configuration, so there is no field here through which
+    a browser could influence what it is charged.
+
+    `billing_interval` is a closed vocabulary enforced by the pattern below, so a tampered
+    value is a 422 at the edge rather than something the price resolver has to defend against.
+    It selects BETWEEN approved prices; it can never introduce one.
+    """
+    plan_slug: str = Field(..., min_length=1, max_length=60)
+    billing_interval: str = Field(MONTHLY, pattern=f"^({'|'.join(BILLING_INTERVALS)})$")

@@ -5,6 +5,8 @@ never read from the request body. Super admin isn't blocked — it operates on i
 here and uses /admin/* for cross-org management. Reads: any member. Writes + sensitive
 reads (security, developer): org admin (require_org_admin already admits super_admin)."""
 
+import hashlib
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -24,6 +26,9 @@ from ..crud import organization as crud
 from ..db import get_db
 from ..email import UnsafeLinkError
 from ..services import account_lifecycle as lifecycle
+from ..services import payments as payment_svc
+from ..models.plan import Plan
+from ..models.subscription import normalize_subscription_state
 from ..models import (
     EXPORT_TYPES,
     SCOPE_ORGANIZATION,
@@ -60,6 +65,7 @@ from ..schemas.organization import (
     OwnershipTransferCreate,
     OwnershipTransferOut,
     NotificationCatalogItem,
+    SubscriptionCheckoutCreate,
     SupportAccessCustomerOut,
     SupportAccessDecision,
     InvitationAccept,
@@ -167,12 +173,276 @@ def overview(
     return org_svc.overview(db, org, user, range_=range_, include_test=include_test)
 
 
-@router.get("/plans", response_model=list[PlanOut])
+@router.get("/plans")
 def list_plans(db: Session = Depends(get_db)):
-    """Public pricing tiers for the Billing page's plan comparison. Read-only: there is no
-    self-serve plan switch (no payment provider integrated yet) — changing a subscription's
-    plan is still a super-admin action via /admin/organizations/{id}/subscription."""
-    return [p for p in admin_crud.list_plans(db) if p.is_active]
+    """Pricing tiers for the Billing page's plan comparison, each carrying whether it can be
+    purchased self-service.
+
+    `self_service` is computed SERVER-SIDE from whether an approved Stripe price is configured
+    for the plan (settings.subscription_price_map). The browser never decides this, and never
+    sees the Price ID itself — it sends a plan slug back and the server re-resolves. That keeps
+    ZST-COM-PLAN-001 Section 03's CTA split (Developer/Business "Start building" vs Enterprise
+    "Talk to an expert") derived from configuration rather than hardcoded in the UI."""
+    out = []
+    for plan in admin_crud.list_plans(db):
+        if not plan.is_active:
+            continue
+        item = PlanOut.model_validate(plan).model_dump()
+        # Which CADENCES this plan can actually be bought on, straight from the approved price
+        # configuration. The page renders a monthly/annual choice only where both exist, so a
+        # cadence Finance has not published is never offered — the same fail-closed rule that
+        # decides self_service, applied one level down.
+        intervals = settings.purchasable_intervals(plan.slug)
+        item["billing_intervals"] = intervals
+        item["self_service"] = bool(intervals)
+        out.append(item)
+    return out
+
+
+# ── Ledger 1 subscription checkout (ZST-COM-PLAN-001 Section 13/18, Stripe-hosted) ────────
+
+@router.post("/billing/checkout-session")
+def create_subscription_checkout(data: SubscriptionCheckoutCreate,
+                                  org: Organization = Depends(get_my_org_admin),
+                                  user: User = Depends(get_current_user),
+                                  db: Session = Depends(get_db)):
+    """Start a Stripe-hosted subscription checkout for THIS organization's chosen plan.
+
+    Security posture, each point a requirement rather than a precaution:
+
+    * The browser sends a PLAN SLUG only. It never sends an amount, currency, interval or
+      Stripe Price ID — the price is resolved server-side by
+      admin_crud.resolve_subscription_price_id from operator configuration, so a tampered
+      request can at worst name a different plan, never a different price.
+    * The organization comes from `get_my_org_admin` (the caller's own session), never from the
+      request body, so one tenant cannot open checkout against another's subscription.
+    * No state changes. Section 18: "No feature may be unlocked because a card authorization
+      succeeded if the subscription/order activation did not complete." Only the verified
+      webhook may advance the Section 12 state; this records the session reference for
+      correlation and nothing else.
+    * Returns a URL for the browser to follow. Card entry happens on Stripe's page — no payment
+      credential ever reaches this origin, and the secret key never leaves the server.
+    """
+    if not settings.stripe_configured():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "Payments are not configured")
+
+    plan = admin_crud.get_plan_by_slug(db, data.plan_slug)
+    if plan is None or not plan.is_active:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found")
+
+    try:
+        price_id = admin_crud.resolve_subscription_price_id(plan, data.billing_interval)
+    except ValueError as e:
+        # An unpriced plan is a commercial state, not a server fault: it means Finance has not
+        # published a price for it yet. 409 so the UI can route the customer to the inquiry
+        # path rather than showing a broken checkout.
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e))
+
+    sub = admin_crud._current_subs(db, [org.id]).get(org.id)
+    if sub is None:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This organization has no subscription record to upgrade")
+
+    # A tenant that ALREADY has a live Stripe subscription must not be sent through checkout
+    # again. This endpoint creates a NEW Stripe subscription every time it succeeds, so an
+    # already-paying organization that clicked a different plan card ended up with TWO live
+    # subscriptions on the same customer and was billed for both — the plan never changed, and
+    # the second charge was silent. That is a money bug, not a missing feature, so it is
+    # refused here rather than left to be noticed on an invoice.
+    #
+    # Changing the plan of an already-paid subscription is Section 12's PLAN_CHANGE_SCHEDULED
+    # path, which is NOT implemented: the effective-date and proration rules it needs are
+    # undefined by ZST-COM-PLAN-001 and by the Approved Price Book, so there is no correct
+    # amount to charge and no defensible date to charge it on. Until Product/Finance supply
+    # those rules this stays a sales conversation, which is what the Billing page already
+    # tells the customer — this makes the backend agree with it instead of quietly
+    # double-billing.
+    if sub.stripe_subscription_id and normalize_subscription_state(sub.status) not in (
+            "canceled", "closed", "trial_expired"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This organization already has an active subscription. Changing the plan of a "
+            "paid subscription is not self-service yet — please contact sales so the change "
+            "can be scheduled without double-billing you.",
+        )
+
+    base = settings.APP_URL.rstrip("/")
+    # EXPLICITLY "stripe". get_provider() defaults to the deterministic SIMULATOR, so calling it
+    # bare handed this route a MockPaymentProvider — which has no subscription-checkout method at
+    # all, so the endpoint 500'd instead of ever reaching Stripe. Every Ledger 2 call site
+    # already names its provider; this was the one that did not.
+    #
+    # Naming it is also the safer shape: get_provider("stripe") FAILS CLOSED with
+    # ProviderNotConfigured when there is no secret key, where the bare call would silently
+    # return a simulator. The stripe_configured() guard above turns that into a 503 first, so
+    # this route can never produce a fabricated checkout.
+    provider = payment_svc.get_provider("stripe")
+
+    success_url = f"{base}/organization/billing?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{base}/organization/billing?checkout=cancelled"
+    metadata = {"org_id": str(org.id), "plan_slug": plan.slug, "subscription_id": str(sub.id)}
+
+    # Idempotency key = org + plan + a FINGERPRINT OF THE REQUEST ITSELF.
+    #
+    # It was `{org.id}:{plan.slug}` alone, which is stable forever — and Stripe rejects a reused
+    # key whose parameters have changed ("Keys for idempotent requests can only be used with the
+    # same parameters they were first used with"). So the first time anything in the session
+    # changed, that organization could never check out for that plan again: every attempt
+    # returned IdempotencyError -> 502, permanently. A changed APP_URL after a deploy, or a user
+    # changing their email address, was enough to poison it for good.
+    #
+    # Hashing the parameters makes the collision impossible by construction while keeping the
+    # property that mattered: an identical retry (the payer double-clicks, or the browser
+    # re-sends) still produces the SAME key and therefore the same Stripe session rather than a
+    # second subscription. A genuinely different request simply gets a different key, which is
+    # what Stripe's contract asks for.
+    fingerprint = hashlib.sha256(json.dumps(
+        {"price_id": price_id, "success_url": success_url, "cancel_url": cancel_url,
+         "metadata": metadata, "customer_email": user.email},
+        sort_keys=True,
+    ).encode()).hexdigest()[:16]
+
+    try:
+        result = provider.create_subscription_checkout_session(
+            price_id=price_id,
+            idempotency_key=f"{org.id}:{plan.slug}:{fingerprint}",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata=metadata,
+            customer_email=user.email,
+        )
+    except payment_svc.PaymentProviderError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Payment provider error: {e}")
+
+    admin_crud.record_subscription_checkout_started(
+        db, sub, checkout_session_ref=result.checkout_session_ref,
+        billing_interval=data.billing_interval, actor=user)
+    db.commit()
+    # The Price ID is deliberately NOT returned: the browser has no use for it and echoing it
+    # would invite a client that tries to send one back.
+    return {"checkout_url": result.checkout_url,
+            "checkout_session_ref": result.checkout_session_ref}
+
+
+_PLAN_CHANGE_STATUS = {
+    "invalid_interval": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "invalid_plan": status.HTTP_404_NOT_FOUND,
+    "unpriced": status.HTTP_409_CONFLICT,
+    "not_active": status.HTTP_409_CONFLICT,
+    "change_already_scheduled": status.HTTP_409_CONFLICT,
+    "no_change": status.HTTP_409_CONFLICT,
+    "no_period_end": status.HTTP_409_CONFLICT,
+    "illegal_transition": status.HTTP_409_CONFLICT,
+    "no_change_scheduled": status.HTTP_409_CONFLICT,
+}
+
+
+@router.post("/billing/plan-change")
+def schedule_plan_change(data: SubscriptionCheckoutCreate,
+                          org: Organization = Depends(get_my_org_admin),
+                          user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    """Schedule a paid subscription's plan/cadence change for the end of the current period.
+
+    This is the Section 12 `active -> plan_change_scheduled` path, and it is the ONLY
+    self-service way to change an already-paid plan. It is separate from checkout on purpose:
+    checkout CREATES a subscription (and creating a second one for an existing customer is
+    double-billing), whereas this MOVES the one they already have.
+
+    Approved rules enforced by crud.admin.request_plan_change, not here:
+      * no proration — nothing is charged or credited at request time;
+      * effective at the subscription's own `current_period_end`;
+      * entitlements untouched until that date.
+
+    Security posture is identical to checkout: the browser sends a plan slug and a cadence from
+    a closed vocabulary, the organization comes from the caller's session (never the body), and
+    the Stripe Price is resolved server-side. No amount, price or Stripe id is accepted.
+    """
+    plan = admin_crud.get_plan_by_slug(db, data.plan_slug)
+    if plan is None or not plan.is_active:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found")
+
+    sub = admin_crud._current_subs(db, [org.id]).get(org.id)
+    if sub is None:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This organization has no subscription to change")
+
+    try:
+        admin_crud.request_plan_change(
+            db, sub, plan=plan, billing_interval=data.billing_interval, actor=user)
+    except admin_crud.PlanChangeError as e:
+        db.rollback()
+        raise HTTPException(_PLAN_CHANGE_STATUS.get(e.code, status.HTTP_409_CONFLICT), str(e))
+    db.commit()
+    db.refresh(sub)
+    return _scheduled_change_payload(db, sub)
+
+
+@router.delete("/billing/plan-change")
+def cancel_scheduled_plan_change(org: Organization = Depends(get_my_org_admin),
+                                  user: User = Depends(get_current_user),
+                                  db: Session = Depends(get_db)):
+    """Abandon a scheduled change — Section 12's `-> ACTIVE(old version)` outcome.
+
+    Nothing is refunded or reversed because nothing was charged: the current plan was billed
+    and entitled throughout, so cancelling simply drops the pending intention.
+    """
+    sub = admin_crud._current_subs(db, [org.id]).get(org.id)
+    if sub is None:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This organization has no subscription")
+    try:
+        admin_crud.cancel_plan_change(db, sub, actor=user)
+    except admin_crud.PlanChangeError as e:
+        db.rollback()
+        raise HTTPException(_PLAN_CHANGE_STATUS.get(e.code, status.HTTP_409_CONFLICT), str(e))
+    db.commit()
+    db.refresh(sub)
+    return _scheduled_change_payload(db, sub)
+
+
+def _scheduled_change_payload(db: Session, sub) -> dict:
+    """The pending change as the Billing page needs to render it, or nulls when none.
+
+    Read from OUR record, and only the fields the page displays — no Stripe ids, no price.
+    """
+    pending = db.get(Plan, sub.pending_plan_id) if sub.pending_plan_id else None
+    return {
+        "status": sub.status,
+        "plan_slug": sub.plan.slug if sub.plan else None,
+        "billing_interval": sub.billing_interval,
+        "current_period_end": sub.current_period_end,
+        "pending_plan_slug": pending.slug if pending else None,
+        "pending_plan_name": pending.name if pending else None,
+        "pending_billing_interval": sub.pending_billing_interval,
+        "plan_change_effective_at": sub.plan_change_effective_at,
+    }
+
+
+@router.get("/billing/checkout-status")
+def subscription_checkout_status(session_id: str = Query(..., max_length=120),
+                                  org: Organization = Depends(get_my_org_admin),
+                                  db: Session = Depends(get_db)):
+    """Authoritative state for a returning payer — read from OUR database, never from the URL.
+
+    Stripe's success redirect proves only that the browser came back; it is trivially forgeable
+    and arrives before the webhook may have landed. So this reports the Section 12 state the
+    backend actually holds, and says `pending` while confirmation is outstanding rather than
+    claiming a success that has not been verified.
+    """
+    sub = admin_crud.subscription_by_provider_ref(db, checkout_session_ref=session_id)
+    # Tenant check: a session reference belonging to another organization reveals nothing.
+    if sub is None or sub.org_id != org.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Checkout session not found")
+    confirmed = sub.stripe_subscription_id is not None
+    return {
+        "status": sub.status,
+        "plan": sub.plan.name if sub.plan else None,
+        # False until a signature-verified webhook has bound the Stripe subscription.
+        "payment_confirmed": confirmed,
+        "state": "confirmed" if confirmed else "pending",
+    }
 
 
 @router.get("/analytics")
@@ -1550,10 +1820,25 @@ def create_invitation(data: InvitationCreate, background: BackgroundTasks,
         raise HTTPException(status.HTTP_409_CONFLICT, "A user with that email already exists")
     if crud.pending_invite_exists(db, admin.org_id, email):
         raise HTTPException(status.HTTP_409_CONFLICT, "A pending invitation for that email already exists")
-    members_bar = next((i for i in org_svc.entitlements(db, org)["items"] if i["label"] == "Members"), None)
-    if members_bar and members_bar["limit"] is not None and members_bar["used"] >= members_bar["limit"]:
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                             "Member seat limit reached for your plan — upgrade to invite more people")
+    # ENFORCEMENT reads the plan directly, NOT the overview payload. It used to pull the
+    # "Members" bar out of `entitlements()`, which is a REPORTING API whose `limit: None` means
+    # "no entitled plan, so render no denominator". Enforcement read that same None as "no
+    # ceiling", so a trial_expired / canceled / closed / suspended organization could invite
+    # UNLIMITED members — more than it could while its subscription was live.
+    #
+    # `enforcement_plan` answers the ceiling question directly, so the display convention can no
+    # longer leak into a permission decision. `None` still means "no ceiling", but now it can
+    # only arise from a plan that genuinely has no seat limit (Enterprise) or from an
+    # organization with no subscription row at all — never from a lapsed subscription.
+    seat_plan = org_svc.enforcement_plan(db, org.id)
+    seat_limit = seat_plan.max_users if seat_plan else None
+    if seat_limit is not None:
+        members_used = db.scalar(
+            select(func.count(User.id)).where(User.org_id == org.id, User.deleted_at.is_(None))
+        ) or 0
+        if members_used >= seat_limit:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                 "Member seat limit reached for your plan — upgrade to invite more people")
     inv, raw = crud.create_invitation(db, admin.org_id, email, data.role, admin.id)
     url = _invite_url(raw)
     # ORG-001 base variant. The invitation row is already committed, so the notice reports

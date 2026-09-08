@@ -99,7 +99,16 @@ def _deny(url, headers=None, json=None, timeout=None):
     raise RuntimeError("outbound email attempted outside a capture context")
 
 
-email_mod.httpx.post = _deny
+# The baseline `_deny` patch is applied per-module (pytest: the autouse fixture at the bottom;
+# plain runner: the __main__ block), NOT at import time.
+#
+# Import time is wrong because pytest imports every test module during COLLECTION, before any
+# test runs — so an import-time assignment here silently replaced httpx.post for the whole
+# session, and every later module that legitimately exercises a real send (test_account_ready,
+# test_contact, test_email_verification, test_identity_security, test_registration) failed with
+# "outbound email attempted outside a capture context". Scoping it to this module keeps the
+# leak-detection guarantee for these tests without reaching into anyone else's.
+_ORIGINAL_HTTPX_POST = email_mod.httpx.post
 
 
 def _assert_no_leak():
@@ -841,11 +850,27 @@ try:                                    # pytest only; the plain runner checks i
     def _no_unmocked_sends():
         yield
         _assert_no_leak()
+
+    @pytest.fixture(autouse=True, scope="module")
+    def _deny_unmocked_sends_for_this_module_only():
+        """Installs the `_deny` baseline for THIS module's tests and removes it afterwards.
+
+        The guarantee is unchanged for this file: any send that escapes a test's own
+        `_capture()` still raises and is recorded in _LEAKS. What changes is the blast radius
+        — see the note next to `_ORIGINAL_HTTPX_POST` above for why an import-time patch broke
+        five unrelated modules in a full-suite run."""
+        previous = email_mod.httpx.post
+        email_mod.httpx.post = _deny
+        yield
+        email_mod.httpx.post = previous
 except ImportError:                     # pragma: no cover
     pass
 
 
 if __name__ == "__main__":
+    # The plain runner has no fixtures, so it installs the same baseline itself. Nothing else
+    # runs in this process, so there is nobody to restore it for.
+    email_mod.httpx.post = _deny
     passed = failed = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

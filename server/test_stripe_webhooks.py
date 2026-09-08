@@ -67,8 +67,8 @@ def sign(raw: bytes, secret: str = WEBHOOK_SECRET, timestamp: int | None = None)
 
 
 def intent_event(*, event_id=None, event_type="payment_intent.succeeded", intent_id="pi_test_1",
-                 amount=10000, currency="usd", created=None) -> dict:
-    return {
+                 amount=10000, currency="usd", created=None, livemode=None) -> dict:
+    event = {
         "id": event_id or f"evt_{uuid.uuid4().hex[:16]}",
         "object": "event",
         "type": event_type,
@@ -78,6 +78,14 @@ def intent_event(*, event_id=None, event_type="payment_intent.succeeded", intent
             "amount": amount, "currency": currency, "status": "succeeded",
         }},
     }
+    # Omitted unless a test explicitly cares (the P1.1 livemode-isolation tests below) — every
+    # pre-existing test builds an event with no `livemode` key at all, and
+    # stripe_events.livemode_mismatch() treats that exactly like a real Stripe event lacking
+    # the field: nothing to enforce, never a mismatch. Adding this parameter must not change
+    # what any existing test sends.
+    if livemode is not None:
+        event["livemode"] = livemode
+    return event
 
 
 def charge_refund_event(*, event_id=None, intent_id="pi_test_1", amount=10000, refunded=10000) -> dict:
@@ -378,9 +386,76 @@ def test_mapping_layer_contains_no_commercial_logic():
     """Section 27."""
     src = code_only(stripe_events)
     for token in ("CatalogLine", "EventOrder", "Invoice", "SellerLegalEntity", "CapacityPool",
-                  "evaluate_readiness", "golive", "RefundCredit", "tax_", "price",
+                  "evaluate_readiness", "golive", "RefundCredit", "tax_",
+                  # Pricing DECISIONS, spelled out. This was previously the bare token "price",
+                  # which also caught `_subscription_price_ids` — the pure payload read that
+                  # reports WHICH Stripe Price a subscription bills. That extractor invents
+                  # nothing and decides nothing; it reports a provider fact exactly as this
+                  # module already reports provider_status, org_id and plan_slug. What Section
+                  # 27 actually forbids here is DECIDING a price or a plan, so the decision
+                  # surfaces are named directly. This list catches strictly more than the old
+                  # token did: it would fail on a price->plan lookup, a configuration read or an
+                  # amount computation, none of which "price" alone would have caught.
+                  "unit_amount", "price_data", "subscription_price_map",
+                  "resolve_subscription_price_id", "resolve_plan_for_provider_price",
+                  "get_plan_by_slug", "Plan", "settings.",
                   "apply_payment_state", "payment.state"):
         assert token not in src, f"mapping layer contains commercial logic: {token!r}"
+
+
+def test_price_extraction_reports_identifiers_without_interpreting_them():
+    """The single point where this module touches a price: it lists the Price IDs a subscription
+    bills against. It must stay a pure read of the payload — no plan lookup, no configuration,
+    no amount or currency. Turning a price into a plan is crud.admin's authority boundary, and
+    keeping that split is what stops the translation layer becoming a pricing decision."""
+    src = code_only(stripe_events._subscription_price_ids)
+    assert "price_" in src, "the extractor must still recognise Stripe's Price ID prefix"
+    for decision in ("Plan", "slug", "settings", "amount", "currency", "map"):
+        assert decision not in src, f"price extraction must not interpret: {decision!r}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# P1.1 (audit 2026-08-27) · LIVEMODE ISOLATION — pure logic, no DB
+# ══════════════════════════════════════════════════════════════════════════════════════
+
+def test_expected_livemode_reads_the_key_prefix():
+    assert stripe_events.expected_livemode("sk_test_abc123") is False
+    assert stripe_events.expected_livemode("sk_live_abc123") is True
+
+
+def test_expected_livemode_is_unknown_when_key_is_blank():
+    assert stripe_events.expected_livemode("") is None
+    assert stripe_events.expected_livemode("   ") is None
+
+
+def test_livemode_mismatch_is_none_when_mode_cannot_be_determined():
+    """No STRIPE_SECRET_KEY configured -> nothing to enforce, not a mismatch by default."""
+    assert stripe_events.livemode_mismatch({"livemode": True}, "") is None
+    assert stripe_events.livemode_mismatch({"livemode": False}, "") is None
+
+
+def test_livemode_mismatch_is_none_when_event_lacks_the_field():
+    """Every pre-existing test event in this file has no `livemode` key — must stay a no-op,
+    never a mismatch, or every other test here would start failing."""
+    assert stripe_events.livemode_mismatch({}, "sk_live_abc") is None
+    assert stripe_events.livemode_mismatch({"livemode": "not-a-bool"}, "sk_live_abc") is None
+
+
+def test_livemode_mismatch_detects_test_event_against_live_deployment():
+    reason = stripe_events.livemode_mismatch({"livemode": False}, "sk_live_abc123")
+    assert reason is not None
+    assert "livemode=test" in reason and "live mode" in reason
+
+
+def test_livemode_mismatch_detects_live_event_against_test_deployment():
+    reason = stripe_events.livemode_mismatch({"livemode": True}, "sk_test_abc123")
+    assert reason is not None
+    assert "livemode=live" in reason and "test mode" in reason
+
+
+def test_livemode_mismatch_is_none_when_modes_agree():
+    assert stripe_events.livemode_mismatch({"livemode": True}, "sk_live_abc123") is None
+    assert stripe_events.livemode_mismatch({"livemode": False}, "sk_test_abc123") is None
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -904,6 +979,138 @@ class TestStripeWebhookProcessing:
             blob = json.dumps(rec.payload or {})
             assert "4242424242424242" not in blob
             assert '"cvc": "123"' not in blob and '"cvc":"123"' not in blob
+
+
+@needs_db
+class TestStripeLivemodeIsolation:
+    """P1.1 (audit 2026-08-27): a test-mode event must never be processed as live, and vice
+    versa. The ctx fixture mirrors TestStripeWebhookProcessing's — a real order+payment is
+    needed even here: `test_matched_mode_is_processed_normally` must prove a correctly-matched
+    event is applied for real, not merely "not quarantined", and `ingest_provider_event`
+    legitimately reports `applied: False` for an event with no matching payment regardless of
+    livemode — that's a different, unrelated outcome this suite must not conflate with a
+    quarantine."""
+
+    @pytest.fixture
+    def ctx(self, client):
+        with Session(engine) as db:
+            org = Organization(name=f"lm-{uuid.uuid4().hex[:8]}")
+            db.add(org)
+            db.flush()
+            user = User(org_id=org.id, full_name="LM", email=f"lm-{uuid.uuid4().hex[:8]}@t.test",
+                       username=f"lm{uuid.uuid4().hex[:8]}", password_hash="x", role="super_admin")
+            db.add(user)
+            db.flush()
+            event = Event(org_id=org.id, created_by=user.id, title="Livemode isolation test")
+            account = CommercialAccount(org_id=org.id)
+            catalog = CatalogVersion(version_label="v1", vertical=f"lm-{uuid.uuid4().hex[:6]}",
+                                     status="published")
+            db.add_all([event, account, catalog])
+            db.flush()
+            order = EventOrder(event_id=event.id, commercial_account_id=account.id,
+                               catalog_version_id=catalog.id, currency="USD",
+                               subtotal=Decimal("100.00"), total_amount=Decimal("100.00"),
+                               status="accepted", idempotency_key=str(uuid.uuid4()))
+            db.add(order)
+            db.flush()
+            intent_id = f"pi_test_{uuid.uuid4().hex[:14]}"
+            payment = Payment(event_order_id=order.id, provider="stripe",
+                              provider_payment_ref=intent_id, amount=Decimal("100.00"),
+                              currency="USD", state="pending",
+                              idempotency_key=f"auth_{uuid.uuid4().hex[:12]}")
+            db.add(payment)
+            db.commit()
+            ids = SimpleNamespace(org_id=org.id, user_id=user.id, event_id=event.id,
+                                  order_id=order.id, payment_id=payment.id, intent_id=intent_id,
+                                  account_id=account.id, catalog_id=catalog.id,
+                                  evt_prefix=f"evt_lm_{uuid.uuid4().hex[:10]}_")
+        yield client, ids
+        with Session(engine) as db:
+            for sql, params in [
+                ("DELETE FROM provider_events WHERE provider_event_id LIKE :e", {"e": f"{ids.evt_prefix}%"}),
+                ("DELETE FROM audit_logs WHERE org_id = :o OR actor_id = :u",
+                 {"o": ids.org_id, "u": ids.user_id}),
+                ("DELETE FROM payment_schedules WHERE event_order_id = :o", {"o": ids.order_id}),
+                ("DELETE FROM payments WHERE event_order_id = :o", {"o": ids.order_id}),
+                ("DELETE FROM commercial_state_transitions WHERE event_order_id=:o", {"o": ids.order_id}),
+                ("DELETE FROM event_orders WHERE id = :o", {"o": ids.order_id}),
+                ("DELETE FROM events WHERE id = :e", {"e": ids.event_id}),
+                ("DELETE FROM catalog_versions WHERE id = :c", {"c": ids.catalog_id}),
+                ("DELETE FROM commercial_accounts WHERE id = :a", {"a": ids.account_id}),
+                ("DELETE FROM users WHERE id = :u", {"u": ids.user_id}),
+                ("DELETE FROM organizations WHERE id = :o", {"o": ids.org_id}),
+            ]:
+                db.execute(text(sql), params)
+            db.commit()
+
+    def _evt_id(self, ids) -> str:
+        return f"{ids.evt_prefix}{uuid.uuid4().hex[:8]}"
+
+    def test_test_mode_event_against_live_configured_deployment_is_quarantined(self, ctx, monkeypatch):
+        client, ids = ctx
+        monkeypatch.setattr(settings, "STRIPE_SECRET_KEY", "sk_live_deployment_key")
+        eid = self._evt_id(ids)
+        r = post(client, intent_event(event_id=eid, livemode=False))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["applied"] is False
+        assert "livemode_mismatch" in body["result"]["reason"]
+        with Session(engine) as db:
+            rec = db.scalar(select(ProviderEvent).where(ProviderEvent.provider_event_id == eid))
+            assert rec is not None
+            assert rec.processing_status == "processed"  # quarantined, not an error
+            assert rec.signature_verified is True         # never a signature problem
+
+    def test_live_mode_event_against_test_configured_deployment_is_quarantined(self, ctx, monkeypatch):
+        client, ids = ctx
+        monkeypatch.setattr(settings, "STRIPE_SECRET_KEY", "sk_test_deployment_key")
+        eid = self._evt_id(ids)
+        r = post(client, intent_event(event_id=eid, livemode=True))
+        assert r.status_code == 200
+        body = r.json()
+        assert body["applied"] is False
+        assert "livemode_mismatch" in body["result"]["reason"]
+
+    def test_matched_mode_is_processed_normally(self, ctx, monkeypatch):
+        """A correctly-matched event (or one with no livemode field, like every other test in
+        this file) is unaffected — this guard only fires on an actual mismatch. Posts against
+        the fixture's real payment so `applied: True` proves genuine processing happened, not
+        merely that quarantine didn't."""
+        client, ids = ctx
+        monkeypatch.setattr(settings, "STRIPE_SECRET_KEY", "sk_test_deployment_key")
+        eid = self._evt_id(ids)
+        r = post(client, intent_event(event_id=eid, intent_id=ids.intent_id, livemode=False))
+        assert r.status_code == 200
+        assert r.json()["applied"] is True
+        with Session(engine) as db:
+            rec = db.scalar(select(ProviderEvent).where(ProviderEvent.provider_event_id == eid))
+            assert rec.processing_status == "processed"
+
+    def test_signature_verification_still_runs_before_the_livemode_check(self, ctx, monkeypatch):
+        """An invalid signature must be rejected regardless of livemode — the livemode check
+        must never run before, or in place of, signature verification."""
+        client, ids = ctx
+        monkeypatch.setattr(settings, "STRIPE_SECRET_KEY", "sk_live_deployment_key")
+        event = intent_event(event_id=self._evt_id(ids), livemode=False)
+        r = post(client, event, secret="whsec_totally_wrong_secret")
+        assert r.status_code == 401
+        with Session(engine) as db:
+            rec = db.scalar(select(ProviderEvent).where(ProviderEvent.provider_event_id == event["id"]))
+            assert rec is None  # never persisted — same posture as any other signature failure
+
+    def test_duplicate_delivery_of_a_mismatched_event_stays_idempotent(self, ctx, monkeypatch):
+        client, ids = ctx
+        monkeypatch.setattr(settings, "STRIPE_SECRET_KEY", "sk_live_deployment_key")
+        event = intent_event(event_id=self._evt_id(ids), livemode=False)
+        first = post(client, event)
+        second = post(client, event)
+        assert first.status_code == 200 and second.status_code == 200
+        assert first.json()["applied"] is False and second.json()["applied"] is False
+        with Session(engine) as db:
+            rows = db.scalars(
+                select(ProviderEvent).where(ProviderEvent.provider_event_id == event["id"])
+            ).all()
+            assert len(rows) == 1  # exactly one row — no double-insert on replay
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════

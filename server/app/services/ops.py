@@ -32,6 +32,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import (
+    LEGACY_SUBSCRIPTION_STATES,
     AnalyticsSnapshot,
     BroadcastSession,
     ElevationSession,
@@ -51,6 +52,13 @@ from ..crud import commercial as commercial_crud
 from . import admin as admin_svc
 
 log = logging.getLogger(__name__)
+
+# Subscriptions whose commercial phase is an evaluation, in both the §12 spelling and the
+# pre-§12 one, so the expiring-trial banner still matches rows written before the state
+# machine existed. Local to this module because the grouping is a UI concern (which banner
+# tone to show), not a commercial state class.
+_TRIALING_STATES = ("trialing", *(k for k, v in LEGACY_SUBSCRIPTION_STATES.items() if v == "trialing"))
+_TRIAL_OR_PAST_DUE = (*_TRIALING_STATES, "past_due")
 
 # ── vocabulary ────────────────────────────────────────────────────────────────
 
@@ -724,7 +732,7 @@ def action_queues(db: Session, readiness: list[dict]) -> list[dict]:
     ).all()
     expiring = db.scalars(
         select(Subscription).where(
-            Subscription.status.in_(("trial", "past_due")),
+            Subscription.status.in_(_TRIAL_OR_PAST_DUE),
         ).order_by(Subscription.current_period_end)
     ).all()
 
@@ -766,7 +774,7 @@ def action_queues(db: Session, readiness: list[dict]) -> list[dict]:
         *[{"id": str(s.id), "title": f"Subscription {s.status.replace('_', ' ')}",
            "detail": f"{s.organization.name if s.organization else '—'}"
                      + (f" · ends {_fmt_due(s.current_period_end, now)}" if s.current_period_end else ""),
-           "tone": "warning" if s.status == "trial" else "danger",
+           "tone": "warning" if s.status in _TRIALING_STATES else "danger",
            "at": when(s.current_period_end), "to": "/admin/subscriptions"}
           for s in expiring],
     ]

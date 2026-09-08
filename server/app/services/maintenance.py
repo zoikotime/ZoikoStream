@@ -167,12 +167,124 @@ def report_unmatched_settlements(db: Session, *, actor: User | None = None) -> d
             "settlement_ids": [str(s.id) for s in aged]}
 
 
+def expire_commercial_overrides(db: Session, *, actor: User | None = None) -> dict:
+    """Mark approved commercial overrides whose expiry has passed as `expired`.
+
+    ZST-COM-PLAN-001 Section 19 requires manual overrides be "time-bound ... [with] automatic
+    expiry". Access control already refuses a lapsed override at read time
+    (crud.admin.active_overrides filters on expires_at), so this job is about the STORED state
+    agreeing with reality — a console listing must not show a lapsed grant as still approved.
+    Correctness never depends on this job having run.
+
+    Idempotent: a second run finds nothing, because the first moved the rows out of `approved`.
+    """
+    from ..crud import admin as admin_crud
+
+    expired = admin_crud.expire_lapsed_overrides(db)
+    db.commit()
+    return {"job": "expire_commercial_overrides", "expired": expired}
+
+
+def apply_due_plan_changes(db: Session, *, actor: User | None = None) -> dict:
+    """Put scheduled subscription plan changes into effect once their date has arrived.
+
+    This is the clock behind Section 12's `PLAN_CHANGE_SCHEDULED -> ACTIVE`. The approved
+    effective date is the subscription's own `current_period_end`, so a change becomes due
+    exactly when the period the customer already paid for has ended — no proration arises
+    because no mid-cycle boundary is ever crossed.
+
+    Order matters and is deliberate: OUR record moves first, then Stripe is asked to swap the
+    price. If Stripe fails, the local change stands and is reported — the tenant is on the plan
+    they asked for from the date they were promised, and the provider is reconciled on retry or
+    by the next `customer.subscription.updated` webhook. The alternative (Stripe first) would
+    let a provider timeout leave a customer billed for a plan our record denies them.
+
+    Idempotent twice over: `apply_plan_change` clears `pending_*` as part of applying, so a
+    second sweep finds nothing; and the Stripe call carries a per-subscription idempotency key,
+    so a retry cannot swap twice or invoice twice.
+    """
+    from ..config import settings
+    from ..crud import admin as admin_crud
+    from . import payments as payment_svc
+
+    applied, failed, provider_failed, contended = [], [], [], 0
+    # Candidate ids first, then an ATOMIC per-row claim. The batch query's lock is dropped as
+    # soon as the first subscription is applied (create_audit_log commits its own session), so
+    # re-claiming each row individually is what actually prevents two concurrent runners — a
+    # scheduler double-fire, a retry, or an operator running this by hand — from applying the
+    # same change twice and writing two `plan_change_applied` rows.
+    candidate_ids = [s.id for s in admin_crud.due_plan_changes(db)]
+    db.rollback()                     # release the batch lock; each row is re-claimed below
+
+    for sub_id in candidate_ids:
+        sub = admin_crud.claim_due_plan_change(db, sub_id)
+        if sub is None:
+            # Held by another worker, or already applied by one. Either way not ours.
+            contended += 1
+            db.rollback()
+            continue
+        target = sub.pending_plan_id
+        ok, error = admin_crud.apply_plan_change(db, sub, actor=actor)
+        if not ok:
+            db.commit()                       # keep the rejection audit row
+            if error:
+                failed.append({"subscription_id": str(sub.id), "error": error})
+            continue
+        db.commit()
+        applied.append({"subscription_id": str(sub.id), "plan_id": str(sub.plan_id),
+                        "billing_interval": sub.billing_interval})
+
+        # Reconcile the provider. Skipped when there is nothing to reconcile against.
+        if not (sub.stripe_subscription_id and settings.stripe_configured()):
+            continue
+        try:
+            plan = db.get(admin_crud.Plan, sub.plan_id)
+            price_id = admin_crud.resolve_subscription_price_id(plan, sub.billing_interval)
+            provider = payment_svc.get_provider("stripe")
+            provider.change_subscription_price(
+                sub.stripe_subscription_id, price_id=price_id,
+                # Stable per subscription AND per target, so a retry of THIS change collapses
+                # onto one Stripe operation while a genuinely later change gets its own key.
+                idempotency_key=f"{sub.id}:{target}:{sub.billing_interval}",
+            )
+            admin_crud.create_audit_log(
+                db, actor=actor, action="subscription.plan_change_provider_synced",
+                target_type="subscription", target_id=sub.id, org_id=sub.org_id,
+                meta={"stripe_subscription_id": sub.stripe_subscription_id,
+                      "price_id": price_id, "proration": "none"},
+            )
+            db.commit()
+        except Exception as exc:              # noqa: BLE001 — recorded, never swallowed
+            db.rollback()
+            admin_crud.create_audit_log(
+                db, actor=actor, action="subscription.plan_change_provider_failed",
+                target_type="subscription", target_id=sub.id, org_id=sub.org_id,
+                meta={"stripe_subscription_id": sub.stripe_subscription_id,
+                      "error": f"{type(exc).__name__}: {exc}"},
+            )
+            db.commit()
+            provider_failed.append({"subscription_id": str(sub.id),
+                                    "error": type(exc).__name__})
+            log.exception("plan change applied locally but Stripe sync failed for %s", sub.id)
+
+    return {"job": "apply_due_plan_changes", "applied": len(applied),
+            "rejected": len(failed), "provider_failed": len(provider_failed),
+            # Rows another concurrent runner held or had already applied. Reported rather than
+            # hidden so a scheduler double-fire is visible in the job result instead of looking
+            # like a run that found nothing to do.
+            "contended": contended,
+            "details": {"applied": applied, "rejected": failed,
+                        "provider_failed": provider_failed}}
+
+
 JOBS = (
     expire_capacity_holds,
     release_stale_reservations,
     expire_replay_entitlements,
     report_stale_payments,
     report_unmatched_settlements,
+    expire_commercial_overrides,
+    apply_due_plan_changes,
 )
 
 

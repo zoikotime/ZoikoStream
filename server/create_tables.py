@@ -322,6 +322,105 @@ _PHASE5B_STATEMENTS = [
     "ALTER TABLE commercial_state_transitions ADD COLUMN IF NOT EXISTS reason TEXT",
 ]
 
+# Phase 6 — maker-checker for period close and reconciliation-exception resolution (audit
+# 2026-08-27, ZST-LE-COM-001 doc Section 25 principle extended to two flows that previously let
+# one actor both prepare and finalize).
+#
+# financial_periods.status was VARCHAR(10); "pending_close" is 13 characters, so it must widen
+# before any row can take that value — existing "open"/"closed" rows are unaffected by a wider
+# column. All new columns are nullable: every pre-existing period/exception simply has no
+# preparer on file, which is correct (there was no two-step process when they were written).
+_PHASE6_STATEMENTS = [
+    "ALTER TABLE financial_periods ALTER COLUMN status TYPE VARCHAR(20)",
+    "ALTER TABLE financial_periods ADD COLUMN IF NOT EXISTS prepared_by UUID REFERENCES users(id)",
+    "ALTER TABLE financial_periods ADD COLUMN IF NOT EXISTS prepared_at TIMESTAMPTZ",
+    "ALTER TABLE reconciliation_exceptions ADD COLUMN IF NOT EXISTS prepared_by UUID REFERENCES users(id)",
+    "ALTER TABLE reconciliation_exceptions ADD COLUMN IF NOT EXISTS prepared_at TIMESTAMPTZ",
+    "ALTER TABLE reconciliation_exceptions ADD COLUMN IF NOT EXISTS proposed_status VARCHAR(20)",
+]
+
+# Phase 7 — invoice duplication guard (audit 2026-08-28).
+#
+# `issue_invoice` had no duplicate check, and UNIQUE(seller_legal_entity_id, number) does not
+# imply one: it makes NUMBERS unique per seller, not DOCUMENTS per order. Two concurrent POSTs
+# to /orders/{id}/invoices each allocated their own number and both succeeded, leaving one
+# order with two valid invoices. Enforced in the database because only the database can
+# arbitrate a race — same reasoning as the provider-event identity index above.
+#
+# PARTIAL (state <> 'void') so the model's declared draft|issued|paid|void vocabulary keeps its
+# void-then-reissue path; a blanket unique would silently remove it.
+#
+# NOT idempotent in the ADD COLUMN sense: this CREATE fails if the target database already
+# holds two non-void invoices for one order. That is deliberate — duplicate financial documents
+# must be reconciled by Finance, never auto-deleted by a migration. Check before deploying:
+#   SELECT event_order_id, count(*) FROM invoices WHERE state <> 'void'
+#   GROUP BY event_order_id HAVING count(*) > 1;
+_PHASE7_STATEMENTS = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_invoice_active_per_order "
+    "ON invoices (event_order_id) WHERE state <> 'void'",
+]
+
+# Phase 8 — subscription lifecycle vocabulary (ZST-COM-PLAN-001 Section 12).
+#
+# `subscriptions.status` was VARCHAR(20); the Section 12 state `plan_change_scheduled` is 21
+# characters, so the column must widen before any row can take that value. Widening is
+# non-destructive; existing rows are untouched.
+#
+# Deliberately NO data rewrite: rows written before Section 12 keep their `trial`/`cancelled`
+# spellings and are translated on read/write by models.subscription (LEGACY_SUBSCRIPTION_STATES).
+# Mass-updating historical commercial rows is the silent mutation Section 18 prohibits, and it
+# is not needed for correctness.
+_PHASE8_STATEMENTS = [
+    "ALTER TABLE subscriptions ALTER COLUMN status TYPE VARCHAR(30)",
+]
+
+# Phase 9 — commercial overrides (ZST-COM-PLAN-001 Section 14 / Section 19).
+#
+# `commercial_overrides` is a brand-new table, so create_all() builds it and no ALTER is
+# needed. The index is declared on the model; this statement exists so a database created
+# before the model gained it still receives it, matching how every other index in this file
+# is applied. Both are IF NOT EXISTS, so re-running is a no-op.
+# Phase 10 — Ledger 1 Stripe references (ZST-COM-PLAN-001 Section 13 "Commerce Adapter").
+#
+# Correlation keys only: they let an inbound Stripe event find the right subscription. They are
+# NOT the subscription's state — `status` (the Section 12 machine) remains the only authority.
+# All nullable: every existing subscription predates Stripe and has none.
+#
+# The two unique indexes are what make webhook matching exact rather than fuzzy — one Stripe
+# subscription and one checkout session can each belong to at most one tenant. NULLs are
+# distinct in Postgres, so the many rows with no Stripe reference are unaffected.
+_PHASE10_STATEMENTS = [
+    "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(120)",
+    "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(120)",
+    "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS checkout_session_ref VARCHAR(120)",
+    "CREATE INDEX IF NOT EXISTS ix_subscriptions_stripe_customer "
+    "ON subscriptions (stripe_customer_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_subscriptions_stripe_subscription "
+    "ON subscriptions (stripe_subscription_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_subscriptions_checkout_session "
+    "ON subscriptions (checkout_session_ref)",
+    # The cadence a subscription is billed on. Deliberately NULLABLE with no default: rows
+    # written before this column existed genuinely have no recorded cadence, and defaulting
+    # them to 'monthly' would assert something about live tenants that nobody verified.
+    "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS billing_interval VARCHAR(16)",
+    # Scheduled plan change (Section 12 PLAN_CHANGE_SCHEDULED). All three nullable and additive:
+    # an existing subscription simply has no pending change, which is the correct reading of
+    # NULL here. No backfill, no default, no data touched.
+    "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS pending_plan_id UUID "
+    "REFERENCES plans(id)",
+    "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS pending_billing_interval VARCHAR(16)",
+    "ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS plan_change_effective_at TIMESTAMPTZ",
+    # Lets the effective-date job find due changes without scanning every subscription. Partial:
+    # only rows that actually have a pending change are of interest.
+    "CREATE INDEX IF NOT EXISTS ix_subscriptions_plan_change_due "
+    "ON subscriptions (plan_change_effective_at) WHERE pending_plan_id IS NOT NULL",
+]
+
+_PHASE9_STATEMENTS = [
+    "CREATE INDEX IF NOT EXISTS ix_commercial_overrides_org_expiry "
+    "ON commercial_overrides (org_id, expires_at)",
+]
+
 # Raw statements (not single-table ALTER fragments) — constraint swaps and index creation.
 _PHASE2_STATEMENTS = [
     "ALTER TABLE invoices DROP CONSTRAINT IF EXISTS uq_invoice_number",
@@ -434,6 +533,44 @@ def _relax_not_null(table: str, column: str) -> str:
 # ── ZST-EC-001 MED-007 / MED-008 / MED-011 — recording governance ────────────────────────
 # `validation_status` / `validation_evidence` / `retention_*` / `legal_hold` already existed;
 # these are the health, finalization-announcement and deletion-lifecycle columns.
+# MED-002 governed signal state + notification bookkeeping on live inputs. Same omission as
+# _BROADCAST_SESSION_COLUMNS below: models/live.py declares these ten columns and nothing ever
+# added them, so `create_all()` covered a brand-new database while every existing one raised
+# UndefinedColumn — here it took down the media sweeper on every tick, not just one request.
+#
+# `signal_state` and `interruption_count` are NOT NULL in the model with Python-side defaults.
+# A bare NOT NULL ADD COLUMN cannot be applied to a table that already has rows, so both carry
+# the SAME default in SQL: existing inputs land on "healthy"/0, which is exactly what the model
+# would have assigned them, rather than being invented here.
+_LIVE_INGRESS_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS signal_state VARCHAR(16) NOT NULL DEFAULT 'healthy'",
+    "ADD COLUMN IF NOT EXISTS signal_changed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS signal_lost_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS last_signal_ok_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS interruption_count INTEGER NOT NULL DEFAULT 0",
+    "ADD COLUMN IF NOT EXISTS interruption_window_started_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS created_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS interrupted_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS intermittent_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS recovered_notified_at TIMESTAMPTZ",
+]
+
+# Broadcast health + notification bookkeeping. models/broadcast.py declares these eight
+# columns, but nothing in this file ever added them — so `create_all()` produced them on a
+# BRAND-NEW database and every pre-existing database silently lacked them, failing any
+# broadcast_sessions query with UndefinedColumn. Same additive, IF NOT EXISTS shape as every
+# other list here, so it is a no-op wherever they are already present.
+_BROADCAST_SESSION_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS health_level VARCHAR(8)",
+    "ADD COLUMN IF NOT EXISTS health_changed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS health_issues TEXT",
+    "ADD COLUMN IF NOT EXISTS started_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS ended_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS health_failed_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS health_degraded_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS health_recovered_notified_at TIMESTAMPTZ",
+]
+
 _MED_RECORDING_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS hold_category VARCHAR(40)",
     "ADD COLUMN IF NOT EXISTS hold_reference VARCHAR(80)",
@@ -530,6 +667,10 @@ def ensure_schema():
             # unaffected: the ADD COLUMN above carries DEFAULT FALSE). Relaxing the constraint
             # is the non-destructive fix — the data stays, and the column stops being required
             # by a model that no longer manages it.
+            #
+            # This is also where the other side of this merge relaxed `auto_start_recording`
+            # via its own separate pass: same table, same guard, and this tuple is a strict
+            # superset (it also covers `auto_end_event`), so the events relax happens once here.
             conn.execute(text(_relax_not_null("events", col)))
         for clause in _CUSTOMER_DELIVERY_COLUMNS:
             conn.execute(text(f"ALTER TABLE customer_deliveries {clause}"))
@@ -569,10 +710,33 @@ def ensure_schema():
             conn.execute(text(stmt))
         for stmt in _PHASE5B_STATEMENTS:
             conn.execute(text(stmt))
+        # UNION of both sides of this merge — neither is optional. The media columns and the
+        # Phase 6-10 statements are independent migrations that happen to land in the same
+        # block; dropping either leaves a database missing columns its models declare.
+        for clause in _LIVE_INGRESS_COLUMNS:
+            conn.execute(text(f"ALTER TABLE live_ingress_endpoints {clause}"))
+        for clause in _BROADCAST_SESSION_COLUMNS:
+            conn.execute(text(f"ALTER TABLE broadcast_sessions {clause}"))
         for clause in _MED_RECORDING_COLUMNS:
             conn.execute(text(f"ALTER TABLE live_recordings {clause}"))
         for clause in _MED_REPLAY_COLUMNS:
             conn.execute(text(f"ALTER TABLE replay_entitlements {clause}"))
+        # Phase 10 carries the Ledger 1 provider columns (subscriptions.stripe_customer_id,
+        # stripe_subscription_id, checkout_session_ref) that the subscription webhook path
+        # correlates on, so this is load-bearing for Stripe billing.
+        for stmt in _PHASE6_STATEMENTS:
+            conn.execute(text(stmt))
+        for stmt in _PHASE7_STATEMENTS:
+            conn.execute(text(stmt))
+        for stmt in _PHASE8_STATEMENTS:
+            conn.execute(text(stmt))
+        for stmt in _PHASE9_STATEMENTS:
+            conn.execute(text(stmt))
+        for stmt in _PHASE10_STATEMENTS:
+            conn.execute(text(stmt))
+        # The orphan-`events` DROP NOT NULL pass that the other side of this merge put here is
+        # deliberately absent: the `_EVENT_RELAX_NOT_NULL` loop earlier in this function does the
+        # same guarded relax on the same table and covers a superset of the columns.
     print("Schema ready!")
 
 

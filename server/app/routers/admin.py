@@ -570,7 +570,12 @@ def update_subscription(sub_id: uuid.UUID, data: SubscriptionUpdate, request: Re
     sub = crud.get_subscription(db, sub_id)
     if not sub:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Subscription not found")
-    out = crud.update_subscription(db, sub, data)
+    try:
+        out = crud.update_subscription(db, sub, data)
+    except ValueError as e:
+        # An illegal or unknown §12 transition is a business validation failure, not a server
+        # error — same posture as the commercial routes' ValueError handling.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     _audit(db, admin, request, "subscription.update", target_type="subscription",
            target_id=sub.id, org_id=sub.org_id, meta=data.model_dump(exclude_none=True))
     return out

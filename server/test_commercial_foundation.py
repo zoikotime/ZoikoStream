@@ -416,10 +416,21 @@ class _StubSession:
         self.added.append(o)
 
     def get(self, model, pk):
-        return self._get
+        # Type-aware, mirroring real Session.get(Model, pk): return the stubbed row
+        # only when the caller asks for ITS model. A stub that answers every lookup
+        # with the same object made _order_org_id (which does db.get(EventOrder, ...))
+        # receive a CommercialAccount and fail on .event_id.
+        if self._get is not None and isinstance(self._get, model):
+            return self._get
+        return None
 
     def scalar(self, stmt=None):
         return self._scalar
+
+    def flush(self):
+        # issue_invoice flushes before auditing so a constraint violation surfaces
+        # before an audit row is written. No-op here: the stub has no database.
+        pass
 
     def commit(self):
         pass

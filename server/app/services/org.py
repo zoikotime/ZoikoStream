@@ -34,6 +34,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import (
+    SUBSCRIPTION_ENTITLED_STATES,
+    normalize_subscription_state,
     AnalyticsSnapshot,
     BroadcastSession,
     Event,
@@ -200,13 +202,70 @@ def service_health(stages: list[dict]) -> dict:
 # ── entitlements ──────────────────────────────────────────────────────────────
 
 def _plan(db: Session, org_id) -> tuple[Subscription | None, Plan | None]:
+    """The org's ENTITLED subscription and plan, for DISPLAY. Unchanged, deliberately.
+
+    This is the REPORTING resolver. Returning (None, None) for a non-entitled organization is
+    intentional and is pinned by `test_no_plan_means_no_invented_ceiling`: the overview must
+    report a null limit rather than a made-up denominator, which would render a meaningless
+    progress bar.
+
+    Do NOT use this for enforcement — see `enforcement_plan` below. The two questions ("what
+    should I show?" and "what ceiling applies?") have different answers for a subscription whose
+    entitlement has ended, and conflating them is what let a lapsed tenant become unmetered.
+    """
     sub = db.scalar(
         select(Subscription).where(
             Subscription.org_id == org_id,
-            Subscription.status.in_(("active", "trial", "past_due")),
+            Subscription.status.in_(SUBSCRIPTION_ENTITLED_STATES),
         ).order_by(Subscription.started_at.desc())
     )
     return sub, (sub.plan if sub else None)
+
+
+def enforcement_plan(db: Session, org_id) -> Plan | None:
+    """The plan whose QUANTITATIVE CEILING governs this organization, whatever its state.
+
+    THE ENFORCEMENT resolver, and the counterpart to `_plan` above. Plan resolution and
+    entitlement are separate concepts here:
+
+        plan        = the subscription's stored plan            <- this function
+        entitlement = status in SUBSCRIPTION_ENTITLED_STATES    <- unchanged, elsewhere
+
+    Approved Product decision: for an organization that HAS a subscription in a non-entitled
+    state (trial_expired, canceled, closed, suspended), that subscription's existing plan
+    remains the quantitative ceiling for storage and seats. It does NOT make the organization
+    entitled, and none of those states is added to SUBSCRIPTION_ENTITLED_STATES — paid-feature
+    access is a separate question this function does not answer.
+
+    The defect it fixes: both enforcement points previously resolved the plan through the
+    entitled-only query, so a lapsed subscription resolved to plan=None and `None` was then read
+    as "no ceiling". Losing entitlement therefore INCREASED usable capacity — measured, a tenant
+    60 GB over Developer's 50 GB ceiling was blocked while trialing and unblocked once expired,
+    cancelled or suspended.
+
+    Returns None ONLY when the organization has no subscription row at all. Nothing is
+    fabricated for that case: what governs an organization that never had a subscription is an
+    open Product question, so this preserves the existing behaviour rather than inventing a
+    default plan.
+
+    Row selection prefers an ENTITLED subscription when one exists, so an old cancelled row can
+    never override a current live one; otherwise it takes the most recent. That is the same
+    intent as `crud.admin._current_subs`, and it decides only WHICH row to read.
+    """
+    entitled = db.scalar(
+        select(Subscription).where(
+            Subscription.org_id == org_id,
+            Subscription.status.in_(SUBSCRIPTION_ENTITLED_STATES),
+        ).order_by(Subscription.started_at.desc())
+    )
+    if entitled is not None:
+        return entitled.plan
+    lapsed = db.scalar(
+        select(Subscription)
+        .where(Subscription.org_id == org_id)
+        .order_by(Subscription.started_at.desc())
+    )
+    return lapsed.plan if lapsed is not None else None
 
 
 def _streaming_hours(db: Session, org_id) -> float:
@@ -252,6 +311,20 @@ def entitlements(db: Session, org: Organization) -> dict:
         "plan": plan.name if plan else None,
         "plan_slug": plan.slug if plan else None,
         "status": sub.status if sub else None,
+        # The cadence this tenant is billed on, or None where it predates the column being
+        # recorded. Section 16 requires the console to show the current interval; None renders
+        # as "not recorded" rather than being guessed at as monthly.
+        "billing_interval": sub.billing_interval if sub else None,
+        # A scheduled plan change, so the console can show what is coming and when. Read from
+        # OUR record — the effective date is the one the customer was promised, not a value the
+        # page derives. All three are null together when nothing is pending.
+        "pending_plan_slug": (
+            sub.pending_plan.slug if sub and sub.pending_plan is not None else None),
+        "pending_plan_name": (
+            sub.pending_plan.name if sub and sub.pending_plan is not None else None),
+        "pending_billing_interval": sub.pending_billing_interval if sub else None,
+        "plan_change_effective_at": (
+            _aware(sub.plan_change_effective_at) if sub else None),
         "trial_ends_at": _aware(sub.trial_ends_at) if sub else None,
         "current_period_end": _aware(sub.current_period_end) if sub else None,
         "items": items,
@@ -324,6 +397,16 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
             bucket_order.append(label)
         buckets[label]["viewers"] += per_event[e.id]["peak"]
         buckets[label]["watch_hours"] += per_event[e.id]["watch_hours"]
+
+    # Imported here, not at module scope, because services/broadcast.py reaches this module
+    # through webhooks -> webhook_lifecycle -> org_comms -> org, and `engagement_score` is
+    # defined near the END of broadcast.py. A module-level import therefore closed a cycle that
+    # only resolved when something imported `org` FIRST: `import app.services.broadcast` on its
+    # own raised ImportError ("partially initialized module"), and the test suite passed or
+    # failed on collection order alone. broadcast.py already defers its import of this module
+    # for the same reason (see _storage_over_limit); this is the other half of that pair, so
+    # neither direction of the cycle has a module-level edge any more.
+    from .broadcast import engagement_score
 
     def event_engagement(info: dict) -> int:
         from .broadcast import engagement_score
@@ -649,7 +732,15 @@ def attention(db: Session, org: Organization, ent: dict, readiness: list[dict]) 
             })
 
     # Trial ending.
-    if ent.get("status") == "trial" and ent.get("trial_ends_at"):
+    #
+    # Compared through normalize_subscription_state, not against a literal. This tested only
+    # `== "trial"`, the PRE-Section-12 spelling, while every subscription current code creates
+    # is written as `trialing` — so the warning never fired for any of them and tenants got no
+    # notice before their trial ended. Normalizing matches both spellings, so the legacy rows
+    # this string was written for keep working too.
+    #
+    # The commercial meaning is unchanged: same threshold, same severities, same copy.
+    if normalize_subscription_state(ent.get("status")) == "trialing" and ent.get("trial_ends_at"):
         days = _days_until(ent["trial_ends_at"], now)
         if days <= 14:
             items.append({

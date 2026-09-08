@@ -869,6 +869,8 @@ class FinancialPeriodOut(BaseModel):
     period_end: datetime
     status: str
     snapshot: dict | None = None
+    prepared_by: uuid.UUID | None = None
+    prepared_at: datetime | None = None
     closed_by: uuid.UUID | None = None
     closed_at: datetime | None = None
     created_at: datetime | None = None
@@ -885,12 +887,21 @@ class ReconciliationExceptionOut(BaseModel):
     status: str
     owner_id: uuid.UUID | None = None
     resolution_notes: str | None = None
+    prepared_by: uuid.UUID | None = None
+    prepared_at: datetime | None = None
+    proposed_status: str | None = None
     created_at: datetime | None = None
     resolved_at: datetime | None = None
 
 
 class ExceptionResolveCreate(BaseModel):
     status: Literal["resolved", "accepted_risk", "investigating"]
+    resolution_notes: str | None = None
+
+
+class ExceptionConfirmCreate(BaseModel):
+    """Body for the maker-checker CONFIRM step. No `status` field — confirming ratifies
+    whatever the maker proposed (`proposed_status`), it never chooses a different outcome."""
     resolution_notes: str | None = None
 
 

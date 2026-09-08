@@ -36,6 +36,7 @@ from decimal import Decimal
 import stripe
 
 from .payments import (
+    SubscriptionCheckoutResult,
     CheckoutSessionResult,
     DisputeResult,
     PaymentProvider,
@@ -357,6 +358,135 @@ class StripePaymentProvider(PaymentProvider):
             provider_payment_ref=intent_ref,
             state="requires_action",
             expires_at=_utc(getattr(session, "expires_at", None)),
+        )
+
+    def create_subscription_checkout_session(
+        self, *, price_id: str, idempotency_key: str, success_url: str, cancel_url: str,
+        metadata: dict[str, str], customer_email: str | None = None,
+    ) -> "SubscriptionCheckoutResult":
+        """Create a Stripe-hosted Checkout Session in SUBSCRIPTION mode (Ledger 1).
+
+        Separate from create_checkout_session() above, which is Ledger 2's one-off event-order
+        payment. The two differ in every way that matters and must not be merged:
+
+        * `mode="subscription"` — Stripe creates a recurring Subscription, not a single
+          PaymentIntent. The billing interval lives on the Stripe Price, not here.
+        * `price` (an approved Stripe Price ID) — NOT `price_data`. This is the opposite choice
+          from Ledger 2 and is deliberate. A Live Event amount is computed from our published
+          CatalogVersion, so Stripe is told the result. A subscription price is an approved
+          commercial fact from ZST-COM-PRICE-001 that Stripe itself holds; inventing an inline
+          amount here would make this code the pricing authority, which Section 18 forbids.
+        * no `capture_method="manual"` — that parameter belongs to payment mode and is invalid
+          for subscription mode. Stripe collects the first invoice itself.
+
+        The caller resolves `price_id` from configuration; this method never chooses a price,
+        and it is unreachable without one.
+        """
+        if not (price_id or "").strip():
+            raise ProviderInvalidRequest(
+                "A subscription checkout requires an approved Stripe Price ID"
+            )
+        if not (success_url or "").strip() or not (cancel_url or "").strip():
+            raise ProviderInvalidRequest("Checkout requires both a success and a cancel URL")
+        safe_metadata = {str(k): str(v) for k, v in (metadata or {}).items() if v is not None}
+        params: dict = {
+            "mode": "subscription",
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "line_items": [{"price": price_id.strip(), "quantity": 1}],
+            # Mirrored onto the Subscription so inbound customer.subscription.* events carry
+            # our tenant references — session metadata does not propagate automatically, the
+            # same gap create_checkout_session() closes for the PaymentIntent.
+            "subscription_data": {"metadata": safe_metadata},
+            "metadata": safe_metadata,
+        }
+        if customer_email:
+            # Prefills Stripe's own form. Never a substitute for tenant identity, which is
+            # carried in metadata and re-derived server-side on the way back.
+            params["customer_email"] = customer_email
+        try:
+            session = self._client.checkout.sessions.create(
+                params=params,
+                # Same plan purchase retried -> the same Stripe session, not a second
+                # subscription. Namespaced apart from Ledger 2's "checkout:" keys.
+                options={"idempotency_key": f"sub_checkout:{idempotency_key}"},
+            )
+        except Exception as exc:
+            translated = _translate(exc, operation="create_subscription_checkout_session")
+            self._log("subscription_checkout_error", error=type(translated).__name__)
+            raise translated from exc
+
+        url = getattr(session, "url", None)
+        if not url:
+            raise ProviderInvalidRequest("Stripe returned a checkout session with no URL")
+        sub = getattr(session, "subscription", None)
+        sub_ref = sub if isinstance(sub, str) else getattr(sub, "id", None)
+        customer = getattr(session, "customer", None)
+        customer_ref = customer if isinstance(customer, str) else getattr(customer, "id", None)
+        # No amount/currency is logged: this method never sees one.
+        self._log("subscription_checkout_created", checkout_session_ref=session.id,
+                  price_id=price_id, stripe_subscription_ref=sub_ref)
+        return SubscriptionCheckoutResult(
+            checkout_session_ref=session.id,
+            checkout_url=url,
+            stripe_customer_id=customer_ref,
+            stripe_subscription_id=sub_ref,
+        )
+
+    def change_subscription_price(self, provider_subscription_ref: str, *, price_id: str,
+                                   idempotency_key: str) -> "SubscriptionCheckoutResult":
+        """Move an EXISTING Stripe subscription onto `price_id` with NO proration.
+
+        Called only at the effective date, once the billing period the customer already paid
+        for has ended. That timing is what makes a plain modify correct here rather than a
+        Subscription Schedule: there is no remaining mid-cycle time to prorate, so the swap is
+        a clean boundary transition — which is exactly the approved rule.
+
+        `proration_behavior="none"` is the approved commercial decision, not a default:
+            "Use NO mid-cycle proration. Do not create prorated credits or charges. Do not use
+             Stripe proration behavior that creates additional mid-cycle charges."
+        Stripe's own default is `create_prorations`, which WOULD raise an immediate invoice
+        item, so leaving this unset would have silently violated the rule. `none` is passed
+        explicitly and is asserted by test.
+
+        Reuses the existing subscription's items: the item id is read back and swapped in place,
+        so no second Stripe subscription and no second customer is ever created.
+        """
+        if not (provider_subscription_ref or "").strip():
+            raise ProviderInvalidRequest("A subscription price change requires a subscription id")
+        if not (price_id or "").strip():
+            raise ProviderInvalidRequest(
+                "A subscription price change requires an approved Stripe Price ID")
+        try:
+            existing = self._client.subscriptions.retrieve(provider_subscription_ref.strip())
+            items = getattr(getattr(existing, "items", None), "data", None) or []
+            if not items:
+                raise ProviderInvalidRequest(
+                    "The Stripe subscription has no line item to move")
+            updated = self._client.subscriptions.update(
+                provider_subscription_ref.strip(),
+                params={
+                    # Replace the single existing item rather than appending one — appending
+                    # would bill the customer for BOTH plans.
+                    "items": [{"id": items[0].id, "price": price_id.strip()}],
+                    "proration_behavior": "none",
+                },
+                options={"idempotency_key": f"plan_change:{idempotency_key}"},
+            )
+        except Exception as exc:
+            translated = _translate(exc, operation="change_subscription_price")
+            self._log("subscription_item_swap_error", error=type(translated).__name__)
+            raise translated from exc
+
+        customer = getattr(updated, "customer", None)
+        self._log("subscription_item_swapped",
+                  stripe_subscription_ref=provider_subscription_ref, price_id=price_id,
+                  proration="none")
+        return SubscriptionCheckoutResult(
+            checkout_session_ref="",
+            checkout_url="",
+            stripe_customer_id=customer if isinstance(customer, str) else getattr(customer, "id", None),
+            stripe_subscription_id=getattr(updated, "id", provider_subscription_ref),
         )
 
     # ── disputes ─────────────────────────────────────────────────────────────────────────
