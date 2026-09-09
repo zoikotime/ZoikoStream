@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer } from "react";
 import { useSearchParams } from "react-router-dom";
-import api from "../api";
-import useApi from "./useApi";
 import useEventStream from "./useEventStream";
 import useInterval from "./useInterval";
 import useReactionChannel from "./useReactionChannel";
@@ -60,30 +58,18 @@ const EMPTY = {
 
 const TYPING_TTL = 4000;
 
-// Which event the console attaches to when the URL carries no ?event=<id>.
+// The console attaches to the event in ?event=<id>, and to nothing else.
 //
-// This used to ask the API for `status: "live"` and take the first row — an exact-match
-// filter (crud/event.py list_events), so it could only ever find an event that was ALREADY
-// live, i.e. precisely the case where the host does not need the Go Live button. A host who
-// had not gone live yet resolved nothing, and Dashboard.jsx short-circuits a null `resolved`
-// to a "No event to broadcast" empty state, so the whole console — deck, stage and Go Live
-// control — never mounted at all. That is the host role's own landing page (auth/roleHome.js
-// maps host -> /host/dashboard, with no event id), so every host hit it on first login and
-// the only working entry point was the assignment email's ?event= link.
+// There used to be a `pickBroadcastable` helper here that chose an event out of the
+// organization's list when the URL carried none. It is deleted rather than left unused,
+// because it encoded the defect: /host/dashboard was the host ACCOUNT role's landing page,
+// so every host-persona login opened the Producer Console, the helper attached it to
+// whichever org event ranked highest, and the backend correctly refused broadcast control on
+// an event that person was never assigned to — "No host assigned", "View only".
 //
-// Ranked rather than filtered: an on-air event still wins, and otherwise the console opens
-// the soonest event this host could actually take live. `armed` outranks scheduled/published
-// because it is the state a host deliberately moves an event into just before going live.
-const BROADCASTABLE = ["live", "degraded", "paused", "armed", "scheduled", "published"];
-
-// Exported for the regression tests only — the console still uses it through the hook.
-export function pickBroadcastable(items) {
-  const ranked = items
-    .map((ev) => ({ ev, rank: BROADCASTABLE.indexOf(ev.status) }))
-    .filter((x) => x.rank !== -1)
-    .sort((a, b) => a.rank - b.rank);
-  return ranked.length ? ranked[0].ev : null;
-}
+// The fix is upstream: an account role is not an event assignment, so host/moderator/speaker
+// now land on the organization dashboard, and enter a console only by choosing an event.
+// See auth/destination.js.
 
 const upsert = (list, item, key = "id") => {
   const i = list.findIndex((x) => x[key] === item[key]);
@@ -322,19 +308,28 @@ export default function useLiveEvent() {
   // components/live/ReactionOverlay.jsx re-renders. See hooks/useReactionChannel.js.
   const reactions = useReactionChannel();
 
-  // Which event: ?event=<id>, else this org's currently-live event via the EXISTING events
-  // API. An explicit id needs no request, and deriving it means changing the URL re-attaches
-  // the socket (a fetch-once hook would not).
-  const { data: liveEvent, loading, error } = useApi(() =>
-    eventParam
-      ? Promise.resolve(null)
-      : api
-          .get("/events", { params: { page_size: 50, sort_by: "start_time", order: "asc" } })
-          .then((r) => pickBroadcastable(r.data.items || []))
-  );
+  // Which event: ?event=<id>, and ONLY that.
+  //
+  // This used to fall back to picking a broadcastable event out of the organization's list
+  // when the URL carried none. That substitution is what turned a bad post-login redirect
+  // into the reported bug: a host-persona account with no assignment landed on
+  // /host/dashboard, the console silently attached to somebody else's event, and the
+  // backend — correctly — answered can_host:false, leaving "No host assigned" / "View only"
+  // on a broadcast the user had nothing to do with.
+  //
+  // A console with no event is not a destination. Callers route to the assignment picker
+  // instead, so the event id is always something a person chose. The route
+  // guard (EventConsoleRoute) also refuses to mount this page without one, so in practice
+  // `eventParam` is present by the time the hook runs — this is the second line of defence,
+  // not the first.
+  // No request: the event id is in the URL or there is no event. `loading` and `error` stay
+  // in the hook's shape because Dashboard.jsx branches on them, but resolution itself can no
+  // longer fail or take time.
+  const loading = false;
+  const error = null;
   const resolved = useMemo(
-    () => (eventParam ? { id: eventParam } : liveEvent),
-    [eventParam, liveEvent]
+    () => (eventParam ? { id: eventParam } : null),
+    [eventParam]
   );
 
   const onEnvelope = useCallback((env) => {

@@ -116,6 +116,20 @@ class Event(Base):
     service_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("service_profiles.id"))
     commercial_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("commercial_accounts.id"))
 
+    # -- LVE-003 (ZST-EC-001) ----------------------------------------------------------
+    # Communication markers for the approved-event and team lifecycles. They live here
+    # rather than in a side table because they describe THIS row's announcement state, and a
+    # claim column beside its evidence cannot drift out of step with it.
+    approved_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    team_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The last ANNOUNCED team, as a stable signature of (user_id, role) pairs - deliberately
+    # not names. A staff display-name edit therefore produces an identical signature and
+    # sends nothing, while a genuine add/remove/role-change does not.
+    team_signature: Mapped[str | None] = mapped_column(String(500))
+    # The last ANNOUNCED team as displayed, so a Team Changed message can show a real
+    # "previous" rather than re-deriving one that no longer exists.
+    team_display: Mapped[str | None] = mapped_column(String(500))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

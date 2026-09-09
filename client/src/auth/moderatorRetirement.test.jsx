@@ -10,7 +10,7 @@
 //      a role="moderator" blob kept being routed as a moderator no matter what the server
 //      thought. The role removal is only real if the session layer stops replaying it.
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 
 import { roleHome } from "./roleHome";
@@ -57,8 +57,8 @@ function WhereAmI() {
 // preserves ?event=<id> through login), and /host/dashboard sits INSIDE it.
 const renderApp = (initialPath) =>
   render(
-    <AuthProvider>
-      <MemoryRouter initialEntries={[initialPath]}>
+    <MemoryRouter initialEntries={[initialPath]}>
+      <AuthProvider>
         <Routes>
           <Route path="/moderator/dashboard" element={<LegacyRedirect />} />
           <Route
@@ -71,8 +71,8 @@ const renderApp = (initialPath) =>
           />
           <Route path="/login" element={<p>login-page</p>} />
         </Routes>
-      </MemoryRouter>
-    </AuthProvider>
+      </AuthProvider>
+    </MemoryRouter>
   );
 
 beforeEach(() => {
@@ -93,20 +93,37 @@ describe("moderator is no longer a destination", () => {
     }
   });
 
-  it("sends a legacy moderator session to the host console, not the generic dashboard", () => {
-    // Mapped rather than dropped on purpose: a not-yet-migrated users.role row may still say
-    // "moderator", and such a person can hold a perfectly valid host EventAssignment. Falling
-    // through to /dashboard would strand them.
-    expect(roleHome("moderator")).toBe("/host/dashboard");
+  it("does not strand a legacy moderator session", () => {
+    // Unchanged intent, new destination. A not-yet-migrated users.role row may still say
+    // "moderator", and that person must land somewhere they can actually use — falling
+    // through to a generic /dashboard would strand them.
+    //
+    // They no longer need the host console to avoid that: no ACCOUNT role maps to an event
+    // console any more (an EventAssignment is what opens one), and the organization
+    // dashboard is open to every member. So a legacy moderator lands there like everybody
+    // else, and nothing has to special-case a retired role to keep it working.
+    expect(roleHome("moderator")).toBe("/organization/dashboard");
+    expect(roleHome("moderator")).not.toBe("/dashboard");
   });
 
-  it("keeps every live role's home unchanged", () => {
+  it("keeps every live role's home a real, non-console destination", () => {
     expect(roleHome("super_admin")).toBe("/admin/dashboard");
     expect(roleHome("org_admin")).toBe("/organization/dashboard");
-    expect(roleHome("host")).toBe("/host/dashboard");
-    expect(roleHome("speaker")).toBe("/speaker/backstage");
-    expect(roleHome("viewer")).toBeNull();
-    expect(roleHome("nonsense")).toBe("/dashboard");
+    // CHANGED DELIBERATELY: "host" is an account persona, not an assignment to a broadcast.
+    // Mapping it to the Producer Console made a past assignment the user's landing page and
+    // opened a console for an event they had no claim on. An event console is now reached
+    // only with an explicit ?event=<id> the server confirms.
+    expect(roleHome("host")).toBe("/organization/dashboard");
+    // Same reasoning as "host": backstage is an event console, reached with a confirmed
+    // assignment, not a place an account role begins.
+    expect(roleHome("speaker")).toBe("/organization/dashboard");
+    // `viewer` was null ("no app home"). It is now the organization dashboard, which is safe
+    // because /organization/overview authorizes with get_my_org — any member — rather than
+    // require_org_admin. Invited and public viewers still reach events by link, not by this
+    // map, so nothing about their path changed.
+    expect(roleHome("viewer")).toBe("/organization/dashboard");
+    // An unknown role no longer falls through to a legacy generic dashboard.
+    expect(roleHome("nonsense")).toBe("/organization/dashboard");
   });
 
   it("has dropped the role from the participant, admin and assignment vocabularies", () => {
@@ -143,12 +160,19 @@ describe("stale stored sessions", () => {
       const { user, loading } = useAuth();
       return <p>{loading ? "loading" : `role:${user?.role}`}</p>;
     }
-    render(<AuthProvider><Show /></AuthProvider>);
+    // AuthProvider sits inside a router now: logout navigates to /login rather than
+    // relying on a guard to bounce the current page, so it needs router context. The
+    // assertions below are unchanged.
+    render(<MemoryRouter><AuthProvider><Show /></AuthProvider></MemoryRouter>);
 
-    // Optimistic first paint may show the stored value; the server's answer must win.
+    // The server's answer wins over the stale stored role — the point of the test, and it
+    // still holds. What changed is that there is no optimistic paint from storage at all:
+    // the stored role is never rendered, not even for one frame.
     await waitFor(() => expect(screen.getByText("role:host")).toBeInTheDocument());
-    expect(JSON.parse(localStorage.getItem("user")).role).toBe("host");
     expect(mockGet).toHaveBeenCalledWith("/auth/me");
+    // And the stale key is REMOVED rather than overwritten. Nothing writes the profile back,
+    // so a later build cannot be tempted to read it as identity again.
+    expect(localStorage.getItem("user")).toBeNull();
   });
 
   it("clears the session entirely when /auth/me returns 401", async () => {
@@ -176,10 +200,23 @@ describe("stale stored sessions", () => {
       const { user, loading } = useAuth();
       return <p>{loading ? "loading" : `role:${user?.role ?? "none"}`}</p>;
     }
-    render(<AuthProvider><Show /></AuthProvider>);
+    // AuthProvider sits inside a router now: logout navigates to /login rather than
+    // relying on a guard to bounce the current page, so it needs router context. The
+    // assertions below are unchanged.
+    render(<MemoryRouter><AuthProvider><Show /></AuthProvider></MemoryRouter>);
 
-    await waitFor(() => expect(screen.getByText("role:host")).toBeInTheDocument());
+    // The session is NOT destroyed: the credential survives, so the next navigation or
+    // reload re-validates and signs them straight back in with no password.
+    await waitFor(() => expect(screen.getByText("role:none")).toBeInTheDocument());
     expect(localStorage.getItem("token")).toBe("good");
+
+    // What changed, and why: the stored profile is no longer rendered as identity while the
+    // server is unreachable. Trusting it was the bug — a blob anyone can edit decided what
+    // the console showed. So an outage costs this page load, not the session. Proof:
+    mockGet.mockResolvedValue({ data: { id: "u1", role: "host" } });
+    cleanup();
+    render(<MemoryRouter><AuthProvider><Show /></AuthProvider></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText("role:host")).toBeInTheDocument());
   });
 
   it("ignores a stored user when no token is present", async () => {
@@ -205,7 +242,10 @@ describe("stale stored sessions", () => {
       const { user, loading } = useAuth();
       return <p>{loading ? "loading" : `role:${user?.role ?? "none"}`}</p>;
     }
-    render(<AuthProvider><Show /></AuthProvider>);
+    // AuthProvider sits inside a router now: logout navigates to /login rather than
+    // relying on a guard to bounce the current page, so it needs router context. The
+    // assertions below are unchanged.
+    render(<MemoryRouter><AuthProvider><Show /></AuthProvider></MemoryRouter>);
     await waitFor(() => expect(screen.getByText("role:host")).toBeInTheDocument());
 
     window.dispatchEvent(new Event("zoiko:auth-expired"));
@@ -219,7 +259,10 @@ describe("stale stored sessions", () => {
       const { loading } = useAuth();
       return <p>loading:{String(loading)}</p>;
     }
-    render(<AuthProvider><Show /></AuthProvider>);
+    // AuthProvider sits inside a router now: logout navigates to /login rather than
+    // relying on a guard to bounce the current page, so it needs router context. The
+    // assertions below are unchanged.
+    render(<MemoryRouter><AuthProvider><Show /></AuthProvider></MemoryRouter>);
     expect(screen.getByText("loading:false")).toBeInTheDocument();
   });
 });
@@ -237,22 +280,27 @@ describe("route guard behaviour for a legacy role", () => {
 
     const ALLOW = ["host", "moderator", "org_admin", "super_admin"];
     render(
-      <AuthProvider>
-        <MemoryRouter initialEntries={["/host/dashboard"]}>
+      <MemoryRouter initialEntries={["/host/dashboard"]}>
+        <AuthProvider>
           <Routes>
             <Route
               path="/host/dashboard"
               element={<Guard allow={ALLOW}><WhereAmI /></Guard>}
             />
           </Routes>
-        </MemoryRouter>
-      </AuthProvider>
+        </AuthProvider>
+      </MemoryRouter>
     );
 
     expect(await screen.findByText("at:/host/dashboard")).toBeInTheDocument();
-    // The allow-list and the roleHome mapping must agree, or the loop returns.
+    // The allow-list still carries the transitional entry, so a legacy moderator can load
+    // the console shell it is forwarded to.
     expect(ALLOW).toContain("moderator");
-    expect(roleHome("moderator")).toBe("/host/dashboard");
+    // And the loop this test exists to prevent is now structurally impossible rather than
+    // merely avoided: roleHome no longer points at a guarded console at all, so there is no
+    // pair of route + home that can disagree.
+    expect(roleHome("moderator")).toBe("/organization/dashboard");
+    expect(ALLOW).not.toContain(roleHome("moderator"));
   });
 
   it("still bounces a viewer away from the host console", async () => {
@@ -262,8 +310,8 @@ describe("route guard behaviour for a legacy role", () => {
     mockGet.mockResolvedValue({ data: { id: "u1", role: "viewer" } });
 
     render(
-      <AuthProvider>
-        <MemoryRouter initialEntries={["/host/dashboard"]}>
+      <MemoryRouter initialEntries={["/host/dashboard"]}>
+        <AuthProvider>
           <Routes>
             <Route
               path="/host/dashboard"
@@ -274,11 +322,13 @@ describe("route guard behaviour for a legacy role", () => {
               }
             />
           </Routes>
-        </MemoryRouter>
-      </AuthProvider>
+        </AuthProvider>
+      </MemoryRouter>
     );
 
     // roleHome("viewer") is null, so the guard falls back to the public site.
-    expect(await screen.findByText("bounced-to:/")).toBeInTheDocument();
+    // A viewer is still refused the host console. They land on the organization dashboard
+    // now instead of the public site, because that is where roleHome sends every member.
+    expect(await screen.findByText("bounced-to:/organization/dashboard")).toBeInTheDocument();
   });
 });

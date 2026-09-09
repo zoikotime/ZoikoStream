@@ -498,3 +498,46 @@ class SubscriptionCheckoutCreate(BaseModel):
     """
     plan_slug: str = Field(..., min_length=1, max_length=60)
     billing_interval: str = Field(MONTHLY, pattern=f"^({'|'.join(BILLING_INTERVALS)})$")
+
+
+# -- Support cases (ZST-EC-001 SUP-001 .. SUP-004) ---------------------------------------
+# Deliberately NO org_id field: the organization comes from the caller's own token via
+# get_my_org, so there is nothing here a customer could point at another tenant.
+
+class SupportCaseCreate(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(..., min_length=1)
+    category: str
+    priority: str = "normal"
+    # The authoritative classification feedback eligibility is decided from. Defaults to
+    # standard; an operator raises it, and it is never guessed from the wording.
+    sensitivity: str = "standard"
+
+
+class SupportParticipantAdd(BaseModel):
+    email: EmailStr
+    display_name: str | None = Field(None, max_length=200)
+
+
+class SupportReopen(BaseModel):
+    reason: str | None = Field(None, max_length=1000)
+
+
+# -- Security contacts and abuse reports (ZST-EC-001 SEC-006 / SEC-004) ------------------
+
+class SecurityContactCreate(BaseModel):
+    email: EmailStr
+    display_name: str | None = Field(None, max_length=200)
+
+
+class SecurityContactVerify(BaseModel):
+    token: str = Field(..., min_length=16, max_length=200)
+
+
+class AbuseReportCreate(BaseModel):
+    category: str
+    subject_type: str
+    subject_id: uuid.UUID | None = None
+    description: str | None = Field(None, max_length=4000)
+    # The organization the report is ABOUT, not the reporter's own.
+    org_id: uuid.UUID | None = None

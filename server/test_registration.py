@@ -12,12 +12,30 @@ from types import SimpleNamespace
 
 from starlette.testclient import TestClient
 
+import app.email as email_mod
 import app.main as m
 from app.db import SessionLocal
 from app.models import Event, EventRegistration, Organization, User
 from app.security import create_registration_token, decode_registration_token
 
 NOW = datetime.now(timezone.utc)
+
+
+class _Resp:
+    status_code = 200
+    text = "{}"
+
+    def raise_for_status(self):
+        return None
+
+
+def _no_send(url, headers=None, json=None, timeout=None):
+    """Registration mails a confirmation. Unpatched, this file was posting to the live
+    Resend API - real requests to a real provider from a self-check."""
+    return _Resp()
+
+
+email_mod.httpx.post = _no_send
 
 
 # ── token round-trip (pure) ─────────────────────────────────────────────────────
@@ -77,7 +95,10 @@ def _cleanup(db, org, user, ev):
     db.commit()
 
 
-def test_register_400s_when_not_required():
+def test_register_succeeds_even_when_not_required():
+    """Registering on an event that does not require it is deliberately allowed: it is how an
+    anonymous viewer identifies themselves for chat/Q&A/polls (see register_for_event's own
+    docstring and routers/live.py's `reg` fallback). This used to expect a 400."""
     db = SessionLocal()
     client = TestClient(m.app)
     org = _org(db)
@@ -86,7 +107,8 @@ def test_register_400s_when_not_required():
     db.commit()
     try:
         resp = client.post(f"/api/events/{ev.id}/register", json={"name": "Jane", "email": "jane@example.com"})
-        assert resp.status_code == 400, resp.text
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["email"] == "jane@example.com" and resp.json()["token"]
     finally:
         _cleanup(db, org, user, ev)
         db.close()

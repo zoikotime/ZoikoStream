@@ -49,6 +49,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -72,6 +73,10 @@ from ..models import (
     # itself; crud.admin.apply_subscription_provider_event remains the only writer.
     subscription_transition_error,
 )
+from ..services import commerce_comms
+from ..services import event_closeout
+from ..services import event_comms
+from ..services import event_ops
 from ..services import replay_comms
 from ..schemas.commercial import (
     CancelOrderRequest, CancellationPolicyCreate, CancellationPolicyOut, CancellationResult,
@@ -396,7 +401,8 @@ def create_quote(event_id: uuid.UUID, data: QuoteCreate, admin: User = Depends(r
 
 
 @router.post("/events/{event_id}/quotes/{quote_id}/issue", response_model=QuoteOut)
-def issue_quote(event_id: uuid.UUID, quote_id: uuid.UUID, admin: User = Depends(require_super_admin),
+def issue_quote(event_id: uuid.UUID, quote_id: uuid.UUID, background: BackgroundTasks,
+                 admin: User = Depends(require_super_admin),
                  db: Session = Depends(get_db)):
     _get_event_or_404(db, admin, event_id)
     quote = db.get(Quote, quote_id)
@@ -404,22 +410,37 @@ def issue_quote(event_id: uuid.UUID, quote_id: uuid.UUID, admin: User = Depends(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Quote not found")
     try:
         crud.supersede_open_quotes(db, event_id, except_quote_id=quote.id)
-        return crud.issue_quote(db, quote)
+        issued = crud.issue_quote(db, quote)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    # ZST-EC-001 LVE-001. Queued only after the ISSUED status is committed, and addressed to
+    # the resolved event owner + commercial contacts rather than to _order_contact's single
+    # purchaser-or-billing address.
+    event_comms.notify_proposal_ready(db, background, issued)
+    return issued
 
 
 @router.post("/events/{event_id}/quotes/{quote_id}/accept", response_model=QuoteOut)
-def accept_quote(event_id: uuid.UUID, quote_id: uuid.UUID, user: User = Depends(require_commercial("accept")),
+def accept_quote(event_id: uuid.UUID, quote_id: uuid.UUID, background: BackgroundTasks,
+                  user: User = Depends(require_commercial("accept")),
                   db: Session = Depends(get_db)):
     _get_event_or_404(db, user, event_id)
     quote = db.get(Quote, quote_id)
     if quote is None or quote.event_id != event_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Quote not found")
     try:
-        return crud.accept_quote(db, quote, actor=user)
+        accepted = crud.accept_quote(db, quote, actor=user)
     except ValueError as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+        # An expired proposal lands here: accept_quote flips the status to EXPIRED and
+        # refuses. That refusal IS the authoritative expiry, so the notice is queued from the
+        # same place rather than pretending the acceptance succeeded. Returned as a response
+        # carrying the background tasks, because raising builds a fresh response and would
+        # silently discard them.
+        event_comms.notify_proposal_expired(db, background, quote)
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
+                            content={"detail": str(e)}, background=background)
+    event_comms.notify_booking_accepted(db, background, accepted)
+    return accepted
 
 
 # ── Event orders (construction: Zoiko-side; acceptance: customer) ───────────────────────
@@ -594,6 +615,7 @@ def list_reschedules(event_id: uuid.UUID, user: User = Depends(get_current_user)
 @router.post("/events/{event_id}/reschedule", response_model=RescheduleResult,
              status_code=status.HTTP_201_CREATED)
 def reschedule_event(event_id: uuid.UUID, data: RescheduleCreate,
+                      background: BackgroundTasks,
                       user: User = Depends(require_commercial("change")),
                       db: Session = Depends(get_db)):
     """Move an event's window, preserving the original and releasing its capacity.
@@ -612,6 +634,15 @@ def reschedule_event(event_id: uuid.UUID, data: RescheduleCreate,
         )
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    # ZST-EC-001 LVE-008. A contractual reschedule leaves the SAME durable schedule-change
+    # record an ordinary edit does, so neither path can move a date silently and both notify
+    # the identical governed recipient classes.
+    change = event_ops.record_change(
+        db, ev, previous_start=result["reschedule"].previous_start_time,
+        previous_end=result["reschedule"].previous_end_time,
+        previous_timezone=ev.timezone, actor_id=user.id, reason_category="operational")
+    if change is not None:
+        event_ops.notify_schedule_change(db, background, ev, change)
     return RescheduleResult(
         reschedule=RescheduleOut.model_validate(result["reschedule"]),
         released_reservations=result["released_reservations"],
@@ -882,6 +913,15 @@ def capture_payment(payment_id: uuid.UUID, background: BackgroundTasks,
         if contact and ev:
             background.add_task(send_payment_receipt_email, contact[0], contact[1], ev.title,
                                  str(payment.amount), payment.currency, _order_url(order))
+        # ZST-EC-001 COM-006. The receipt above goes to the purchaser-or-billing contact via
+        # _order_contact; this reaches the full resolved BILLING population and carries the
+        # masked reference and remaining balance. Both are claimed once, durably.
+        commerce_comms.notify_payment_received(db, background, payment)
+        # COM-007. Only reachable once a problem was actually communicated for this order -
+        # a retry merely starting is never a resolution.
+        commerce_comms.notify_billing_resolved(db, background, payment=payment)
+    elif payment.state == "failed":
+        commerce_comms.notify_payment_failed(db, background, payment)
     return payment
 
 
@@ -900,16 +940,22 @@ def list_disputes(order_id: uuid.UUID, user: User = Depends(get_current_user), d
 
 
 @router.post("/payments/{payment_id}/disputes", response_model=PaymentDisputeOut, status_code=status.HTTP_201_CREATED)
-def open_dispute(payment_id: uuid.UUID, data: DisputeOpenCreate,
-                  admin: User = Depends(require_commercial("refund_approve")), db: Session = Depends(get_db)):
+def open_dispute(payment_id: uuid.UUID, data: DisputeOpenCreate, background: BackgroundTasks,
+                  admin: User = Depends(require_commercial("refund_approve")),
+                  db: Session = Depends(get_db)):
     payment = db.get(Payment, payment_id)
     if payment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Payment not found")
     _get_order_or_404(db, admin, payment.event_order_id)
     try:
-        return crud.open_dispute(db, payment, admin, reason_code=data.reason_code, amount=data.amount)
+        dispute = crud.open_dispute(db, payment, admin, reason_code=data.reason_code,
+                                     amount=data.amount)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    # ZST-EC-001 COM-007. Dispute state was previously entirely silent to the customer.
+    # Only real DISPUTE_STATES transitions notify; provider evidence is never included.
+    commerce_comms.notify_dispute(db, background, dispute)
+    return dispute
 
 
 @router.post("/disputes/{dispute_id}/evidence", response_model=PaymentDisputeOut)
@@ -924,12 +970,18 @@ def submit_dispute_evidence(dispute_id: uuid.UUID, data: DisputeEvidenceCreate,
 
 @router.post("/disputes/{dispute_id}/resolve", response_model=PaymentDisputeOut)
 def resolve_dispute(dispute_id: uuid.UUID, data: DisputeResolveCreate,
-                     admin: User = Depends(require_commercial("refund_approve")), db: Session = Depends(get_db)):
+                     background: BackgroundTasks,
+                     admin: User = Depends(require_commercial("refund_approve")),
+                     db: Session = Depends(get_db)):
     dispute = _get_dispute_or_404(db, admin, dispute_id)
     try:
-        return crud.resolve_dispute(db, dispute, admin, won=data.won)
+        dispute = crud.resolve_dispute(db, dispute, admin, won=data.won)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    # COM-007. The outcome wording comes from the committed status, so a won and a lost
+    # dispute never read the same.
+    commerce_comms.notify_dispute(db, background, dispute)
+    return dispute
 
 
 @router.get("/orders/{order_id}/invoices", response_model=list[InvoiceOut])
@@ -970,14 +1022,22 @@ def record_tax_determination(order_id: uuid.UUID, data: TaxDeterminationCreate,
 
 
 @router.post("/orders/{order_id}/invoices", response_model=InvoiceOut, status_code=status.HTTP_201_CREATED)
-def issue_invoice(order_id: uuid.UUID, data: InvoiceCreate, admin: User = Depends(require_commercial("finance")),
+def issue_invoice(order_id: uuid.UUID, data: InvoiceCreate, background: BackgroundTasks,
+                   admin: User = Depends(require_commercial("finance")),
                    db: Session = Depends(get_db)):
     order = _get_order_or_404(db, admin, order_id)
     try:
-        return crud.issue_invoice(db, order, due_date=data.due_date, actor=admin)
+        # `actor=admin` attributes the issuance in the audit trail; binding the result is
+        # what lets COM-006 below notify on a document that already exists. Both sides of
+        # this line were additions, and neither is optional.
+        invoice = crud.issue_invoice(db, order, due_date=data.due_date, actor=admin)
     except ValueError as e:
         # Undetermined tax basis — a business validation failure, not a server error (doc L4).
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    # ZST-EC-001 COM-006. The invoice row is committed before this runs, so the notice
+    # reports a document that exists. Addressed to BILLING contacts, not to the event owner.
+    commerce_comms.notify_invoice_available(db, background, invoice)
+    return invoice
 
 
 # ── Change orders (doc Section 11/G) ─────────────────────────────────────────────────────
@@ -1022,10 +1082,16 @@ def accept_change_order(change_order_id: uuid.UUID, background: BackgroundTasks,
 # ── Readiness (doc Section 13/I) ─────────────────────────────────────────────────────────
 
 @router.get("/events/{event_id}/readiness", response_model=ReadinessEvaluation)
-def evaluate_readiness(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def evaluate_readiness(event_id: uuid.UUID, background: BackgroundTasks,
+                       user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, user, event_id)
     order = crud.get_current_order(db, ev.id)
-    return crud.evaluate_readiness(db, ev, order)
+    evaluation = crud.evaluate_readiness(db, ev, order)
+    # ZST-EC-001 LVE-006. Announces only a CHANGE of verdict, so polling this endpoint (which
+    # the console does) sends nothing while the position holds. The verdict comes from the
+    # engine above - event_ops re-implements no readiness rule of its own.
+    event_ops.notify_readiness(db, background, ev)
+    return evaluation
 
 
 @router.get("/events/{event_id}/readiness/checks", response_model=list[ReadinessCheckOut])
@@ -1035,7 +1101,9 @@ def list_readiness_checks(event_id: uuid.UUID, user: User = Depends(get_current_
 
 
 @router.post("/events/{event_id}/readiness/checks", response_model=ReadinessCheckOut, status_code=status.HTTP_201_CREATED)
-def record_readiness_check(event_id: uuid.UUID, data: ReadinessCheckCreate, admin: User = Depends(require_commercial("readiness")),
+def record_readiness_check(event_id: uuid.UUID, data: ReadinessCheckCreate,
+                            background: BackgroundTasks,
+                            admin: User = Depends(require_commercial("readiness")),
                             db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, admin, event_id)
     return crud.record_readiness_check(db, ev, actor=admin, **data.model_dump())
@@ -1141,6 +1209,11 @@ def execute_refund_credit(refund_credit_id: uuid.UUID, background: BackgroundTas
     if contact and ev:
         background.add_task(send_refund_credit_email, contact[0], contact[1], ev.title,
                              str(rc.amount), order.currency, rc.type, _order_url(order))
+    # ZST-EC-001 COM-006. The legacy sender above takes `rc.type` as a bare string and
+    # renders one message for all three kinds. This routes on the committed type instead, so
+    # a REFUND (money returned) and a CREDIT NOTE (an accounting adjustment that may not
+    # return money) are never the same message.
+    commerce_comms.notify_refund_or_credit(db, background, rc)
     return rc
 
 
@@ -1189,6 +1262,13 @@ def publish_replay(entitlement_id: uuid.UUID, background: BackgroundTasks,
     # owner and the people authorized to publish learn that a decision was taken on an asset
     # they are accountable for. Neither message is a substitute for the other.
     replay_comms.notify_published(db, background, ent)
+    # ZST-EC-001 LVE-011. The purchaser notice above is a commercial courtesy on a
+    # `customer`-scope entitlement; this is the EVENT OWNER and assigned team learning the
+    # replay reached PUBLISHED. LVE-011 is explicit that a billing contact is not a
+    # substitute for the event owner, and event_closeout.stakeholders() never resolves one.
+    ev_for_replay = db.get(Event, ent.event_id)
+    if ev_for_replay is not None:
+        event_closeout.notify_replay(db, background, ev_for_replay)
     return ent
 
 
@@ -1214,6 +1294,10 @@ def withdraw_replay(entitlement_id: uuid.UUID, data: ReplayWithdrawIn,
     if previous is None:
         return ent
     replay_comms.notify_withdrawn(db, background, ent)
+    # LVE-011 Unavailable, to the event owner and team.
+    ev_withdrawn = db.get(Event, ent.event_id)
+    if ev_withdrawn is not None:
+        event_closeout.notify_replay(db, background, ev_withdrawn)
     return ent
 
 

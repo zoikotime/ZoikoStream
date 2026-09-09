@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 import ControlBar from "./ControlBar";
-import { reducer, INITIAL_LIVE_STATE, pickBroadcastable } from "../../hooks/useLiveEvent";
+import { reducer, INITIAL_LIVE_STATE } from "../../hooks/useLiveEvent";
 
 // Regression cover for the two reported host-console failures — the Go Live button never
 // becoming clickable, and the broadcast silently dropping out of "live". Both were traced to
@@ -131,37 +131,36 @@ describe("live-state reducer", () => {
 });
 
 describe("host console event resolution", () => {
-  // THE BUG: this asked the API for status "live" and took the first row — an exact match, so
-  // it could only ever find an event that was ALREADY live, i.e. the one case where Go Live
-  // is not needed. A host who had not gone live yet resolved nothing, and Dashboard
-  // short-circuits a null resolution to "No event to broadcast", so the deck never mounted
-  // and there was no Go Live button at all. /host/dashboard is the host role's own landing
-  // page, so every host hit this on first login.
-  it("resolves an event the host has not taken live yet", () => {
-    expect(pickBroadcastable([{ id: "e1", status: "published" }])?.id).toBe("e1");
-    expect(pickBroadcastable([{ id: "e2", status: "scheduled" }])?.id).toBe("e2");
+  // The console no longer resolves an event by itself, and that is the fix.
+  //
+  // It used to: `pickBroadcastable` chose the highest-ranked broadcastable event from the
+  // organization's list whenever the URL carried no ?event=<id>. Combined with
+  // /host/dashboard being the host ACCOUNT role's landing page, that meant every
+  // host-persona login opened the Producer Console attached to an arbitrary event — one the
+  // user usually had no EventAssignment for, so the backend refused broadcast control and
+  // the console rendered "No host assigned" / "View only" / "You aren't assigned to run this
+  // event."
+  //
+  // An account role is not an event assignment. The event id now always comes from a person
+  // choosing one (/events/mine) or from an assignment link, so there is nothing left to
+  // guess and no helper to guess with.
+  it("no longer exports a way to substitute an event", async () => {
+    const hook = await import("../../hooks/useLiveEvent");
+    expect(hook.pickBroadcastable).toBeUndefined();
   });
 
-  it("prefers an event already on air over one merely scheduled", () => {
-    const picked = pickBroadcastable([
-      { id: "scheduled", status: "scheduled" },
-      { id: "onair", status: "live" },
-    ]);
-    expect(picked.id).toBe("onair");
-  });
-
-  it("prefers an armed event over a merely published one", () => {
-    const picked = pickBroadcastable([
-      { id: "published", status: "published" },
-      { id: "armed", status: "armed" },
-    ]);
-    expect(picked.id).toBe("armed");
-  });
-
-  it("ignores events that can never be broadcast", () => {
-    expect(pickBroadcastable([
-      { id: "d", status: "draft" }, { id: "e", status: "ended" }, { id: "c", status: "cancelled" },
-    ])).toBeNull();
-    expect(pickBroadcastable([])).toBeNull();
+  it("keeps no ranking table that could reintroduce the guess", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    // Same convention as the other static guards in this repo (Contact.static.test.js).
+    const source = readFileSync(resolve(process.cwd(), "src/hooks/useLiveEvent.js"), "utf8");
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    expect(code).not.toContain("BROADCASTABLE");
+    // And it must not go looking for the organization's events to pick from: the hook
+    // imports no api client at all any more.
+    expect(code).not.toContain("from \"../api\"");
+    expect(code).not.toContain("/events");
   });
 });

@@ -1,68 +1,17 @@
 import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
-import { ArrowUpRight, CreditCard, Download, KeyRound, Layers, ShieldCheck, UserPlus, UserPen } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { cx, focusRing } from "../../../ui/tokens";
+import { QUICK_ACTIONS as ACTIONS } from "../quickActions";
 import { CARD, CARD_INTERACTIVE, CHIP, TXT } from "./styles";
 import { inView, item, liftHover, liftTap, stagger } from "./motion";
 
-// Quick actions. Every card routes to a page that exists and that an org admin is
-// authorised to use — nothing here opens a dead end.
+// Quick actions, expanded card form.
 //
-// "Export Data" is the one action with no self-service endpoint in this stack, so it
-// routes to Support (where the request is actually actioned) and says so, rather than
-// rendering a button that would fail on click.
-const ACTIONS = [
-  {
-    icon: UserPen,
-    title: "Edit Profile",
-    desc: "Organization name, industry, contact and timezone.",
-    to: "/organization/settings?tab=general",
-    tone: "violet",
-  },
-  {
-    icon: UserPlus,
-    title: "Invite Members",
-    desc: "Send invitations and assign roles to your team.",
-    to: "/organization/users",
-    tone: "indigo",
-  },
-  {
-    icon: Layers,
-    title: "Manage Workspace",
-    desc: "Workspace health, live sessions and entitlements.",
-    to: "/organization/dashboard",
-    tone: "blue",
-  },
-  {
-    icon: KeyRound,
-    title: "API Keys",
-    desc: "Credential inventory, expiry and rotation posture.",
-    to: "/organization/credentials",
-    tone: "emerald",
-  },
-  {
-    icon: ShieldCheck,
-    title: "Security Settings",
-    desc: "Two-factor, SSO, session limits and allowed domains.",
-    to: "/organization/settings?tab=security",
-    tone: "rose",
-  },
-  {
-    icon: CreditCard,
-    title: "Billing",
-    desc: "Plan, usage against limits, invoices and payment.",
-    to: "/organization/billing",
-    tone: "amber",
-  },
-  {
-    icon: Download,
-    title: "Export Data",
-    desc: "Request an org data export — handled by support.",
-    to: "/organization/support",
-    tone: "slate",
-  },
-];
-
+// The destinations live in ../quickActions.js, shared with the topbar's compact Quick
+// Actions menu, so a route that moves moves once. This component is the expanded rendering
+// of that same set; the Profile page now uses the topbar menu instead, and this is kept for
+// any page that wants the grid.
 export default function QuickActions() {
   return (
     <motion.div

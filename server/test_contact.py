@@ -208,9 +208,15 @@ def test_rate_limited_response_says_nothing_about_mail(client, sender):
 
 def test_a_mail_provider_failure_does_not_fail_the_request(client):
     """Delivery is a background task and _send already swallows provider errors, so a mail
-    outage must not turn a received enquiry into a 500 for the visitor."""
-    with patch("app.routers.contact.send_contact_message_email",
-               side_effect=RuntimeError("provider down")):
+    outage must not turn a received enquiry into a 500 for the visitor.
+
+    The failure is injected at the TRANSPORT, which is what a provider outage actually is.
+    Patching the sender itself to raise would step over `_send`'s own error handling - the
+    very thing under test - and the exception would escape the background task instead.
+    """
+    import httpx
+
+    with patch("app.email.httpx.post", side_effect=httpx.ConnectError("provider down")):
         r = client.post("/api/contact", json=VALID)
     assert r.status_code == 202
 

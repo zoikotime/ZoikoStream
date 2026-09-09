@@ -30,9 +30,17 @@ from ..services import payments as payment_svc
 from ..models.plan import Plan
 from ..models.subscription import normalize_subscription_state
 from ..models import (
+    ABUSE_CATEGORIES,
+    ABUSE_SUBJECT_TYPES,
+    CASE_CATEGORIES,
+    CASE_CATEGORY_LABELS,
+    CASE_SENSITIVITIES,
     EXPORT_TYPES,
     SCOPE_ORGANIZATION,
     DeveloperDataExport,
+    AbuseReport,
+    OrganizationSecurityContact,
+    SupportTicket,
     WEBHOOK_VERIFIED,
     STEP_UP_HIGH_RISK_ROLE_GRANT,
     STEP_UP_OWNERSHIP_TRANSFER,
@@ -58,7 +66,13 @@ from ..schemas.admin import (
 )
 from ..schemas.auth import TokenOut, UserOut
 from ..schemas.organization import (
+    AbuseReportCreate,
     AccessReviewAssignmentOut,
+    SecurityContactCreate,
+    SecurityContactVerify,
+    SupportCaseCreate,
+    SupportParticipantAdd,
+    SupportReopen,
     AccessReviewCreate,
     AccessReviewDecisionIn,
     AccessReviewOut,
@@ -119,6 +133,9 @@ from ..services import webhook_security
 from ..services import notifications as notif_svc
 from ..services import org_policy
 from ..services import stepup as stepup_svc
+from ..services import commerce_comms
+from ..services import security_comms
+from ..services import support_comms
 from ..services import org_comms
 from ..services import org_governance as governance
 from ..services import support_access as support_svc
@@ -1837,8 +1854,25 @@ def create_invitation(data: InvitationCreate, background: BackgroundTasks,
             select(func.count(User.id)).where(User.org_id == org.id, User.deleted_at.is_(None))
         ) or 0
         if members_used >= seat_limit:
-            raise HTTPException(status.HTTP_409_CONFLICT,
-                                 "Member seat limit reached for your plan — upgrade to invite more people")
+            # ZST-EC-001 COM-008. This 409 used to be the customer's ONLY signal: the person
+            # clicking Invite saw an error and nobody responsible for the plan was told.
+            #
+            # The DECISION above is the authoritative one and is deliberately unchanged by
+            # this notice — evaluate_entitlements re-reads the same authority and records the
+            # UNDER_LIMIT -> LIMIT_REACHED crossing, so the mail fires once per crossing
+            # rather than on every blocked attempt. No limit is computed here, and none is
+            # passed to the email layer.
+            commerce_comms.evaluate_entitlements(db, org)
+            commerce_comms.notify_limit_reached(
+                db, background, org, "Members",
+                blocked_action="New member invitations are blocked")
+            # JSONResponse rather than `raise`: BackgroundTasks are attached to the RESPONSE,
+            # and raising discards them — the notice would be queued and never sent.
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"detail": "Member seat limit reached for your plan — upgrade to "
+                                   "invite more people"},
+                background=background)
     inv, raw = crud.create_invitation(db, admin.org_id, email, data.role, admin.id)
     url = _invite_url(raw)
     # ORG-001 base variant. The invitation row is already committed, so the notice reports
@@ -1954,3 +1988,271 @@ def reject_invitation(data: InvitationReject, db: Session = Depends(get_db)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or already-used invitation")
     crud.set_invitation_status(db, inv, "rejected")
     return {"message": "Invitation declined."}
+
+
+# ── Support cases (ZST-EC-001 SUP-001 .. SUP-004, customer side) ────────────────────────
+# THE authorization fix. Support cases used to exist only on the `/admin` router, which is
+# gated at router level by require_super_admin - so a customer could not open or even read
+# their own case. These routes put case creation and the customer's own half of the
+# lifecycle on the ORGANIZATION router, using the same get_my_org / require_org_admin
+# pattern as every other tenant route.
+#
+# Tenant isolation is unchanged, and deliberately stronger than the old admin route: the
+# organization comes from the caller's own token via get_my_org, never from the request
+# body, so there is no org_id field a customer could point at somebody else's tenant.
+
+@router.post("/support-cases", status_code=status.HTTP_201_CREATED)
+def open_support_case(data: SupportCaseCreate, background: BackgroundTasks,
+                      admin: User = Depends(require_org_admin),
+                      org: Organization = Depends(get_my_org),
+                      db: Session = Depends(get_db)):
+    """Open a support case for the caller's OWN organization.
+
+    Gated on org_admin, the same authority that manages members and billing. Priority is
+    taken as submitted by that authorized caller and defaults to normal - it is never
+    inferred from how urgent the description sounds.
+    """
+    ticket = support_comms.open_case(
+        db, org=org, requester=admin, subject=data.subject, description=data.description,
+        category=data.category, priority=data.priority, sensitivity=data.sensitivity)
+    if ticket is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"category must be one of {list(CASE_CATEGORIES)}, sensitivity one of "
+            f"{list(CASE_SENSITIVITIES)}, and priority a valid support priority")
+    admin_crud.create_audit_log(db, actor=admin, action="support_case.open",
+                                target_type="support_ticket", target_id=ticket.id,
+                                org_id=org.id,
+                                meta={"case_reference": ticket.case_reference,
+                                      "category": ticket.category})
+    support_comms.notify_case_opened(db, background, ticket)
+    return _support_case_out(db, ticket)
+
+
+@router.get("/support-cases")
+def list_support_cases(user: User = Depends(get_current_user),
+                       org: Organization = Depends(get_my_org),
+                       db: Session = Depends(get_db)):
+    """The caller's own organization's cases. Org-scoped, so no cross-tenant read."""
+    rows = db.scalars(
+        select(SupportTicket).where(SupportTicket.org_id == org.id)
+        .order_by(SupportTicket.created_at.desc())).all()
+    return [_support_case_out(db, t) for t in rows]
+
+
+def _get_own_case(db, org, ticket_id) -> SupportTicket:
+    ticket = db.get(SupportTicket, ticket_id)
+    # 404 rather than 403 for another tenant's case: a customer must not be able to probe
+    # whether a case reference exists in somebody else's organization.
+    if ticket is None or ticket.org_id != org.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Support case not found")
+    return ticket
+
+
+def _support_case_out(db, ticket: SupportTicket) -> dict:
+    """Customer-safe projection. internal_notes is deliberately absent."""
+    return {
+        "id": str(ticket.id),
+        "case_reference": ticket.case_reference,
+        "subject": ticket.subject,
+        "description": ticket.message,
+        "category": ticket.category,
+        "category_label": CASE_CATEGORY_LABELS.get(ticket.category or "other", "Other"),
+        "priority": ticket.priority,
+        "status": ticket.status,
+        "owner": ticket.assigned_owner,
+        "next_update_at": ticket.next_update_at,
+        "customer_update": ticket.customer_update,
+        "pending_action": ticket.pending_action,
+        "pending_action_due_at": ticket.pending_action_due_at,
+        "resolution_summary": ticket.resolution_summary,
+        "resolved_at": ticket.resolved_at,
+        "closed_at": ticket.closed_at,
+        "reopened_at": ticket.reopened_at,
+        "created_at": ticket.created_at,
+        "participants": [{"email": p.email, "role": p.role}
+                         for p in support_comms.participants(db, ticket)],
+    }
+
+
+@router.get("/support-cases/{ticket_id}")
+def get_support_case(ticket_id: uuid.UUID, user: User = Depends(get_current_user),
+                     org: Organization = Depends(get_my_org),
+                     db: Session = Depends(get_db)):
+    return _support_case_out(db, _get_own_case(db, org, ticket_id))
+
+
+@router.post("/support-cases/{ticket_id}/participants",
+             status_code=status.HTTP_201_CREATED)
+def add_support_case_participant(ticket_id: uuid.UUID, data: SupportParticipantAdd,
+                                 admin: User = Depends(require_org_admin),
+                                 org: Organization = Depends(get_my_org),
+                                 db: Session = Depends(get_db)):
+    """Add somebody explicitly to one case.
+
+    Case membership is the ONLY thing that puts an address on the recipient list, which is
+    what stops a case notice reaching every organization member.
+    """
+    ticket = _get_own_case(db, org, ticket_id)
+    row = support_comms.add_participant(db, ticket, email=data.email,
+                                        display_name=data.display_name,
+                                        added_by=admin.id)
+    if row is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A valid email is required")
+    return {"email": row.email, "role": row.role}
+
+
+@router.post("/support-cases/{ticket_id}/action-complete")
+def complete_support_case_action(ticket_id: uuid.UUID, background: BackgroundTasks,
+                                 admin: User = Depends(require_org_admin),
+                                 org: Organization = Depends(get_my_org),
+                                 db: Session = Depends(get_db)):
+    """The customer supplies what was asked for, which clears the pending action.
+
+    Clearing it is what stops the reminder: reminder_due() reads the same committed state.
+    """
+    ticket = _get_own_case(db, org, ticket_id)
+    if not support_comms.complete_customer_action(db, ticket):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"This case is {ticket.status}, not waiting for you")
+    return {"status": ticket.status}
+
+
+@router.post("/support-cases/{ticket_id}/reopen")
+def reopen_support_case(ticket_id: uuid.UUID, data: SupportReopen,
+                        background: BackgroundTasks,
+                        admin: User = Depends(require_org_admin),
+                        org: Organization = Depends(get_my_org),
+                        db: Session = Depends(get_db)):
+    """Customers may reopen their own resolved or closed case.
+
+    A reopen starts a new lifecycle cycle, so the case can legitimately be resolved and
+    announced again later.
+    """
+    ticket = _get_own_case(db, org, ticket_id)
+    if not support_comms.reopen(db, ticket, reason=data.reason):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"A case that is {ticket.status} cannot be reopened")
+    admin_crud.create_audit_log(db, actor=admin, action="support_case.reopen",
+                                target_type="support_ticket", target_id=ticket.id,
+                                org_id=org.id,
+                                meta={"case_reference": ticket.case_reference})
+    support_comms.notify_reopened(db, background, ticket)
+    return {"status": ticket.status, "reopened_at": ticket.reopened_at}
+
+
+# ── Security contacts and abuse reporting (ZST-EC-001 SEC-006 / SEC-004) ────────────────
+# Customer-side. State commits before any notice, so a Resend outage cannot roll back a
+# nomination, a verification, or a filed report.
+
+@router.post("/security-contacts", status_code=status.HTTP_201_CREATED)
+def nominate_security_contact(data: SecurityContactCreate, background: BackgroundTasks,
+                              admin: User = Depends(require_org_admin),
+                              org: Organization = Depends(get_my_org),
+                              db: Session = Depends(get_db)):
+    """Nominate an address to receive this organization's security mail.
+
+    The address is PENDING until it proves control of the inbox. Only VERIFIED contacts
+    receive SEC-001 and SEC-003, which is why this is the foundation the other families
+    depend on. Re-nominating supersedes any outstanding token.
+    """
+    contact, raw = security_comms.nominate_contact(
+        db, org, email=data.email, display_name=data.display_name, created_by=admin.id)
+    if contact is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A valid email is required")
+    admin_crud.create_audit_log(db, actor=admin, action="security_contact.nominate",
+                                target_type="security_contact", target_id=contact.id,
+                                org_id=org.id, meta={"email": contact.email})
+    security_comms.notify_contact_verification(db, background, contact, raw)
+    return {"id": str(contact.id), "email": contact.email, "status": contact.status,
+            "verification_expires_at": contact.verification_expires_at}
+
+
+@router.get("/security-contacts")
+def list_security_contacts(user: User = Depends(get_current_user),
+                           org: Organization = Depends(get_my_org),
+                           db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(OrganizationSecurityContact).where(
+            OrganizationSecurityContact.org_id == org.id)
+        .order_by(OrganizationSecurityContact.created_at)).all()
+    # The token hash is never projected, not even to an admin - it has no legitimate reader
+    # outside verify_contact().
+    return [{"id": str(c.id), "email": c.email, "display_name": c.display_name,
+             "status": c.status, "verified_at": c.verified_at,
+             "revoked_at": c.revoked_at} for c in rows]
+
+
+@router.post("/security-contacts/verify")
+def verify_security_contact(data: SecurityContactVerify, db: Session = Depends(get_db)):
+    """Redeem a verification token.
+
+    Deliberately UNAUTHENTICATED: a security contact is frequently a shared mailbox with no
+    platform account, so requiring a session would make the whole concept unusable. The
+    token is the credential - purpose-bound, hashed at rest, single-use and expiring.
+    """
+    contact, outcome = security_comms.verify_contact(db, token=data.token)
+    if contact is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            {"invalid": "This verification link is not valid.",
+                             "already_used": "This link has already been used.",
+                             "superseded": "A newer verification link was issued.",
+                             "expired": "This verification link has expired."}[outcome])
+    return {"status": contact.status, "verified_at": contact.verified_at}
+
+
+@router.delete("/security-contacts/{contact_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_security_contact(contact_id: uuid.UUID,
+                            admin: User = Depends(require_org_admin),
+                            org: Organization = Depends(get_my_org),
+                            db: Session = Depends(get_db)):
+    """Revoke a contact. A revoked address stops receiving security mail immediately and
+    its outstanding verification token stops being redeemable."""
+    contact = db.get(OrganizationSecurityContact, contact_id)
+    if contact is None or contact.org_id != org.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Security contact not found")
+    if not security_comms.revoke_contact(db, contact):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This contact is already revoked")
+    admin_crud.create_audit_log(db, actor=admin, action="security_contact.revoke",
+                                target_type="security_contact", target_id=contact.id,
+                                org_id=org.id)
+
+
+@router.post("/abuse-reports", status_code=status.HTTP_201_CREATED)
+def file_abuse_report(data: AbuseReportCreate, background: BackgroundTasks,
+                      user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """File an abuse report.
+
+    The reporter's identity is stored on the report but is NEVER projected into any read
+    available to the reported party - see security_comms.reported_party_view(). The
+    acknowledgement promises a review and nothing more.
+    """
+    report = security_comms.file_report(
+        db, category=data.category, subject_type=data.subject_type,
+        subject_id=data.subject_id, description=data.description,
+        reporter_id=user.id, reporter_contact=user.email,
+        reporter_name=user.full_name, org_id=data.org_id)
+    if report is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"category must be one of {list(ABUSE_CATEGORIES)} and subject_type one of "
+            f"{list(ABUSE_SUBJECT_TYPES)}")
+    security_comms.notify_report_received(db, background, report)
+    return {"reference": report.reference, "status": report.status}
+
+
+@router.get("/abuse-reports/about-us")
+def reports_about_this_organization(user: User = Depends(get_current_user),
+                                   org: Organization = Depends(get_my_org),
+                                   db: Session = Depends(get_db)):
+    """What THIS organization may see about reports filed against it.
+
+    Every field comes from reported_party_view(), which omits the reporter's id, contact,
+    name and the free-text description. There is no query parameter, header or role that
+    widens this projection - reporter identity is simply not in the response shape.
+    """
+    rows = db.scalars(
+        select(AbuseReport).where(AbuseReport.org_id == org.id)
+        .order_by(AbuseReport.created_at.desc())).all()
+    return [security_comms.reported_party_view(r) for r in rows]

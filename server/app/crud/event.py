@@ -291,6 +291,69 @@ def is_assigned(db, event_id, user_id, role) -> bool:
     ) is not None
 
 
+def console_access(db, event, user) -> dict:
+    """What console access this user actually has to THIS event.
+
+    The one authoritative answer, and it is deliberately the same rule
+    services/moderation.resolve_ctx uses to decide `can_host` on the live socket - so the
+    routing decision a browser makes and the broadcast control the server grants can never
+    disagree.
+
+    ACCOUNT role and EVENT role are different things:
+
+      User.role         a persona on the organization ("host", "moderator", "org_admin"...).
+                        Being a "host" account does NOT mean you run any particular event.
+      EventAssignment   who runs THIS event. This is what grants broadcast control.
+
+    org_admin/super_admin run their own organization's events by virtue of running the
+    organization, which is why they are not required to hold an assignment row.
+    """
+    roles = set(db.scalars(
+        select(EventAssignment.role).where(
+            EventAssignment.event_id == event.id,
+            EventAssignment.user_id == user.id,
+        )
+    ).all())
+    org_authority = user.role in ("org_admin", "super_admin")
+    return {
+        "event_id": str(event.id),
+        "assigned_roles": sorted(roles),
+        # Broadcast control. An unassigned "host"-persona account gets False here, which is
+        # exactly the case that was routing people into a read-only Producer Console.
+        "can_host": bool(org_authority or "host" in roles),
+        "can_moderate": bool(org_authority or (roles & {"host", "moderator"})),
+        "can_contribute": "speaker" in roles,
+        # True when the access comes from running the organization rather than from an
+        # assignment, so a caller can tell "I was put on this event" from "I own the org".
+        "via_org_role": org_authority and not roles,
+    }
+
+
+def list_my_assignments(db, user, *, statuses=None) -> list:
+    """Events this user is assigned to, newest scheduled first.
+
+    Assignment rows only - an org_admin's implicit authority over every event in their
+    organization is NOT expanded here, because "events I was put on" is a different question
+    from "events I could run", and a 200-event organization would drown the answer.
+    """
+    stmt = (
+        select(Event, EventAssignment.role)
+        .join(EventAssignment, EventAssignment.event_id == Event.id)
+        .where(EventAssignment.user_id == user.id,
+               Event.org_id == user.org_id,
+               Event.deleted_at.is_(None))
+        .order_by(Event.start_time.desc().nullslast())
+    )
+    if statuses:
+        stmt = stmt.where(Event.status.in_(tuple(statuses)))
+    seen = {}
+    for event, role in db.execute(stmt).all():
+        entry = seen.setdefault(event.id, {"event": event, "roles": []})
+        if role not in entry["roles"]:
+            entry["roles"].append(role)
+    return list(seen.values())
+
+
 def set_assignees(db, event, role, user_ids) -> None:
     """Replace the full set of `role` assignees for the event."""
     for a in db.scalars(

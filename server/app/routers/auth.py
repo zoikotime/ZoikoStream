@@ -645,6 +645,29 @@ def step_up(data: StepUpIn, request: Request, db: Session = Depends(get_db),
 
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)):
+    """The session endpoint the browser routes from.
+
+    Returns the ACCOUNT identity and nothing about any event. A client deciding where to
+    send somebody after login must not be able to read an event role here, because an
+    assignment to one broadcast is not a property of the account — it is answered per event
+    by GET /events/{event_id}/assignment.
+    """
     user_out = UserOut.model_validate(user)
-    user_out.organization_name = user.organization.name if user.organization else None
+    org = user.organization
+    user_out.organization_name = org.name if org else None
+    # Platform authority, separated from organization standing.
+    user_out.platform_role = "super_admin" if user.role == "super_admin" else None
+    # "owner" is not a ROLES value - ownership lives on Organization.owner_user_id - so it
+    # can only be reported through this field.
+    if org is not None and org.owner_user_id == user.id:
+        user_out.organization_role = "owner"
+    elif user.role in ("org_admin", "billing_admin"):
+        user_out.organization_role = user.role
+    elif user.role == "super_admin":
+        user_out.organization_role = None
+    else:
+        # host / moderator / speaker / viewer are ACCOUNT personas, and their standing in the
+        # organization is plain membership. Reporting the persona here would re-create the
+        # confusion this split exists to remove.
+        user_out.organization_role = "member"
     return user_out

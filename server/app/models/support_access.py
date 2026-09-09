@@ -110,6 +110,19 @@ class SupportAccessRequest(Base):
     emergency_authorizer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     emergency_authorizer_email: Mapped[str | None] = mapped_column(String(255))
     post_use_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ZST-EC-001 SEC-002. `post_use_review_at` above records WHEN the review happened; these
+    # record when it is DUE and what it concluded, which is what makes an overdue-review
+    # notice possible without inventing a deadline. review_due_at is set explicitly by the
+    # operator opening the emergency session - nothing derives it.
+    review_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    review_outcome: Mapped[str | None] = mapped_column(String(300))
+    breakglass_started_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    breakglass_ended_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
+    review_overdue_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True))
 
     # The elevation actually opened for this request, so the session and the authorization
     # are one linked record rather than two hopeful halves.

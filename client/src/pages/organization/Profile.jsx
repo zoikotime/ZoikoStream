@@ -15,7 +15,6 @@ import { useOrgScope } from "../../components/organization/orgScope";
 import ProfileHeader from "../../components/organization/profile/ProfileHeader";
 import MetricCard from "../../components/organization/profile/MetricCard";
 import InfoCard from "../../components/organization/profile/InfoCard";
-import QuickActions from "../../components/organization/profile/QuickActions";
 import ActivityTimeline from "../../components/organization/profile/ActivityTimeline";
 import SecurityPanel from "../../components/organization/profile/SecurityPanel";
 import Section from "../../components/organization/profile/Section";
@@ -65,7 +64,10 @@ const PLAN_TONE = { active: "success", trial: "warning", past_due: "danger" };
 export default function OrganizationProfile() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const { state, reload: reloadShell } = useOrgScope();
+  // `quickActions: true` puts the Quick Actions menu in the topbar for this page, in the
+  // slot the health pill occupies elsewhere. Asked for here rather than set in the layout
+  // so no other org page loses its live health verdict.
+  const { state, reload: reloadShell } = useOrgScope({ quickActions: true });
   const { data, loading, error, reload } = useApi(loadProfile);
 
   const overview = data?.overview;
@@ -317,13 +319,10 @@ export default function OrganizationProfile() {
           </Section>
         </div>
 
-        {/* ── Quick Actions ─────────────────────────────────────────────────── */}
-        <Section
-          title="Quick Actions"
-          description="The screens an organization owner reaches for most."
-        >
-          <QuickActions />
-        </Section>
+        {/* The Quick Actions card grid that used to close this page is gone: the topbar now
+            carries the same seven destinations (components/organization/quickActions.js), and
+            two copies of one shortcut set on one screen is repetition, not emphasis. The
+            grid component itself is retained for any page that wants the expanded form. */}
       </div>
     </MotionConfig>
   );

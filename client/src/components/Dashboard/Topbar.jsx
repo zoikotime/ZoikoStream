@@ -8,12 +8,19 @@ import { CONSOLE, brand, brandButton, cx, focusRing } from "../../ui/tokens";
 import Dropdown from "../../ui/Dropdown";
 import ThemeToggle from "../../ui/ThemeToggle";
 import HealthDot from "../admin/HealthDot";
+import QuickActionsMenu from "../organization/QuickActionsMenu";
 
 // Organization console topbar: workspace + range scoping, the primary "request live event"
 // action, then health verdict, theme and account.
 //
 // `filters`/`onFilters` are optional — only the Overview page scopes by window, so other org
 // pages render the bar without them rather than showing dead controls.
+//
+// `quickActions` swaps the health verdict for a Quick Actions menu in the SAME slot. Only the
+// Profile page asks for it (via useOrgScope), because that page's own reason to exist is
+// those shortcuts; everywhere else keeps the live verdict and its retry affordance. Same
+// opt-in shape as `filters` above, and the same reasoning: the control lives here, the
+// decision belongs to the page.
 //
 // The notification bell that used to live here was hardcoded to "3" with no data source; it
 // is gone rather than lying about unread items.
@@ -45,7 +52,8 @@ function useClickOutside(onClose) {
   return ref;
 }
 
-export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, onFilters }) {
+export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, onFilters,
+                                quickActions = false }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -122,11 +130,18 @@ export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, 
           </>
         )}
 
-        {/* Health verdict — real, from /organization/console-state. When that call failed it
+        {/* This slot holds EITHER the Quick Actions menu (Profile only, see `quickActions`)
+            OR the health verdict — never both, so the row's spacing is identical either way.
+
+            Health verdict — real, from /organization/console-state. When that call failed it
             becomes a retry, never a reassuring default. The pill pulses only while the
             platform is actually healthy or actually down: a static amber reads as "look at
             me later", a pulsing one as "look now". */}
-        {unknown ? (
+        {quickActions ? (
+          // `md:inline-flex` on the pill it replaces hid the verdict on phones; the menu is
+          // an ACTION, not a readout, so it stays available at every width.
+          <QuickActionsMenu />
+        ) : unknown ? (
           <button
             onClick={onRetry}
             className={cx(

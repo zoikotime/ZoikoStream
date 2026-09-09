@@ -30,7 +30,12 @@ export const AUTH_EXPIRED_EVENT = "zoiko:auth-expired";
 // Endpoints where a 401 is the ANSWER, not a verdict on the caller's session: signing in with
 // the wrong password, redeeming a spent verification/reset challenge. Clearing the session on
 // those would be wrong in the one place a user is actively trying to establish one.
-const AUTH_ENDPOINT = /^\/auth\/(login|register|forgot-password|reset-password|verify-email|resend-verification|recover)/;
+//
+// `/auth/me` is in the list for a different reason: AuthContext owns that call and handles
+// its own 401, including the startup case where a 401 is the expected, normal answer. Letting
+// the interceptor also fire on it would clear storage underneath the very code deciding what
+// to do about it.
+const AUTH_ENDPOINT = /^\/auth\/(me|login|register|forgot-password|reset-password|verify-email|verify-otp|resend-verification|recover)/;
 
 api.interceptors.response.use(
   (response) => response,
@@ -47,15 +52,20 @@ api.interceptors.response.use(
     const sentToken = !!config?.headers?.Authorization;
     const path = config?.url || "";
     if (status === 401 && sentToken && !AUTH_ENDPOINT.test(path)) {
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
+      try {
+        localStorage.removeItem("token");
+        // Legacy key from the build that treated a stored profile as proof of identity.
+        // AuthContext.clearStoredAuth sweeps the rest; this keeps the two in step for the
+        // one key that mattered.
+        localStorage.removeItem("user");
+      } catch { /* private mode / blocked site data — nothing stored to clear */ }
       // No retry and no redirect — this only clears state and announces it. A retry would
       // fail identically (nothing refreshes the token), and looping is exactly the failure
       // mode a response interceptor invites; the route guards own where to send the user.
       window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
     }
     return Promise.reject(error);
-  }
+  },
 );
 
 export default api;

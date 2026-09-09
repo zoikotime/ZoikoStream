@@ -21,6 +21,8 @@ from .routers.live import router as live_router
 from .routers.commercial import router as commercial_router
 from .routers.deliveries import router as deliveries_router
 from .routers.contact import router as contact_router
+from .routers.status import router as status_router
+from .routers.trust import router as trust_router
 from .security import ALGORITHM
 from .services import bus
 from .services import platform_settings
@@ -31,6 +33,7 @@ from .services.org_comms import run_invitation_reminders
 from .services.credential_lifecycle import run_credential_sweeper
 from .services.org_state import require_operational_org_access
 from .services.media_comms import run_media_sweeper
+from .services.event_planning import run_event_planning_sweeper
 from .services.media_retention import run_retention_sweeper
 from .services.signing_rotation import run_signing_rotation_sweeper
 from .services.org_governance import run_governance_sweeper
@@ -50,7 +53,7 @@ log = logging.getLogger(__name__)
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Thirteen background tickers, each owning its own domain (which is also what keeps
+    """Fourteen background tickers, each owning its own domain (which is also what keeps
     moderation and broadcast from having to import each other):
       * scheduler  — fires scheduled polls/announcements, closes timed-out polls
       * sampler    — writes analytics snapshots (the retention graph) and pushes live counters
@@ -72,9 +75,11 @@ async def lifespan(_: FastAPI):
       * retention  — recording retention warnings and replay-availability expiry, both
                      deadline-driven so neither has a request or webhook that could carry
                      them (services/media_retention.py)
+      * planning   — proposal expiry, event-intake reminders and rehearsal reminders
+                     (services/event_planning.py)
     The bus releases its Redis client on the way out.
 
-    All thirteen run in the LEADER process only, elected by a Postgres advisory lock (see
+    All fourteen run in the LEADER process only, elected by a Postgres advisory lock (see
     db.try_acquire_ticker_leadership). They previously ran in every process, so a deployment
     with more than one instance fired each scheduled poll, webhook delivery and watermark burn
     once per instance. A follower serves HTTP normally and simply runs no tickers; it retries
@@ -98,9 +103,26 @@ async def lifespan(_: FastAPI):
     # all), so this warns rather than refusing to boot. Runs in every process (leader or
     # follower) — unlike the tickers below, this is a per-process config check, not a job
     # that would duplicate if it ran more than once.
+    # One structured line an operator can grep for, whatever the outcome. Modes, never
+    # contents: the only credential-derived field is `service_account` (an identifier, the
+    # thing to check the bucket's IAM binding against), and no key material, API secret or
+    # token is reachable from here.
+    diagnostics = livekit.gcs_diagnostics()
+    # WARNING when storage is misconfigured, INFO when it is fine. An operator diagnosing a
+    # production incident should not have to raise the log level to see the line that
+    # explains it - and on a healthy deployment it stays out of the way.
+    healthy = diagnostics["gcs_credentials_mode"] in ("absent", "mounted_file")
+    log.log(logging.INFO if healthy else logging.WARNING,
+            "storage_config %s", " ".join(f"{k}={v}" for k, v in diagnostics.items()))
+
     gcs_error = livekit.gcs_config_error()
     if gcs_error:
         log.warning("Recording uploads will not work: %s", gcs_error)
+        # Said plainly, because the two failed together in production and the operator
+        # concluded the outage was the credential. It is not: LiveKit publishing and
+        # recording egress are independent, and only the second one is broken here.
+        log.warning("Live publishing is unaffected by this — hosts can still go live and "
+                    "viewers can still watch. Only recording uploads are impacted.")
 
     supervisor = asyncio.create_task(_ticker_supervisor())
     try:
@@ -141,6 +163,10 @@ def _start_tickers() -> list:
         # MED-009 / MED-011. Retention warnings and replay expiry are both deadline-driven,
         # so neither has a request or a webhook that could carry it.
         asyncio.create_task(run_retention_sweeper()),
+        # ZST-EC-001 LVE-001 / LVE-002 / LVE-005. Proposal expiry, intake reminders and
+        # rehearsal reminders are all deadline-driven, so none has a request or a
+        # webhook that could carry it.
+        asyncio.create_task(run_event_planning_sweeper()),
     ]
 
 
@@ -155,9 +181,9 @@ async def _stop_tickers(tasks: list) -> None:
 async def _ticker_supervisor() -> None:
     """Run the tickers only while this process is the elected leader.
 
-    One supervisor gates all thirteen rather than each ticker checking for itself: the invariant is
-    "these jobs run in one process", so it belongs in one place. Thirteen independent checks
-    would be thirteen chances for one of them to drift out of step.
+    One supervisor gates all fourteen rather than each ticker checking for itself: the invariant is
+    "these jobs run in one process", so it belongs in one place. Fourteen independent checks
+    would be fourteen chances for one of them to drift out of step.
 
     If leadership is LOST mid-flight (the lock's connection dropped) the tickers are cancelled
     immediately, because by then a follower may already have been promoted. Stopping is always
@@ -314,7 +340,18 @@ async def maintenance_gate(request: Request, call_next):
 # and carries no session, so the dependency was already a no-op there (user is None).
 _ORG_STATE_GATE = [Depends(require_operational_org_access)]
 
-for router in (auth_router, dashboard_router, admin_router, contact_router, live_router):
+# status_router is public and NOT org-state gated: a status page behind a login, or gated on
+# a tenant's own standing, is useless during the outage it exists to report.
+#
+# trust_router likewise. A security researcher has no account here; a vendor-security reviewer
+# at a prospect does not either; and somebody unsubscribing from marketing must not have to
+# sign in to do it. Gating any of those on a tenant's standing would be worse than useless -
+# it would suppress a vulnerability report from a restricted tenant's own admin.
+#
+# live_router's own reason is given above: playback and the LiveKit webhook must keep working
+# for a restricted tenant's audience and for LiveKit itself.
+for router in (auth_router, dashboard_router, admin_router, contact_router, live_router,
+               status_router, trust_router):
     app.include_router(router, prefix="/api")
 for router in (organization_router, events_router, commercial_router,
                deliveries_router):

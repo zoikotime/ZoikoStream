@@ -5,7 +5,7 @@ import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
 import api, { errCode, errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
-import { roleHome } from "../../auth/roleHome";
+import { resolvePostLogin } from "../../auth/destination";
 import { Field, PasswordField, SubmitButton, CheckField } from "../../ui/forms";
 import AuthTabs from "./AuthTabs";
 
@@ -49,10 +49,23 @@ export default function Login() {
         password,
         remember,
       });
-      setSession(data);
-      notify.success(`Welcome back, ${data.user.full_name}!`);
-      const dest = from ? `${from.pathname}${from.search || ""}` : roleHome(data.user.role) || "/";
-      navigate(dest, { replace: true });
+      // setSession stores the token and CONFIRMS it with GET /auth/me before returning, so
+      // the redirect below is driven by the server's answer rather than by the login
+      // payload we happen to be holding. Awaiting it also means the destination route never
+      // renders while auth state is still resolving.
+      const account = await setSession(data);
+      if (!account) {
+        notify.error("Signed in, but the session could not be confirmed. Please try again.");
+        return;
+      }
+      notify.success(`Welcome back, ${account.full_name}!`);
+      // One authoritative destination. `from` is a REQUEST, not a permission: a saved
+      // event-console deep-link is honoured only after the backend confirms the assignment
+      // for that exact event, and anything it refuses falls back to the account's own home
+      // with a reason rather than dropping the user somewhere unexplained.
+      const { to, reason } = await resolvePostLogin(account, from);
+      if (reason) notify.error(reason);
+      navigate(to, { replace: true });
     } catch (error) {
       if (errCode(error) === "EMAIL_VERIFICATION_REQUIRED") {
         setNeedsVerification({ email: error?.response?.data?.detail?.email });

@@ -1,0 +1,20 @@
+{
+  "request_reference": "PRV-2026-000001",
+  "generated_at": "2026-09-07T10:16:24.652834+00:00",
+  "account": {
+    "email": "subject-4c383d45a797@example.com",
+    "full_name": "Data Subject",
+    "role": "viewer",
+    "created_at": "2026-09-07T15:46:23.914902+05:30",
+    "email_verified": true
+  },
+  "counts": {
+    "audit_entries": 0
+  },
+  "excluded": [
+    "Credential material (password hashes, MFA secrets, recovery codes)",
+    "API keys and webhook signing secrets",
+    "Security detection state",
+    "Other people's personal data"
+  ]
+}
