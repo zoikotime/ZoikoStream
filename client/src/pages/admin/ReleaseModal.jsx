@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Textarea, Select, Label } from "../../ui/forms";
@@ -9,13 +9,12 @@ const EMPTY = { version: "", title: "", notes: "", channel: "production" };
 
 // Publish a new changelog entry. Create-only — releases are an append-only log.
 export default function ReleaseModal({ open, onClose, onSaved }) {
+  // Mounted only while open (the call site does `{modalOpen && ...}`), so this initial state
+  // IS the per-open reset. It replaces an effect that called setForm on `open`, which cost a
+  // cascading re-render every time the dialog appeared.
   const [form, setForm] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
-
-  useEffect(() => {
-    if (open) setForm(EMPTY);
-  }, [open]);
 
   const close = () => !saving && onClose();
 

@@ -1,0 +1,323 @@
+name: CI
+
+# Every branch and every pull request. CI is deliberately NOT restricted to main: a branch
+# that only gets tested at PR time has already cost the author a round trip.
+#
+# `main` is the one branch absent from the push trigger, and that is not a gap — deploy.yml
+# owns main and calls THIS workflow through `workflow_call` before it deploys. That way a
+# push to main runs exactly one set of CI jobs (inside the deploy run) instead of two
+# identical sets racing each other.
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+# One CI run per ref. An outdated run on the same branch/PR is cancelled, because nobody
+# needs the results of a commit that has already been replaced.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI reads the repo and nothing else. No id-token (that is CD's alone), no
+# contents: write, no packages.
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend — lint, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches `FROM node:22-alpine` in the Dockerfile. CI must build on the same major
+          # the production image builds on, or CI green means nothing about the image.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      # `npm ci` (not install) so the lockfile is authoritative and CI cannot silently
+      # resolve a different tree than the Dockerfile does.
+      - name: Install dependencies
+        working-directory: client
+        run: npm ci
+
+      # Every command below is a script that already exists in client/package.json:
+      #   lint  -> eslint .        test -> vitest run        build -> vite build
+      # `dev` and `preview` are deliberately never run — a dev server in CI would hang.
+      - name: Lint
+        working-directory: client
+        run: npm run lint
+
+      - name: Tests
+        working-directory: client
+        run: npm run test
+
+      - name: Production build
+        working-directory: client
+        run: npm run build
+
+  backend:
+    name: Backend — pytest and self-check suites
+    runs-on: ubuntu-latest
+
+    # Ephemeral Postgres and Redis, created and destroyed with the job.
+    #
+    # THIS IS THE ISOLATION BOUNDARY. The suites import `from app.db import engine` and write
+    # real rows with no transactional rollback, and this repository's own .env points
+    # DATABASE_URL at a live Supabase instance. Nothing in CI is ever given that value: the
+    # only database this job can reach is the container below, which exists for ~5 minutes and
+    # is thrown away. See server/conftest.py, whose guard refuses the suite outright if
+    # TEST_DATABASE_URL is missing or resolves to the same database as DATABASE_URL.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: zoiko
+          POSTGRES_PASSWORD: zoiko
+          POSTGRES_DB: zoikostream_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # `test` keeps conftest's ENVIRONMENT=production refusal satisfied and marks the run for
+      # anything else that inspects it.
+      ENVIRONMENT: test
+      # Localhost because the service ports are mapped to the runner, not because the job runs
+      # inside the compose network. This is the EPHEMERAL redis service below — never the
+      # production Upstash instance, which is not available to this job in any form.
+      REDIS_URL: redis://127.0.0.1:6379/0
+      # Deterministic, throwaway, and NOT a production value. Present because app.config
+      # requires it; it signs nothing that outlives the job.
+      SECRET_KEY: ci-only-not-a-production-secret
+      SUPER_ADMIN_EMAIL: ci@example.invalid
+      SUPER_ADMIN_PASSWORD: ci-only-password
+      # A canonical HTTPS origin, which is all the suite needs.
+      #
+      # app/email.py::public_base_url refuses to build a link that is not HTTPS unless
+      # ENVIRONMENT is exactly "development" — an audit fix, because APP_URL was absent from
+      # the deployed environment file and every emailed link silently became a non-TLS
+      # localhost address while still carrying a single-use credential. ENVIRONMENT=test is
+      # (correctly) not exempt, so without this the guard fires on every send path.
+      #
+      # `.invalid` is reserved by RFC 2606 and can never resolve, so this cannot point at
+      # anything real. It is deliberately NOT the production origin and deliberately not
+      # https://localhost:5173 — the tests need a canonical secure URL to embed in a link,
+      # not a server to talk to. Nothing is delivered regardless: RESEND_API_KEY is unset,
+      # and conftest.py additionally swaps the mail transport for a stub.
+      APP_URL: https://ci.zoikostream.invalid
+      # Test-only LiveKit credentials, for LOCAL TOKEN SIGNING ONLY.
+      #
+      # Verified before adding: services/livekit.py::create_stream_token builds an
+      # api.AccessToken and returns to_jwt(), which is an HMAC signature over a local claim
+      # set — it opens no socket. It was checked by signing a token with every socket connect
+      # blocked; it succeeded. test_storage_config.py then decodes the issued JWT and asserts
+      # a host token carries canPublish and a viewer token does not, so it needs a signing
+      # key to exist and nothing more.
+      #
+      # These are not production credentials and grant nothing: the key/secret pair is
+      # meaningless to any real LiveKit deployment, and the URL is an RFC 2606 `.invalid`
+      # host that cannot resolve. Server-side room control (services/livekit.py::_with_room)
+      # therefore fails DNS and returns False, which the callers already treat as
+      # "not enforced" — the same path a blank configuration takes.
+      LIVEKIT_URL: wss://livekit.example.invalid
+      LIVEKIT_API_KEY: APIcitestonly000000
+      LIVEKIT_API_SECRET: ci-only-livekit-secret-not-a-real-credential
+      # A placeholder key that must be NON-EMPTY, and is never used to reach Resend.
+      #
+      # app/email.py::_send returns EARLY when RESEND_API_KEY is blank — before it reaches
+      # httpx.post. The email suites assert on the ATTEMPTED send by capturing that exact
+      # call and inspecting the payload (recipient, subject, unsubscribe header, absence of
+      # secrets), so a blank key does not make them safe, it makes them VACUOUS: the capture
+      # list stays empty and ~160 assertions fail on an empty list. conftest.py says the same
+      # thing in its own words, which is why it stubs the transport instead of blanking this.
+      #
+      # Nothing can leave the machine, and that is enforced in two independent places rather
+      # than by this value:
+      #   * conftest.py installs a session-scoped autouse fixture that replaces
+      #     email_mod.httpx.post with a stub for every pytest-collected test.
+      #   * each self-check suite (which runs outside pytest, so it gets no conftest)
+      #     replaces email_mod.httpx.post at MODULE IMPORT with a `_deny` that RAISES on any
+      #     send outside an explicit capture context.
+      # Both are in place before a single test runs, so the key's value is inert.
+      RESEND_API_KEY: re_ci_only_not_a_real_key
+      # Every remaining external integration stays UNSET on purpose. app.config treats blank
+      # as "not configured", and the code paths degrade rather than reaching out — so a pull
+      # request cannot charge Stripe or write to the production GCS bucket. Listed explicitly
+      # so the intent is legible:
+      #   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
+      #   GCS_BUCKET / GCS_CREDENTIALS_PATH
+      # are all absent from this block and must stay absent.
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches `FROM python:3.12-slim` in the Dockerfile.
+          python-version: '3.12'
+          cache: pip
+
+      # Both files, deliberately.
+      #
+      # requirements.txt (repo root) is what the Dockerfile installs — production's actual
+      # set. server/requirements.txt carries what the app additionally needs at runtime for
+      # correctness (notably `tzdata`, without which ZoneInfo("Asia/Kolkata") raises on a slim
+      # image and organization-timezone timestamps in customer email silently fall back to
+      # UTC). Installing both means CI exercises the union; the DIFFERENCE between them is a
+      # real production gap, reported separately rather than papered over here.
+      #
+      # pytest is in NEITHER file, so it is installed explicitly. There is no declared
+      # test-dependency set in this repository.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r server/requirements.txt
+          pip install pytest pytest-asyncio
+
+      # Prove the two backing services the suite talks to are the EPHEMERAL ones before
+      # running anything against them. Cheap, and it turns "some async test hung" into a
+      # one-line answer. It also documents, in the run log, which endpoints CI actually used.
+      - name: Check the service containers
+        working-directory: server
+        run: |
+          python - <<'PY'
+          import os
+          import redis
+          url = os.environ["REDIS_URL"]
+          assert "127.0.0.1" in url or "localhost" in url, f"REDIS_URL is not the CI service: {url}"
+          print("redis", url, "->", redis.Redis.from_url(url, socket_connect_timeout=5).ping())
+          PY
+          python - <<'PY'
+          import psycopg2
+          dsn = "postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci"
+          with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+              cur.execute("select current_database(), inet_server_addr()")
+              print("postgres ->", cur.fetchone())
+          PY
+
+      # Schema AND the plan catalogue. `seed.py` calls create_tables.ensure_schema() and then
+      # seeds plans idempotently by slug — including `developer`, which
+      # test_subscription_provisioning.py and test_entitlement_enforcement.py assert exists
+      # (42 setup errors without it, 54 passing tests with it).
+      #
+      # DATABASE_URL is scoped to THIS STEP only. It names the ephemeral container, and it is
+      # never exported to the pytest step below, where conftest's guard would refuse a run in
+      # which TEST_DATABASE_URL and DATABASE_URL resolve to the same database.
+      - name: Prepare the CI database
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
+        run: python seed.py
+
+      # This project has no Alembic — schema evolves through small idempotent scripts run
+      # against DATABASE_URL, and `ensure_schema()` does not create all of them.
+      #
+      # `uq_broadcast_sessions_open` is the one this suite requires. It is the partial unique
+      # index on broadcast_sessions (event_id) WHERE ended_at IS NULL, and
+      # services/broadcast.py::_golive is written around it: two simultaneous Go Live clicks
+      # both see "no open session", both INSERT, and the index is what rejects the loser so
+      # the retry can resolve against the winner. Without it a fresh database silently accepts
+      # BOTH rows — test_broadcast.py::test_concurrent_golive_creates_exactly_one_open_session
+      # found exactly that here.
+      #
+      # `CREATE UNIQUE INDEX IF NOT EXISTS`, so re-running is a no-op.
+      - name: Apply schema migrations the suite depends on
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
+        run: python migrate_broadcast_session_unique.py
+
+      # The 12 suites that pytest cannot run are computed, not hardcoded: each one is driven
+      # by `if __name__ == "__main__"` and takes a `World` positional argument, so pytest
+      # reports "fixture 'w' not found" at setup. Deriving the list keeps CI correct when a
+      # suite is added or converted, instead of rotting against a list nobody updates.
+      - name: Identify self-check suites
+        id: split
+        working-directory: server
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import pathlib, re
+          selfcheck = []
+          for path in sorted(pathlib.Path(".").glob("test_*.py")):
+              src = path.read_text(encoding="utf-8", errors="replace")
+              if '__name__ == "__main__"' in src and re.search(
+                      r"^def test_\w+\(\s*w\s*[,)]", src, re.M):
+                  selfcheck.append(path.name)
+          print("selfcheck=" + " ".join(selfcheck))
+          print("ignores=" + " ".join(f"--ignore={n}" for n in selfcheck))
+          PY
+
+      # TEST_DATABASE_URL and no DATABASE_URL: conftest.py accepts that, swaps it into
+      # DATABASE_URL for the session, and the suite runs against the container.
+      - name: pytest
+        working-directory: server
+        env:
+          TEST_DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
+        run: python -m pytest -q ${{ steps.split.outputs.ignores }}
+
+      # The self-check suites, each through its own driver. `set -e` is the default, and the
+      # loop records every failure rather than stopping at the first, so one run tells you
+      # everything that is broken instead of only the earliest thing.
+      - name: Self-check suites
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
+        run: |
+          failed=""
+          for suite in ${{ steps.split.outputs.selfcheck }}; do
+            echo "::group::$suite"
+            python "$suite" || failed="$failed $suite"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::self-check suites failed:$failed"
+            exit 1
+          fi
+
+  docker:
+    name: Docker — production image builds
+    runs-on: ubuntu-latest
+    # Only worth the minutes once the code itself is known good. It also means a red build
+    # here points at the IMAGE (a missing dependency, a broken COPY) rather than at code the
+    # earlier jobs would already have caught.
+    needs: [frontend, backend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Builds the real production Dockerfile — the single image that serves FastAPI and the
+      # built SPA from one origin. Nothing is pushed: this job exists to catch the case where
+      # frontend and backend tests both pass but the image cannot be assembled.
+      - name: Build the production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: false
+          tags: zoikostream:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

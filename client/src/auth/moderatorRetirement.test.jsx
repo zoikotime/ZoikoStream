@@ -16,7 +16,7 @@ import { MemoryRouter, Routes, Route, Navigate, useLocation } from "react-router
 import { roleHome } from "./roleHome";
 import { ROLE_ORDER, ROLE_TONE } from "../data/moderation";
 import { ROLES as ADMIN_ROLES } from "../pages/admin/roleInfo";
-import { ROLE_PATH } from "../pages/organization/AssignPeopleModal";
+import { ROLE_PATH } from "../pages/organization/roleConfig";
 
 // api.js is mocked at the module level so AuthContext's /auth/me call is controllable and no
 // real network is attempted. AUTH_EXPIRED_EVENT must keep its real value — AuthContext

@@ -8,6 +8,11 @@ import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import OrgModal from "./OrgModal";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 const PLAN_TONE = { Enterprise: "brand", Pro: "info", Starter: "neutral" };
 const STATUS_TONE = { active: "success", trial: "warning", suspended: "danger" };
 const SUB_TONE = { active: "success", trial: "warning", past_due: "danger", cancelled: "neutral" };
@@ -38,7 +43,7 @@ export default function Organizations() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingOrg, setEditingOrg] = useState(null);
 
-  const organizations = data?.organizations || [];
+  const organizations = data?.organizations || NONE;
   const plans = data?.plans || [];
 
   const kpis = useMemo(
@@ -224,13 +229,18 @@ export default function Organizations() {
         />
       </Panel>
 
-      <OrgModal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        org={editingOrg}
-        plans={plans}
-        onSaved={reload}
-      />
+      {modalOpen && (
+        <OrgModal
+          // Keyed so "edit A, close, edit B" cannot show A's values, even if this stops being
+          // conditionally mounted one day.
+          key={editingOrg?.id ?? "new"}
+          open
+          onClose={() => setModalOpen(false)}
+          org={editingOrg}
+          plans={plans}
+          onSaved={reload}
+        />
+      )}
     </div>
   );
 }

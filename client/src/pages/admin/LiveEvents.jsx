@@ -11,6 +11,11 @@ import HealthDot from "../../components/admin/HealthDot";
 import DataTable from "../../components/admin/DataTable";
 import { initials, timeAgo } from "../../components/admin/format";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 const TABS = [
   { key: "live", label: "Live" },
   { key: "recent", label: "Recently Ended" },
@@ -55,7 +60,7 @@ export default function LiveEvents() {
   const [tab, setTab] = useState("live");
   const [q, setQ] = useState("");
 
-  const live = data?.live || [];
+  const live = data?.live || NONE;
   const recent = data?.recent || [];
   const rowsForTab = tab === "live" ? live : recent;
 

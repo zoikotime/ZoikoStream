@@ -404,3 +404,128 @@ real file size) or hardware ingress (`ingress_started`/`ingress_ended` drive end
    publication's source/`trackSid`/muted state. Tokens are never logged.
 4. Open the watch link in another browser. The viewer logs `[viewer] …` with the room name —
    it must match the producer's exactly.
+
+---
+
+## CI/CD (GitHub Actions)
+
+Two workflows in `.github/workflows/`. They replace an older `deploy.yml` that was deleted in
+July 2026 — that one built **two** services (`zoikostream-api`, `zoikostream-web`) in
+`us-central1` and does not match this architecture. It is not coming back.
+
+### What runs when
+
+| You do this | CI | Production deploy |
+|---|---|---|
+| push any branch except `main` | yes — `ci.yml` | no |
+| open / update a pull request | yes — `ci.yml` | no |
+| push or merge to `main` | yes — inside the `Deploy` run | only if the gate is open |
+
+CI is the same three jobs in both cases, because `deploy.yml` **calls** `ci.yml` rather than
+repeating it (`uses: ./.github/workflows/ci.yml`). That is also why `ci.yml`'s own push
+trigger ignores `main`: without that, a push to main would start two identical CI runs.
+
+    frontend    npm ci -> lint -> vitest -> vite build            (Node 22, as the Dockerfile)
+    backend     pytest + the 12 self-check suites                 (Python 3.12, as the Dockerfile)
+    docker      builds the production Dockerfile, pushes nothing
+
+`deploy` runs only after all three pass. **Tests fail → nothing deploys**, structurally: the
+deploy job `needs: [gate, validate]`, and there is no `continue-on-error` or `always()`
+anywhere in either file.
+
+### The safety gate — read this before enabling
+
+Production deployment is gated on a repository variable:
+
+```
+GITHUB_CD_ENABLED = true
+```
+
+Anything else (unset, `false`) and the run tests `main` and deploys **nothing**, saying so in
+the run summary. This is the default on purpose.
+
+**Production is currently deployed by something outside this repository** — most likely a
+Cloud Build trigger created by Cloud Run's *"Continuously deploy"* on the `zoikostream-git`
+service. Two mechanisms deploying the same commit is worse than one deploying it late.
+
+So the order matters:
+
+1. Land these workflows and watch CI go green on a few branches and PRs.
+2. **Disable the external Cloud Build / "Continuously deploy" trigger** in the GCP console.
+3. *Then* set `GITHUB_CD_ENABLED=true`. GitHub Actions is now the canonical CD owner.
+
+### Test isolation
+
+The backend job runs against **ephemeral Postgres and Redis service containers** that are
+created and destroyed with the job. Production `DATABASE_URL` and `REDIS_URL` are never given
+to CI. Every external integration is left deliberately unconfigured — no `RESEND_API_KEY`,
+`STRIPE_SECRET_KEY`, `LIVEKIT_API_SECRET`, `GCS_BUCKET` or `GCS_CREDENTIALS_PATH` — and those
+code paths degrade when blank rather than reaching out, so a pull request cannot send email,
+charge a card, create a room, or write to the recordings bucket.
+
+`server/conftest.py` enforces this independently of CI and refuses to run at all if
+`TEST_DATABASE_URL` is missing or resolves to the same database as `DATABASE_URL`. CI satisfies
+that guard rather than working around it.
+
+### Deployment target
+
+One image, one service — the same single-container design the `Dockerfile` describes (FastAPI
+serving the API and the built SPA from one origin):
+
+| | |
+|---|---|
+| Service | `zoikostream-git` |
+| Region | `europe-west1` |
+| Image | `<region>-docker.pkg.dev/<project>/<repo>/zoikostream:<commit-sha>` |
+
+### Runtime configuration is NOT touched
+
+The deploy step passes `--image` and nothing else. No `--set-env-vars`, no `--set-secrets`, no
+`--clear-env-vars`. `gcloud run deploy --image` on an existing service creates a revision that
+**inherits** the current configuration — environment variables, Secret Manager bindings,
+CPU/memory, scaling, service account, ingress — and changes only the container.
+
+That is deliberate. `DATABASE_URL`, `SECRET_KEY`, `REDIS_URL`, `LIVEKIT_API_SECRET`,
+`RESEND_API_KEY`, `STRIPE_SECRET_KEY` and the GCS credentials stay in Cloud Run / Secret
+Manager. **None of them exist in GitHub**, none are passed on a command line, and none can
+appear in a workflow log. Changing runtime configuration remains a separate, deliberate act
+against Cloud Run.
+
+### Repository variables to configure
+
+Settings → Secrets and variables → Actions → **Variables** (not Secrets — none of these is a
+credential):
+
+| Variable | Value |
+|---|---|
+| `GITHUB_CD_ENABLED` | `false` until the external trigger is disabled, then `true` |
+| `GCP_PROJECT_ID` | your project id |
+| `GCP_REGION` | `europe-west1` |
+| `CLOUD_RUN_SERVICE` | `zoikostream-git` |
+| `GCP_ARTIFACT_REPOSITORY` | the Artifact Registry Docker repo name in that region |
+| `GCP_WIF_PROVIDER` | `projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>` |
+| `GCP_SERVICE_ACCOUNT` | `<name>@<project>.iam.gserviceaccount.com` |
+
+Authentication is **Workload Identity Federation** — no service-account JSON key is stored in
+GitHub. The deploy job is the only place that requests `id-token: write`; CI holds
+`contents: read` and nothing more.
+
+### Minimum IAM for the deploy service account
+
+Grant these and no more — not Owner, not Editor:
+
+| Role | Where | Why |
+|---|---|---|
+| `roles/run.developer` | the `zoikostream-git` service (or the project) | create a new revision |
+| `roles/artifactregistry.writer` | the Artifact Registry repository | push the image |
+| `roles/iam.serviceAccountUser` | **the Cloud Run runtime service account** | Cloud Run deploys *as* that identity, so the deployer must be allowed to act as it |
+
+And on the pool side: the GitHub principal needs `roles/iam.workloadIdentityUser` on the deploy
+service account, restricted by an attribute condition to this repository — otherwise any
+repository that finds the provider can assume it.
+
+### Verification
+
+After deploying, the job polls `GET /health` (a real endpoint — `app/main.py` returns
+`{"status": "ok"}`) on the new revision's URL, retrying while it starts. A revision that never
+answers **fails the job** rather than reporting a green deploy.

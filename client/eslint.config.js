@@ -28,4 +28,20 @@ export default defineConfig([
     languageOptions: { globals: { ...globals.browser, ...globals.node, vi: 'readonly' } },
     rules: { 'react-refresh/only-export-components': 'off' },
   },
+  {
+    // Node-only files. These execute in Node — the build/test tooling configs, and everything
+    // under e2e/, which Playwright's runner loads in its own Node process — so `process`,
+    // `__dirname` and friends genuinely exist at runtime.
+    //
+    // Scoped to these paths on purpose. Adding `process` to the browser block above would make
+    // `process.env.FOO` lint clean inside src/, where Vite replaces nothing and the reference
+    // is a ReferenceError in the browser: the lint error is load-bearing there, so it stays.
+    // src/ reads configuration through `import.meta.env`, which is already a browser global.
+    //
+    // `react-refresh/only-export-components` is off because these are not components at all;
+    // Fast Refresh never sees them.
+    files: ['*.config.js', 'e2e/**/*.js'],
+    languageOptions: { globals: globals.node },
+    rules: { 'react-refresh/only-export-components': 'off' },
+  },
 ])

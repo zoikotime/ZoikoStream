@@ -12,6 +12,11 @@ import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
 import { notify } from "../../ui/Toast";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 // Governance — real obligation tracking. GET/POST/PATCH against /admin/governance-records:
 // the same `governance_records` table the Command Center's action queues already read for
 // two kinds ("single_path_override", the readiness gate; "break_glass", the elevation
@@ -198,7 +203,7 @@ export default function Governance() {
   const [ageSeconds, setAgeSeconds] = useState(0);
   useInterval(() => setAgeSeconds(Math.floor((Date.now() - data.fetched_at) / 1000)), 1000, Boolean(data));
 
-  const records = data?.items || [];
+  const records = data?.items || NONE;
   const selectedLive = selected ? records.find((r) => r.id === selected.id) || selected : null;
 
   const counts = useMemo(() => ({

@@ -8,6 +8,11 @@ import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import SupportTicketModal from "./SupportTicketModal";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 const PRIORITY_TONE = { urgent: "danger", high: "warning", normal: "info", low: "neutral" };
 const label = (s) => s.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 
@@ -32,7 +37,7 @@ export default function Support() {
   const [status, setStatus] = useState("all");
   const [modalOpen, setModalOpen] = useState(false);
 
-  const tickets = data?.tickets || [];
+  const tickets = data?.tickets || NONE;
   const organizations = data?.organizations || [];
 
   const kpis = useMemo(
@@ -151,7 +156,9 @@ export default function Support() {
         />
       </Panel>
 
-      <SupportTicketModal open={modalOpen} onClose={() => setModalOpen(false)} organizations={organizations} onSaved={reload} />
+      {modalOpen && (
+        <SupportTicketModal open onClose={() => setModalOpen(false)} organizations={organizations} onSaved={reload} />
+      )}
     </div>
   );
 }

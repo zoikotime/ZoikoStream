@@ -9,6 +9,11 @@ import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { notify } from "../../ui/Toast";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 // Media — cross-org recordings. Real GET /admin/recordings: every real LiveRecording row
 // (services/admin.py's list_recordings), across every organization, nothing fabricated.
 //
@@ -326,7 +331,7 @@ export default function Media() {
   const [selected, setSelected] = useState(null);
 
   const { data, loading, error, reload } = useRecordingsData(status, "all");
-  const recordings = data || [];
+  const recordings = data || NONE;
 
   const counts = useMemo(() => ({
     total: recordings.length,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Select, Label } from "../../ui/forms";
@@ -9,24 +9,22 @@ const EMPTY = { name: "", domain: "", region: "", status: "active", plan_slug: "
 
 // Create/edit an organization. Same modal for both — `org` null means create.
 export default function OrgModal({ open, onClose, org, plans = [], onSaved }) {
-  const [form, setForm] = useState(EMPTY);
+  // Mounted only while open and keyed by the org being edited (Organizations.jsx), so this
+  // initial state IS the per-open reset. `plans` cannot arrive later: it comes from the same
+  // fetch as the rows, and opening the dialog requires a row.
+  const [form, setForm] = useState(() =>
+    org
+      ? {
+          name: org.name || "",
+          domain: org.domain || "",
+          region: org.region || "",
+          status: org.status || "active",
+          plan_slug: (plans.find((p) => p.name === org.plan) || {}).slug || "",
+        }
+      : EMPTY
+  );
   const [saving, setSaving] = useState(false);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
-
-  useEffect(() => {
-    if (!open) return;
-    setForm(
-      org
-        ? {
-            name: org.name || "",
-            domain: org.domain || "",
-            region: org.region || "",
-            status: org.status || "active",
-            plan_slug: (plans.find((p) => p.name === org.plan) || {}).slug || "",
-          }
-        : EMPTY
-    );
-  }, [open, org, plans]);
 
   const close = () => !saving && onClose();
 

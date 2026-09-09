@@ -4,6 +4,11 @@ import { CONSOLE, DataTable, Panel, StatCard, timeAgo } from "../../components/a
 import api from "../../api";
 import useApi from "../../hooks/useApi";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 // Field skins come from the console tokens so a hover or focus change lands on every filter
 // row at once, instead of being re-typed per page.
 const inputCls = CONSOLE.search;
@@ -37,7 +42,7 @@ export default function AuditLogs() {
   const [action, setAction] = useState("all");
   const [targetType, setTargetType] = useState("all");
 
-  const rows = logs || [];
+  const rows = logs || NONE;
 
   const actions = useMemo(() => [...new Set(rows.map((a) => a.action))].sort(), [rows]);
   const targetTypes = useMemo(() => [...new Set(rows.map((a) => a.target_type).filter(Boolean))].sort(), [rows]);

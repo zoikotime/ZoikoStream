@@ -20,7 +20,8 @@ import Modal from "../../ui/Modal";
 import { Input, Label } from "../../ui/forms";
 import { cx, focusRing } from "../../ui/tokens";
 import { statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
-import AssignPeopleModal, { ROLE_PATH } from "./AssignPeopleModal";
+import AssignPeopleModal from "./AssignPeopleModal";
+import { ROLE_PATH } from "./roleConfig";
 import ContributorInviteModal from "./ContributorInviteModal";
 import InviteViewersModal from "./InviteViewersModal";
 import EventCommercial from "../../components/organization/EventCommercial";
@@ -628,6 +629,9 @@ export default function EventDetails() {
 
       {manageRole && (
         <AssignPeopleModal
+          // Keyed by role so switching Host -> Speaker remounts with a fresh selection
+          // instead of carrying the previous tab's checkboxes across.
+          key={manageRole}
           open
           onClose={() => setManageRole(null)}
           eventId={event.id}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { FiCheck, FiCopy } from "react-icons/fi";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
@@ -9,18 +9,15 @@ import api, { errMsg } from "../../api";
 // Two-phase: form (label) -> reveal (the raw key, shown exactly once — the backend never
 // returns it again after this response).
 export default function GenerateApiKeyModal({ open, onClose, orgId, onCreated }) {
+  // Mounted only while open (the call site does `{orgId && modalOpen && ...}`), so these
+  // initial values ARE the per-open reset. That matters more here than in the other dialogs:
+  // `created` holds the one-time raw key, and leaving it in state after close meant reopening
+  // the dialog re-displayed the PREVIOUS key's reveal panel until the effect cleared it a
+  // render later.
   const [label, setLabel] = useState("");
   const [saving, setSaving] = useState(false);
   const [created, setCreated] = useState(null);
   const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setLabel("");
-      setCreated(null);
-      setCopied(false);
-    }
-  }, [open]);
 
   const close = () => {
     if (saving) return;

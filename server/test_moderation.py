@@ -86,19 +86,40 @@ def test_unknown_action_is_rejected():
     assert asyncio.run(m.dispatch(ctx, "chat.delete", {"id": "x"}))      # viewer -> error
 
 
-# ── bus fan-out + presence (in-process path) ──────────────────────────────────
+# ── bus fan-out + presence ────────────────────────────────────────────────────
 
 def test_publish_reaches_every_subscriber():
+    """Every subscriber of an event receives each envelope, and no event ever receives
+    another event's traffic.
+
+    Delivery is AWAITED rather than read with get_nowait(). With REDIS_URL set — which is
+    how production runs, and how CI runs against its ephemeral Redis — publish() goes to
+    Redis alone and the per-event pump relays the envelope back into this process, so
+    arrival is a round-trip. The in-process fallback satisfies the same waits immediately,
+    so this exercises whichever transport is configured instead of only the one.
+    """
     async def run():
         async with bus.subscribe("evt-1") as a, bus.subscribe("evt-1") as b:
             await bus.publish("evt-1", "chat", "message.new", {"text": "hi"})
             await bus.publish("evt-2", "chat", "message.new", {"text": "other room"})
-            return a.get_nowait(), b.get_nowait(), a.empty()
+            first = await asyncio.wait_for(a.get(), 5)
+            second = await asyncio.wait_for(b.get(), 5)
+            # evt-2 was published BEFORE either get() above returned, so a leak would
+            # already be queued: in-process fan-out is synchronous, and the Redis path
+            # delivers in publish order down one pump connection. Requiring this to time
+            # out asserts the isolation directly, rather than inferring it from a queue
+            # that merely happens to be empty at one instant.
+            leaked = None
+            try:
+                leaked = await asyncio.wait_for(a.get(), 0.5)
+            except asyncio.TimeoutError:
+                pass
+            return first, second, leaked
 
-    first, second, isolated = asyncio.run(run())
+    first, second, leaked = asyncio.run(run())
     assert first["channel"] == "chat" and first["data"]["text"] == "hi"
     assert second["data"]["text"] == "hi"
-    assert isolated, "an event must not receive another event's traffic"
+    assert leaked is None, f"an event must not receive another event's traffic: {leaked!r}"
 
 
 def test_subscriber_cleanup():
@@ -137,7 +158,9 @@ def test_socket_loop():
     limiter. Only the DB boundary is stubbed — the loop, dispatcher, limiter and bus are
     the real ones. This is the piece where a regression means "the console goes silent",
     so it's worth the stubbing."""
+    from fastapi import status
     from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
 
     from app.main import app
     from app.routers import live as live_router
@@ -155,8 +178,14 @@ def test_socket_loop():
 
     originals = (live_router._user_from_token, live_router.mod.resolve_ctx, live_router.mod.snapshot)
     live_router._user_from_token = lambda token, db: (
+        # `org_id=None` is a real, supported value and not a shortcut: routers/live.py's
+        # organization gate reads `user.org_id` and skips the lookup when it is unset, and
+        # org_state.blocked_reason(None, path) resolves to "active" — so a signed-in caller
+        # whose organization is not restricted passes through, which is the case this test is
+        # about. Without the attribute the socket path raised AttributeError before reaching
+        # the loop at all.
         types.SimpleNamespace(id=user_id, email="ava@example.com", is_active=True,
-                              role="org_admin", full_name="Ava Chen")
+                              role="org_admin", full_name="Ava Chen", org_id=None)
         if token == "good" else None
     )
     live_router.mod.resolve_ctx = lambda *_: ctx
@@ -166,14 +195,24 @@ def test_socket_loop():
         client = TestClient(app)
         url = f"/api/live/events/{event_id}/ws"
 
-        # An invalid token is refused BEFORE accept, so it never sees an envelope.
-        try:
-            with client.websocket_connect(f"{url}?token=bad"):
-                raise AssertionError("a bad token must not be accepted")
-        except AssertionError:
-            raise
-        except Exception:
-            pass
+        # An invalid token is refused with a POLICY VIOLATION and never sees an envelope.
+        #
+        # The transport handshake does complete first, and that is deliberate: the client
+        # distinguishes "do not retry" from "retry later" purely by close code
+        # (hooks/useEventStream.js FATAL_CODES), and a rejected handshake gives the browser no
+        # code at all — so routers/live.py accepts in order to be able to send one, then
+        # closes immediately. See _accept()/_connect_failed() there.
+        #
+        # This asserts the two things that actually matter, rather than the handshake result:
+        # nothing is ever delivered on the socket, and the close code is the fatal one.
+        with client.websocket_connect(f"{url}?token=bad") as ws:
+            try:
+                leaked = ws.receive_json()
+            except WebSocketDisconnect as exc:
+                assert exc.code == status.WS_1008_POLICY_VIOLATION, (
+                    f"a bad token must be closed as a policy violation, got {exc.code}")
+            else:
+                raise AssertionError(f"a bad token must not be sent an envelope: {leaked!r}")
 
         with client.websocket_connect(f"{url}?token=good") as ws:
             first = ws.receive_json()

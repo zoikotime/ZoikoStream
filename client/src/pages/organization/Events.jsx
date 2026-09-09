@@ -26,16 +26,21 @@ export default function OrganizationEvents() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [createOpen, setCreateOpen] = useState(false);
+  // `?create=true` is a one-shot deep link (the dashboard CTA and the empty-state button).
+  // Whether the dialog starts open is knowable on the first render, so it is INITIAL state
+  // rather than a setState fired from an effect.
+  const [createOpen, setCreateOpen] = useState(() => searchParams.get("create") === "true");
 
+  // Stripping the parameter stays in an effect because it is a real external-system
+  // synchronization — the browser URL — and not a state update: left in place, a refresh or a
+  // back-navigation would reopen the dialog after the user had dismissed it. Building a new
+  // URLSearchParams rather than mutating the one React Router handed us keeps that object
+  // immutable, as the router expects.
   useEffect(() => {
-    if (searchParams.get("create") === "true") {
-      setCreateOpen(true);
-
-      // remove query parameter after opening
-      searchParams.delete("create");
-      setSearchParams(searchParams, { replace: true });
-    }
+    if (searchParams.get("create") !== "true") return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("create");
+    setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
   const { data, loading, error, reload } = useApi(() =>

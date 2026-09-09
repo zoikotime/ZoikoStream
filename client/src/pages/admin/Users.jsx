@@ -7,6 +7,11 @@ import useApi from "../../hooks/useApi";
 import UserModal from "./UserModal";
 import { ROLES, roleLabel } from "./roleInfo";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 // No "moderator" key: the role is retired. A not-yet-migrated legacy row falls through to
 // the default tone rather than showing a role the platform no longer has.
 const ROLE_TONE = { super_admin: "brand", org_admin: "info", host: "info", speaker: "neutral", viewer: "neutral" };
@@ -81,9 +86,9 @@ export default function Users() {
   useEffect(() => {
     if (!mounted.current) { mounted.current = true; return; }
     reload();
-  }, [q, role, active]);
+  }, [q, role, active, reload]);
 
-  const rows = users || [];
+  const rows = users || NONE;
 
   const orgs = useMemo(
     () => [...new Set(rows.map((u) => u.organization_name).filter(Boolean))].sort(),
@@ -227,7 +232,9 @@ export default function Users() {
         />
       </Panel>
 
-      <UserModal open={modalOpen} onClose={() => setModalOpen(false)} user={editingUser} onSaved={reloadAll} />
+      {modalOpen && (
+        <UserModal key={editingUser?.id ?? "none"} open onClose={() => setModalOpen(false)} user={editingUser} onSaved={reloadAll} />
+      )}
     </div>
   );
 }

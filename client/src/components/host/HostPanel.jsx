@@ -348,20 +348,32 @@ function FeedbackStars({ rating }) {
 }
 
 function FeedbackTab({ eventId }) {
-  const [items, setItems] = useState(null);
-  const [loadError, setLoadError] = useState(null);
+  // The response is stored TOGETHER with the event it describes, and "still loading" is
+  // derived from a mismatch between that and the current `eventId`.
+  //
+  // What this replaces: two synchronous setItems(null)/setLoadError(null) calls at the top of
+  // the effect, whose job was to stop one event's feedback rendering under another's heading.
+  // They did that, but only after an extra render pass — and they were the reason the effect
+  // wrote state synchronously at all. Pairing the data with its key gets the same guarantee
+  // from the first render, with no window in which stale items are on screen.
+  const [loaded, setLoaded] = useState({ eventId: null, items: null, error: null });
 
   useEffect(() => {
     if (!eventId) return;
     let cancelled = false;
-    setItems(null);
-    setLoadError(null);
     api
       .get(`/events/${eventId}/feedback`, { params: { role: "viewer" } })
-      .then((res) => { if (!cancelled) setItems(res.data); })
-      .catch((e) => { if (!cancelled) setLoadError(errMsg(e, "Couldn't load feedback")); });
+      .then((res) => { if (!cancelled) setLoaded({ eventId, items: res.data, error: null }); })
+      .catch((e) => {
+        if (!cancelled) setLoaded({ eventId, items: null, error: errMsg(e, "Couldn't load feedback") });
+      });
     return () => { cancelled = true; };
   }, [eventId]);
+
+  // Only trust what was loaded for the event currently being shown.
+  const current = loaded.eventId === eventId ? loaded : null;
+  const items = current ? current.items : null;
+  const loadError = current ? current.error : null;
 
   if (loadError) {
     return (

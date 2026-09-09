@@ -22,6 +22,11 @@ import { Input, Label } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import { fmtDate } from "../../data/events";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 // Literal gradient per accent — Tailwind JIT can't compile interpolated names.
 // (Same convention as the watch-page thumbnails.)
 const THUMB = [
@@ -314,7 +319,7 @@ export default function OrganizationRecordings() {
   const { data, loading, error, reload } = useApi(() =>
     api.get("/organization/recordings").then((r) => r.data)
   );
-  const list = data || [];
+  const list = data || NONE;
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
   const [sort, setSort] = useState("date-desc");
