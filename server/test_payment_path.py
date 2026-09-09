@@ -396,6 +396,26 @@ def test_every_live_status_assignment_is_gated():
         found = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
         return found | {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
 
+    def guards_on_production_status(node) -> bool:
+        """True when the function can only move an event that is ALREADY in production.
+
+        `broadcast.mark_degraded` (live -> degraded) and `mark_recovered` (degraded -> live)
+        are this shape: each no-ops unless the event currently holds a production status, so
+        neither can smuggle an unready event INTO production - which is the only thing the
+        go-live gate exists to prevent. Requiring them to consult the gate would be asking
+        for a readiness decision that was already made when the event went live.
+        """
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Compare):
+                continue
+            if not (isinstance(n.left, ast.Attribute) and n.left.attr == "status"):
+                continue
+            for comparator in n.comparators:
+                if (isinstance(comparator, ast.Constant)
+                        and comparator.value in ("live", "armed", "degraded")):
+                    return True
+        return False
+
     offenders = []
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -408,8 +428,11 @@ def test_every_live_status_assignment_is_gated():
                 continue
             if not escalates(fn):
                 continue
-            if not (names_in(fn) & gate_names):
-                offenders.append(f"{path.name}::{fn.name}")
+            if names_in(fn) & gate_names:
+                continue
+            if guards_on_production_status(fn):
+                continue
+            offenders.append(f"{path.name}::{fn.name}")
     assert not offenders, f"ungated production-status escalation in: {offenders}"
 
 

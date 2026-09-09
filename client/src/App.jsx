@@ -6,6 +6,7 @@ import { roleHome } from "./auth/roleHome";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { PageSpinner } from "./ui/Spinner";
 import RoleRoute from "./components/RoleRoute";
+import EventConsoleRoute from "./components/EventConsoleRoute";
 import MainLayout from "./layouts/MainLayout";
 import OrganizationLayout from "./layouts/OrganizationLayout";
 import AdminLayout from "./layouts/AdminLayout";
@@ -30,7 +31,12 @@ import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
 import SpeakerBackstage from "./pages/speaker/Backstage";
 import Landing from "./pages/Landing";
+import MyEvents from "./pages/MyEvents";
 import Contact from "./pages/Contact";
+import Status from "./pages/Status";
+import Trust from "./pages/Trust";
+import SecurityReport from "./pages/SecurityReport";
+import EmailPreferences from "./pages/EmailPreferences";
 
 // Super Admin console — code-split as one area. Only super admins can reach /admin/*, so
 // shipping these 14 pages (plus their charts and tables) in the main bundle made every
@@ -130,8 +136,11 @@ const legacyStubs = [
 export default function App() {
   return (
     <ThemeProvider>
-      <AuthProvider>
-        <BrowserRouter>
+      {/* BrowserRouter wraps AuthProvider (not the other way round) so the provider can
+          navigate on logout and on a session that expires mid-visit. Nothing outside
+          <Routes> consumes auth, so the swap changes nothing else. */}
+      <BrowserRouter>
+        <AuthProvider>
           <Routes>
             {/* Public landing page */}
             <Route path="/" element={<LandingOrDashboard />} />
@@ -140,6 +149,25 @@ export default function App() {
                 Deliberately NOT behind LandingOrDashboard: a signed-in operator should still
                 be able to reach it without being bounced to their dashboard. */}
             <Route path="/contact" element={<Contact />} />
+
+            {/* Public status page. Unauthenticated by design and NOT behind
+                LandingOrDashboard: it is what every STS-001..006 email links to, and a
+                status page that needs a session is useless during an outage that stops
+                people signing in. It also carries the subscription confirm/manage
+                links (/status?confirm=..., /status?t=...). */}
+            <Route path="/status" element={<Status />} />
+
+            {/* Trust Center and the marketing preference centre. Public and NOT
+                behind LandingOrDashboard, for the same reason /status is not: a
+                security researcher has no account here, a vendor-security reviewer
+                at a prospect does not either, and requiring a login to unsubscribe
+                is what makes people report mail as spam instead. Every one of these
+                paths is the CTA of an email we send, so a missing route here is a
+                dead link in a security advisory. */}
+            <Route path="/trust" element={<Trust />} />
+            <Route path="/security/report/:reference" element={<SecurityReport />} />
+            <Route path="/preferences" element={<EmailPreferences mode="preferences" />} />
+            <Route path="/unsubscribe" element={<EmailPreferences mode="unsubscribe" />} />
 
             {/* Authentication — one login for every role; brand panel shared via AuthLayout.
                 All dummy: no API calls. After login, roleHome() picks the dashboard. */}
@@ -185,7 +213,19 @@ export default function App() {
                 retire_moderator_role.py has run everywhere and no `users.role` row carries
                 the value. */}
             <Route element={<RoleRoute allow={["host", "moderator", "org_admin", "super_admin"]} />}>
-              <Route path="/host/dashboard" element={<HostDashboard />} />
+              {/* RoleRoute (outer) answers "may this ACCOUNT use consoles at all".
+                  EventConsoleRoute answers the question it cannot: "does this person run
+                  THIS event?" — a server-confirmed EventAssignment, checked per event id.
+                  Without it a host-persona account reached the Producer Console for an
+                  event it had no claim on, read-only, which was the reported bug.
+
+                  There is deliberately no /moderator/dashboard route inside this guard: the
+                  separate moderator console was retired (LegacyModeratorRedirect above
+                  forwards its old URL here, carrying ?event=<id>), so the host console is
+                  the only event console this group protects. */}
+              <Route element={<EventConsoleRoute capability={["can_host", "can_moderate"]} />}>
+                <Route path="/host/dashboard" element={<HostDashboard />} />
+              </Route>
             </Route>
 
             {/* Compatibility redirect, not a route: assignment-notification emails sent
@@ -202,7 +242,9 @@ export default function App() {
                 server-side (can_contribute from resolve_ctx); this route gate only stops a
                 wrong-role visitor from loading the page shell. */}
             <Route element={<RoleRoute allow={["speaker", "org_admin", "super_admin"]} />}>
-              <Route path="/speaker/backstage" element={<SpeakerBackstage />} />
+              <Route element={<EventConsoleRoute capability="can_contribute" />}>
+                <Route path="/speaker/backstage" element={<SpeakerBackstage />} />
+              </Route>
             </Route>
 
             {/* Super admin (platform) area */}
@@ -235,10 +277,26 @@ export default function App() {
               </Route>
             </Route>
 
+            {/* The organization dashboard is open to ANY member of the organization, not
+                just admins — which is what stops the bounce loop that produced the reported
+                bug. When it was admin-only, a host/moderator/speaker/billing_admin/viewer
+                account that asked for it was rejected by RoleRoute and sent to its own
+                accountHome; with the host persona's home being an event console, that landed
+                them in a Producer Console for an event they were not assigned to.
+
+                It is also what the BACKEND already allows: /organization/overview and
+                /console-state authorize with `get_my_org` (any member), not with
+                require_org_admin, so this closes a gap between the two rather than opening
+                one. Every genuinely admin-only page stays in the admin group below. */}
+            <Route element={<ProtectedRoute />}>
+              <Route element={<OrganizationLayout />}>
+                <Route path="/organization/dashboard" element={<OrganizationDashboard />} />
+              </Route>
+            </Route>
+
             {/* Organization admin area */}
             <Route element={<RoleRoute allow={["org_admin"]} />}>
               <Route element={<OrganizationLayout />}>
-                <Route path="/organization/dashboard" element={<OrganizationDashboard />} />
                 <Route path="/organization/events" element={<OrganizationEvents />} />
                 <Route path="/organization/recordings" element={<OrganizationRecordings />} />
                 <Route path="/organization/analytics" element={<OrganizationAnalytics />} />
@@ -262,6 +320,13 @@ export default function App() {
             </Route>
 
             {/* Legacy generic dashboard for other roles (moved off "/" so the homepage can live there) */}
+            {/* Where a host/moderator/speaker PERSONA lands after login. Their account role
+                says what they do, not which event they run, so they choose from the events
+                they are actually assigned to. */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/events/mine" element={<MyEvents />} />
+            </Route>
+
             <Route element={<ProtectedRoute />}>
               <Route element={<MainLayout />}>
                 <Route path="/dashboard" element={<Dashboard />} />
@@ -273,8 +338,8 @@ export default function App() {
 
             <Route path="*" element={<RootRedirect />} />
           </Routes>
-        </BrowserRouter>
-      </AuthProvider>
+        </AuthProvider>
+      </BrowserRouter>
     </ThemeProvider>
   );
 }

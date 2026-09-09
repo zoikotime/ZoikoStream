@@ -41,6 +41,9 @@ export default function OrganizationLayout() {
 
   const [filters, setFilters] = useState({ workspace: null, range: "24h" });
   const [scoped, setScoped] = useState(false);
+  // Set by the page that wants the topbar's Quick Actions menu (Profile). Kept here beside
+  // `scoped` because both are "which topbar controls does the current page want".
+  const [quickActions, setQuickActions] = useState(false);
   const [collapsed, setCollapsed] = useState(readCollapsed);
 
   const toggleCollapsed = useCallback(() => {
@@ -58,11 +61,14 @@ export default function OrganizationLayout() {
   // A page opts into the topbar's scope controls by calling this; pages that don't
   // (Events, Settings…) leave the controls hidden instead of showing dead ones.
   const enableScope = useCallback(() => setScoped(true), []);
+  const enableQuickActions = useCallback(() => setQuickActions(true), []);
 
   const unknown = Boolean(error) || (!state && !loading);
 
   return (
-    <OrgScopeContext.Provider value={{ filters, setFilters, enableScope, state, reload }}>
+    <OrgScopeContext.Provider
+      value={{ filters, setFilters, enableScope, enableQuickActions, state, reload }}
+    >
       <AppShell
         surface={`${CONSOLE.page} text-slate-800 dark:text-neutral-200`}
         mainClass="p-4 sm:p-6 lg:px-8 lg:py-7"
@@ -83,6 +89,7 @@ export default function OrganizationLayout() {
             onRetry={reload}
             filters={scoped ? filters : undefined}
             onFilters={scoped ? setFilters : undefined}
+            quickActions={quickActions}
           />
         )}
       />

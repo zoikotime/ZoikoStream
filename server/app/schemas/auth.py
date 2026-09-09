@@ -82,6 +82,26 @@ class StepUpOut(BaseModel):
 
 
 class UserOut(BaseModel):
+    """The signed-in account.
+
+    ── ROLE SEMANTICS ───────────────────────────────────────────────────────────────────
+    `role` is the ACCOUNT role from models/user.ROLES and stays as-is, because a dozen
+    callers read it. What it is NOT is an event role: a value of "host" means "this person
+    produces broadcasts", never "this person runs event X". Which events somebody runs is
+    EventAssignment, resolved per event through GET /events/{event_id}/assignment.
+
+    `platform_role` and `organization_role` split that single field into the two questions a
+    client actually asks, so no consumer has to infer one from the other:
+
+        platform_role      "super_admin", or null. Authority over the PLATFORM.
+        organization_role  the caller's standing in their own organization, including
+                           "owner" — which `role` cannot express at all, because ownership
+                           is Organization.owner_user_id and not a ROLES value.
+
+    Deliberately absent: any event role. Adding one here would invite exactly the mistake
+    this shape exists to prevent — treating a per-event assignment as an account property.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -91,6 +111,8 @@ class UserOut(BaseModel):
     role: str
     org_id: uuid.UUID
     organization_name: str | None = None
+    platform_role: str | None = None
+    organization_role: str | None = None
 
 
 class TokenOut(BaseModel):

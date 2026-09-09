@@ -74,9 +74,18 @@ export default function AcceptInvitation() {
         full_name: name.trim(),
         password,
       });
-      setSession(data);
+      // Awaited for the same reason as Login: setSession confirms the token with
+      // GET /auth/me, so the destination is the server's answer and the route is not
+      // entered while auth state is still resolving.
+      const account = await setSession(data);
+      if (!account) {
+        notify.error("Your account was created, but the session could not be confirmed. "
+                     + "Please sign in.");
+        navigate("/login", { replace: true });
+        return;
+      }
       notify.success("Welcome to ZoikoStream!");
-      navigate(roleHome(data.user.role) || "/", { replace: true });
+      navigate(roleHome(account.role) || "/", { replace: true });
     } catch (error) {
       notify.error(errMsg(error, "Couldn't accept this invitation."));
     } finally {

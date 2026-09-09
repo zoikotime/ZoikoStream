@@ -510,9 +510,95 @@ _IDENTITY_CHALLENGE_COLUMNS = [
 ]
 
 
+# -- ZST-EC-001 LVE-003 - approved-event and team announcement markers -------------------
+_LVE_EVENT_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS approved_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS team_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS team_signature VARCHAR(500)",
+    "ADD COLUMN IF NOT EXISTS team_display VARCHAR(500)",
+]
+
+# ZST-EC-001 SEC-002 - post-access review deadline on the EXISTING support_access_requests
+# row. The independent countersign and the enforced elevation expiry already existed; only
+# the review obligation's deadline and outcome were missing.
+_SEC_SUPPORT_ACCESS_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS review_due_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS reviewed_by_id UUID",
+    "ADD COLUMN IF NOT EXISTS review_outcome VARCHAR(300)",
+    "ADD COLUMN IF NOT EXISTS breakglass_started_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS breakglass_ended_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS review_overdue_notified_at TIMESTAMPTZ",
+]
+
+
+# ZST-EC-001 SUP-001 .. SUP-004 - support case lifecycle on the EXISTING support_tickets
+# table. Every column is nullable or defaulted, so rows worked from the Super Admin console
+# before this change keep behaving identically.
+_SUP_TICKET_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS case_reference VARCHAR(40)",
+    "ADD COLUMN IF NOT EXISTS requester_id UUID",
+    "ADD COLUMN IF NOT EXISTS category VARCHAR(30)",
+    "ADD COLUMN IF NOT EXISTS assigned_owner VARCHAR(80)",
+    "ADD COLUMN IF NOT EXISTS next_update_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS reopened_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS incident_id UUID",
+    "ADD COLUMN IF NOT EXISTS sensitivity VARCHAR(20) NOT NULL DEFAULT 'standard'",
+    "ADD COLUMN IF NOT EXISTS feedback_eligible BOOLEAN NOT NULL DEFAULT TRUE",
+    "ADD COLUMN IF NOT EXISTS internal_notes TEXT",
+    "ADD COLUMN IF NOT EXISTS customer_update TEXT",
+    "ADD COLUMN IF NOT EXISTS pending_action TEXT",
+    "ADD COLUMN IF NOT EXISTS pending_action_due_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS action_version INTEGER NOT NULL DEFAULT 0",
+    "ADD COLUMN IF NOT EXISTS lifecycle_cycle INTEGER NOT NULL DEFAULT 0",
+    "ADD COLUMN IF NOT EXISTS resolution_summary TEXT",
+]
+_SUP_TICKET_STATEMENTS = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_support_tickets_case_reference "
+    "ON support_tickets (case_reference)",
+]
+
+
+# ZST-EC-001 CON-001 / CON-005 - contributor grant link and authoritative session end on the
+# EXISTING contributor_sessions table.
+_CON_SESSION_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS grant_id UUID",
+    "ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS end_reason VARCHAR(20)",
+    "ADD COLUMN IF NOT EXISTS ended_notified_at TIMESTAMPTZ",
+]
+
+
+# LVE-010 operational interruption lifecycle on the EXISTING event_incidents record.
+_LVE_INCIDENT_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS operational_state VARCHAR(20)",
+    "ADD COLUMN IF NOT EXISTS reason_category VARCHAR(40)",
+    "ADD COLUMN IF NOT EXISTS delay_started_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS hold_started_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS resumed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS canceled_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS next_update_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS customer_summary VARCHAR(300)",
+    "ADD COLUMN IF NOT EXISTS delayed_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS hold_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS resumed_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS canceled_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS review_ready_notified_at TIMESTAMPTZ",
+]
+
+# LVE-001 proposal transition markers.
+_LVE_QUOTE_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS proposal_ready_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS accepted_notified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS expired_notified_at TIMESTAMPTZ",
+]
+
+
 # Columns models/event.py no longer declares. See the call site for why they must be relaxed
 # rather than re-added: main deliberately removed them from the model.
-_EVENT_RELAX_NOT_NULL = ("auto_start_recording", "auto_end_event")
+# Only auto_start_recording: models/event.py still declares auto_end_event, so it keeps
+# supplying a value and its NOT NULL is still doing real work.
+_EVENT_RELAX_NOT_NULL = ("auto_start_recording",)
 
 
 def _relax_not_null(table: str, column: str) -> str:
@@ -612,6 +698,27 @@ _MED_REPLAY_COLUMNS = [
 ]
 
 
+# ── ZST-EC-001 TRU-001 / MKT-001 ────────────────────────────────────────────────────────
+# Advisory routing on an EXISTING table. Defaults TRUE because verifying a security contact
+# is itself the opt-in for security mail; the flag only lets an organization route advisories
+# to the subset of verified contacts that handles patching.
+_TRU_SECURITY_CONTACT_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS advisory_subscribed BOOLEAN NOT NULL DEFAULT TRUE",
+]
+
+# Release approval. `notes` stays internal; a release is distributable only once somebody
+# writes `customer_summary` and somebody approves it. DEFAULT FALSE matters: every release
+# already in the changelog must stay undistributable until a person says otherwise.
+_MKT_RELEASE_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS customer_summary TEXT",
+    "ADD COLUMN IF NOT EXISTS customer_visible BOOLEAN NOT NULL DEFAULT FALSE",
+    "ADD COLUMN IF NOT EXISTS documentation_path VARCHAR(300)",
+    "ADD COLUMN IF NOT EXISTS rollout_status VARCHAR(60)",
+    "ADD COLUMN IF NOT EXISTS approved_by UUID",
+    "ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ",
+]
+
+
 def ensure_schema():
     """Create any missing tables and add any missing columns. Idempotent — safe to re-run."""
     print("Creating tables...")
@@ -657,6 +764,20 @@ def ensure_schema():
             # an empty database used to fail here. Postgres has no ALTER COLUMN IF EXISTS,
             # so the guard is explicit.
             conn.execute(text(_relax_not_null("event_registrations", col)))
+        for clause in _LVE_EVENT_COLUMNS:
+            conn.execute(text(f"ALTER TABLE events {clause}"))
+        for clause in _LVE_QUOTE_COLUMNS:
+            conn.execute(text(f"ALTER TABLE commercial_quotes {clause}"))
+        for clause in _LVE_INCIDENT_COLUMNS:
+            conn.execute(text(f"ALTER TABLE event_incidents {clause}"))
+        for clause in _CON_SESSION_COLUMNS:
+            conn.execute(text(f"ALTER TABLE contributor_sessions {clause}"))
+        for clause in _SEC_SUPPORT_ACCESS_COLUMNS:
+            conn.execute(text(f"ALTER TABLE support_access_requests {clause}"))
+        for clause in _SUP_TICKET_COLUMNS:
+            conn.execute(text(f"ALTER TABLE support_tickets {clause}"))
+        for stmt in _SUP_TICKET_STATEMENTS:
+            conn.execute(text(stmt))
         for col in _EVENT_RELAX_NOT_NULL:
             # Same legacy problem, one table over, surfaced by merging main. main removed
             # `auto_start_recording` / `auto_end_event` from models/event.py, but the columns
@@ -737,6 +858,10 @@ def ensure_schema():
         # The orphan-`events` DROP NOT NULL pass that the other side of this merge put here is
         # deliberately absent: the `_EVENT_RELAX_NOT_NULL` loop earlier in this function does the
         # same guarded relax on the same table and covers a superset of the columns.
+        for clause in _TRU_SECURITY_CONTACT_COLUMNS:
+            conn.execute(text(f"ALTER TABLE organization_security_contacts {clause}"))
+        for clause in _MKT_RELEASE_COLUMNS:
+            conn.execute(text(f"ALTER TABLE releases {clause}"))
     print("Schema ready!")
 
 

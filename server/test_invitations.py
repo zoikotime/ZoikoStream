@@ -72,15 +72,27 @@ def test_soft_delete_sets_marker_and_deactivates():
 
 def test_authorization_gating():
     client = TestClient(m.app)
-    public = {"/organization/invitations/accept", "/organization/invitations/reject"}
+    # Token-redemption routes: reachable without a session by design, because the token IS
+    # the credential. With no token in the body they answer 422, not 401.
+    public_token = {"/organization/invitations/accept", "/organization/invitations/reject",
+                    "/organization/invitations/preview",
+                    "/organization/security-contacts/verify"}
+    # Pricing tiers are deliberately readable without a session (the public Billing page
+    # renders them) and expose only active plans.
+    public_open = {"/organization/plans"}
     for r in orgr.routes:
         for method in sorted(x for x in r.methods if x != "HEAD"):
-            resp = client.request(method, r.path.replace("{user_id}", "11111111-1111-1111-1111-111111111111")
-                                              .replace("{invitation_id}", "11111111-1111-1111-1111-111111111111"),
-                                  json={})
-            if r.path in public:
+            # The "/api" prefix matters: without it the request falls through to the SPA
+            # catch-all, which answers 200 with index.html and proves nothing about auth.
+            path = "/api" + r.path.replace(
+                "{user_id}", "11111111-1111-1111-1111-111111111111").replace(
+                "{invitation_id}", "11111111-1111-1111-1111-111111111111")
+            resp = client.request(method, path, json={})
+            if r.path in public_token:
                 # public + reachable without a token → body validation (missing token), not 401
                 assert resp.status_code == 422, f"{r.path} should be public, got {resp.status_code}"
+            elif r.path in public_open:
+                assert resp.status_code == 200, f"{r.path} should be public, got {resp.status_code}"
             else:
                 assert resp.status_code == 401, f"{method} {r.path} unprotected: {resp.status_code}"
 

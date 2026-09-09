@@ -54,6 +54,14 @@ from ..models import (
 )
 from . import admin as admin_svc
 from . import ops as ops_svc
+# `engagement_score` is imported lazily inside analytics() rather than here. There is a real
+# module cycle - org -> broadcast -> webhooks -> webhook_lifecycle -> org_comms -> org - and
+# a module-level `from .broadcast import <name>` is the one form of it that cannot survive:
+# every other edge imports a module OBJECT, which tolerates partial initialization, whereas
+# binding a NAME requires broadcast to be fully executed. Importing app.main happened to
+# resolve the cycle in a working order, so this only ever surfaced when a caller imported
+# app.routers.events (or app.services.org) first - which is exactly what test_broadcast.py
+# and test_commercial_lifecycle.py do.
 
 # Ranges the overview toolbar offers. Mirrors the console's vocabulary.
 RANGES = {"1h": timedelta(hours=1), "24h": timedelta(hours=24),
@@ -409,7 +417,8 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
     from .broadcast import engagement_score
 
     def event_engagement(info: dict) -> int:
-        from .broadcast import engagement_score
+        # `engagement_score` comes from the deferred import above — both sides of the merge
+        # added the same lazy import independently, and one is enough for the closure.
         return engagement_score(
             {"messages": info["messages"], "questions": info["questions"],
              "poll_votes": 0, "reactions": info["reactions"]}, info["peak"])

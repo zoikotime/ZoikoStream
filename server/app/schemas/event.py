@@ -263,3 +263,89 @@ class ViewerInvite(BaseModel):
 
 class ViewerInviteCreate(BaseModel):
     invites: list[ViewerInvite] = Field(..., min_length=1, max_length=100)
+
+
+# -- Event intake / planning / rehearsal (ZST-EC-001 LVE-002 / LVE-004 / LVE-005) --------
+
+class IntakeOpen(BaseModel):
+    owner_id: uuid.UUID | None = None
+    due_at: datetime | None = None
+
+
+class IntakeReopen(BaseModel):
+    sections: list[str]
+    reason: str | None = Field(None, max_length=300)
+    due_at: datetime | None = None
+
+
+class PlanningUpdate(BaseModel):
+    status: str | None = None
+    assigned_to: uuid.UUID | None = None
+    due_at: datetime | None = None
+    blocking: bool | None = None
+    outstanding: list[str] | None = None
+
+
+class RehearsalCreate(BaseModel):
+    scheduled_at: datetime
+    purpose: str | None = Field(None, max_length=300)
+
+
+class RehearsalOutcome(BaseModel):
+    validated: list[str] = []
+    outstanding: list[str] = []
+    repeat_required: bool = False
+    repeat_reason: str | None = Field(None, max_length=300)
+    next_rehearsal_at: datetime | None = None
+    outcome: str | None = None
+
+
+# -- Event brief / incidents (ZST-EC-001 LVE-007 / LVE-010) ------------------------------
+
+class IncidentStateIn(BaseModel):
+    state: str
+    reason_category: str
+    summary: str | None = Field(None, max_length=300)
+    # Only set when an operator genuinely commits to a time. Absent means the message makes
+    # no next-update promise at all.
+    next_update_at: datetime | None = None
+
+
+class IncidentCancelIn(BaseModel):
+    reason_category: str
+    summary: str | None = Field(None, max_length=300)
+
+
+# -- Event contributors (ZST-EC-001 CON-001 .. CON-005) -----------------------------------
+
+class ContributorInvite(BaseModel):
+    # EMAIL, not a user id: an external contributor has no platform account.
+    email: EmailStr
+    role: str
+    display_name: str | None = Field(None, max_length=200)
+    expires_at: datetime | None = None
+    technical_check_required: bool = True
+    rehearsal_required: bool = False
+
+
+class ContributorRevoke(BaseModel):
+    reason: str | None = Field(None, max_length=200)
+
+
+class ContributorAccept(BaseModel):
+    token: str = Field(..., min_length=16, max_length=200)
+
+
+class TechnicalCheckIn(BaseModel):
+    """Real browser capability results, same shape as the existing preflight payload."""
+    browser_supported: bool = False
+    camera_ok: bool = False
+    mic_ok: bool = False
+    speaker_ok: bool = False
+    framing_ok: bool = False
+    # Unverified self-report: there is no measured network test in this product.
+    network_quality: str | None = Field(None, max_length=40)
+
+
+class SessionEndIn(BaseModel):
+    reason: str

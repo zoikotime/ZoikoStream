@@ -1,7 +1,7 @@
 import base64
 import html
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
@@ -3313,7 +3313,13 @@ def send_payment_failed_email(to: str, name: str, event_title: str, amount: str,
     lines = [f"A payment attempt for <strong>{safe_title}</strong> was not successful."]
     if reason:
         lines.append(f"Reason: {html.escape(reason)}")
-    lines.append("No charge was made. Please try again or contact us for help.")
+    # ZST-EC-001 COM-007. This previously appended "No charge was made." unconditionally, on
+    # every failure, whatever the provider had actually done - so a customer whose card was
+    # authorized and then failed at capture was told no charge existed while their bank showed
+    # a hold. The strong claim now lives ONLY in services/commerce_comms, where
+    # charge_position() derives it from committed Payment state. This legacy sender has no
+    # access to that state, so it says the safe thing.
+    lines.append("Please try again or contact us for help.")
     _send(to, f"Payment issue: {event_title}", _commercial_html(
         "Payment couldn't be completed", name, lines,
         rows=[("Amount", f"{currency} {amount}")],
@@ -3535,3 +3541,2887 @@ if __name__ == "__main__":
         send_replay_available_email("nobody@example.com", "<script>", "<b>Ev</b>", "https://x/watch")
         send_refund_credit_email("nobody@example.com", "<script>", "<b>Ev</b>", "20.00", "USD", "fee_waiver", "https://x/o")
     print("ok")
+
+
+# == LVE-001 .. LVE-005 - live event operations ==========================================
+# Customer-facing event and commercial communications. Every one of these reports committed
+# proposal, intake, event, planning or rehearsal state.
+#
+# `[TEST MODE]` reuses media_subject() and therefore Organization.is_test - a real stored
+# flag. Events carry no separate test/live mode of their own, which is reported as an
+# unsupported requirement rather than inferred from a hostname or an event name.
+#
+# No template here accepts a contributor joining token, a LiveKit token, an access-link
+# token or a stream key. There is no parameter that could carry one.
+
+SENDER_EVENTS = "Zoiko Steam Event Operations"
+
+
+def event_url(event_id: str) -> str:
+    """Authenticated customer console for one event.
+
+    No PII and no token in the URL: the event id is an opaque UUID, and the page behind it
+    is behind the normal session check. Never an admin/Super Admin path.
+    """
+    return f"{public_base_url()}/organization/events/{event_id}"
+
+
+def _lve_send(to, subject, header, headline, preheader, rows, body, cta, url, footer,
+              test_mode):
+    """One shell for every LVE message: HTML + plain text, safe CTA, named sender."""
+    return _send(
+        to, media_subject(subject, test_mode),
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, SENDER_EVENTS),
+        sender=_sender_identity(SENDER_EVENTS),
+    )
+
+
+def _bullets(items) -> str:
+    return "; ".join(str(i) for i in items) if items else "None"
+
+
+# -- LVE-001 Proposal and booking lifecycle ----------------------------------------------
+
+LVE_001_READY_SUBJECT = "Your Zoiko Steam event proposal is ready"
+LVE_001_ACCEPTED_SUBJECT = "Your Zoiko Steam event booking is confirmed"
+LVE_001_CHANGED_SUBJECT = "Your Zoiko Steam event booking changed"
+LVE_001_EXPIRED_SUBJECT = "Your Zoiko Steam event proposal expired"
+LVE_001_PREHEADER = "Review the scope, responsibilities and validity period."
+
+
+def send_proposal_ready_email(to, *, name, event_title, reference, scope, services,
+                              customer_responsibilities, zoiko_responsibilities, assumptions,
+                              amount, valid_until, validity_note, event_id, org_name,
+                              test_mode=False):
+    body = (f"Hi {name}, the proposal for {event_title} is ready for your review. It is not a "
+            f"booking yet - the event is only booked once the proposal is accepted.")
+    rows = [("Event", event_title), ("Proposal reference", reference),
+            ("Organization", org_name), ("Approved scope", scope),
+            ("Included services", _bullets(services)),
+            ("Your responsibilities", _bullets(customer_responsibilities)),
+            ("Zoiko Steam responsibilities", _bullets(zoiko_responsibilities)),
+            ("Assumptions", _bullets(assumptions)),
+            ("Amount", amount), ("Valid until", valid_until)]
+    return _lve_send(to, LVE_001_READY_SUBJECT, "Proposal ready",
+                     "Your event proposal is ready.", LVE_001_PREHEADER, rows, body,
+                     "Review proposal", event_url(event_id), validity_note, test_mode)
+
+
+def send_booking_accepted_email(to, *, name, event_title, reference, accepted_at, scope,
+                                services, event_owner, commercial_contact, same_person,
+                                next_step, event_id, org_name, test_mode=False):
+    body = (f"Hi {name}, the booking for {event_title} was accepted at {accepted_at}. "
+            f"The event is now confirmed.")
+    contact_row = ("Commercial contact",
+                   commercial_contact + (" (also the event owner)" if same_person else ""))
+    rows = [("Event", event_title), ("Reference", reference), ("Organization", org_name),
+            ("Accepted", accepted_at), ("Confirmed scope", scope),
+            ("Included services", _bullets(services)),
+            ("Event owner", event_owner), contact_row, ("Next step", next_step)]
+    return _lve_send(to, LVE_001_ACCEPTED_SUBJECT, "Booking confirmed",
+                     "Your event booking is confirmed.", LVE_001_PREHEADER, rows, body,
+                     "Open event", event_url(event_id), next_step, test_mode)
+
+
+def send_booking_changed_email(to, *, name, event_title, reference, previous_summary,
+                               current_summary, effective_at, event_id, org_name,
+                               test_mode=False):
+    body = (f"Hi {name}, an approved change to the booking for {event_title} took effect at "
+            f"{effective_at}.")
+    rows = [("Event", event_title), ("Change reference", reference),
+            ("Organization", org_name), ("Previous", previous_summary),
+            ("Current", current_summary), ("Effective", effective_at)]
+    return _lve_send(to, LVE_001_CHANGED_SUBJECT, "Booking changed",
+                     "Your event booking changed.", LVE_001_PREHEADER, rows, body,
+                     "Review booking", event_url(event_id),
+                     "This change has already been approved and committed.", test_mode)
+
+
+def send_proposal_expired_email(to, *, name, event_title, reference, expired_at,
+                                reissue_note, event_id, org_name, test_mode=False):
+    body = (f"Hi {name}, the proposal for {event_title} expired at {expired_at} and can no "
+            f"longer be accepted.")
+    rows = [("Event", event_title), ("Proposal reference", reference),
+            ("Organization", org_name), ("Expired", expired_at)]
+    return _lve_send(to, LVE_001_EXPIRED_SUBJECT, "Proposal expired",
+                     "Your event proposal expired.", LVE_001_PREHEADER, rows, body,
+                     "Open event", event_url(event_id), reissue_note, test_mode)
+
+
+# -- LVE-002 Event intake lifecycle -------------------------------------------------------
+
+LVE_002_OPENED_SUBJECT = "Action required: complete your Zoiko Steam event intake"
+LVE_002_REMINDER_SUBJECT = "Reminder: your Zoiko Steam event intake is due"
+LVE_002_INCOMPLETE_SUBJECT = "Action required: your Zoiko Steam event intake is incomplete"
+LVE_002_COMPLETED_SUBJECT = "Your Zoiko Steam event intake is complete"
+LVE_002_REOPENED_SUBJECT = "Action required: your Zoiko Steam event intake was reopened"
+LVE_002_PREHEADER = "Complete the required sections in your event console."
+LVE_002_CTA = "Complete intake"
+LVE_002_FOOTER = ("Sign in to complete the intake. The link opens your event in the Zoiko "
+                  "Steam console and carries no personal details.")
+
+
+def send_intake_opened_email(to, *, name, event_title, opened_at, due_at, sections,
+                             event_id, org_name, test_mode=False):
+    body = (f"Hi {name}, the event intake for {event_title} is open. We need these details "
+            f"before planning can begin.")
+    rows = [("Event", event_title), ("Organization", org_name), ("Opened", opened_at),
+            ("Due", due_at), ("Required sections", _bullets(sections))]
+    return _lve_send(to, LVE_002_OPENED_SUBJECT, "Event intake",
+                     "Please complete your event intake.", LVE_002_PREHEADER, rows, body,
+                     LVE_002_CTA, event_url(event_id), LVE_002_FOOTER, test_mode)
+
+
+def send_intake_reminder_email(to, *, name, event_title, due_at, sections, event_id,
+                               org_name, test_mode=False):
+    body = f"Hi {name}, the event intake for {event_title} is due at {due_at}."
+    rows = [("Event", event_title), ("Organization", org_name), ("Due", due_at),
+            ("Still needed", _bullets(sections))]
+    return _lve_send(to, LVE_002_REMINDER_SUBJECT, "Intake reminder",
+                     "Your event intake is due soon.", LVE_002_PREHEADER, rows, body,
+                     LVE_002_CTA, event_url(event_id), LVE_002_FOOTER, test_mode)
+
+
+def send_intake_incomplete_email(to, *, name, event_title, due_at, sections, event_id,
+                                 org_name, test_mode=False):
+    body = (f"Hi {name}, the event intake for {event_title} is missing required information.")
+    rows = [("Event", event_title), ("Organization", org_name), ("Due", due_at),
+            ("Missing", _bullets(sections))]
+    return _lve_send(to, LVE_002_INCOMPLETE_SUBJECT, "Intake incomplete",
+                     "Your event intake is incomplete.", LVE_002_PREHEADER, rows, body,
+                     LVE_002_CTA, event_url(event_id), LVE_002_FOOTER, test_mode)
+
+
+def send_intake_completed_email(to, *, name, event_title, completed_at, sections, event_id,
+                                org_name, test_mode=False):
+    body = (f"Hi {name}, the event intake for {event_title} was validated and completed at "
+            f"{completed_at}.")
+    rows = [("Event", event_title), ("Organization", org_name), ("Completed", completed_at),
+            ("Validated sections", _bullets(sections))]
+    return _lve_send(to, LVE_002_COMPLETED_SUBJECT, "Intake complete",
+                     "Your event intake is complete.", LVE_002_PREHEADER, rows, body,
+                     "Open event", event_url(event_id),
+                     "Planning continues from here. We will contact you if anything else is "
+                     "needed.", test_mode)
+
+
+def send_intake_reopened_email(to, *, name, event_title, reopened_at, due_at, sections,
+                               reason, event_id, org_name, test_mode=False):
+    body = (f"Hi {name}, the event intake for {event_title} was reopened at {reopened_at} "
+            f"because some details need updating.")
+    rows = [("Event", event_title), ("Organization", org_name), ("Reopened", reopened_at),
+            ("New due date", due_at), ("Sections to update", _bullets(sections)),
+            ("Reason", reason)]
+    return _lve_send(to, LVE_002_REOPENED_SUBJECT, "Intake reopened",
+                     "Your event intake was reopened.", LVE_002_PREHEADER, rows, body,
+                     LVE_002_CTA, event_url(event_id), LVE_002_FOOTER, test_mode)
+
+
+# -- LVE-003 Event details and assigned team ----------------------------------------------
+
+LVE_003_APPROVED_SUBJECT = "Your Zoiko Steam event is confirmed"
+LVE_003_TEAM_ASSIGNED_SUBJECT = "Your Zoiko Steam event team has been assigned"
+LVE_003_TEAM_CHANGED_SUBJECT = "Your Zoiko Steam event team changed"
+LVE_003_PREHEADER = "Review the confirmed details for your event."
+
+
+def send_event_approved_email(to, *, name, event_title, reference, start_at, end_at, zone,
+                              local_note, delivery_model, access_model, contributor_plan,
+                              recording_requirement, replay_policy, team, event_id, org_name,
+                              test_mode=False):
+    body = (f"Hi {name}, {event_title} is confirmed. These are the details we will deliver "
+            f"against.")
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Organization", org_name), ("Starts", start_at), ("Ends", end_at),
+            ("Event timezone", zone), ("Delivery", delivery_model),
+            ("Audience access", access_model), ("Contributors", contributor_plan),
+            ("Recording", recording_requirement), ("Replay", replay_policy),
+            ("Assigned team", _bullets(team))]
+    return _lve_send(to, LVE_003_APPROVED_SUBJECT, "Event confirmed",
+                     "Your event is confirmed.", LVE_003_PREHEADER, rows, body,
+                     "Open event", event_url(event_id), local_note, test_mode)
+
+
+def send_event_team_email(to, *, name, variant, event_title, reference, previous_team,
+                          current_team, effective_at, primary_contact, event_id, org_name,
+                          test_mode=False):
+    assigned = variant == "assigned"
+    subject = (LVE_003_TEAM_ASSIGNED_SUBJECT if assigned
+               else LVE_003_TEAM_CHANGED_SUBJECT)
+    headline = ("Your event team has been assigned." if assigned
+                else "Your event team changed.")
+    body = (f"Hi {name}, the team for {event_title} "
+            + ("has been assigned." if assigned else "changed.")
+            + f" This took effect at {effective_at}.")
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Organization", org_name)]
+    if not assigned:
+        rows.append(("Previous", previous_team))
+    rows += [("Current", current_team), ("Effective", effective_at),
+             ("Primary operational contact", primary_contact)]
+    return _lve_send(to, subject, "Event team", headline, LVE_003_PREHEADER, rows, body,
+                     "Open event", event_url(event_id),
+                     "Only the people assigned to your event are listed here.", test_mode)
+
+
+# -- LVE-004 Planning actions required ----------------------------------------------------
+
+LVE_004_SUBJECTS = {
+    "contributors": "Action required: complete contributor planning for {event}",
+    "audience_access": "Action required: complete audience-access planning for {event}",
+    "accessibility": "Action required: complete accessibility planning for {event}",
+    "recording_replay": "Action required: complete recording and replay planning for {event}",
+}
+LVE_004_PREHEADER = "One planning action is outstanding for your event."
+
+
+def send_planning_action_email(to, *, name, category, category_label, event_title,
+                               outstanding, assigned_owner, due_at, blocking, extra_note,
+                               event_id, org_name, test_mode=False):
+    subject = LVE_004_SUBJECTS[category].format(event=event_title)
+    body = (f"Hi {name}, {category_label.lower()} planning for {event_title} is not complete "
+            f"yet. You are recorded as the owner of this action.")
+    rows = [("Event", event_title), ("Organization", org_name),
+            ("Planning area", category_label),
+            ("Outstanding", _bullets(outstanding)),
+            ("Action owner", assigned_owner), ("Due", due_at),
+            ("Blocking", "Yes - the event cannot proceed until this is resolved"
+                         if blocking else "No")]
+    footer = extra_note or ("Complete this in your event console. Only the owner of this "
+                            "action receives this message.")
+    return _lve_send(to, subject, "Planning action required",
+                     f"{category_label} planning is outstanding.", LVE_004_PREHEADER, rows,
+                     body, "Complete planning", event_url(event_id), footer, test_mode)
+
+
+# -- LVE-005 Rehearsal lifecycle ----------------------------------------------------------
+
+LVE_005_SCHEDULED_SUBJECT = "Zoiko Steam rehearsal scheduled for {event}"
+LVE_005_REMINDER_SUBJECT = "Reminder: Zoiko Steam rehearsal for {event}"
+LVE_005_COMPLETED_SUBJECT = "Zoiko Steam rehearsal completed for {event}"
+LVE_005_REPEAT_SUBJECT = "Action required: another rehearsal is needed for {event}"
+LVE_005_PREHEADER = "Rehearsal details for your event."
+LVE_005_CTA = "Open event"
+
+
+def send_rehearsal_scheduled_email(to, *, name, event_title, scheduled_at, zone, local_note,
+                                   purpose, expected, joining, event_id, org_name,
+                                   test_mode=False):
+    body = (f"Hi {name}, a rehearsal for {event_title} is scheduled for {scheduled_at}.")
+    rows = [("Event", event_title), ("Organization", org_name),
+            ("Rehearsal", scheduled_at), ("Event timezone", zone), ("Purpose", purpose),
+            ("Expected participants", _bullets(expected)), ("Joining", joining)]
+    return _lve_send(to, LVE_005_SCHEDULED_SUBJECT.format(event=event_title), "Rehearsal",
+                     "A rehearsal is scheduled.", LVE_005_PREHEADER, rows, body,
+                     LVE_005_CTA, event_url(event_id), local_note, test_mode)
+
+
+def send_rehearsal_reminder_email(to, *, name, event_title, scheduled_at, zone, local_note,
+                                  joining, event_id, org_name, test_mode=False):
+    body = f"Hi {name}, the rehearsal for {event_title} is coming up at {scheduled_at}."
+    rows = [("Event", event_title), ("Organization", org_name),
+            ("Rehearsal", scheduled_at), ("Event timezone", zone), ("Joining", joining)]
+    return _lve_send(to, LVE_005_REMINDER_SUBJECT.format(event=event_title), "Rehearsal",
+                     "Your rehearsal is coming up.", LVE_005_PREHEADER, rows, body,
+                     LVE_005_CTA, event_url(event_id), local_note, test_mode)
+
+
+def send_rehearsal_completed_email(to, *, name, event_title, scheduled_at, zone, local_note,
+                                   completed_at, validated, outstanding, next_steps,
+                                   event_id, org_name, test_mode=False):
+    body = f"Hi {name}, the rehearsal for {event_title} completed at {completed_at}."
+    rows = [("Event", event_title), ("Organization", org_name),
+            ("Completed", completed_at), ("Event timezone", zone),
+            ("Validated", _bullets(validated)),
+            ("Outstanding issues", _bullets(outstanding)), ("Next steps", next_steps)]
+    return _lve_send(to, LVE_005_COMPLETED_SUBJECT.format(event=event_title), "Rehearsal",
+                     "The rehearsal is complete.", LVE_005_PREHEADER, rows, body,
+                     LVE_005_CTA, event_url(event_id), local_note, test_mode)
+
+
+def send_rehearsal_repeat_email(to, *, name, event_title, scheduled_at, zone, local_note,
+                                reason, outstanding, next_action, next_at, joining,
+                                event_id, org_name, test_mode=False):
+    body = (f"Hi {name}, the rehearsal for {event_title} did not validate the setup, so "
+            f"another rehearsal is needed.")
+    rows = [("Event", event_title), ("Organization", org_name), ("Reason", reason),
+            ("Unresolved", _bullets(outstanding)), ("Next action", next_action),
+            ("Next rehearsal", next_at), ("Joining", joining)]
+    return _lve_send(to, LVE_005_REPEAT_SUBJECT.format(event=event_title), "Rehearsal",
+                     "Another rehearsal is needed.", LVE_005_PREHEADER, rows, body,
+                     LVE_005_CTA, event_url(event_id), local_note, test_mode)
+
+
+# == LVE-006 .. LVE-012 - readiness, event day, incidents, completion, evidence ==========
+# Same shell, sender and [TEST MODE] rule as LVE-001..005. No template below accepts a
+# LiveKit token, playback token, stream key, contributor credential, API key or admin URL -
+# there is no parameter that could carry one, which is the structural guarantee.
+
+# -- LVE-006 Readiness gate lifecycle -----------------------------------------------------
+
+LVE_006_CONDITIONAL_SUBJECT = "Zoiko Steam event readiness is conditional"
+LVE_006_BLOCKED_SUBJECT = "Action required: {event} is blocked from readiness"
+LVE_006_PASSED_SUBJECT = "{event} passed Zoiko Steam readiness checks"
+LVE_006_REGRESSED_SUBJECT = "Action required: {event} readiness changed"
+LVE_006_PREHEADER = "Review the current readiness position for your event."
+
+
+def send_readiness_email(to, *, name, variant, event_title, reference, current_state,
+                         previous_state, regressed_at, conditions, exceptions, may_proceed,
+                         impact, owners, event_id, org_name, test_mode=False):
+    subject = {
+        "conditional": LVE_006_CONDITIONAL_SUBJECT,
+        "blocked": LVE_006_BLOCKED_SUBJECT.format(event=event_title),
+        "passed": LVE_006_PASSED_SUBJECT.format(event=event_title),
+        "regressed": LVE_006_REGRESSED_SUBJECT.format(event=event_title),
+    }[variant]
+    headline = {
+        "conditional": "Readiness is conditional.",
+        "blocked": "This event is blocked from readiness.",
+        "passed": "This event passed readiness checks.",
+        "regressed": "Readiness has changed and needs attention.",
+    }[variant]
+    body = {
+        "conditional": (f"Hi {name}, {event_title} has cleared readiness only because an "
+                        f"approved exception is carrying it."),
+        "blocked": (f"Hi {name}, {event_title} cannot enter production until the conditions "
+                    f"below are resolved."),
+        "passed": f"Hi {name}, {event_title} has passed every required readiness check.",
+        "regressed": (f"Hi {name}, {event_title} previously passed readiness and no longer "
+                      f"does. This needs attention before the event."),
+    }[variant]
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Organization", org_name), ("Current readiness", current_state)]
+    if variant == "regressed":
+        rows += [("Previous readiness", previous_state), ("Changed at", regressed_at)]
+    rows += [("Outstanding conditions", _bullets(conditions)),
+             # Whether the event may proceed is the readiness ENGINE's own answer, never an
+             # independent judgement made in the message.
+             ("May the event proceed?", "Yes" if may_proceed else "No"),
+             ("Impact", impact),
+             ("Responsible owners", _bullets(owners))]
+    if exceptions:
+        rows.append(("Approved exceptions", _bullets(exceptions)))
+    footer = ("Conditions are shown as the readiness engine reported them. Internal risk and "
+              "detection logic is not included.")
+    return _lve_send(to, subject, "Event readiness", headline, LVE_006_PREHEADER, rows, body,
+                     "Review readiness", event_url(event_id), footer, test_mode)
+
+
+# -- LVE-007 Final event-day brief --------------------------------------------------------
+
+LVE_007_SUBJECT = "Your Zoiko Steam event-day brief is ready"
+LVE_007_PREHEADER = "The approved brief for your event day."
+
+
+def send_event_brief_email(to, *, name, event_title, version, approved_at, starts, zone,
+                           local_note, delivery, audience_access, contributors, recording,
+                           replay, accessibility, team, escalation, event_id, org_name,
+                           test_mode=False):
+    body = (f"Hi {name}, version {version} of the event-day brief for {event_title} has been "
+            f"approved. It is the operational plan we will deliver against.")
+    rows = [("Event", event_title), ("Brief version", str(version)),
+            ("Organization", org_name), ("Approved", approved_at), ("Starts", starts),
+            ("Event timezone", zone), ("Delivery", delivery),
+            ("Audience access", audience_access), ("Contributors", contributors),
+            ("Recording", recording), ("Replay", replay),
+            ("Accessibility", accessibility), ("Event team", _bullets(team)),
+            ("Escalation contact", escalation)]
+    return _lve_send(to, LVE_007_SUBJECT, "Event-day brief",
+                     "Your event-day brief is approved.", LVE_007_PREHEADER, rows, body,
+                     "View event-day brief", event_url(event_id), local_note, test_mode)
+
+
+# -- LVE-008 Event schedule change --------------------------------------------------------
+
+LVE_008_SUBJECT = "The schedule changed for {event}"
+LVE_008_PREHEADER = "The date or time of your event has moved."
+
+
+def send_schedule_change_email(to, *, name, audience, event_title, reference, previous_time,
+                               new_time, previous_zone, new_zone, date_changed, local_note,
+                               rehearsal_note, readiness_note, brief_note, contributor_note,
+                               event_id, org_name, test_mode=False):
+    """One template, three governed audiences. `audience` decides how much operational
+    detail is appropriate - an attendee is told the new time, not the readiness position."""
+    body = (f"Hi {name}, the schedule for {event_title} has changed. The new time is below.")
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Previous", f"{previous_time} ({previous_zone})"),
+            ("New", f"{new_time} ({new_zone})"),
+            ("Date changed", "Yes" if date_changed else "No - the time moved on the same day")]
+    if audience == "team":
+        rows += [("Rehearsal", rehearsal_note), ("Readiness", readiness_note),
+                 ("Event-day brief", brief_note), ("Contributors", contributor_note)]
+    elif audience == "contributor":
+        rows += [("Rehearsal", rehearsal_note), ("Your access", contributor_note)]
+    footer = (local_note if audience == "audience"
+              else local_note + " Dependent plans have been re-evaluated where the platform "
+                                "supports it.")
+    return _lve_send(to, LVE_008_SUBJECT.format(event=event_title), "Schedule changed",
+                     "The event schedule changed.", LVE_008_PREHEADER, rows, body,
+                     "View event", event_url(event_id), footer, test_mode)
+
+
+# -- LVE-009 Event-day activation ---------------------------------------------------------
+
+LVE_009_ARMED_SUBJECT = "{event} is armed for live operation"
+LVE_009_LIVE_SUBJECT = "{event} is live on Zoiko Steam"
+LVE_009_PREHEADER = "Internal operations notice for your event team."
+
+
+def send_activation_email(to, *, name, variant, event_title, reference, changed_at, start_at,
+                          zone, local_note, event_id, org_name, test_mode=False):
+    armed = variant == "armed"
+    subject = (LVE_009_ARMED_SUBJECT if armed else LVE_009_LIVE_SUBJECT).format(
+        event=event_title)
+    body = (f"Hi {name}, {event_title} "
+            + ("is armed and ready for live operation." if armed else "is now live.")
+            + f" This happened at {changed_at}.")
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Organization", org_name),
+            ("State", "Armed" if armed else "Live"), ("Confirmed at", changed_at),
+            ("Scheduled start", start_at), ("Event timezone", zone)]
+    footer = ("This is an internal operations notice for your event team. No audience "
+              "communication was sent. " + local_note)
+    return _lve_send(to, subject, "Event activation",
+                     "Your event is armed." if armed else "Your event is live.",
+                     LVE_009_PREHEADER, rows, body, "Open operations view",
+                     event_url(event_id), footer, test_mode)
+
+
+# -- LVE-010 Interruption and cancellation ------------------------------------------------
+
+LVE_010_DELAYED_SUBJECT = "{event} is delayed"
+LVE_010_HOLD_SUBJECT = "{event} is temporarily on hold"
+LVE_010_RESUMED_SUBJECT = "{event} has resumed"
+LVE_010_CANCELED_SUBJECT = "{event} was canceled"
+LVE_010_PREHEADER = "An update on your event."
+
+
+def send_event_incident_email(to, *, name, variant, event_title, reference, reason, summary,
+                              next_update, current_state, started_at, resumed_at,
+                              canceled_at, interruption_duration, event_id, org_name,
+                              test_mode=False):
+    subject = {
+        "delayed": LVE_010_DELAYED_SUBJECT, "temporary_hold": LVE_010_HOLD_SUBJECT,
+        "resumed": LVE_010_RESUMED_SUBJECT, "canceled": LVE_010_CANCELED_SUBJECT,
+    }[variant].format(event=event_title)
+    headline = {"delayed": "Your event is delayed.",
+                "temporary_hold": "Your event is temporarily on hold.",
+                "resumed": "Your event has resumed.",
+                "canceled": "Your event was canceled."}[variant]
+    body = {
+        "delayed": f"Hi {name}, {event_title} is delayed. {summary}",
+        "temporary_hold": f"Hi {name}, {event_title} is on hold. {summary}",
+        "resumed": f"Hi {name}, {event_title} has resumed.",
+        "canceled": f"Hi {name}, {event_title} was canceled. {summary}",
+    }[variant]
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Organization", org_name), ("Reason category", reason),
+            ("Current state", current_state)]
+    if variant in ("delayed", "temporary_hold"):
+        rows.append(("Started", started_at))
+    if variant == "resumed":
+        rows += [("Resumed", resumed_at), ("Interruption duration", interruption_duration)]
+    if variant == "canceled":
+        rows.append(("Canceled", canceled_at))
+    # A next-update promise appears ONLY when an operator committed to a time. There is no
+    # default and no "shortly" - an uncommitted promise is worse than none.
+    if next_update:
+        rows.append(("Next update", next_update))
+    footer = ("We share a reason category rather than investigation detail. Your Zoiko Steam "
+              "team can give you more once the review is complete.")
+    return _lve_send(to, subject, "Event update", headline, LVE_010_PREHEADER, rows, body,
+                     "View event", event_url(event_id), footer, test_mode)
+
+
+# -- LVE-011 Completion and replay --------------------------------------------------------
+
+LVE_011_ENDED_SUBJECT = "Your Zoiko Steam event has ended"
+LVE_011_PROCESSING_SUBJECT = "Your Zoiko Steam replay is being prepared"
+LVE_011_APPROVAL_SUBJECT = "Action required: review your Zoiko Steam replay"
+LVE_011_PUBLISHED_SUBJECT = "Your Zoiko Steam replay is published"
+LVE_011_UNAVAILABLE_SUBJECT = "Zoiko Steam replay is unavailable"
+LVE_011_PREHEADER = "Where your recording and replay currently stand."
+
+
+def send_event_ended_email(to, *, name, event_title, reference, ended_at, duration,
+                           final_state, recording_status, replay_next, event_id, org_name,
+                           test_mode=False):
+    body = (f"Hi {name}, {event_title} ended at {ended_at} after {duration}.")
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Organization", org_name), ("Ended", ended_at), ("Duration", duration),
+            ("Final state", final_state),
+            # Reports where the recording ACTUALLY is. An event that just ended is still
+            # uploading, so this must never read as "recording complete".
+            ("Recording", recording_status), ("Replay", replay_next)]
+    return _lve_send(to, LVE_011_ENDED_SUBJECT, "Event ended", "Your event has ended.",
+                     LVE_011_PREHEADER, rows, body, "View event", event_url(event_id),
+                     "Recording and replay are separate steps. We will tell you when each "
+                     "one is done.", test_mode)
+
+
+def send_replay_lifecycle_email(to, *, name, variant, event_title, reference, replay_status,
+                                recording_status, reason, next_action, event_id, org_name,
+                                test_mode=False):
+    subject = {
+        "replay_processing": LVE_011_PROCESSING_SUBJECT,
+        "replay_approval_required": LVE_011_APPROVAL_SUBJECT,
+        "replay_published": LVE_011_PUBLISHED_SUBJECT,
+        "replay_unavailable": LVE_011_UNAVAILABLE_SUBJECT,
+    }[variant]
+    headline = {
+        "replay_processing": "Your replay is being prepared.",
+        "replay_approval_required": "Your replay is ready for review.",
+        "replay_published": "Your replay is published.",
+        "replay_unavailable": "Your replay is unavailable.",
+    }[variant]
+    cta = "Review replay" if variant == "replay_approval_required" else "View event"
+    body = f"Hi {name}, here is the current position for the {event_title} replay."
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Organization", org_name), ("Replay", replay_status),
+            ("Recording", recording_status), ("Next action", next_action)]
+    if variant == "replay_unavailable":
+        rows.append(("Reason", reason))
+    return _lve_send(to, subject, "Replay", headline, LVE_011_PREHEADER, rows, body, cta,
+                     event_url(event_id),
+                     "A published replay is the only state your audience can watch.",
+                     test_mode)
+
+
+# -- LVE-012 Post-event evidence and retention --------------------------------------------
+
+LVE_012_READY_SUBJECT = "Your Zoiko Steam post-event report is ready"
+LVE_012_FAILED_SUBJECT = "Zoiko Steam could not generate your post-event report"
+LVE_012_REVIEW_SUBJECT = "Zoiko Steam event incident review is ready"
+LVE_012_CLOSED_SUBJECT = "Zoiko Steam event record is closed"
+LVE_012_PREHEADER = "Post-event evidence for your event."
+
+
+def send_post_event_report_email(to, *, name, variant, event_title, version, generated_at,
+                                 window, metrics, privacy_note, failure_note, event_id,
+                                 org_name, test_mode=False):
+    ready = variant == "ready"
+    subject = LVE_012_READY_SUBJECT if ready else LVE_012_FAILED_SUBJECT
+    body = (f"Hi {name}, version {version} of the post-event report for {event_title} is "
+            f"ready." if ready else
+            f"Hi {name}, we could not generate the post-event report for {event_title}.")
+    rows = [("Event", event_title), ("Organization", org_name),
+            ("Report version", str(version)), ("Reporting window", window)]
+    if ready:
+        # Whole-event totals only. No segment breakdown: there is no approved disclosure
+        # threshold in this platform, so granular audience figures are not emailed at all.
+        rows += [("Generated", generated_at), ("Headline figures", _bullets(metrics))]
+    footer = privacy_note if ready else failure_note
+    return _lve_send(to, subject, "Post-event report",
+                     "Your post-event report is ready." if ready
+                     else "We could not generate your report.",
+                     LVE_012_PREHEADER, rows, body,
+                     "Open report" if ready else "View event", event_url(event_id), footer,
+                     test_mode)
+
+
+def send_incident_review_email(to, *, name, event_title, reference, occurred_at, category,
+                               summary, event_id, org_name, test_mode=False):
+    body = (f"Hi {name}, the incident review for {event_title} has been approved and is "
+            f"available in your console.")
+    rows = [("Event", event_title), ("Review reference", reference),
+            ("Organization", org_name), ("Incident opened", occurred_at),
+            ("Category", category), ("Summary", summary)]
+    return _lve_send(to, LVE_012_REVIEW_SUBJECT, "Incident review",
+                     "Your incident review is ready.", LVE_012_PREHEADER, rows, body,
+                     "Open review", event_url(event_id),
+                     "This is the approved customer-facing review. Internal investigation "
+                     "notes are not included.", test_mode)
+
+
+def send_record_closed_email(to, *, name, event_title, reference, closed_at, report_version,
+                             recordings, legal_hold, retention_until, residual, event_id,
+                             org_name, test_mode=False):
+    body = (f"Hi {name}, the operational record for {event_title} is now closed.")
+    rows = [("Event", event_title), ("Event reference", reference),
+            ("Organization", org_name), ("Closed", closed_at),
+            ("Final report version", str(report_version)),
+            ("Recordings held", str(recordings)),
+            ("Under legal hold", str(legal_hold)),
+            ("Media retained until", retention_until)]
+    # Never claims erasure: audit, security and billing records outlive the media by design.
+    return _lve_send(to, LVE_012_CLOSED_SUBJECT, "Record closed",
+                     "This event record is closed.", LVE_012_PREHEADER, rows, body,
+                     "View event", event_url(event_id), residual, test_mode)
+
+
+# == CON-001 .. CON-005 - event contributors =============================================
+# Contributor-facing. Every CTA points at /contributor/events/{id} - a contributor-scoped
+# surface, never an organizer console, never organization administration, never Super Admin.
+#
+# No template here accepts a LiveKit token, stream key, producer credential, API key or
+# password: there is no parameter that could carry one. The only credential any of these
+# carries is a contributor access token, which is exchanged server-side for a short-lived
+# media credential (services/contributor_access.issue_media_credential).
+
+SENDER_CONTRIBUTOR = "Zoiko Steam Event Team"
+
+
+def contributor_url(event_id: str) -> str:
+    """The contributor backstage surface for one event."""
+    return f"{public_base_url()}/contributor/events/{event_id}"
+
+
+def _con_send(to, subject, header, headline, preheader, rows, body, cta, url, footer,
+              test_mode):
+    return _send(
+        to, media_subject(subject, test_mode),
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, SENDER_CONTRIBUTOR),
+        sender=_sender_identity(SENDER_CONTRIBUTOR),
+    )
+
+
+# -- CON-001 Contributor invitation lifecycle ---------------------------------------------
+
+CON_001_INVITE_SUBJECT = "You're invited to contribute to {event} on Zoiko Steam"
+CON_001_ACCEPTED_SUBJECT = "You're confirmed for {event}"
+CON_001_REMINDER_SUBJECT = "Reminder: action needed before {event}"
+CON_001_REVOKED_SUBJECT = "Your contributor access for {event} was revoked"
+CON_001_EXPIRED_SUBJECT = "Your contributor invitation for {event} expired"
+CON_001_PREHEADER = "Your contributor details for this event."
+
+
+def send_contributor_invite_email(to, *, name, event_title, role, starts, zone, local_note,
+                                  technical_check, technical_status, rehearsal, org_name,
+                                  inviter, grants, consent, expires_at, accept_url,
+                                  test_mode=False):
+    body = (f"Hi {name}, {inviter} has invited you to take part in {event_title} as "
+            f"{role}. Accepting confirms you can attend.")
+    rows = [("Event", event_title), ("Your role", role), ("Organizer", org_name),
+            ("Starts", starts), ("Event timezone", zone), ("This role lets you", grants),
+            ("Technical check", technical_check), ("Rehearsal", rehearsal),
+            ("Invitation expires", expires_at), ("Privacy", consent)]
+    return _con_send(to, CON_001_INVITE_SUBJECT.format(event=event_title),
+                     "Contributor invitation", "You have been invited to contribute.",
+                     CON_001_PREHEADER, rows, body, "Accept invitation", accept_url,
+                     local_note, test_mode)
+
+
+def send_contributor_accepted_email(to, *, name, event_title, role, starts, zone, local_note,
+                                    technical_check, technical_status, rehearsal, org_name,
+                                    next_action, access_note, backstage, test_mode=False):
+    body = f"Hi {name}, you are confirmed as {role} for {event_title}."
+    rows = [("Event", event_title), ("Your role", role), ("Organizer", org_name),
+            ("Starts", starts), ("Event timezone", zone),
+            ("Technical check", technical_check), ("Rehearsal", rehearsal),
+            ("Next step", next_action), ("Event-day access", access_note)]
+    return _con_send(to, CON_001_ACCEPTED_SUBJECT.format(event=event_title),
+                     "Contributor confirmed", "You are confirmed for this event.",
+                     CON_001_PREHEADER, rows, body, "Open your backstage", backstage,
+                     local_note, test_mode)
+
+
+def send_contributor_reminder_email(to, *, name, event_title, role, starts, zone, local_note,
+                                    technical_check, technical_status, rehearsal, org_name,
+                                    outstanding, backstage, test_mode=False):
+    body = (f"Hi {name}, there is still something to do before {event_title}.")
+    rows = [("Event", event_title), ("Your role", role), ("Starts", starts),
+            ("Event timezone", zone), ("Still to do", _bullets(outstanding)),
+            ("Technical check", technical_status)]
+    return _con_send(to, CON_001_REMINDER_SUBJECT.format(event=event_title),
+                     "Contributor reminder", "One thing still needs your attention.",
+                     CON_001_PREHEADER, rows, body, "Open your backstage", backstage,
+                     local_note, test_mode)
+
+
+def send_contributor_revoked_email(to, *, name, event_title, role, starts, zone, local_note,
+                                   technical_check, technical_status, rehearsal, org_name,
+                                   revoked_at, reason, test_mode=False):
+    body = (f"Hi {name}, your contributor access for {event_title} has been withdrawn. Any "
+            f"personal links you were sent no longer work.")
+    rows = [("Event", event_title), ("Your role", role), ("Organizer", org_name),
+            ("Withdrawn", revoked_at)]
+    # Only a reason an operator explicitly recorded as customer-safe. Absent means the
+    # message says nothing about why rather than inventing an explanation.
+    if reason:
+        rows.append(("Reason", reason))
+    return _con_send(to, CON_001_REVOKED_SUBJECT.format(event=event_title),
+                     "Contributor access withdrawn", "Your contributor access was withdrawn.",
+                     CON_001_PREHEADER, rows, body, None, None,
+                     "Contact the event organizer if you think this is a mistake.", test_mode)
+
+
+def send_contributor_expired_email(to, *, name, event_title, role, starts, zone, local_note,
+                                   technical_check, technical_status, rehearsal, org_name,
+                                   expired_at, test_mode=False):
+    body = (f"Hi {name}, your invitation to contribute to {event_title} expired at "
+            f"{expired_at} and can no longer be accepted.")
+    rows = [("Event", event_title), ("Your role", role), ("Organizer", org_name),
+            ("Expired", expired_at)]
+    return _con_send(to, CON_001_EXPIRED_SUBJECT.format(event=event_title),
+                     "Invitation expired", "Your contributor invitation expired.",
+                     CON_001_PREHEADER, rows, body, None, None,
+                     "Ask the event organizer to send a new invitation if you still want to "
+                     "take part.", test_mode)
+
+
+# -- CON-002 Contributor technical check --------------------------------------------------
+
+CON_002_REQUIRED_SUBJECT = "Action required: complete your technical check for {event}"
+CON_002_PASSED_SUBJECT = "Your technical check passed for {event}"
+CON_002_ATTENTION_SUBJECT = "Action required: technical check needs attention for {event}"
+CON_002_EXPIRED_SUBJECT = "Please repeat your technical check for {event}"
+CON_002_ALERT_SUBJECT = "A contributor technical check needs attention for {event}"
+CON_002_PREHEADER = "Check your camera, microphone and browser before the event."
+
+
+def send_contributor_tech_check_email(to, *, name, variant, event_title, role, starts, zone,
+                                      local_note, technical_check, technical_status,
+                                      rehearsal, org_name, deadline, completed_at,
+                                      required_checks, tested, failures, network_note,
+                                      validity, check_url, test_mode=False):
+    subject = {
+        "required": CON_002_REQUIRED_SUBJECT, "passed": CON_002_PASSED_SUBJECT,
+        "needs_attention": CON_002_ATTENTION_SUBJECT, "expired": CON_002_EXPIRED_SUBJECT,
+    }[variant].format(event=event_title)
+    headline = {"required": "Please complete your technical check.",
+                "passed": "Your technical check passed.",
+                "needs_attention": "Your technical check needs attention.",
+                "expired": "Please repeat your technical check."}[variant]
+    body = {
+        "required": (f"Hi {name}, before {event_title} we need to confirm your camera, "
+                     f"microphone and browser will work."),
+        "passed": f"Hi {name}, everything we need for {event_title} is working.",
+        "needs_attention": (f"Hi {name}, we could not confirm everything for {event_title}. "
+                            f"The details below show what to look at."),
+        "expired": (f"Hi {name}, your earlier technical check for {event_title} is no longer "
+                    f"current."),
+    }[variant]
+    rows = [("Event", event_title), ("Your role", role), ("Event starts", starts),
+            ("Event timezone", zone)]
+    if variant == "required":
+        # Nothing is claimed to have passed yet.
+        rows += [("Deadline", deadline), ("What we check", _bullets(required_checks))]
+    elif variant == "passed":
+        rows += [("Completed", completed_at), ("Confirmed", _bullets(tested)),
+                 ("Valid for", validity)]
+    elif variant == "needs_attention":
+        # Safe categories only - no user agent, no device ids, no addresses, no raw
+        # diagnostics of any kind.
+        rows += [("Needs attention", _bullets(failures)), ("Deadline", deadline)]
+    else:
+        rows.append(("Deadline", deadline))
+    footer = network_note if variant in ("required", "needs_attention") else local_note
+    return _con_send(to, subject, "Technical check", headline, CON_002_PREHEADER, rows, body,
+                     "Run technical check", check_url, footer, test_mode)
+
+
+def send_contributor_tech_alert_email(to, *, name, contributor, role, event_title, failures,
+                                      event_id, org_name, test_mode=False):
+    """Operational alert to the ASSIGNED owner only - never the whole event team."""
+    body = (f"Hi {name}, a contributor for {event_title} could not complete their technical "
+            f"check.")
+    rows = [("Event", event_title), ("Contributor", contributor), ("Role", role),
+            ("Organization", org_name), ("Needs attention", _bullets(failures))]
+    return _con_send(to, CON_002_ALERT_SUBJECT.format(event=event_title), "Technical check",
+                     "A contributor needs help with their setup.", CON_002_PREHEADER, rows,
+                     body, "Open event", contributor_url(event_id),
+                     "Only the assigned event owner receives this alert.", test_mode)
+
+
+# -- CON-003 Contributor rehearsal reminder -----------------------------------------------
+
+CON_003_SUBJECT = "Reminder: rehearsal for {event}"
+CON_003_PREHEADER = "Your rehearsal is coming up."
+
+
+def send_contributor_rehearsal_email(to, *, name, event_title, role, starts, zone, local_note,
+                                     technical_check, technical_status, rehearsal, org_name,
+                                     rehearsal_at, purpose, preparation, backstage,
+                                     test_mode=False):
+    body = f"Hi {name}, your rehearsal for {event_title} is at {rehearsal_at}."
+    rows = [("Event", event_title), ("Your role", role), ("Rehearsal", rehearsal_at),
+            ("Event timezone", zone), ("Purpose", purpose),
+            ("Technical check", technical_status), ("How to prepare", preparation)]
+    return _con_send(to, CON_003_SUBJECT.format(event=event_title), "Rehearsal",
+                     "Your rehearsal is coming up.", CON_003_PREHEADER, rows, body,
+                     "Open your backstage", backstage, local_note, test_mode)
+
+
+# -- CON-004 Contributor event-day access -------------------------------------------------
+
+CON_004_SUBJECT = "Your access is ready for {event}"
+CON_004_PREHEADER = "Your personal backstage link for this event."
+
+
+def send_contributor_access_email(to, *, name, event_title, role, starts, zone, local_note,
+                                  technical_check, technical_status, rehearsal, org_name,
+                                  window_opens, join_url, forward_note, support,
+                                  test_mode=False):
+    """The link here is a contributor access token, NOT a media credential. It is exchanged
+    server-side; the LiveKit token is minted only after authorization succeeds."""
+    body = (f"Hi {name}, your backstage access for {event_title} is ready. Use the link "
+            f"below when the join window opens.")
+    rows = [("Event", event_title), ("Your role", role), ("Join window opens", window_opens),
+            ("Event starts", starts), ("Event timezone", zone),
+            ("Technical check", technical_status), ("Support", support)]
+    return _con_send(to, CON_004_SUBJECT.format(event=event_title), "Backstage access",
+                     "Your backstage access is ready.", CON_004_PREHEADER, rows, body,
+                     "Open backstage", join_url,
+                     # Generated from what the backend actually enforces for this grant.
+                     forward_note + " " + local_note, test_mode)
+
+
+# -- CON-005 Contributor session ended ----------------------------------------------------
+
+CON_005_SUBJECT = "Your contributor session for {event} has ended"
+CON_005_PREHEADER = "Your contributor session is closed."
+
+
+def send_contributor_session_ended_email(to, *, name, event_title, role, starts, zone,
+                                         local_note, technical_check, technical_status,
+                                         rehearsal, org_name, ended_at, reason,
+                                         further_action, test_mode=False):
+    body = f"Hi {name}, your contributor session for {event_title} has ended."
+    rows = [("Event", event_title), ("Your role", role), ("Organizer", org_name),
+            ("Ended", ended_at), ("Reason", reason), ("Anything to do?", further_action)]
+    return _con_send(to, CON_005_SUBJECT.format(event=event_title), "Session ended",
+                     "Your contributor session has ended.", CON_005_PREHEADER, rows, body,
+                     None, None,
+                     "Thank you for taking part. Contributing to this event does not "
+                     "subscribe you to any mailing list.", test_mode)
+
+
+# == COM-006 / COM-007 / COM-008 - billing, payments, entitlements =======================
+# Billing-facing. Every CTA is the customer billing surface, never Super Admin.
+#
+# Reference discipline, applied by services/commerce_comms:
+#   invoice_number / order_number  -> customer-facing business references, shown in full
+#   payment_reference / provider   -> processor identifiers, masked to the last 4
+#   internal row ids               -> an 8-character stub, never the whole UUID
+#
+# No template here accepts a card number, CVV, processor token, API key or storage secret -
+# there is no parameter through which one could travel.
+
+SENDER_BILLING = "Zoiko Steam Billing"
+
+
+def billing_date(moment) -> str:
+    """A billing timestamp in UTC.
+
+    Deliberately NOT the event timezone: an invoice belongs to a seller entity and an
+    accounting period, not to an event's locale. UTC is stated so the value is unambiguous.
+    """
+    if moment is None:
+        return "Not set"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return f"{moment.astimezone(timezone.utc).strftime('%d %b %Y, %I:%M %p')} UTC"
+
+
+def billing_console_url() -> str:
+    return f"{public_base_url()}/organization/billing"
+
+
+def _com_send(to, subject, header, headline, preheader, rows, body, cta, url, footer):
+    return _send(
+        to, subject,
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, SENDER_BILLING),
+        sender=_sender_identity(SENDER_BILLING),
+    )
+
+
+# -- COM-006 Invoice and payment confirmation ---------------------------------------------
+
+COM_006_INVOICE_SUBJECT = "Your Zoiko Steam invoice is available"
+COM_006_RECEIVED_SUBJECT = "Payment received for your Zoiko Steam invoice"
+COM_006_REFUND_SUBJECT = "A refund was issued for your Zoiko Steam account"
+COM_006_CREDIT_SUBJECT = "A credit note was issued for your Zoiko Steam account"
+COM_006_PREHEADER = "Billing details for your account."
+
+
+def send_invoice_available_email(to, *, name, invoice_number, order_reference, event_title,
+                                 issue_date, due_date, currency, amount_due, subtotal,
+                                 tax_summary, billing_entity, org_name, billing_url):
+    body = (f"Hi {name}, invoice {invoice_number} is available for {org_name}.")
+    rows = [("Invoice number", invoice_number), ("Order reference", order_reference),
+            ("Organization", org_name), ("For", event_title),
+            ("Issue date", issue_date), ("Due date", due_date),
+            ("Subtotal", subtotal), ("Tax", tax_summary),
+            ("Amount due", amount_due), ("Billed by", billing_entity)]
+    return _com_send(to, COM_006_INVOICE_SUBJECT, "Invoice available",
+                     "Your invoice is available.", COM_006_PREHEADER, rows, body,
+                     "View invoice", billing_url,
+                     "Sign in to view or download the full invoice.")
+
+
+def send_payment_received_email(to, *, name, amount, currency, paid_at, invoice_number,
+                                payment_reference, method, balance, org_name, billing_url):
+    body = f"Hi {name}, we have received your payment of {amount}. Thank you."
+    rows = [("Amount received", amount), ("Received", paid_at),
+            ("Invoice number", invoice_number), ("Organization", org_name),
+            ("Payment method", method),
+            # Masked - a processor reference, kept only so a bank line can be matched.
+            ("Payment reference", payment_reference),
+            ("Remaining balance", balance)]
+    return _com_send(to, COM_006_RECEIVED_SUBJECT, "Payment received",
+                     "Your payment has been received.", COM_006_PREHEADER, rows, body,
+                     "View billing", billing_url,
+                     "This payment is captured and settled.")
+
+
+def send_refund_issued_email(to, *, name, amount, reference, issued_at, invoice_number,
+                             reason, payment_reference, status, org_name, billing_url):
+    """A REFUND: money is being returned. Distinct from a credit note."""
+    body = (f"Hi {name}, a refund of {amount} has been issued for {org_name}. It will be "
+            f"returned to your original payment method.")
+    rows = [("Refund amount", amount), ("Refund reference", reference),
+            ("Issued", issued_at), ("Related invoice", invoice_number),
+            ("Organization", org_name), ("Reason", reason),
+            ("Payment reference", payment_reference), ("Status", status)]
+    return _com_send(to, COM_006_REFUND_SUBJECT, "Refund issued",
+                     "A refund has been issued.", COM_006_PREHEADER, rows, body,
+                     "View billing", billing_url,
+                     "Your bank may take a few working days to show the refund.")
+
+
+def send_credit_note_email(to, *, name, amount, reference, issued_at, invoice_number,
+                           reason, effect, waiver, org_name, billing_url):
+    """A CREDIT NOTE: an accounting adjustment, which may not return money at all.
+
+    The distinction is stated in the body rather than left to inference, because a customer
+    told "credit" who expects a bank refund will chase one that is never coming.
+    """
+    body = (f"Hi {name}, a credit note of {amount} has been applied to {org_name}.")
+    rows = [("Credit amount", amount), ("Credit note reference", reference),
+            ("Issued", issued_at), ("Related invoice", invoice_number),
+            ("Organization", org_name),
+            ("Type", "Fee waiver" if waiver else "Credit note"),
+            ("Reason", reason), ("What this means", effect)]
+    return _com_send(to, COM_006_CREDIT_SUBJECT, "Credit note",
+                     "A credit note was issued.", COM_006_PREHEADER, rows, body,
+                     "View billing", billing_url, effect)
+
+
+# -- COM-007 Payment problem lifecycle ----------------------------------------------------
+
+COM_007_FAILED_SUBJECT = "Action required: we could not complete your payment"
+COM_007_OVERDUE_SUBJECT = "Action required: your Zoiko Steam invoice is overdue"
+COM_007_RESOLVED_SUBJECT = "Your Zoiko Steam billing issue is resolved"
+COM_007_PREHEADER = "Please review your billing details."
+
+
+def send_payment_problem_email(to, *, name, variant, invoice_number, order_reference, amount,
+                               currency, occurred_at, charge_note, category,
+                               payment_reference, next_action, due_date, resolved_at,
+                               org_name, billing_url):
+    subject = {"failed": COM_007_FAILED_SUBJECT, "overdue": COM_007_OVERDUE_SUBJECT,
+               "resolved": COM_007_RESOLVED_SUBJECT}[variant]
+    headline = {"failed": "We could not complete your payment.",
+                "overdue": "Your invoice is overdue.",
+                "resolved": "Your billing issue is resolved."}[variant]
+    if variant == "failed":
+        # `charge_note` is DERIVED from committed payment state by
+        # services/commerce_comms.charge_position. There is no unconditional
+        # "no charge was made" sentence anywhere in this template.
+        body = f"Hi {name}, a payment for {org_name} was not completed. {charge_note}"
+    elif variant == "overdue":
+        body = (f"Hi {name}, invoice {invoice_number} was due on {due_date} and is still "
+                f"outstanding.")
+    else:
+        body = f"Hi {name}, the billing issue on your account is now resolved. {category}"
+
+    rows = [("Invoice number", invoice_number), ("Order reference", order_reference),
+            ("Organization", org_name), ("Amount", amount)]
+    if variant == "failed":
+        rows += [("Attempted", occurred_at), ("What happened", category),
+                 ("Payment reference", payment_reference)]
+    elif variant == "overdue":
+        rows += [("Original due date", due_date), ("Amount outstanding", amount),
+                 ("Current status", category)]
+    else:
+        rows += [("Resolved", resolved_at), ("Result", category)]
+    rows.append(("Next step", next_action))
+    footer = ("We share a general category rather than the processor's own decline detail."
+              if variant == "failed" else
+              "If you have already paid, it may take a short time to appear."
+              if variant == "overdue" else
+              "No further action is needed.")
+    return _com_send(to, subject, "Billing", headline, COM_007_PREHEADER, rows, body,
+                     "Open billing", billing_url, footer)
+
+
+COM_007_DISPUTE_OPENED_SUBJECT = "A payment dispute was opened on your Zoiko Steam account"
+COM_007_DISPUTE_ACTION_SUBJECT = "Action required: evidence needed for a payment dispute"
+COM_007_DISPUTE_RESOLVED_SUBJECT = "A payment dispute on your Zoiko Steam account is resolved"
+
+
+def send_dispute_email(to, *, name, variant, dispute_reference, provider_reference, amount,
+                       opened_at, evidence_due, resolved_at, outcome, org_name, billing_url):
+    """Dispute lifecycle. Raw evidence and fraud signals are never included."""
+    subject = {"dispute_opened": COM_007_DISPUTE_OPENED_SUBJECT,
+               "dispute_action_required": COM_007_DISPUTE_ACTION_SUBJECT,
+               "dispute_resolved": COM_007_DISPUTE_RESOLVED_SUBJECT}[variant]
+    headline = {"dispute_opened": "A payment dispute was opened.",
+                "dispute_action_required": "A payment dispute needs evidence.",
+                "dispute_resolved": "A payment dispute is resolved."}[variant]
+    body = {
+        "dispute_opened": (f"Hi {name}, a dispute was opened against a payment of {amount} "
+                           f"on {org_name}. We are handling it with the payment provider."),
+        "dispute_action_required": (f"Hi {name}, we need supporting information for a "
+                                    f"dispute of {amount} on {org_name}."),
+        "dispute_resolved": (f"Hi {name}, the dispute of {amount} on {org_name} has been "
+                             f"resolved."),
+    }[variant]
+    rows = [("Dispute reference", dispute_reference), ("Organization", org_name),
+            ("Amount", amount), ("Opened", opened_at),
+            # Masked - identifies the case inside the processor.
+            ("Provider reference", provider_reference)]
+    if variant == "dispute_action_required" and evidence_due:
+        rows.append(("Evidence needed by", evidence_due))
+    if variant == "dispute_resolved":
+        rows += [("Resolved", resolved_at), ("Outcome", outcome)]
+    return _com_send(to, subject, "Payment dispute", headline, COM_007_PREHEADER, rows, body,
+                     "Open billing", billing_url,
+                     "We do not share the payment provider's investigation detail.")
+
+
+# -- COM-008 Usage and entitlement lifecycle ----------------------------------------------
+
+COM_008_LIMIT_SUBJECT = "Your Zoiko Steam {metric} limit has been reached"
+COM_008_CHANGED_SUBJECT = "Your Zoiko Steam entitlements changed"
+COM_008_REPORT_SUBJECT = "Your Zoiko Steam usage report is ready"
+COM_008_CORRECTED_SUBJECT = "Your Zoiko Steam usage report was corrected"
+COM_008_PREHEADER = "Usage and entitlements for your account."
+
+
+def send_entitlement_limit_email(to, *, name, org_name, metric, used, limit, blocked_action,
+                                 next_step, billing_url):
+    body = (f"Hi {name}, {org_name} has reached its {metric.lower()} limit. {blocked_action}.")
+    rows = [("Organization", org_name), ("Entitlement", metric),
+            ("Current usage", used), ("Limit", limit),
+            ("Blocked action", blocked_action), ("Next step", next_step)]
+    return _com_send(to, COM_008_LIMIT_SUBJECT.format(metric=metric.lower()),
+                     "Usage limit reached", f"Your {metric.lower()} limit is reached.",
+                     COM_008_PREHEADER, rows, body, "View plan and usage", billing_url,
+                     "You are told once each time this limit is reached, not on every "
+                     "blocked attempt.")
+
+
+def send_entitlement_changed_email(to, *, name, org_name, previous_plan, current_plan,
+                                   changes, effective_at, billing_note, billing_url):
+    body = f"Hi {name}, the entitlements for {org_name} have changed."
+    rows = [("Organization", org_name), ("Previous plan", previous_plan),
+            ("Current plan", current_plan), ("What changed", _bullets(changes)),
+            ("Effective", effective_at)]
+    # No price claim: a limit change is not evidence of a commercial price change.
+    return _com_send(to, COM_008_CHANGED_SUBJECT, "Entitlements changed",
+                     "Your entitlements changed.", COM_008_PREHEADER, rows, body,
+                     "View plan and usage", billing_url, billing_note)
+
+
+def send_usage_report_email(to, *, name, org_name, period, state, state_note, figures,
+                            version, billing_url):
+    """`state` is the STORED report state, so a provisional figure is always labelled."""
+    body = (f"Hi {name}, the {state.lower()} usage report for {org_name} covering {period} "
+            f"is ready.")
+    rows = [("Organization", org_name), ("Reporting period", period),
+            ("Report type", state), ("Version", str(version)),
+            ("Figures", _bullets(figures))]
+    return _com_send(to, COM_008_REPORT_SUBJECT, "Usage report",
+                     f"Your {state.lower()} usage report is ready.", COM_008_PREHEADER,
+                     rows, body, "Open usage report", billing_url, state_note)
+
+
+def send_usage_corrected_email(to, *, name, org_name, period, changes, reason, corrected_at,
+                               billing_url):
+    body = (f"Hi {name}, the usage report for {org_name} covering {period} has been "
+            f"corrected.")
+    rows = [("Organization", org_name), ("Reporting period", period),
+            ("Correction", _bullets(changes)), ("Reason", reason),
+            ("Corrected", corrected_at)]
+    return _com_send(to, COM_008_CORRECTED_SUBJECT, "Usage corrected",
+                     "Your usage report was corrected.", COM_008_PREHEADER, rows, body,
+                     "Open usage report", billing_url,
+                     "The previous figures are shown above so the change is visible.")
+
+
+# == SUP-001 .. SUP-004 - support cases ==================================================
+# Customer-facing. Every CTA is /organization/support/{id} - the Tenant Console support
+# view, never /admin and never a Super Admin path.
+#
+# Structural guarantees, enforced by the parameter lists below:
+#   * NO template accepts `internal_notes`, an incident `detail`, a `commander`, a severity,
+#     a password, a token, an API key or raw logs. There is no parameter one could travel in.
+#   * `next_update` is always passed READY-MADE by
+#     services/support_comms.next_update_note(). No template composes a time, so an invented
+#     SLA is impossible here rather than merely discouraged.
+
+SENDER_SUPPORT = "Zoiko Steam Support"
+
+
+def support_case_url(ticket_id: str) -> str:
+    """The customer's own support view for one case."""
+    return f"{public_base_url()}/organization/support/{ticket_id}"
+
+
+def _sup_send(to, subject, header, headline, preheader, rows, body, cta, url, footer):
+    return _send(
+        to, subject,
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, SENDER_SUPPORT),
+        sender=_sender_identity(SENDER_SUPPORT),
+    )
+
+
+SUP_CTA = "View support case"
+SUP_PREHEADER = "An update on your Zoiko Steam support case."
+
+
+def _case_rows(case_reference, subject, category, priority, status, owner, org_name):
+    """The identity block every SUP message carries. No internal routing metadata."""
+    return [("Case reference", case_reference), ("Subject", subject),
+            ("Category", category), ("Priority", priority),
+            ("Status", status), ("Handled by", owner), ("Organization", org_name)]
+
+
+# -- SUP-001 Support case opened ----------------------------------------------------------
+
+SUP_001_SUBJECT = "Zoiko Steam support case {case} was opened"
+
+
+def send_support_case_opened_email(to, *, name, case_reference, subject, category, priority,
+                                   status, owner, next_update, case_url, org_name,
+                                   created_at, requester, next_action):
+    body = (f"Hi {name}, we have opened support case {case_reference} and our team will "
+            f"pick it up.")
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows += [("Opened", created_at), ("Raised by", requester),
+             ("What happens next", next_action)]
+    return _sup_send(to, SUP_001_SUBJECT.format(case=case_reference), "Support case",
+                     "Your support case is open.", SUP_PREHEADER, rows, body,
+                     SUP_CTA, case_url, next_update)
+
+
+# -- SUP-002 Update and customer action ---------------------------------------------------
+
+SUP_002_UPDATE_SUBJECT = "Update on support case {case}"
+SUP_002_ACTION_SUBJECT = "Action required on support case {case}"
+SUP_002_REMINDER_SUBJECT = "Reminder: action needed on support case {case}"
+
+
+def send_support_case_update_email(to, *, name, case_reference, subject, category, priority,
+                                   status, owner, next_update, case_url, org_name,
+                                   updated_at, update_text, action_required):
+    """`update_text` is SupportTicket.customer_update - the only free text mailed here.
+    internal_notes has no parameter and therefore no route into this message."""
+    body = f"Hi {name}, there is an update on support case {case_reference}."
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows += [("Updated", updated_at), ("Update", update_text),
+             ("Action needed from you", "Yes" if action_required else "No")]
+    return _sup_send(to, SUP_002_UPDATE_SUBJECT.format(case=case_reference), "Support case",
+                     "Your support case was updated.", SUP_PREHEADER, rows, body,
+                     SUP_CTA, case_url, next_update)
+
+
+def send_support_action_required_email(to, *, name, case_reference, subject, category,
+                                       priority, status, owner, next_update, case_url,
+                                       org_name, requested_action, due_at, secure_note):
+    body = (f"Hi {name}, we need something from you before we can continue with support "
+            f"case {case_reference}.")
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows.append(("What we need", requested_action))
+    # A due date appears only when one was actually recorded.
+    if due_at:
+        rows.append(("Needed by", due_at))
+    return _sup_send(to, SUP_002_ACTION_SUBJECT.format(case=case_reference), "Support case",
+                     "We need something from you.", SUP_PREHEADER, rows, body,
+                     SUP_CTA, case_url, secure_note)
+
+
+def send_support_action_reminder_email(to, *, name, case_reference, subject, category,
+                                       priority, status, owner, next_update, case_url,
+                                       org_name, requested_action, due_at):
+    body = (f"Hi {name}, support case {case_reference} is still waiting on something from "
+            f"you.")
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows.append(("Still needed", requested_action))
+    if due_at:
+        rows.append(("Needed by", due_at))
+    return _sup_send(to, SUP_002_REMINDER_SUBJECT.format(case=case_reference),
+                     "Support case", "Your support case is waiting on you.", SUP_PREHEADER,
+                     rows, body, SUP_CTA, case_url,
+                     "Add what we need in the support case and we will continue.")
+
+
+# -- SUP-003 Escalation -------------------------------------------------------------------
+
+SUP_003_ESCALATED_SUBJECT = "Support case {case} was escalated"
+SUP_003_OWNER_SUBJECT = "The owner changed for support case {case}"
+SUP_003_INCIDENT_SUBJECT = "Support case {case} is linked to an active incident"
+
+
+def send_support_escalated_email(to, *, name, case_reference, subject, category, priority,
+                                 status, owner, next_update, case_url, org_name,
+                                 escalated_at, reason):
+    body = (f"Hi {name}, we have escalated support case {case_reference} so it gets more "
+            f"attention.")
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows += [("Escalated", escalated_at), ("Why", reason)]
+    # `next_update` is ready-made: either a stored commitment or the honest fallback.
+    return _sup_send(to, SUP_003_ESCALATED_SUBJECT.format(case=case_reference),
+                     "Support case", "Your support case was escalated.", SUP_PREHEADER,
+                     rows, body, SUP_CTA, case_url, next_update)
+
+
+def send_support_owner_changed_email(to, *, name, case_reference, subject, category,
+                                     priority, status, owner, next_update, case_url,
+                                     org_name, previous_owner, current_owner, effective_at):
+    body = (f"Hi {name}, support case {case_reference} is now being handled by a different "
+            f"team.")
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows += [("Previous", previous_owner), ("Current", current_owner),
+             ("Effective", effective_at)]
+    return _sup_send(to, SUP_003_OWNER_SUBJECT.format(case=case_reference), "Support case",
+                     "Your support case changed hands.", SUP_PREHEADER, rows, body,
+                     SUP_CTA, case_url, next_update)
+
+
+def send_support_incident_linked_email(to, *, name, case_reference, subject, category,
+                                       priority, status, owner, next_update, case_url,
+                                       org_name, incident_reference, incident_status,
+                                       impact):
+    """Only the approved incident reference, its safe status and a generic impact line.
+
+    There is no parameter for the incident's detail, its commander, its severity or any
+    root-cause text, so none of that can be mailed from here.
+    """
+    body = (f"Hi {name}, support case {case_reference} is linked to a wider incident we are "
+            f"already working on.")
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows += [("Incident reference", incident_reference),
+             ("Incident status", incident_status), ("Current impact", impact)]
+    return _sup_send(to, SUP_003_INCIDENT_SUBJECT.format(case=case_reference),
+                     "Support case", "Your case is linked to an incident.", SUP_PREHEADER,
+                     rows, body, SUP_CTA, case_url, next_update)
+
+
+# -- SUP-004 Resolution, close, reopen, feedback ------------------------------------------
+
+SUP_004_RESOLVED_SUBJECT = "Support case {case} was resolved"
+SUP_004_CLOSED_SUBJECT = "Support case {case} was closed"
+SUP_004_REOPENED_SUBJECT = "Support case {case} was reopened"
+SUP_004_FEEDBACK_SUBJECT = "Tell us about your Zoiko Steam support experience"
+
+
+def send_support_resolved_email(to, *, name, case_reference, subject, category, priority,
+                                status, owner, next_update, case_url, org_name,
+                                resolved_at, summary, action_remains, reopen_note):
+    body = f"Hi {name}, support case {case_reference} has been resolved."
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows += [("Resolved", resolved_at), ("What we did", summary),
+             ("Anything left for you", "Yes" if action_remains else "No")]
+    return _sup_send(to, SUP_004_RESOLVED_SUBJECT.format(case=case_reference),
+                     "Support case", "Your support case is resolved.", SUP_PREHEADER,
+                     rows, body, SUP_CTA, case_url, reopen_note)
+
+
+def send_support_closed_email(to, *, name, case_reference, subject, category, priority,
+                              status, owner, next_update, case_url, org_name,
+                              closed_at, summary, reopen_note):
+    body = f"Hi {name}, support case {case_reference} is now closed."
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows += [("Closed", closed_at), ("Summary", summary)]
+    return _sup_send(to, SUP_004_CLOSED_SUBJECT.format(case=case_reference), "Support case",
+                     "Your support case is closed.", SUP_PREHEADER, rows, body,
+                     SUP_CTA, case_url, reopen_note)
+
+
+def send_support_reopened_email(to, *, name, case_reference, subject, category, priority,
+                                status, owner, next_update, case_url, org_name,
+                                reopened_at, next_step):
+    body = f"Hi {name}, support case {case_reference} has been reopened."
+    rows = _case_rows(case_reference, subject, category, priority, status, owner, org_name)
+    rows += [("Reopened", reopened_at), ("Next step", next_step)]
+    return _sup_send(to, SUP_004_REOPENED_SUBJECT.format(case=case_reference),
+                     "Support case", "Your support case was reopened.", SUP_PREHEADER,
+                     rows, body, SUP_CTA, case_url, next_update)
+
+
+def send_support_feedback_email(to, *, name, case_reference, subject, category, priority,
+                                status, owner, next_update, case_url, org_name,
+                                resolved_at, consent_note):
+    """Sent only for cases services/support_comms.is_feedback_eligible() approves.
+
+    Carries no promotional content and no marketing link - answering it subscribes the
+    recipient to nothing, which the footer states plainly.
+    """
+    body = (f"Hi {name}, support case {case_reference} is closed out. How did we do?")
+    rows = [("Case reference", case_reference), ("Subject", subject),
+            ("Organization", org_name), ("Closed", resolved_at)]
+    return _sup_send(to, SUP_004_FEEDBACK_SUBJECT, "Support feedback",
+                     "How was your support experience?", SUP_PREHEADER, rows, body,
+                     "Give feedback", case_url, consent_note)
+
+
+# == SEC-001 .. SEC-006 - security, abuse and content restriction ========================
+# Security-facing. Every CTA is /organization/security - the customer Security Center,
+# never /admin and never a Super Admin path.
+#
+# Structural guarantees, enforced by the parameter lists below. NO template here accepts:
+#   a password, a reset token, an MFA secret, a recovery code, an API key, a webhook signing
+#   secret, a LiveKit credential, a stream key, a raw log line, an IP address, a detection
+#   rule or signature, a risk score or threshold, an exploit or vulnerability detail,
+#   a reporter identity, or an internal admin URL.
+# There is no parameter through which any of those could travel.
+#
+# Containment and next-update wording is always passed READY-MADE by
+# services/security_comms (containment_note / disclosure_next_update), so no template can
+# compose a containment claim or invent an ETA.
+
+SENDER_SECURITY_OPS = "Zoiko Steam Security"
+
+
+def security_center_url() -> str:
+    return f"{public_base_url()}/organization/security"
+
+
+def _sec_send(to, subject, header, headline, preheader, rows, body, cta, url, footer):
+    return _send(
+        to, subject,
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, SENDER_SECURITY_OPS),
+        sender=_sender_identity(SENDER_SECURITY_OPS),
+    )
+
+
+SEC_CTA = "Open Security Center"
+SEC_PREHEADER = "A security notice for your Zoiko Steam organization."
+# Repeated deliberately: the single most useful anti-phishing line we can carry, given these
+# are exactly the messages an attacker would imitate.
+NEVER_ASK = ("Zoiko Steam never asks for your password, recovery codes, MFA codes or API "
+             "keys by email.")
+
+
+# -- SEC-006 Security contact verification ------------------------------------------------
+
+SEC_006_VERIFY_SUBJECT = "Verify your Zoiko Steam security contact"
+SEC_006_VIOLATION_SUBJECT = "Security action required for your Zoiko Steam account"
+
+
+def send_security_contact_verify_email(to, *, name, org_name, reason, scope, expires_at,
+                                       verify_url):
+    """Carries no incident detail and no organization secrets - it only establishes the
+    channel that SEC-001 and SEC-003 later depend on."""
+    body = (f"Hi {name}, please confirm this address so it can receive security "
+            f"notifications for {org_name}.")
+    rows = [("Organization", org_name), ("Why you received this", reason),
+            ("What this contact receives", scope), ("Link expires", expires_at)]
+    return _sec_send(to, SEC_006_VERIFY_SUBJECT, "Security contact",
+                     "Verify your security contact.", SEC_PREHEADER, rows, body,
+                     "Verify security contact", verify_url, NEVER_ASK)
+
+
+def send_security_violation_email(to, *, name, account, org_name, occurred_at, category,
+                                  summary, access_restricted, remediation, security_url):
+    """A CONFIRMED violation only. There is no parameter for a rule, a threshold, a
+    signature or an address, so detection internals cannot appear."""
+    body = (f"Hi {name}, a security policy condition was confirmed on {account}. "
+            f"{summary}")
+    rows = [("Account", account), ("Organization", org_name), ("When", occurred_at),
+            ("What happened", category),
+            ("Access restricted", "Yes" if access_restricted else "No"),
+            ("What you need to do", remediation)]
+    return _sec_send(to, SEC_006_VIOLATION_SUBJECT, "Security", "Security action required.",
+                     SEC_PREHEADER, rows, body, SEC_CTA, security_url, NEVER_ASK)
+
+
+# -- SEC-001 Urgent security alert --------------------------------------------------------
+
+SEC_001_ALERT_SUBJECT = "Urgent security alert for your Zoiko Steam account"
+SEC_001_CONTAINED_SUBJECT = "Security event contained for your Zoiko Steam account"
+SEC_001_RESOLVED_SUBJECT = "Security event resolved for your Zoiko Steam account"
+
+
+def send_security_alert_email(to, *, name, variant, reference, account, org_name, category,
+                              confirmed_at, contained_at, resolved_at, containment,
+                              access_state, summary, remediation, security_url,
+                              recovery_note):
+    """Sent only from a CONFIRMED (or later) SecurityEvent.
+
+    `containment` arrives ready-made from containment_note(), which reads `contained_at`
+    alone - so the containment sentence cannot be produced by a token revocation or a
+    password change.
+    """
+    subject = {"confirmed": SEC_001_ALERT_SUBJECT,
+               "contained": SEC_001_CONTAINED_SUBJECT,
+               "resolved": SEC_001_RESOLVED_SUBJECT}[variant]
+    headline = {"confirmed": "We confirmed a high-risk security event.",
+                "contained": "The security event has been contained.",
+                "resolved": "The security event is resolved."}[variant]
+    body = (f"Hi {name}, {summary}")
+    rows = [("Reference", reference), ("Account", account), ("Organization", org_name),
+            ("What we confirmed", category), ("Confirmed", confirmed_at),
+            ("Current access state", access_state)]
+    if variant == "confirmed":
+        rows.append(("Status", containment))
+    if contained_at:
+        rows.append(("Contained", contained_at))
+    # RESOLVED is reported as its own distinct fact, never merged with containment.
+    if resolved_at:
+        rows.append(("Resolved", resolved_at))
+    rows.append(("What you need to do", remediation))
+    footer = NEVER_ASK + " " + recovery_note
+    return _sec_send(to, subject, "Security alert", headline, SEC_PREHEADER, rows, body,
+                     SEC_CTA, security_url, footer)
+
+
+# -- SEC-002 Break-glass lifecycle --------------------------------------------------------
+
+SEC_002_STARTED_SUBJECT = "Emergency access started for your Zoiko Steam organization"
+SEC_002_ENDED_SUBJECT = "Emergency access ended for your Zoiko Steam organization"
+SEC_002_REVIEW_SUBJECT = "Action required: emergency-access review is overdue"
+
+
+def send_breakglass_started_email(to, *, name, org_name, reference, reason, scope, operator,
+                                  approval, security_url, started_at, expires_at):
+    """`expires_at` is the elevation's real expiry, which services/ops.current_elevation
+    enforces - the email quotes an enforced deadline, it does not assert one."""
+    body = (f"Hi {name}, a Zoiko Steam engineer has started emergency access to {org_name} "
+            f"under independent authorization.")
+    rows = [("Organization", org_name), ("Reference", reference), ("Started", started_at),
+            ("Access expires", expires_at), ("Purpose", reason),
+            ("Approved scope", scope), ("Operator", operator),
+            ("Independent approval", approval)]
+    return _sec_send(to, SEC_002_STARTED_SUBJECT, "Emergency access",
+                     "Emergency access has started.", SEC_PREHEADER, rows, body,
+                     SEC_CTA, security_url,
+                     "Access ends automatically at the time above, and every action is "
+                     "recorded in your audit trail.")
+
+
+def send_breakglass_ended_email(to, *, name, org_name, reference, reason, scope, operator,
+                                approval, security_url, started_at, ended_at, duration,
+                                end_reason, review_note):
+    body = (f"Hi {name}, the emergency access session on {org_name} has ended.")
+    rows = [("Organization", org_name), ("Reference", reference), ("Started", started_at),
+            ("Ended", ended_at), ("Duration", duration), ("How it ended", end_reason),
+            ("Approved scope", scope), ("Operator", operator), ("Review", review_note)]
+    # Access ending is not a finding that the activity was appropriate. The footer says so.
+    return _sec_send(to, SEC_002_ENDED_SUBJECT, "Emergency access",
+                     "Emergency access has ended.", SEC_PREHEADER, rows, body,
+                     SEC_CTA, security_url,
+                     "Ending the session does not itself conclude that the activity was "
+                     "appropriate - that is what the review determines.")
+
+
+def send_breakglass_review_email(to, *, name, org_name, reference, reason, scope, operator,
+                                 approval, security_url, due_at):
+    body = (f"Hi {name}, the review of the emergency access session on {org_name} is "
+            f"overdue.")
+    rows = [("Organization", org_name), ("Reference", reference),
+            ("Review was due", due_at), ("Approved scope", scope), ("Operator", operator),
+            ("Independent approval", approval)]
+    return _sec_send(to, SEC_002_REVIEW_SUBJECT, "Emergency access",
+                     "An emergency-access review is overdue.", SEC_PREHEADER, rows, body,
+                     SEC_CTA, security_url,
+                     "Complete the review in your Security Center so the session can be "
+                     "closed out.")
+
+
+# -- SEC-003 Organization security incident -----------------------------------------------
+
+SEC_003_OPENED_SUBJECT = "Security incident opened for your Zoiko Steam organization"
+SEC_003_UPDATE_SUBJECT = "Update on the security incident for your Zoiko Steam organization"
+SEC_003_CONTAINED_SUBJECT = "Security incident contained for your Zoiko Steam organization"
+SEC_003_RESOLVED_SUBJECT = "Security incident resolved for your Zoiko Steam organization"
+
+
+def send_security_incident_email(to, *, name, variant, reference, org_name, status,
+                                 opened_at, contained_at, resolved_at, affected_service,
+                                 impact, action, resolution, report_available, next_update,
+                                 evidence_note, security_url):
+    """Customer-safe disclosure fields only.
+
+    There is no parameter for the incident's internal detail, its commander, its severity,
+    an RCA draft, a detector rule, an attack payload or a log line - so none of them can be
+    mailed. Evidence is viewed behind authentication, never attached or quoted.
+    """
+    subject = {"incident_opened": SEC_003_OPENED_SUBJECT,
+               "incident_update": SEC_003_UPDATE_SUBJECT,
+               "incident_contained": SEC_003_CONTAINED_SUBJECT,
+               "incident_resolved": SEC_003_RESOLVED_SUBJECT}[variant]
+    headline = {"incident_opened": "We opened a security incident.",
+                "incident_update": "There is an update on the security incident.",
+                "incident_contained": "The security incident has been contained.",
+                "incident_resolved": "The security incident is resolved."}[variant]
+    body = f"Hi {name}, {impact}"
+    rows = [("Incident reference", reference), ("Organization", org_name),
+            ("Status", status), ("Opened", opened_at),
+            ("Affected service", affected_service), ("Impact on you", impact),
+            ("Recommended action", action)]
+    if contained_at:
+        rows.append(("Contained", contained_at))
+    if variant == "incident_contained":
+        rows.append(("Investigation", "Our investigation is continuing."))
+    if resolved_at:
+        rows.append(("Resolved", resolved_at))
+    if variant == "incident_resolved":
+        rows.append(("Resolution", resolution or "Our review is complete."))
+        # Only mentioned when an approved artifact genuinely exists.
+        rows.append(("Report", "A report is available in your Security Center."
+                     if report_available else "No customer report was produced."))
+    if variant in ("incident_opened", "incident_update"):
+        rows.append(("Next update", next_update))
+    return _sec_send(to, subject, "Security incident", headline, SEC_PREHEADER, rows, body,
+                     "View secure incident details", security_url,
+                     evidence_note + " " + NEVER_ASK)
+
+
+# -- SEC-004 Abuse report lifecycle -------------------------------------------------------
+
+SEC_004_RECEIVED_SUBJECT = "We received your Zoiko Steam report"
+SEC_004_CLOSED_SUBJECT = "Our review of your Zoiko Steam report is complete"
+
+
+def send_abuse_received_email(to, *, name, reference, received_at, category, promise,
+                              consent_note, security_url):
+    """Acknowledges receipt WITHOUT promising an enforcement outcome.
+
+    `promise` is the fixed REVIEW_PROMISE constant; there is no parameter for a suspension,
+    a removal, a ban, legal action or a refund, so none can be offered from here.
+    """
+    body = (f"Hi {name}, thank you for the report. {promise}")
+    rows = [("Report reference", reference), ("Received", received_at),
+            ("Reported category", category), ("What happens next", promise)]
+    return _sec_send(to, SEC_004_RECEIVED_SUBJECT, "Report received",
+                     "We received your report.", SEC_PREHEADER, rows, body,
+                     "Check report status", security_url, consent_note)
+
+
+def send_abuse_closed_email(to, *, name, reference, closed_at, outcome, security_url):
+    """`outcome` is one of four approved closure notes, none of which names an enforcement
+    action taken against anybody."""
+    body = f"Hi {name}, our review of report {reference} is complete. {outcome}"
+    rows = [("Report reference", reference), ("Review completed", closed_at),
+            ("Outcome", outcome)]
+    return _sec_send(to, SEC_004_CLOSED_SUBJECT, "Report closed",
+                     "Our review is complete.", SEC_PREHEADER, rows, body,
+                     "Open Security Center", security_url,
+                     "We do not share the details of any action we take on individual "
+                     "accounts.")
+
+
+# -- SEC-005 Content restriction and appeal -----------------------------------------------
+
+SEC_005_RESTRICTED_SUBJECT = "Access to Zoiko Steam content was restricted"
+SEC_005_APPEAL_RECEIVED_SUBJECT = "We received your appeal"
+SEC_005_APPEAL_DECIDED_SUBJECT = "Decision on your Zoiko Steam content appeal"
+SEC_005_REMOVED_SUBJECT = "Content removal completed"
+
+
+def send_content_restriction_email(to, *, name, reference, org_name, content,
+                                   restriction_type, effective_at, reason, appeal_allowed,
+                                   appeal_deadline, security_url):
+    """No parameter carries a complainant, so the reporter cannot be identified here."""
+    body = (f"Hi {name}, access to {content} in {org_name} has been restricted. {reason}")
+    rows = [("Reference", reference), ("Organization", org_name), ("Content", content),
+            ("Restriction", restriction_type), ("Effective", effective_at),
+            ("Reason", reason),
+            ("Appeal available", "Yes" if appeal_allowed else "No")]
+    if appeal_allowed and appeal_deadline:
+        rows.append(("Appeal by", appeal_deadline))
+    cta = "Appeal this decision" if appeal_allowed else SEC_CTA
+    return _sec_send(to, SEC_005_RESTRICTED_SUBJECT, "Content restricted",
+                     "Access to your content was restricted.", SEC_PREHEADER, rows, body,
+                     cta, security_url,
+                     "We do not share who raised a report about content.")
+
+
+def send_restriction_appeal_email(to, *, name, variant, reference, org_name, content,
+                                  submitted_at, decided_at, decision, current_state,
+                                  next_step, security_url):
+    subject = {"appeal_received": SEC_005_APPEAL_RECEIVED_SUBJECT,
+               "appeal_upheld": SEC_005_APPEAL_DECIDED_SUBJECT,
+               "appeal_granted": SEC_005_APPEAL_DECIDED_SUBJECT}[variant]
+    headline = {"appeal_received": "We received your appeal.",
+                "appeal_upheld": "Your appeal was reviewed.",
+                "appeal_granted": "Your appeal was granted."}[variant]
+    body = {
+        "appeal_received": (f"Hi {name}, we have your appeal about {content} and it is "
+                            f"queued for review."),
+        "appeal_upheld": (f"Hi {name}, we reviewed your appeal about {content}. "
+                          f"{decision}"),
+        "appeal_granted": (f"Hi {name}, we reviewed your appeal about {content} and the "
+                           f"restriction has been lifted."),
+    }[variant]
+    rows = [("Restriction reference", reference), ("Organization", org_name),
+            ("Content", content), ("Appeal submitted", submitted_at)]
+    if variant == "appeal_received":
+        rows += [("Current status", current_state), ("Next step", next_step)]
+    else:
+        rows += [("Decided", decided_at), ("Decision", decision),
+                 ("Current status", current_state), ("Next step", next_step)]
+    return _sec_send(to, subject, "Content appeal", headline, SEC_PREHEADER, rows, body,
+                     SEC_CTA, security_url,
+                     "We do not share who raised a report about content.")
+
+
+def send_content_removed_email(to, *, name, reference, org_name, content, completed_at,
+                               residual, security_url):
+    """`residual` is generated by removal_position(), which reads MED-011 retention and
+    legal-hold state - so this never claims that every copy everywhere is gone."""
+    body = (f"Hi {name}, the removal of {content} in {org_name} has completed.")
+    rows = [("Reference", reference), ("Organization", org_name), ("Content", content),
+            ("Completed", completed_at), ("What this means", residual)]
+    return _sec_send(to, SEC_005_REMOVED_SUBJECT, "Content removed",
+                     "Content removal is complete.", SEC_PREHEADER, rows, body,
+                     SEC_CTA, security_url, residual)
+
+
+# == PRV-001 .. PRV-004 - privacy and data governance ====================================
+# Every CTA routes to /organization/privacy - the customer Privacy Center, never /admin.
+#
+# Structural guarantees enforced by the parameter lists below. NO template here accepts a
+# password, a password hash, an MFA secret, a recovery code, an API key, a security log, raw
+# audit evidence, legal advice, representative evidence, another user's data, or the export
+# itself. There is no parameter through which any of those could travel, and the export is
+# carried as a LINK only.
+#
+# Deadline wording always arrives ready-made from privacy_comms.deadline_note(), and the
+# deletion residue sentence from deletion_sentence(), so no template can invent a statutory
+# date or claim total erasure.
+
+SENDER_PRIVACY = "Zoiko Steam Privacy"
+
+
+def privacy_center_url() -> str:
+    return f"{public_base_url()}/organization/privacy"
+
+
+def _prv_send(to, subject, header, headline, preheader, rows, body, cta, url, footer):
+    return _send(
+        to, subject,
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, SENDER_PRIVACY),
+        sender=_sender_identity(SENDER_PRIVACY),
+    )
+
+
+PRV_CTA = "Open Privacy Center"
+PRV_PREHEADER = "About your Zoiko Steam privacy request."
+NEVER_ASK_PRV = ("Zoiko Steam never asks for your password, recovery codes, MFA codes or "
+                 "API keys by email.")
+
+
+def _request_rows(reference, request_type, status):
+    """The identity block. Deliberately does NOT restate the requester's own free-text
+    details back to them - the reference and type are enough to identify the request."""
+    return [("Request reference", reference), ("Request type", request_type),
+            ("Current status", status)]
+
+
+# -- PRV-001 Intake and verification ------------------------------------------------------
+
+PRV_001_RECEIVED_SUBJECT = "We received your Zoiko Steam privacy request"
+PRV_001_VERIFY_SUBJECT = "Action required: verify your Zoiko Steam privacy request"
+
+
+def send_privacy_received_email(to, *, name, reference, request_type, status,
+                                deadline_note, privacy_url, received_at,
+                                verification_required):
+    body = (f"Hi {name}, we have your privacy request and it is logged as {reference}.")
+    rows = _request_rows(reference, request_type, status)
+    rows += [("Received", received_at),
+             ("Identity verification", "Required before we act"
+              if verification_required else "Not required"),
+             ("Timing", deadline_note)]
+    return _prv_send(to, PRV_001_RECEIVED_SUBJECT, "Privacy request",
+                     "We received your privacy request.", PRV_PREHEADER, rows, body,
+                     PRV_CTA, privacy_url, NEVER_ASK_PRV)
+
+
+def send_privacy_verify_email(to, *, name, reference, request_type, status, deadline_note,
+                              privacy_url, expires_at, verify_url, purpose_note):
+    """Discloses only that verification is needed - never the request's contents."""
+    body = (f"Hi {name}, before we act on request {reference} we need to confirm your "
+            f"identity. {purpose_note}")
+    rows = _request_rows(reference, request_type, status)
+    rows += [("Why", purpose_note), ("Link expires", expires_at)]
+    return _prv_send(to, PRV_001_VERIFY_SUBJECT, "Privacy request",
+                     "Please verify your privacy request.", PRV_PREHEADER, rows, body,
+                     "Verify my request", verify_url, NEVER_ASK_PRV)
+
+
+# -- PRV-002 Status, clarification, extension, decision -----------------------------------
+
+PRV_002_STATUS_SUBJECT = "Update on privacy request {reference}"
+PRV_002_CLARIFY_SUBJECT = "Action required for privacy request {reference}"
+PRV_002_EXTENSION_SUBJECT = "Privacy request {reference} deadline was extended"
+PRV_002_DECISION_SUBJECT = "Decision on privacy request {reference}"
+
+
+def send_privacy_status_email(to, *, name, reference, request_type, status, deadline_note,
+                              privacy_url, updated_at, action_required):
+    body = f"Hi {name}, there is an update on privacy request {reference}."
+    rows = _request_rows(reference, request_type, status)
+    rows += [("Updated", updated_at), ("Timing", deadline_note),
+             ("Action needed from you", "Yes" if action_required else "No")]
+    return _prv_send(to, PRV_002_STATUS_SUBJECT.format(reference=reference),
+                     "Privacy request", "Your privacy request was updated.", PRV_PREHEADER,
+                     rows, body, PRV_CTA, privacy_url, NEVER_ASK_PRV)
+
+
+def send_privacy_clarification_email(to, *, name, reference, request_type, status,
+                                     deadline_note, privacy_url, needed, due_at,
+                                     secure_note):
+    body = (f"Hi {name}, we need a little more information before we can continue with "
+            f"request {reference}.")
+    rows = _request_rows(reference, request_type, status)
+    rows.append(("What we need", needed))
+    # A response date appears only when one was actually recorded.
+    if due_at:
+        rows.append(("Please reply by", due_at))
+    rows.append(("Timing", deadline_note))
+    return _prv_send(to, PRV_002_CLARIFY_SUBJECT.format(reference=reference),
+                     "Privacy request", "We need more information.", PRV_PREHEADER, rows,
+                     body, "Respond securely", privacy_url, secure_note)
+
+
+def send_privacy_extension_email(to, *, name, reference, request_type, status,
+                                 deadline_note, privacy_url, original_deadline,
+                                 new_deadline, reason):
+    """Only reachable when a real deadline existed and an authorized extension was
+    recorded - `reason` is one of the approved categories, never assumed."""
+    body = (f"Hi {name}, we need more time to complete privacy request {reference}.")
+    rows = _request_rows(reference, request_type, status)
+    rows += [("Original due date", original_deadline), ("New due date", new_deadline),
+             ("Why", reason)]
+    return _prv_send(to, PRV_002_EXTENSION_SUBJECT.format(reference=reference),
+                     "Privacy request", "We extended the due date.", PRV_PREHEADER, rows,
+                     body, PRV_CTA, privacy_url, NEVER_ASK_PRV)
+
+
+def send_privacy_decision_email(to, *, name, reference, request_type, status,
+                                deadline_note, privacy_url, outcome, reason, summary,
+                                review_route):
+    """`reason` is an approved customer-safe category and `summary` is operator-authored
+    customer-facing text. There is no parameter for internal legal reasoning."""
+    body = f"Hi {name}, we have reached a decision on privacy request {reference}. {summary}"
+    rows = _request_rows(reference, request_type, status)
+    rows += [("Outcome", outcome), ("Reason", reason), ("What this means", summary)]
+    return _prv_send(to, PRV_002_DECISION_SUBJECT.format(reference=reference),
+                     "Privacy request", "Decision on your privacy request.", PRV_PREHEADER,
+                     rows, body, PRV_CTA, privacy_url, review_route)
+
+
+# -- PRV-003 Export and deletion ----------------------------------------------------------
+
+PRV_003_EXPORT_SUBJECT = "Your Zoiko Steam privacy export is ready"
+PRV_003_EXPIRED_SUBJECT = "Your Zoiko Steam privacy export link expired"
+PRV_003_DELETED_SUBJECT = "Your Zoiko Steam deletion request was completed"
+PRV_003_DELETION_UPDATE_SUBJECT = "Update on your Zoiko Steam deletion request"
+
+
+def send_privacy_export_ready_email(to, *, name, reference, request_type, status,
+                                    deadline_note, privacy_url, generated_at, expires_at,
+                                    download_url):
+    """Carries a short-lived LINK. There is no attachment parameter, so the export itself
+    cannot travel by email."""
+    body = (f"Hi {name}, the copy of your personal data for request {reference} is ready "
+            f"to download.")
+    rows = _request_rows(reference, request_type, status)
+    rows += [("Generated", generated_at), ("Link expires", expires_at)]
+    return _prv_send(to, PRV_003_EXPORT_SUBJECT, "Privacy export",
+                     "Your privacy export is ready.", PRV_PREHEADER, rows, body,
+                     "Download my data", download_url,
+                     "The link is personal to you, works once and expires shortly. "
+                     + NEVER_ASK_PRV)
+
+
+def send_privacy_export_expired_email(to, *, name, reference, request_type, status,
+                                      deadline_note, privacy_url, expired_at,
+                                      regenerate_note):
+    body = (f"Hi {name}, the download link for privacy request {reference} has expired.")
+    rows = _request_rows(reference, request_type, status)
+    rows += [("Link expired", expired_at), ("What to do", regenerate_note)]
+    return _prv_send(to, PRV_003_EXPIRED_SUBJECT, "Privacy export",
+                     "Your export link expired.", PRV_PREHEADER, rows, body,
+                     PRV_CTA, privacy_url, NEVER_ASK_PRV)
+
+
+def send_privacy_deletion_email(to, *, name, variant, reference, request_type, status,
+                                deadline_note, privacy_url, state, completed_at,
+                                access_note, residual, blocker, next_action):
+    """`residual` arrives ready-made from deletion_sentence(), which is generated from the
+    recorded residual categories - so this cannot claim total erasure."""
+    completed = variant == "completed"
+    subject = PRV_003_DELETED_SUBJECT if completed else PRV_003_DELETION_UPDATE_SUBJECT
+    headline = ("Your deletion request is complete." if completed
+                else "An update on your deletion request.")
+    body = (f"Hi {name}, {residual}")
+    rows = _request_rows(reference, request_type, status)
+    rows.append(("Deletion state", state))
+    if completed_at:
+        rows.append(("Completed", completed_at))
+    rows += [("Account access", access_note), ("What we retained", residual)]
+    if blocker:
+        rows.append(("Why some data remains", blocker))
+    rows.append(("Next step", next_action))
+    return _prv_send(to, subject, "Deletion request", headline, PRV_PREHEADER, rows, body,
+                     PRV_CTA, privacy_url,
+                     "We only keep what we are required to keep, and only for as long as "
+                     "we must.")
+
+
+# -- PRV-004 Notice, consent, subprocessors, retention exception --------------------------
+
+PRV_004_NOTICE_SUBJECT = "Zoiko Steam privacy notice was updated"
+PRV_004_CONSENT_SUBJECT = "Action required: your choice about the Zoiko Steam privacy notice"
+PRV_004_SUBPROCESSOR_SUBJECT = "Zoiko Steam subprocessor list was updated"
+PRV_004_RETENTION_SUBJECT = "Update on privacy request {reference}"
+
+
+def send_privacy_notice_email(to, *, name, version, effective_at, summary,
+                              consent_required, consent_purpose, options, notice_url,
+                              privacy_url):
+    """When consent is required, Accept and Decline are rendered as EQUAL peers with
+    nothing preselected - `options` comes from consent_options()."""
+    subject = PRV_004_CONSENT_SUBJECT if consent_required else PRV_004_NOTICE_SUBJECT
+    headline = ("Please tell us your choice." if consent_required
+                else "We updated our privacy notice.")
+    body = (f"Hi {name}, {summary}")
+    rows = [("Notice version", version), ("Effective", effective_at),
+            ("What changed", summary)]
+    if consent_required:
+        rows += [("Your choice is needed for", consent_purpose or "the purpose described"),
+                 # Equal weight, neither preselected, neither hidden.
+                 ("Your options", " or ".join(o["label"] for o in options)),
+                 ("Preselected", "Nothing is preselected - the choice is yours")]
+    cta = "Review and choose" if consent_required else "View privacy notice"
+    footer = ("You can accept or decline. Declining will not affect anything we do not "
+              "need your consent for." if consent_required else
+              "You can read the full notice at any time in your Privacy Center.")
+    return _prv_send(to, subject, "Privacy notice", headline, PRV_PREHEADER, rows, body,
+                     cta, notice_url, footer)
+
+
+def send_subprocessor_notice_email(to, *, name, processor, service, purpose, status,
+                                   effective_at, list_url, privacy_url):
+    """Names a real processor and its purpose. No contract or confidential vendor terms."""
+    body = (f"Hi {name}, we have updated the list of processors that help us run Zoiko "
+            f"Steam.")
+    rows = [("Processor", processor), ("Service", service), ("Purpose", purpose),
+            ("Status", status), ("Effective", effective_at)]
+    return _prv_send(to, PRV_004_SUBPROCESSOR_SUBJECT, "Subprocessors",
+                     "Our subprocessor list changed.", PRV_PREHEADER, rows, body,
+                     "View subprocessor list", list_url,
+                     "We publish who processes data on our behalf and why. We do not "
+                     "publish commercial terms.")
+
+
+def send_privacy_retention_email(to, *, name, reference, request_type, status,
+                                 deadline_note, privacy_url, record_type, basis, review_at,
+                                 contact_route):
+    """States a record CATEGORY and a basis category. No legal advice, and no internal
+    retention-policy detail."""
+    body = (f"Hi {name}, we could not act fully on request {reference} because some records "
+            f"must be retained.")
+    rows = _request_rows(reference, request_type, status)
+    rows += [("Records retained", record_type), ("Why", basis)]
+    if review_at:
+        rows.append(("Next review", review_at))
+    rows.append(("If you want this reviewed", contact_route))
+    return _prv_send(to, PRV_004_RETENTION_SUBJECT.format(reference=reference),
+                     "Privacy request", "Some records must be retained.", PRV_PREHEADER,
+                     rows, body, PRV_CTA, privacy_url, contact_route)
+
+
+# == STS-001 .. STS-006 - public status page =============================================
+# PUBLIC, unauthenticated audience. Every CTA is /status - the public status page - and a
+# manage/unsubscribe link built from an opaque per-subscriber handle, never the address.
+#
+# Structural guarantees enforced by the parameter lists below. NO template here accepts an
+# internal incident detail, a commander, a severity, an RCA draft, a monitoring payload, an
+# IP, a detection rule, a credential, a customer identity or an exploit detail. There is no
+# parameter through which any of those could travel.
+#
+# Every timestamp is rendered by billing_date() in UTC, which is the canonical maintenance
+# record. Next-update wording always arrives ready-made from next_update_note(), so no
+# template can invent an ETA.
+
+SENDER_STATUS = "Zoiko Steam Status"
+
+
+def public_status_url() -> str:
+    return f"{public_base_url()}/status"
+
+
+def _sts_send(to, subject, header, headline, preheader, rows, body, cta, url, footer):
+    return _send(
+        to, subject,
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, SENDER_STATUS),
+        sender=_sender_identity(SENDER_STATUS),
+    )
+
+
+STS_PREHEADER = "An update from the Zoiko Steam status page."
+# Repeated on every subscriber message: status is its own communication domain, and somebody
+# unsubscribing here must understand they have not opted out of security or billing mail.
+STS_SCOPE = ("You are receiving this because you subscribed to Zoiko Steam status updates. "
+             "Account, security, billing and privacy emails are separate.")
+
+
+# -- STS-001 Subscription lifecycle -------------------------------------------------------
+
+STS_001_VERIFY_SUBJECT = "Confirm your Zoiko Steam status subscription"
+STS_001_CONFIRMED_SUBJECT = "Your Zoiko Steam status subscription is active"
+STS_001_PREFERENCES_SUBJECT = "Your Zoiko Steam status preferences changed"
+STS_001_UNSUBSCRIBED_SUBJECT = "You unsubscribed from Zoiko Steam status updates"
+
+
+def send_status_verify_email(to, *, components, regions, expires_at, confirm_url,
+                             status_url):
+    body = ("Please confirm this address so we can send you Zoiko Steam status updates.")
+    rows = [("Components", _bullets(components)), ("Regions", _bullets(regions)),
+            ("Link expires", expires_at)]
+    return _sts_send(to, STS_001_VERIFY_SUBJECT, "Status updates",
+                     "Confirm your status subscription.", STS_PREHEADER, rows, body,
+                     "Confirm subscription", confirm_url,
+                     "If you did not request this, ignore it and nothing will be sent.")
+
+
+def send_status_confirmed_email(to, *, components, regions, notify_kinds, status_url,
+                                manage_url):
+    body = "Your Zoiko Steam status subscription is active."
+    rows = [("Components", _bullets(components)), ("Regions", _bullets(regions)),
+            ("You will receive", _bullets(notify_kinds))]
+    return _sts_send(to, STS_001_CONFIRMED_SUBJECT, "Status updates",
+                     "Your subscription is active.", STS_PREHEADER, rows, body,
+                     "Manage preferences", manage_url, STS_SCOPE)
+
+
+def send_status_preferences_email(to, *, previous_components, previous_regions,
+                                  current_components, current_regions, status_url,
+                                  manage_url):
+    """Only sent for a materially changed selection - update_preferences() returns False
+    for a no-op, so an unchanged re-save reaches nothing."""
+    body = "Your Zoiko Steam status preferences have been updated."
+    rows = [("Previous components", _bullets(previous_components)),
+            ("Previous regions", _bullets(previous_regions)),
+            ("Current components", _bullets(current_components)),
+            ("Current regions", _bullets(current_regions))]
+    return _sts_send(to, STS_001_PREFERENCES_SUBJECT, "Status updates",
+                     "Your status preferences changed.", STS_PREHEADER, rows, body,
+                     "Manage preferences", manage_url, STS_SCOPE)
+
+
+def send_status_unsubscribed_email(to, *, scope_note, status_url):
+    """`scope_note` states explicitly what was NOT affected, so leaving the status list is
+    never mistaken for opting out of security or billing mail."""
+    body = ("You will no longer receive Zoiko Steam status updates. " + scope_note)
+    rows = [("Status updates", "Stopped"), ("What is unaffected", scope_note)]
+    return _sts_send(to, STS_001_UNSUBSCRIBED_SUBJECT, "Status updates",
+                     "You have unsubscribed.", STS_PREHEADER, rows, body,
+                     "Subscribe again", status_url, scope_note)
+
+
+# -- STS-002 / STS-003 / STS-004 Public incidents -----------------------------------------
+
+STS_002_INVESTIGATING_SUBJECT = "Zoiko Steam is investigating a service issue"
+STS_002_IDENTIFIED_SUBJECT = "Cause identified for Zoiko Steam service issue"
+STS_003_MONITORING_SUBJECT = "Zoiko Steam service has recovered and is being monitored"
+STS_003_RESOLVED_SUBJECT = "Zoiko Steam service incident resolved"
+STS_003_REOPENED_SUBJECT = "Zoiko Steam service incident reopened"
+STS_003_RESIDUAL_SUBJECT = "Service restored — follow-up work continues"
+STS_004_CORRECTION_SUBJECT = "Correction to Zoiko Steam incident update"
+STS_004_REVIEW_SUBJECT = "Post-incident review published for {reference}"
+
+
+def send_status_incident_email(to, *, variant, reference, title, impact, components,
+                               regions, started_at, next_update, status_url, manage_url,
+                               body, customer_action, identified_at, monitoring_at,
+                               resolved_at, reopened_at, residual, review_available):
+    """One template across the public incident lifecycle.
+
+    Every field is a published, customer-safe value. There is no parameter for the internal
+    incident's detail, its commander, its severity or an RCA draft.
+    """
+    subject = {
+        "incident_investigating": STS_002_INVESTIGATING_SUBJECT,
+        "incident_identified": STS_002_IDENTIFIED_SUBJECT,
+        "incident_monitoring": STS_003_MONITORING_SUBJECT,
+        "incident_resolved": STS_003_RESOLVED_SUBJECT,
+        "incident_reopened": STS_003_REOPENED_SUBJECT,
+    }[variant]
+    headline = {
+        "incident_investigating": "We are investigating a service issue.",
+        "incident_identified": "We have identified the cause.",
+        "incident_monitoring": "Service has recovered and we are monitoring.",
+        "incident_resolved": "This incident is resolved.",
+        "incident_reopened": "This incident has been reopened.",
+    }[variant]
+    rows = [("Incident reference", reference), ("Issue", title),
+            ("Impact", impact), ("Affected components", _bullets(components)),
+            ("Affected regions", _bullets(regions)), ("Started", started_at),
+            ("Update", body)]
+    if variant == "incident_identified" and identified_at:
+        rows.append(("Cause identified", identified_at))
+    if variant == "incident_monitoring" and monitoring_at:
+        rows.append(("Recovered", monitoring_at))
+    if variant == "incident_reopened":
+        # The earlier resolution stays visible: it is a published fact, not an error.
+        rows.append(("Previously resolved", resolved_at or "Not recorded"))
+        rows.append(("Reopened", reopened_at or "Just now"))
+    elif variant == "incident_resolved" and resolved_at:
+        rows.append(("Resolved", resolved_at))
+    if customer_action:
+        rows.append(("What you can do", customer_action))
+    if residual:
+        rows.append(("Follow-up work", residual))
+    if variant == "incident_resolved":
+        # Mentioned only when an approved review actually exists.
+        rows.append(("Post-incident review",
+                     "Published on our status page" if review_available
+                     else "Not published for this incident"))
+    if variant in ("incident_investigating", "incident_identified",
+                   "incident_monitoring", "incident_reopened"):
+        rows.append(("Next update", next_update))
+    return _sts_send(to, subject, "Service status", headline, STS_PREHEADER, rows, body,
+                     "View status page", status_url, STS_SCOPE)
+
+
+def send_status_residual_email(to, *, reference, title, impact, components, regions,
+                               started_at, next_update, status_url, manage_url, body,
+                               impact_note):
+    """Restored service with engineering follow-up. `impact_note` makes clear this is not
+    continued customer impact."""
+    rows = [("Incident reference", reference), ("Issue", title),
+            ("Affected components", _bullets(components)),
+            ("Follow-up work", body), ("Your service", impact_note)]
+    return _sts_send(to, STS_003_RESIDUAL_SUBJECT, "Service status",
+                     "Service restored, follow-up continues.", STS_PREHEADER, rows,
+                     impact_note, "View status page", status_url, STS_SCOPE)
+
+
+def send_status_correction_email(to, *, reference, title, impact, components, regions,
+                                 started_at, next_update, status_url, manage_url,
+                                 previously_reported, corrected, corrected_at):
+    """Shows BOTH statements. `previously_reported` is quoted from the preserved original
+    update row, which is never edited or deleted."""
+    body = f"We need to correct an earlier update about incident {reference}."
+    rows = [("Incident reference", reference), ("Issue", title),
+            ("Previously reported", previously_reported),
+            ("Corrected", corrected), ("Correction published", corrected_at)]
+    return _sts_send(to, STS_004_CORRECTION_SUBJECT, "Service status",
+                     "Correction to an earlier update.", STS_PREHEADER, rows, body,
+                     "View full incident history", status_url,
+                     "Our published history keeps the original update alongside this "
+                     "correction. " + STS_SCOPE)
+
+
+def send_status_review_email(to, *, reference, title, impact, components, regions,
+                             started_at, next_update, status_url, manage_url, summary,
+                             impact_period, published_at):
+    """An APPROVED customer-facing review only. No parameter carries an RCA draft, an
+    attack path, exploitable configuration or a staff name."""
+    body = f"We have published a post-incident review for {reference}."
+    rows = [("Incident reference", reference), ("Issue", title),
+            ("Impact period", impact_period), ("Affected components", _bullets(components)),
+            ("Summary", summary), ("Published", published_at)]
+    return _sts_send(to, STS_004_REVIEW_SUBJECT.format(reference=reference),
+                     "Post-incident review", "We published a post-incident review.",
+                     STS_PREHEADER, rows, body, "Read the review", status_url, STS_SCOPE)
+
+
+# -- STS-005 / STS-006 Maintenance --------------------------------------------------------
+
+STS_005_SCHEDULED_SUBJECT = "Scheduled Zoiko Steam maintenance"
+STS_005_REMINDER_SUBJECT = "Reminder: upcoming Zoiko Steam maintenance"
+STS_005_CHANGED_SUBJECT = "Zoiko Steam scheduled maintenance changed"
+STS_005_CANCELED_SUBJECT = "Zoiko Steam scheduled maintenance canceled"
+STS_006_STARTED_SUBJECT = "Zoiko Steam scheduled maintenance has started"
+STS_006_EXTENDED_SUBJECT = "Zoiko Steam maintenance is taking longer than expected"
+STS_006_COMPLETED_SUBJECT = "Zoiko Steam scheduled maintenance is complete"
+STS_006_EMERGENCY_SUBJECT = "Emergency Zoiko Steam maintenance is underway"
+
+
+def send_status_maintenance_email(to, *, variant, reference, title, components, regions,
+                                  starts_at, ends_at, impact, emergency, next_update,
+                                  status_url, local_note, manage_url, state, started_at,
+                                  completed_at, canceled_at, previous_start, previous_end,
+                                  previous_impact, emergency_reason, health,
+                                  remaining_work):
+    """One template across the maintenance lifecycle.
+
+    Emergency work uses its own subject and carries a reason CATEGORY - it is never
+    presented as scheduled maintenance. `health` is read from recorded component impact, so
+    a completed window never claims the platform is healthy on its own authority.
+    """
+    if emergency and variant in ("maintenance_scheduled", "maintenance_started"):
+        subject = STS_006_EMERGENCY_SUBJECT
+        headline = "Emergency maintenance is underway."
+    else:
+        subject = {
+            "maintenance_scheduled": STS_005_SCHEDULED_SUBJECT,
+            "maintenance_reminder": STS_005_REMINDER_SUBJECT,
+            "maintenance_changed": STS_005_CHANGED_SUBJECT,
+            "maintenance_canceled": STS_005_CANCELED_SUBJECT,
+            "maintenance_started": STS_006_STARTED_SUBJECT,
+            "maintenance_extended": STS_006_EXTENDED_SUBJECT,
+            "maintenance_completed": STS_006_COMPLETED_SUBJECT,
+        }[variant]
+        headline = {
+            "maintenance_scheduled": "We have scheduled maintenance.",
+            "maintenance_reminder": "Upcoming maintenance.",
+            "maintenance_changed": "The maintenance window changed.",
+            "maintenance_canceled": "The maintenance is canceled.",
+            "maintenance_started": "Maintenance has started.",
+            "maintenance_extended": "Maintenance is taking longer than expected.",
+            "maintenance_completed": "Maintenance is complete.",
+        }[variant]
+
+    body = f"{title} — {impact}"
+    rows = [("Maintenance reference", reference), ("Work", title),
+            ("Affected components", _bullets(components)),
+            ("Affected regions", _bullets(regions))]
+    if emergency and emergency_reason:
+        rows.append(("Why", emergency_reason))
+    rows += [("Starts (UTC)", starts_at), ("Ends (UTC)", ends_at),
+             ("Expected impact", impact)]
+    if variant == "maintenance_changed":
+        # A published schedule is versioned, not silently mutated - both windows are shown.
+        rows.insert(4, ("Previous start (UTC)", previous_start or "Unchanged"))
+        rows.insert(5, ("Previous end (UTC)", previous_end or "Unchanged"))
+        if previous_impact:
+            rows.append(("Previous impact", previous_impact))
+    if variant == "maintenance_started" and started_at:
+        rows.append(("Actually started", started_at))
+    if variant == "maintenance_extended":
+        rows.append(("Previous expected completion (UTC)", previous_end or "Not recorded"))
+        rows.append(("New expected completion (UTC)", ends_at))
+    if variant == "maintenance_canceled" and canceled_at:
+        rows.append(("Canceled", canceled_at))
+    if variant == "maintenance_completed":
+        rows.append(("Completed", completed_at or "Just now"))
+        # Read from component state, never asserted.
+        rows.append(("Current service status", health))
+        if remaining_work:
+            rows.append(("Remaining work", remaining_work))
+    if variant in ("maintenance_scheduled", "maintenance_started",
+                   "maintenance_extended", "maintenance_reminder"):
+        rows.append(("Next update", next_update))
+    rows.append(("Current state", state))
+    return _sts_send(to, subject, "Maintenance", headline, STS_PREHEADER, rows, body,
+                     "View status page", status_url, local_note + " " + STS_SCOPE)
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# ZST-EC-001 TRU-001 -> TRU-003 — Trust Center
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# SECURITY/TRUST class. Sent under its own sender identity, carries no promotional content,
+# no tracking, and NO unsubscribe link: an advisory to a verified security contact is not a
+# marketing message and a marketing unsubscribe can never suppress it.
+#
+# Structural guarantees enforced by the parameter lists below. No template in this section
+# accepts an exploit payload, a proof of concept, a detection rule, an internal incident
+# reference, a commander, a reporter name, a reporter address, a credential, a document's
+# contents, or a monitoring payload. There is no parameter through which any of those could
+# travel - which is why the test suite asserts on the signatures rather than on the copy.
+
+SENDER_TRUST = "Zoiko Steam Trust"
+SENDER_SECURITY_ADVISORY = "Zoiko Steam Security"
+
+
+def trust_center_url() -> str:
+    return f"{public_base_url()}/trust"
+
+
+def _trust_send(to, subject, header, headline, preheader, rows, body, cta, url, footer,
+                sender=SENDER_TRUST):
+    return _send(
+        to, subject,
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, sender),
+        sender=_sender_identity(sender),
+    )
+
+
+# -- TRU-001 Security advisory lifecycle --------------------------------------------------
+
+TRU_001_PUBLISHED_SUBJECT = "Zoiko Steam security advisory {reference}"
+TRU_001_UPDATED_SUBJECT = "Update to Zoiko Steam security advisory {reference}"
+TRU_001_REMEDIATION_SUBJECT = ("Remediation available for Zoiko Steam security advisory "
+                               "{reference}")
+TRU_001_CLOSED_SUBJECT = "Zoiko Steam security advisory {reference} closed"
+
+ADVISORY_VARIANT_SUBJECT = {
+    "advisory_published": TRU_001_PUBLISHED_SUBJECT,
+    "advisory_updated": TRU_001_UPDATED_SUBJECT,
+    "advisory_remediation": TRU_001_REMEDIATION_SUBJECT,
+    "advisory_closed": TRU_001_CLOSED_SUBJECT,
+}
+
+ADVISORY_SCOPE = ("You are receiving this because you are a verified security contact for "
+                  "your organization. Security advisories are not marketing and cannot be "
+                  "unsubscribed from; ask your organization owner to change your security "
+                  "contacts.")
+
+
+def _advisory_action_line(action_mandatory, deadline, remediation_steps):
+    """The one imperative sentence, and only when policy earned it.
+
+    `action_mandatory` is a recorded policy flag on the advisory. Without it the wording
+    stays descriptive - no "upgrade immediately", no manufactured urgency - because a
+    severity label is not a mandate and email code has no business deciding it is.
+    """
+    if not remediation_steps:
+        return "No remediation is available yet. We will update this advisory when one is."
+    if action_mandatory and deadline:
+        return (f"This update is required. Please complete it by {deadline}.")
+    if action_mandatory:
+        return "This update is required. Please apply it as soon as you are able."
+    return ("We recommend applying this update during your normal change process. No "
+            "deadline has been set for this advisory.")
+
+
+def _advisory_workaround_line(available, summary):
+    """Truthful either way. "No workaround" is a real answer and is stated as one."""
+    if available and summary:
+        return summary
+    return "No workaround is available."
+
+
+def send_security_advisory_email(to, *, reference, variant, title, severity, summary,
+                                 customer_impact, components, affected_versions,
+                                 published_at, immediate_mitigation, fixed_version,
+                                 remediation_steps, remediation_deadline,
+                                 action_mandatory, workaround_available,
+                                 workaround_summary, change_summary, changed_fields,
+                                 closure_note, affected_customer, cvss_vector):
+    """One advisory message, four variants.
+
+    `severity` arrives as a recorded category and is rendered as a label - nothing here
+    computes or upgrades it. `cvss_vector` is rendered ONLY when a human recorded a real
+    one; there is no scoring in this platform, so it is normally absent and no score is
+    implied. `affected_customer` says whether an authoritative AdvisoryImpact row maps the
+    reader's organization to this advisory, so the message can say "this affects your
+    organization" only when that is a recorded fact.
+    """
+    subject_template = ADVISORY_VARIANT_SUBJECT.get(variant, TRU_001_PUBLISHED_SUBJECT)
+    subject = subject_template.format(reference=reference)
+    severity_label = {"low": "Low", "medium": "Medium", "high": "High",
+                      "critical": "Critical"}.get(severity, "Under assessment")
+
+    rows = [("Advisory", reference), ("Severity", severity_label)]
+    if cvss_vector:
+        rows.append(("CVSS vector", cvss_vector))
+    rows.append(("Affected components", _bullets(components) if components
+                 else "See the advisory"))
+    # Only stated when somebody recorded it. "All versions" is never assumed.
+    rows.append(("Affected versions", affected_versions or "Stated in the advisory"))
+    if published_at:
+        rows.append(("Published", billing_date(published_at)))
+    rows.append(("Applies to your organization",
+                 "Yes - our records show your organization is affected"
+                 if affected_customer else
+                 "Not determined - review the advisory against your configuration"))
+
+    if variant == "advisory_published":
+        headline = f"Security advisory {reference}."
+        body = summary
+        if customer_impact:
+            rows.append(("What this means for you", customer_impact))
+        rows.append(("Immediate mitigation",
+                     immediate_mitigation or "No interim mitigation is available yet."))
+        rows.append(("Workaround", _advisory_workaround_line(workaround_available,
+                                                             workaround_summary)))
+        footer = ADVISORY_SCOPE
+    elif variant == "advisory_updated":
+        headline = f"Advisory {reference} has been updated."
+        # The update shows the CHANGE. The previous statement is not overwritten - it stays
+        # in the advisory's published version history in the Trust Center.
+        body = change_summary or "This advisory has been updated."
+        if changed_fields:
+            rows.append(("What changed", _bullets(changed_fields)))
+        rows.append(("Current summary", summary))
+        if customer_impact:
+            rows.append(("What this means for you", customer_impact))
+        rows.append(("Previous versions",
+                     "Earlier versions of this advisory remain published in the Trust "
+                     "Center."))
+        footer = ADVISORY_SCOPE
+    elif variant == "advisory_remediation":
+        headline = f"Remediation is available for advisory {reference}."
+        body = ("A fix for this advisory is now available. " + (summary or ""))
+        rows.append(("Fixed version", fixed_version or "See remediation steps"))
+        rows.append(("Remediation steps", remediation_steps or "See the advisory"))
+        rows.append(("Workaround", _advisory_workaround_line(workaround_available,
+                                                             workaround_summary)))
+        # A deadline appears only when a real one was recorded on the advisory.
+        rows.append(("Deadline", billing_date(remediation_deadline)
+                     if remediation_deadline else "No deadline has been set"))
+        rows.append(("Required action", _advisory_action_line(
+            action_mandatory, billing_date(remediation_deadline)
+            if remediation_deadline else None, remediation_steps)))
+        footer = ADVISORY_SCOPE
+    else:
+        headline = f"Advisory {reference} is closed."
+        body = closure_note or "This advisory is closed."
+        # Closure describes the ADVISORY, not the customer estate. Saying otherwise would
+        # tell an organization it had patched when nothing here knows that.
+        rows.append(("What closure means",
+                     "This advisory is closed on our side. It does not confirm that the "
+                     "update has been applied in your organization - please verify against "
+                     "your own records."))
+        rows.append(("Fixed version", fixed_version or "See the advisory"))
+        footer = ADVISORY_SCOPE
+
+    return _trust_send(to, subject, "Security advisory", headline,
+                       f"Zoiko Steam security advisory {reference}.", rows, body,
+                       "View in the Trust Center", trust_center_url(), footer,
+                       sender=SENDER_SECURITY_ADVISORY)
+
+
+# -- TRU-002 Trust evidence request and access --------------------------------------------
+
+TRU_002_RECEIVED_SUBJECT = "We received your Zoiko Steam Trust Center request"
+TRU_002_APPROVED_SUBJECT = "Your Zoiko Steam Trust Center document is available"
+TRU_002_DENIED_SUBJECT = "About your Zoiko Steam Trust Center request"
+TRU_002_EXPIRED_SUBJECT = "Your Zoiko Steam Trust Center access expired"
+TRU_002_REVOKED_SUBJECT = "Your Zoiko Steam Trust Center access was withdrawn"
+
+EVIDENCE_DECISION_SUBJECT = {
+    "denied": TRU_002_DENIED_SUBJECT,
+    "expired": TRU_002_EXPIRED_SUBJECT,
+    "revoked": TRU_002_REVOKED_SUBJECT,
+}
+
+PURPOSE_LABELS = {
+    "vendor_security_review": "Vendor security review",
+    "procurement_due_diligence": "Procurement due diligence",
+    "customer_audit": "Customer audit",
+    "regulatory_compliance": "Regulatory compliance",
+    "contract_negotiation": "Contract negotiation",
+}
+
+SCOPE_LABELS = {
+    "organization": "Organization-wide",
+    "single_project": "A single project",
+    "annual_review": "Annual review",
+}
+
+DOCUMENT_TYPE_LABELS = {
+    "soc2_type2": "SOC 2 Type II report",
+    "iso27001_certificate": "ISO 27001 certificate",
+    "penetration_test_summary": "Penetration test summary",
+    "security_whitepaper": "Security whitepaper",
+    "subprocessor_list": "Subprocessor list",
+    "dpa_template": "Data processing agreement",
+    "architecture_overview": "Architecture overview",
+    "questionnaire_response": "Security questionnaire response",
+}
+
+
+def send_trust_request_received_email(to, *, reference, requester_name, document_title,
+                                      document_type, purpose, scope, status):
+    """Acknowledge a request. Carries no document and no link to one."""
+    body = ("We have received your Trust Center request and it is with our team for "
+            "review. We will email you when a decision has been made.")
+    rows = [("Request", reference),
+            ("Document", document_title or DOCUMENT_TYPE_LABELS.get(document_type,
+                                                                    "Requested document")),
+            ("Purpose", PURPOSE_LABELS.get(purpose, purpose)),
+            ("Scope", SCOPE_LABELS.get(scope, scope)),
+            ("Status", "Under review" if status == "under_review" else "Received")]
+    headline = "We received your Trust Center request."
+    return _trust_send(to, TRU_002_RECEIVED_SUBJECT, "Trust Center", headline,
+                       "Your Trust Center request has been received.", rows, body,
+                       "Visit the Trust Center", trust_center_url(),
+                       "Confidential documents are released under an approved request only.")
+
+
+def send_trust_access_approved_email(to, *, reference, requester_name, document_title,
+                                     document_version, classification, purpose, scope,
+                                     expires_at, url):
+    """Send the short-lived, bound access link.
+
+    Note what is NOT a parameter: the document, its contents, its storage key, or any
+    attachment. There is no way for the evidence itself to travel in this message - the
+    recipient authenticates against a bound, expiring authorization and the file streams
+    from private storage.
+    """
+    body = ("Your Trust Center request has been approved. Use the link below to access the "
+            "document. The link is issued to this address for the purpose and scope you "
+            "requested, and it expires.")
+    rows = [("Request", reference),
+            ("Document", document_title or "Approved document"),
+            ("Version", document_version or "Current"),
+            ("Classification", {"public": "Public",
+                                "customer_confidential": "Customer confidential",
+                                "nda_required": "Confidential - NDA required"}.get(
+                                    classification, "Confidential")),
+            ("Purpose", PURPOSE_LABELS.get(purpose, purpose)),
+            ("Scope", SCOPE_LABELS.get(scope, scope)),
+            ("Access expires", billing_date(expires_at) if expires_at else "Not set")]
+    return _trust_send(to, TRU_002_APPROVED_SUBJECT, "Trust Center",
+                       "Your document is available.",
+                       "Your Trust Center document is ready.", rows, body,
+                       "Access the document", url,
+                       "This link is issued to you for this document and expires. Please do "
+                       "not forward it - a forwarded link will not work for anyone else.")
+
+
+def send_trust_request_decided_email(to, *, reference, requester_name, variant,
+                                     decision_note):
+    """Denial, expiry and revocation. Carries a customer-safe reason and nothing internal."""
+    subject = EVIDENCE_DECISION_SUBJECT.get(variant, TRU_002_DENIED_SUBJECT)
+    if variant == "denied":
+        headline = "We could not approve this request."
+        body = ("We were not able to approve your Trust Center request. " +
+                (decision_note or ""))
+        rows = [("Request", reference), ("Outcome", "Not approved")]
+    elif variant == "expired":
+        headline = "Your access has expired."
+        body = ("The access window for your Trust Center document has ended and the link no "
+                "longer works. You are welcome to request access again.")
+        rows = [("Request", reference), ("Outcome", "Access expired")]
+    else:
+        headline = "Your access has been withdrawn."
+        body = ("Access to your Trust Center document has been withdrawn and the link no "
+                "longer works. " + (decision_note or ""))
+        rows = [("Request", reference), ("Outcome", "Access withdrawn")]
+    return _trust_send(to, subject, "Trust Center", headline,
+                       "An update on your Trust Center request.", rows, body,
+                       "Visit the Trust Center", trust_center_url(),
+                       "Requests are reviewed individually and access is time-limited.")
+
+
+# -- TRU-003 Vulnerability disclosure -----------------------------------------------------
+
+TRU_003_RECEIVED_SUBJECT = "We received your Zoiko Steam security report"
+TRU_003_UPDATE_SUBJECT = "Update on your Zoiko Steam security report {reference}"
+
+# What acknowledgement is allowed to say, and what it deliberately does not.
+#
+# NO bounty. NO payout. NO public credit. NO validity judgement. NO remediation deadline.
+# None of those exist as policy in this platform, and a researcher acting on an implied
+# promise would be reasonable to feel misled. So the copy commits to exactly one thing:
+# somebody will look at it.
+VULN_NO_PROMISE = ("We do not operate a paid bug bounty programme, and this message is not "
+                   "an assessment of the report's validity. We will tell you what we find.")
+
+VULN_SAFE_HANDLING = ("Please keep the details of your report confidential while we "
+                      "investigate, and avoid accessing, changing or storing other people's "
+                      "data. Do not send us passwords, API keys or private keys - we never "
+                      "need them to reproduce an issue.")
+
+VULN_STAGE_HEADLINE = {
+    "acknowledged": "We have your report.",
+    "clarification_needed": "We need a little more information.",
+    "coordinating": "We are working on a fix.",
+    "remediated": "The issue you reported has been fixed.",
+    "closed": "We have closed your report.",
+}
+
+
+def send_vulnerability_received_email(to, *, reference, reporter_name, received_at,
+                                      category, portal_url):
+    """Acknowledge a researcher's report through the protected channel.
+
+    `portal_url` is the researcher's own bound handle on their own report - it grants read of
+    the safe status view and nothing else anywhere in the platform.
+    """
+    body = ("Thank you for reporting this to us. Your report is with our security team. " +
+            VULN_NO_PROMISE)
+    rows = [("Report", reference),
+            ("Received", billing_date(received_at) if received_at else "Just now"),
+            ("Category", (category or "").replace("_", " ").title()),
+            ("What happens next",
+             "Our security team reviews every report. We will contact you if we need more "
+             "information, and we will tell you the outcome."),
+            ("Safe handling", VULN_SAFE_HANDLING)]
+    return _trust_send(to, TRU_003_RECEIVED_SUBJECT, "Security report",
+                       "We received your security report.",
+                       "Your report is with the Zoiko Steam security team.", rows, body,
+                       "Track your report", portal_url,
+                       "Use the secure link above to follow your report or send us more "
+                       "information. Please do not include credentials.",
+                       sender=SENDER_SECURITY_ADVISORY)
+
+
+def send_vulnerability_update_email(to, *, reference, reporter_name, stage, body,
+                                    resolution, coordination_recorded, portal_hint):
+    """One researcher-safe lifecycle update.
+
+    `body` is the stored researcher-safe text. There is no parameter for internal analysis,
+    detection logic, other customers, or an exploit - and `coordination_recorded` gates the
+    only place a disclosure timeline could be mentioned, so with no coordination policy
+    configured nothing about embargoes or dates is ever said.
+    """
+    subject = TRU_003_UPDATE_SUBJECT.format(reference=reference)
+    headline = VULN_STAGE_HEADLINE.get(stage, "An update on your report.")
+    rows = [("Report", reference), ("Stage", (stage or "").replace("_", " ").title())]
+    if stage == "closed" and resolution:
+        rows.append(("Outcome", (resolution or "").replace("_", " ").title()))
+    if stage == "coordinating":
+        rows.append(("Disclosure timeline",
+                     "We will agree any disclosure timing with you directly."
+                     if coordination_recorded else
+                     "We have not set a disclosure timeline for this report."))
+    if stage == "remediated":
+        rows.append(("Next step",
+                     "If you can, please confirm the fix resolves what you reported."))
+    return _trust_send(to, subject, "Security report", headline,
+                       "An update on your Zoiko Steam security report.", rows, body,
+                       "View your report", trust_center_url(),
+                       VULN_SAFE_HANDLING, sender=SENDER_SECURITY_ADVISORY)
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# ZST-EC-001 MKT-001 -> MKT-004 — Marketing and product education
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# MARKETING class, and separated from everything above by construction:
+#
+#   every promotional sender below REQUIRES an `unsubscribe_url`, and
+#   no security, identity, privacy, billing or support template accepts one.
+#
+# So a marketing message always carries one-click unsubscribe, and unsubscribing can only
+# reach messages that carry it. The two properties are the same guarantee seen from either
+# end, and the test suite asserts both by inspecting the signatures.
+
+SENDER_MARKETING = "Zoiko Steam"
+
+# On every promotional message. States the basis, not just the mechanism: somebody who does
+# not remember opting in should be able to tell what they are looking at.
+MKT_SCOPE = ("You are receiving this because you subscribed to Zoiko Steam product updates. "
+             "This is separate from your account, security, billing and privacy emails, "
+             "which are not affected if you unsubscribe.")
+
+
+def preference_center_url() -> str:
+    return f"{public_base_url()}/preferences"
+
+
+def _mkt_send(to, subject, header, headline, preheader, rows, body, cta, url,
+              *, unsubscribe_url, manage_url=None):
+    """Every marketing send goes through here, and `unsubscribe_url` is keyword-REQUIRED.
+
+    A promotional message without a working one-click unsubscribe cannot be constructed.
+    """
+    footer = MKT_SCOPE + f" Unsubscribe: {unsubscribe_url}"
+    if manage_url:
+        footer += f" Manage what you receive: {manage_url}"
+    return _send(
+        to, subject,
+        _org_shell(header, headline, preheader, rows, html.escape(body), cta, url, footer),
+        _org_text(headline, preheader, rows, body, cta, url, footer, SENDER_MARKETING),
+        sender=_sender_identity(SENDER_MARKETING),
+    )
+
+
+# -- MKT foundation: consent lifecycle ----------------------------------------------------
+
+MKT_VERIFY_SUBJECT = "Confirm your Zoiko Steam product updates"
+MKT_CONFIRMED_SUBJECT = "You're subscribed to Zoiko Steam product updates"
+MKT_PREFERENCES_SUBJECT = "Your Zoiko Steam email preferences changed"
+MKT_UNSUBSCRIBED_SUBJECT = "You unsubscribed from Zoiko Steam product updates"
+
+
+def send_marketing_verify_email(to, *, topics, expires_at, confirm_url):
+    """Double opt-in confirmation. Transactional - it is the consent request itself, so it
+    carries no unsubscribe link because there is nothing yet to unsubscribe from."""
+    body = ("Please confirm this address so we can send you the Zoiko Steam updates you "
+            "asked for. If you did not request this, ignore this email and nothing will be "
+            "sent.")
+    rows = [("You asked for", _bullets(topics)),
+            ("Link expires", billing_date(expires_at) if expires_at else "Not set")]
+    return _send(
+        to, MKT_VERIFY_SUBJECT,
+        _org_shell("Product updates", "Confirm your subscription.",
+                   "Confirm your Zoiko Steam product updates.", rows, html.escape(body),
+                   "Confirm subscription", confirm_url,
+                   "You will not receive anything until you confirm."),
+        _org_text("Confirm your subscription.",
+                  "Confirm your Zoiko Steam product updates.", rows, body,
+                  "Confirm subscription", confirm_url,
+                  "You will not receive anything until you confirm.", SENDER_MARKETING),
+        sender=_sender_identity(SENDER_MARKETING),
+    )
+
+
+def send_marketing_confirmed_email(to, *, topics, manage_url, unsubscribe_url):
+    body = "Thanks - you're subscribed to the Zoiko Steam updates you chose."
+    rows = [("You will receive", _bullets(topics)),
+            ("Not affected",
+             "Account, security, billing and privacy emails are separate and are never "
+             "affected by this subscription.")]
+    return _mkt_send(to, MKT_CONFIRMED_SUBJECT, "Product updates",
+                     "You're subscribed.", "Your Zoiko Steam subscription is active.",
+                     rows, body, "Manage what you receive", manage_url,
+                     unsubscribe_url=unsubscribe_url, manage_url=manage_url)
+
+
+def send_marketing_preferences_email(to, *, previous_topics, current_topics, manage_url,
+                                     unsubscribe_url):
+    body = "Your Zoiko Steam email preferences have been updated."
+    rows = [("Previously", _bullets(previous_topics) if previous_topics else "Nothing"),
+            ("Now", _bullets(current_topics) if current_topics else "Nothing")]
+    return _mkt_send(to, MKT_PREFERENCES_SUBJECT, "Product updates",
+                     "Your preferences changed.",
+                     "Your Zoiko Steam email preferences changed.", rows, body,
+                     "Manage what you receive", manage_url,
+                     unsubscribe_url=unsubscribe_url, manage_url=manage_url)
+
+
+def send_marketing_unsubscribed_email(to, *, resubscribe_url):
+    """Confirms suppression, and states plainly what was NOT switched off.
+
+    Transactional - it is the receipt for an action, and offering to unsubscribe from an
+    unsubscribe confirmation would be absurd.
+    """
+    body = ("You have been unsubscribed from Zoiko Steam product updates. This takes effect "
+            "immediately.")
+    rows = [("Product updates", "Stopped"),
+            ("Still active",
+             "Account, security, billing, privacy and support emails are separate and are "
+             "unaffected. If you subscribe to the status page, that is also unaffected.")]
+    return _send(
+        to, MKT_UNSUBSCRIBED_SUBJECT,
+        _org_shell("Product updates", "You have unsubscribed.",
+                   "You unsubscribed from Zoiko Steam product updates.", rows,
+                   html.escape(body), "Subscribe again", resubscribe_url,
+                   "Security, billing and privacy emails are not affected."),
+        _org_text("You have unsubscribed.",
+                  "You unsubscribed from Zoiko Steam product updates.", rows, body,
+                  "Subscribe again", resubscribe_url,
+                  "Security, billing and privacy emails are not affected.",
+                  SENDER_MARKETING),
+        sender=_sender_identity(SENDER_MARKETING),
+    )
+
+
+# -- MKT-001 Release notes digest ---------------------------------------------------------
+
+MKT_001_SUBJECT = "What's new in Zoiko Steam"
+
+
+def send_release_digest_email(to, *, title, summary, entries, period_start, period_end,
+                              manage_url, unsubscribe_url):
+    """An approved digest of approved releases.
+
+    `entries` carry each release's APPROVED customer summary. There is no parameter for
+    `Release.notes` - the internal changelog prose has no route into this message.
+    """
+    body = summary or "Here's what we shipped recently."
+    rows = [("Period", f"{billing_date(period_start)} to {billing_date(period_end)}")]
+    for entry in entries or []:
+        label = f"{entry.get('version') or 'Release'} - {entry.get('title') or ''}".strip(" -")
+        value = entry.get("summary") or ""
+        if entry.get("rollout_status"):
+            value += f" (Rollout: {entry['rollout_status']})"
+        if entry.get("documentation_path"):
+            value += f" Documentation: {public_base_url()}{entry['documentation_path']}"
+        rows.append((label, value))
+    return _mkt_send(to, MKT_001_SUBJECT, "Product updates", title or "What's new.",
+                     "What's new in Zoiko Steam.", rows, body,
+                     "Read the release notes", f"{public_base_url()}/releases",
+                     unsubscribe_url=unsubscribe_url, manage_url=manage_url)
+
+
+# -- MKT-002 Feature availability announcement --------------------------------------------
+
+# Availability wording is chosen by the SERVICE from the frozen lifecycle
+# (marketing.announcement_subject), never composed here. This sender receives the subject it
+# must use, so there is no code path in which a preview is described as generally available.
+
+AVAILABILITY_NOTE = {
+    "preview": ("This feature is in preview. Preview features are still changing, are not "
+                "covered by the standard service commitments, and may be withdrawn."),
+    "pilot": ("This is a pilot. Pilot access is limited and may change or end while we "
+              "learn from it."),
+    "beta": ("This feature is in beta. It is more stable than preview but is still "
+             "changing."),
+    "regional": ("This feature is rolling out by region. It is available to your "
+                 "organization; it may not be available everywhere yet."),
+    "restricted": ("This feature has limited availability and is enabled for selected "
+                   "organizations."),
+    "invite_only": ("This feature is available by invitation. Your organization has been "
+                    "given access."),
+    "ga": "This feature is generally available.",
+}
+
+
+def send_feature_announcement_email(to, *, subject, feature_name, lifecycle,
+                                    lifecycle_label, headline, body,
+                                    documentation_path, effective_at, manage_url,
+                                    unsubscribe_url):
+    rows = [("Feature", feature_name), ("Availability", lifecycle_label),
+            ("What that means", AVAILABILITY_NOTE.get(lifecycle,
+                                                      "Availability is limited."))]
+    if effective_at:
+        rows.append(("Available from", billing_date(effective_at)))
+    if documentation_path:
+        rows.append(("Documentation", f"{public_base_url()}{documentation_path}"))
+    return _mkt_send(to, subject, "Product updates",
+                     headline or f"{feature_name}: {lifecycle_label}.",
+                     f"{feature_name} - {lifecycle_label}.", rows, body,
+                     "See what's new", f"{public_base_url()}/releases",
+                     unsubscribe_url=unsubscribe_url, manage_url=manage_url)
+
+
+# -- MKT-003 Developer onboarding series --------------------------------------------------
+
+MKT_003_SUBJECT = {
+    "welcome": "Getting started with the Zoiko Steam API",
+    "build": "Building your Zoiko Steam integration",
+    "production_readiness": "Taking your Zoiko Steam integration to production",
+}
+
+# Each step's copy is tied to the milestone that unlocked it, so the message describes
+# something the reader actually did. There is deliberately no step whose copy claims to have
+# seen API traffic: that milestone is not observable here (no API-key request authentication,
+# no per-key telemetry), so it is not used and not implied.
+MKT_003_BODY = {
+    "welcome": ("Welcome. Here's the short path to your first Zoiko Steam API call: create "
+                "a credential in your organization's developer settings, read the quickstart, "
+                "and try a request against a test event."),
+    "build": ("You've created a credential - nice. Next up: webhooks. Register an endpoint, "
+              "verify it, and check the signature on every delivery so you can trust what "
+              "you receive."),
+    "production_readiness": ("Your webhook endpoint is verified, which means you're close to "
+                             "production. Before you go live: handle retries idempotently, "
+                             "rotate your signing secret on a schedule, and know your rate "
+                             "limits."),
+}
+
+MKT_003_STEP_ROW = {
+    "welcome": ("Where you are", "You subscribed to developer education."),
+    "build": ("Where you are", "You have created an API credential."),
+    "production_readiness": ("Where you are", "You have a verified webhook endpoint."),
+}
+
+
+def send_developer_onboarding_email(to, *, step, milestone, manage_url, unsubscribe_url):
+    subject = MKT_003_SUBJECT.get(step, MKT_003_SUBJECT["welcome"])
+    body = MKT_003_BODY.get(step, MKT_003_BODY["welcome"])
+    rows = [MKT_003_STEP_ROW.get(step, MKT_003_STEP_ROW["welcome"]),
+            ("Part of", "Developer education - a short series, not a drip campaign.")]
+    return _mkt_send(to, subject, "Developer education",
+                     subject + ".", "Developer education from Zoiko Steam.", rows, body,
+                     "Open the developer docs", f"{public_base_url()}/developers",
+                     unsubscribe_url=unsubscribe_url, manage_url=manage_url)
+
+
+# -- MKT-004 Guides and webinars ----------------------------------------------------------
+
+MKT_004_GUIDE_SUBJECT = "Your Zoiko Steam guide: {guide}"
+MKT_004_CONFIRMATION_SUBJECT = "You're registered: {title}"
+MKT_004_REMINDER_SUBJECT = "Starting soon: {title}"
+MKT_004_RESCHEDULED_SUBJECT = "New time for {title}"
+MKT_004_CANCELED_SUBJECT = "Cancelled: {title}"
+MKT_004_FOLLOWUP_SUBJECT = "After {title}"
+
+WEBINAR_VARIANT_SUBJECT = {
+    "confirmation": MKT_004_CONFIRMATION_SUBJECT,
+    "reminder": MKT_004_REMINDER_SUBJECT,
+    "rescheduled": MKT_004_RESCHEDULED_SUBJECT,
+    "cancelled": MKT_004_CANCELED_SUBJECT,
+}
+
+WEBINAR_VARIANT_HEADLINE = {
+    "confirmation": "You're registered.",
+    "reminder": "Starting soon.",
+    "rescheduled": "This session has moved.",
+    "cancelled": "This session has been cancelled.",
+}
+
+# Registering, reminding, rescheduling and cancelling are TRANSACTIONAL to somebody who
+# signed up: they are about the thing that person asked for. So they do not carry a
+# marketing unsubscribe, and they are not gated on marketing consent - cancelling a session
+# somebody planned their day around must not depend on their campaign preferences.
+WEBINAR_SCOPE = ("You are receiving this because you registered for this session. "
+                 "Registering does not subscribe you to marketing.")
+
+
+def send_guide_email(to, *, name, guide, guide_label, subscribed):
+    """Fulfil a guide request. Transactional: they asked for this specific document.
+
+    `subscribed` reflects whether they ALSO opted in on the form. When they did not, the
+    message says so explicitly rather than leaving them guessing.
+    """
+    subject = MKT_004_GUIDE_SUBJECT.format(guide=guide_label)
+    body = (f"Here is the guide you asked for: {guide_label}.")
+    rows = [("Guide", guide_label),
+            ("Your subscription",
+             "You also asked for Live Events education emails - please confirm your address "
+             "using the separate email we just sent." if subscribed else
+             "You are not subscribed to any marketing emails. We sent this because you "
+             "asked for this guide.")]
+    return _send(
+        to, subject,
+        _org_shell("Live Events education", f"Your guide: {guide_label}.",
+                   f"Your Zoiko Steam guide: {guide_label}.", rows, html.escape(body),
+                   "Read the guide", f"{public_base_url()}/guides/{guide}",
+                   "You asked for this guide. We have not subscribed you to anything else."),
+        _org_text(f"Your guide: {guide_label}.",
+                  f"Your Zoiko Steam guide: {guide_label}.", rows, body,
+                  "Read the guide", f"{public_base_url()}/guides/{guide}",
+                  "You asked for this guide. We have not subscribed you to anything else.",
+                  SENDER_MARKETING),
+        sender=_sender_identity(SENDER_MARKETING),
+    )
+
+
+def send_webinar_email(to, *, name, variant, reference, title, description,
+                       starts_at_utc, previous_starts_at_utc, duration_minutes,
+                       join_path):
+    """Registration lifecycle. Transactional to a registrant, so no marketing gate."""
+    subject = WEBINAR_VARIANT_SUBJECT.get(variant, MKT_004_CONFIRMATION_SUBJECT).format(
+        title=title)
+    headline = WEBINAR_VARIANT_HEADLINE.get(variant, "About your session.")
+    rows = [("Session", title), ("Reference", reference)]
+    if variant == "rescheduled":
+        # The old time stays visible, so nobody has to trust their memory.
+        rows.append(("Previous time (UTC)", billing_date(previous_starts_at_utc)
+                     if previous_starts_at_utc else "Not recorded"))
+        rows.append(("New time (UTC)", billing_date(starts_at_utc)))
+    elif variant != "cancelled":
+        rows.append(("Time (UTC)", billing_date(starts_at_utc)))
+        rows.append(("Duration", f"{duration_minutes} minutes"))
+    if description and variant in ("confirmation", "reminder"):
+        rows.append(("What we'll cover", description))
+    if variant == "cancelled":
+        rows.append(("What happens now",
+                     "Nothing is required from you. We will let you know if we run this "
+                     "session again."))
+    cta_url = (f"{public_base_url()}{join_path}" if join_path
+               else f"{public_base_url()}/webinars")
+    cta = "Cancel your registration" if variant == "cancelled" else "Join the session"
+    if variant == "cancelled":
+        cta, cta_url = "See upcoming sessions", f"{public_base_url()}/webinars"
+    return _send(
+        to, subject,
+        _org_shell("Live Events education", headline, f"{title} - {headline}", rows,
+                   html.escape(description or title), cta, cta_url, WEBINAR_SCOPE),
+        _org_text(headline, f"{title} - {headline}", rows, description or title, cta,
+                  cta_url, WEBINAR_SCOPE, SENDER_MARKETING),
+        sender=_sender_identity(SENDER_MARKETING),
+    )
+
+
+def send_webinar_followup_email(to, *, name, title, body, manage_url, unsubscribe_url):
+    """The promotional follow-up. Requires approval AND the recipient's own consent.
+
+    Note the required `unsubscribe_url`: unlike the registration lifecycle above, this is
+    marketing, and it is classified and constructed as marketing.
+    """
+    subject = MKT_004_FOLLOWUP_SUBJECT.format(title=title)
+    rows = [("Session", title),
+            ("Why you're receiving this",
+             "You subscribed to Live Events education. Attending a session does not "
+             "subscribe you to anything.")]
+    return _mkt_send(to, subject, "Live Events education", f"After {title}.",
+                     f"Following up on {title}.", rows, body,
+                     "See upcoming sessions", f"{public_base_url()}/webinars",
+                     unsubscribe_url=unsubscribe_url, manage_url=manage_url)

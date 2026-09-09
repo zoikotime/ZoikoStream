@@ -17,10 +17,25 @@ from ..services import org_comms
 from ..services import org_governance as governance
 from ..services import developer_comms
 from ..services import support_access as support_svc
+from ..services import support_comms
+from ..services import trust_center
+from ..services import vuln_disclosure
+from ..services import marketing
 from ..services import media_retention
 from ..services import tenant_access
 from ..services.tenant_access import SupportContext, support_context
 from ..models import (
+    ESCALATION_REASONS,
+    EVIDENCE_ACCESS_TTL_HOURS,
+    FeatureAnnouncement,
+    FeatureAvailability,
+    Incident,
+    MarketingWebinar,
+    Release,
+    ReleaseDigest,
+    SecurityAdvisory,
+    TrustEvidenceRequest,
+    VulnerabilityReport,
     LiveRecording,
     RetentionExtension,
     ORG_STATE_ACTIVE,
@@ -34,6 +49,24 @@ from ..models import (
     User,
 )
 from ..schemas.admin import (
+    AdvisoryCloseIn,
+    AdvisoryDraftIn,
+    AdvisoryImpactIn,
+    AdvisoryRemediationIn,
+    AdvisoryUpdateIn,
+    AnnouncementDraftIn,
+    DigestDraftIn,
+    EvidenceDecisionIn,
+    FeatureAvailabilityIn,
+    FeatureGrantIn,
+    ReleaseApprovalIn,
+    TrustDocumentIn,
+    VulnCloseIn,
+    VulnCoordinateIn,
+    VulnLifecycleIn,
+    WebinarCompleteIn,
+    WebinarIn,
+    WebinarRescheduleIn,
     LegalHoldIn,
     RetentionDecisionIn,
     ApiKeyCreate,
@@ -60,6 +93,13 @@ from ..schemas.admin import (
     ReleaseOut,
     SettingsUpdate,
     SubscriptionUpdate,
+    SupportActionRequestIn,
+    SupportCaseUpdateIn,
+    SupportCloseIn,
+    SupportEscalateIn,
+    SupportIncidentLinkIn,
+    SupportOwnerChangeIn,
+    SupportResolveIn,
     SupportTicketCreate,
     SupportTicketOut,
     SupportTicketUpdate,
@@ -1059,3 +1099,827 @@ def revoke_api_key(org_id: uuid.UUID, key_id: str, request: Request,
     if not crud.revoke_api_key(db, org, key_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "API key not found")
     _audit(db, admin, request, "api_key.revoke", target_type="api_key", target_id=key_id, org_id=org_id)
+
+
+# ── Support case lifecycle (ZST-EC-001 SUP-002 / SUP-003 / SUP-004, staff side) ─────────
+# These stay on the `/admin` router and therefore keep its router-level require_super_admin
+# guard - Super Admin capability is unchanged by this family, only the CUSTOMER side was
+# added (routers/organization.py). Each route commits state first and notifies after, so a
+# Resend outage cannot roll back a case transition.
+
+@router.post("/support-tickets/{ticket_id}/update", response_model=SupportTicketOut)
+def post_support_case_update(ticket_id: uuid.UUID, data: SupportCaseUpdateIn,
+                             request: Request, background: BackgroundTasks,
+                             db: Session = Depends(get_db),
+                             admin: User = Depends(require_super_admin)):
+    """Post a CUSTOMER-VISIBLE update.
+
+    Separate from PATCH /support-tickets/{id} on purpose: that route edits staff-side fields
+    and stays silent, which is what SUP-002 requires. Only this one mails the customer, and
+    only `customer_update` is rendered - `internal_notes` has no route into any template.
+    """
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    if not support_comms.post_update(db, ticket, customer_update=data.customer_update,
+                                     status=data.status,
+                                     next_update_at=data.next_update_at):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "customer_update must not be empty")
+    _audit(db, admin, request, "support_ticket.customer_update",
+           target_type="support_ticket", target_id=ticket_id, org_id=ticket.org_id)
+    support_comms.notify_case_update(db, background, ticket)
+    return ticket
+
+
+@router.post("/support-tickets/{ticket_id}/request-action", response_model=SupportTicketOut)
+def request_support_case_action(ticket_id: uuid.UUID, data: SupportActionRequestIn,
+                                request: Request, background: BackgroundTasks,
+                                db: Session = Depends(get_db),
+                                admin: User = Depends(require_super_admin)):
+    """Move a case to WAITING_FOR_CUSTOMER with a specific requested action."""
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    if not support_comms.request_customer_action(db, ticket, action=data.action,
+                                                 due_at=data.due_at):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "action must not be empty")
+    _audit(db, admin, request, "support_ticket.request_action",
+           target_type="support_ticket", target_id=ticket_id, org_id=ticket.org_id)
+    support_comms.notify_action_required(db, background, ticket)
+    return ticket
+
+
+@router.post("/support-tickets/{ticket_id}/escalate", response_model=SupportTicketOut)
+def escalate_support_case(ticket_id: uuid.UUID, data: SupportEscalateIn, request: Request,
+                          background: BackgroundTasks, db: Session = Depends(get_db),
+                          admin: User = Depends(require_super_admin)):
+    """Record a real escalation.
+
+    `next_update_at` is stored only when supplied. Absent means the message says "we will
+    update the case when new information is available" rather than inventing an SLA.
+    """
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    escalation = support_comms.escalate(
+        db, ticket, level=data.level, reason_category=data.reason_category,
+        owner_after=data.owner_after, next_update_at=data.next_update_at,
+        escalated_by=admin.id)
+    if escalation is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"level must be 1-3 and reason_category one of {list(ESCALATION_REASONS)}")
+    _audit(db, admin, request, "support_ticket.escalate", target_type="support_ticket",
+           target_id=ticket_id, org_id=ticket.org_id,
+           meta={"level": data.level, "reason": data.reason_category})
+    support_comms.notify_escalated(db, background, ticket, escalation)
+    return ticket
+
+
+@router.post("/support-tickets/{ticket_id}/owner", response_model=SupportTicketOut)
+def change_support_case_owner(ticket_id: uuid.UUID, data: SupportOwnerChangeIn,
+                              request: Request, background: BackgroundTasks,
+                              db: Session = Depends(get_db),
+                              admin: User = Depends(require_super_admin)):
+    """Change the customer-facing owning TEAM.
+
+    A reassignment to the same team is a no-op and sends nothing - which is how an internal
+    queue move stays internal.
+    """
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    changed, previous = support_comms.change_owner(db, ticket, owner_after=data.owner)
+    if not changed:
+        return ticket
+    _audit(db, admin, request, "support_ticket.owner_change",
+           target_type="support_ticket", target_id=ticket_id, org_id=ticket.org_id,
+           meta={"previous": previous, "current": data.owner})
+    support_comms.notify_owner_changed(db, background, ticket, previous=previous)
+    return ticket
+
+
+@router.post("/support-tickets/{ticket_id}/link-incident", response_model=SupportTicketOut)
+def link_support_case_incident(ticket_id: uuid.UUID, data: SupportIncidentLinkIn,
+                               request: Request, background: BackgroundTasks,
+                               db: Session = Depends(get_db),
+                               admin: User = Depends(require_super_admin)):
+    """Link a case to a REAL platform incident.
+
+    Reuses models/platform_ops.Incident rather than creating a second incident domain. Only
+    the incident's customer-safe `ref`, its status and a generic impact line are ever mailed.
+    """
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    incident = db.get(Incident, data.incident_id)
+    if incident is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incident not found")
+    if not support_comms.link_incident(db, ticket, incident):
+        raise HTTPException(status.HTTP_409_CONFLICT, "That incident is already linked")
+    _audit(db, admin, request, "support_ticket.link_incident",
+           target_type="support_ticket", target_id=ticket_id, org_id=ticket.org_id,
+           meta={"incident_ref": incident.ref})
+    support_comms.notify_incident_linked(db, background, ticket)
+    return ticket
+
+
+@router.post("/support-tickets/{ticket_id}/resolve", response_model=SupportTicketOut)
+def resolve_support_case(ticket_id: uuid.UUID, data: SupportResolveIn, request: Request,
+                         background: BackgroundTasks, db: Session = Depends(get_db),
+                         admin: User = Depends(require_super_admin)):
+    """Resolve a case, then request feedback only if eligibility allows it."""
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    if not support_comms.resolve(db, ticket, summary=data.summary,
+                                 customer_action_remains=data.customer_action_remains):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"A case that is {ticket.status} cannot be resolved")
+    _audit(db, admin, request, "support_ticket.resolve", target_type="support_ticket",
+           target_id=ticket_id, org_id=ticket.org_id)
+    support_comms.notify_resolved(db, background, ticket)
+    # Gated on the stored sensitivity classification, not on the wording of the case.
+    if data.request_feedback:
+        support_comms.notify_feedback_request(db, background, ticket)
+    return ticket
+
+
+@router.post("/support-tickets/{ticket_id}/close", response_model=SupportTicketOut)
+def close_support_case(ticket_id: uuid.UUID, data: SupportCloseIn, request: Request,
+                       background: BackgroundTasks, db: Session = Depends(get_db),
+                       admin: User = Depends(require_super_admin)):
+    """Close a case. A distinct state from resolved, with its own notice."""
+    ticket = crud.get_support_ticket(db, ticket_id)
+    if not ticket:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
+    if not support_comms.close(db, ticket):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This case is already closed")
+    _audit(db, admin, request, "support_ticket.close", target_type="support_ticket",
+           target_id=ticket_id, org_id=ticket.org_id)
+    support_comms.notify_closed(db, background, ticket)
+    if data.request_feedback:
+        support_comms.notify_feedback_request(db, background, ticket)
+    return ticket
+
+
+# ── Trust Center: advisories, evidence, disclosure (ZST-EC-001 TRU-001 -> TRU-003) ───────
+#
+# The OPERATOR half. Everything here is behind require_super_admin (the whole router is),
+# every state change is audited, and every publication commits before any fan-out.
+#
+# `approved_by=admin.id` is passed explicitly on each publish/approve path rather than
+# defaulted, because the services REFUSE to publish an advisory or approve evidence access
+# without a named approver - that is the mechanism that stops an approval being fabricated.
+
+
+@router.post("/trust/advisories", status_code=status.HTTP_201_CREATED)
+def draft_advisory(data: AdvisoryDraftIn, request: Request,
+                   db: Session = Depends(get_db),
+                   admin: User = Depends(require_super_admin)):
+    """Draft an advisory. Sends nothing - a draft has no audience."""
+    advisory = trust_center.create_advisory(
+        db, title=data.title, severity=data.severity, summary=data.summary,
+        affected_components=data.affected_components,
+        customer_impact=data.customer_impact,
+        immediate_mitigation=data.immediate_mitigation,
+        affected_versions=data.affected_versions,
+        affected_scope_note=data.affected_scope_note,
+        cvss_vector=data.cvss_vector,
+        workaround_available=data.workaround_available,
+        workaround_summary=data.workaround_summary,
+        internal_incident_id=data.internal_incident_id,
+        vulnerability_report_id=data.vulnerability_report_id,
+        created_by=admin.id)
+    if advisory is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "An advisory needs an approved severity, a summary, at least one known "
+            "affected component, and a workaround summary if a workaround is claimed")
+    _audit(db, admin, request, "trust.advisory.draft", target_type="security_advisory",
+           target_id=advisory.id)
+    return {"id": str(advisory.id), "reference": advisory.public_reference,
+            "status": advisory.status}
+
+
+@router.post("/trust/advisories/{advisory_id}/impacts")
+def record_advisory_impact(advisory_id: uuid.UUID, data: AdvisoryImpactIn,
+                           request: Request, db: Session = Depends(get_db),
+                           admin: User = Depends(require_super_admin)):
+    """Map one organization to an advisory, with the recorded basis for saying so.
+
+    This is the ONLY thing that makes a tenant an "affected customer". Without a row here an
+    advisory reaches subscribed verified security contacts and nobody is told the advisory
+    applies to them specifically.
+    """
+    advisory = db.get(SecurityAdvisory, advisory_id)
+    if advisory is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Advisory not found")
+    impact = trust_center.record_impact(
+        db, advisory, org_id=data.org_id, basis=data.basis,
+        evidence_note=data.evidence_note, affected_versions=data.affected_versions,
+        recorded_by=admin.id)
+    if impact is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "A known organization and a recorded impact basis are required")
+    _audit(db, admin, request, "trust.advisory.impact", target_type="security_advisory",
+           target_id=advisory_id, org_id=data.org_id, meta={"basis": data.basis})
+    return {"advisory": advisory.public_reference, "org_id": str(data.org_id),
+            "basis": impact.basis}
+
+
+@router.post("/trust/advisories/{advisory_id}/publish")
+def publish_advisory(advisory_id: uuid.UUID, request: Request,
+                     background: BackgroundTasks, db: Session = Depends(get_db),
+                     admin: User = Depends(require_super_admin)):
+    """Publish a draft and notify. The publication commits first; mail is best-effort."""
+    advisory = db.get(SecurityAdvisory, advisory_id)
+    if advisory is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Advisory not found")
+    if not trust_center.publish(db, advisory, approved_by=admin.id):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Only a draft advisory can be published")
+    _audit(db, admin, request, "trust.advisory.publish", target_type="security_advisory",
+           target_id=advisory_id)
+    kind = trust_center.notify_advisory(db, background, advisory)
+    return {"reference": advisory.public_reference, "status": advisory.status,
+            "version": advisory.version, "notified": kind}
+
+
+@router.post("/trust/advisories/{advisory_id}/update")
+def update_advisory(advisory_id: uuid.UUID, data: AdvisoryUpdateIn, request: Request,
+                    background: BackgroundTasks, db: Session = Depends(get_db),
+                    admin: User = Depends(require_super_admin)):
+    """Materially update a published advisory by APPENDING a version.
+
+    Nothing is overwritten. A cosmetic edit that changes no material field is refused rather
+    than mailed - `publish_update` returns None and the response says so.
+    """
+    advisory = db.get(SecurityAdvisory, advisory_id)
+    if advisory is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Advisory not found")
+    changes = {k: v for k, v in data.model_dump(exclude_unset=True).items()
+               if k != "change_summary"}
+    version = trust_center.publish_update(
+        db, advisory, changes=changes, change_summary=data.change_summary,
+        published_by=admin.id)
+    if version is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Nothing material changed, or this advisory cannot be updated in its current "
+            "state")
+    _audit(db, admin, request, "trust.advisory.update", target_type="security_advisory",
+           target_id=advisory_id, meta={"version": version.version,
+                                        "changed": version.changed_fields})
+    kind = trust_center.notify_advisory(db, background, advisory, version=version)
+    return {"reference": advisory.public_reference, "version": version.version,
+            "changed_fields": version.changed_fields, "notified": kind}
+
+
+@router.post("/trust/advisories/{advisory_id}/remediation")
+def advisory_remediation(advisory_id: uuid.UUID, data: AdvisoryRemediationIn,
+                         request: Request, background: BackgroundTasks,
+                         db: Session = Depends(get_db),
+                         admin: User = Depends(require_super_admin)):
+    """Record that remediation actually exists, and notify.
+
+    `action_mandatory` is what unlocks imperative wording; a deadline is quoted only when a
+    real one is supplied. Neither is inferred from severity.
+    """
+    advisory = db.get(SecurityAdvisory, advisory_id)
+    if advisory is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Advisory not found")
+    if not trust_center.mark_remediation_available(
+            db, advisory, fixed_version=data.fixed_version,
+            remediation_steps=data.remediation_steps,
+            remediation_deadline=data.remediation_deadline,
+            action_mandatory=data.action_mandatory, published_by=admin.id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Remediation needs real steps and a published advisory to attach them to")
+    _audit(db, admin, request, "trust.advisory.remediation",
+           target_type="security_advisory", target_id=advisory_id,
+           meta={"mandatory": data.action_mandatory})
+    kind = trust_center.notify_advisory(db, background, advisory)
+    return {"reference": advisory.public_reference, "status": advisory.status,
+            "notified": kind}
+
+
+@router.post("/trust/advisories/{advisory_id}/close")
+def close_advisory(advisory_id: uuid.UUID, data: AdvisoryCloseIn, request: Request,
+                   background: BackgroundTasks, db: Session = Depends(get_db),
+                   admin: User = Depends(require_super_admin)):
+    """Close an advisory. The notice says closure is about the ADVISORY, not the estate."""
+    advisory = db.get(SecurityAdvisory, advisory_id)
+    if advisory is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Advisory not found")
+    if not trust_center.close_advisory(db, advisory, closure_note=data.closure_note,
+                                       published_by=admin.id):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This advisory cannot be closed in its current state")
+    _audit(db, admin, request, "trust.advisory.close", target_type="security_advisory",
+           target_id=advisory_id)
+    kind = trust_center.notify_advisory(db, background, advisory)
+    return {"reference": advisory.public_reference, "status": advisory.status,
+            "notified": kind}
+
+
+@router.post("/trust/documents", status_code=status.HTTP_201_CREATED)
+def register_trust_document(data: TrustDocumentIn, request: Request,
+                            db: Session = Depends(get_db),
+                            admin: User = Depends(require_super_admin)):
+    """Register an evidence document. Contents go to private storage, never a column."""
+    doc = trust_center.create_document(
+        db, title=data.title, document_type=data.document_type, version=data.version,
+        classification=data.classification, allowed_purposes=data.allowed_purposes,
+        allowed_scopes=data.allowed_scopes, content=data.content,
+        content_type=data.content_type, expires_at=data.expires_at, created_by=admin.id)
+    if doc is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "A document needs a known type, a classification, and at least one allowed "
+            "purpose and scope")
+    _audit(db, admin, request, "trust.document.register",
+           target_type="trust_document", target_id=doc.id,
+           meta={"classification": doc.classification})
+    return {"id": str(doc.id), "status": doc.status,
+            "classification": doc.classification}
+
+
+@router.get("/trust/evidence/requests")
+def list_evidence_requests(db: Session = Depends(get_db)):
+    rows = db.scalars(select(TrustEvidenceRequest).order_by(
+        TrustEvidenceRequest.requested_at.desc()).limit(200)).all()
+    return [{"id": str(r.id), "reference": r.reference,
+             "requester_email": r.requester_email, "company_name": r.company_name,
+             "document_id": str(r.document_id), "purpose": r.purpose, "scope": r.scope,
+             "status": r.status, "qualification_basis": r.qualification_basis,
+             # Says whether the claim was CHECKED against something real or merely asserted,
+             # so a reviewer knows which requests need more diligence.
+             "qualification_verified": r.qualification_verified,
+             "requested_at": trust_center.as_utc(r.requested_at),
+             "access_expires_at": trust_center.as_utc(r.access_expires_at),
+             "access_count": r.access_count} for r in rows]
+
+
+@router.post("/trust/evidence/requests/{request_id}/approve")
+def approve_evidence_request(request_id: uuid.UUID, data: EvidenceDecisionIn,
+                             request: Request, background: BackgroundTasks,
+                             db: Session = Depends(get_db),
+                             admin: User = Depends(require_super_admin)):
+    """Approve access and email the bound, expiring link. The document is not attached."""
+    evidence_request = db.get(TrustEvidenceRequest, request_id)
+    if evidence_request is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    token = trust_center.approve_request(
+        db, evidence_request, approved_by=admin.id,
+        ttl_hours=data.ttl_hours or EVIDENCE_ACCESS_TTL_HOURS,
+        decision_note=data.decision_note)
+    if token is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This request cannot be approved - check its state and that the document still "
+            "allows the requested purpose and scope")
+    _audit(db, admin, request, "trust.evidence.approve",
+           target_type="trust_evidence_request", target_id=request_id,
+           meta={"purpose": evidence_request.purpose, "scope": evidence_request.scope})
+    trust_center.notify_access_approved(db, background, evidence_request, token)
+    return {"reference": evidence_request.reference, "status": evidence_request.status,
+            "access_expires_at": trust_center.as_utc(evidence_request.access_expires_at)}
+
+
+@router.post("/trust/evidence/requests/{request_id}/deny")
+def deny_evidence_request(request_id: uuid.UUID, data: EvidenceDecisionIn,
+                          request: Request, background: BackgroundTasks,
+                          db: Session = Depends(get_db),
+                          admin: User = Depends(require_super_admin)):
+    evidence_request = db.get(TrustEvidenceRequest, request_id)
+    if evidence_request is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    if not data.decision_note:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "A denial needs a customer-safe reason")
+    if not trust_center.deny_request(db, evidence_request, denied_by=admin.id,
+                                     decision_note=data.decision_note):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This request has already been decided")
+    _audit(db, admin, request, "trust.evidence.deny",
+           target_type="trust_evidence_request", target_id=request_id)
+    trust_center.notify_request_denied(db, background, evidence_request)
+    return {"reference": evidence_request.reference, "status": evidence_request.status}
+
+
+@router.post("/trust/evidence/requests/{request_id}/revoke")
+def revoke_evidence_access(request_id: uuid.UUID, data: EvidenceDecisionIn,
+                           request: Request, background: BackgroundTasks,
+                           db: Session = Depends(get_db),
+                           admin: User = Depends(require_super_admin)):
+    """Revoke approved access. The token hash is cleared, so the link dies immediately."""
+    evidence_request = db.get(TrustEvidenceRequest, request_id)
+    if evidence_request is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    if not trust_center.revoke_access(db, evidence_request, revoked_by=admin.id,
+                                      reason=data.decision_note):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This access is not active")
+    _audit(db, admin, request, "trust.evidence.revoke",
+           target_type="trust_evidence_request", target_id=request_id)
+    trust_center.notify_access_ended(db, background, evidence_request)
+    return {"reference": evidence_request.reference, "status": evidence_request.status}
+
+
+@router.get("/trust/evidence/requests/{request_id}/access-log")
+def read_evidence_access_log(request_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Every authorization decision on this request, authorized and refused alike.
+
+    Records who, what, when and the outcome. Never any document content.
+    """
+    evidence_request = db.get(TrustEvidenceRequest, request_id)
+    if evidence_request is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    return [{"at": trust_center.as_utc(a.at), "requester_email": a.requester_email,
+             "document_id": str(a.document_id), "purpose": a.purpose, "scope": a.scope,
+             "outcome": a.outcome, "client": a.client, "ip": a.ip}
+            for a in trust_center.access_log(db, evidence_request)]
+
+
+@router.get("/trust/security/reports")
+def list_vulnerability_reports(db: Session = Depends(get_db),
+                               admin: User = Depends(require_super_admin)):
+    """Triage queue.
+
+    Reporter identity is included ONLY through `vuln_disclosure.reporter_identity`, which
+    checks the role again rather than trusting this router's own dependency. An operator
+    without a security role sees the safe projection and nothing else.
+    """
+    rows = db.scalars(select(VulnerabilityReport).order_by(
+        VulnerabilityReport.received_at.desc()).limit(200)).all()
+    out = []
+    for report in rows:
+        entry = vuln_disclosure.public_projection(report)
+        identity = vuln_disclosure.reporter_identity(report, actor=admin)
+        if identity is not None:
+            entry["reporter"] = identity
+        entry["id"] = str(report.id)
+        out.append(entry)
+    return out
+
+
+@router.post("/trust/security/reports/{report_id}/acknowledge")
+def acknowledge_vulnerability_report(report_id: uuid.UUID, data: VulnLifecycleIn,
+                                     request: Request, background: BackgroundTasks,
+                                     db: Session = Depends(get_db),
+                                     admin: User = Depends(require_super_admin)):
+    """Acknowledge receipt. Not a validity judgement, and the copy says so."""
+    report = db.get(VulnerabilityReport, report_id)
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
+    if not vuln_disclosure.acknowledge(db, report, note=data.safe_update):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This report has already been acknowledged")
+    _audit(db, admin, request, "trust.vuln.acknowledge",
+           target_type="vulnerability_report", target_id=report_id)
+    history = vuln_disclosure.reporter_history(db, report)
+    vuln_disclosure.notify_reporter(db, background, report, history[-1])
+    return vuln_disclosure.public_projection(report)
+
+
+@router.post("/trust/security/reports/{report_id}/triage")
+def triage_vulnerability_report(report_id: uuid.UUID, request: Request,
+                                db: Session = Depends(get_db),
+                                admin: User = Depends(require_super_admin)):
+    """Internal triage. Deliberately silent - triage is not a researcher-facing event."""
+    report = db.get(VulnerabilityReport, report_id)
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
+    if not vuln_disclosure.triage(db, report, triaged_by=admin.id):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This report cannot be triaged in its current state")
+    _audit(db, admin, request, "trust.vuln.triage",
+           target_type="vulnerability_report", target_id=report_id)
+    return vuln_disclosure.public_projection(report)
+
+
+@router.post("/trust/security/reports/{report_id}/coordinate")
+def coordinate_vulnerability_report(report_id: uuid.UUID, data: VulnCoordinateIn,
+                                    request: Request, background: BackgroundTasks,
+                                    db: Session = Depends(get_db),
+                                    admin: User = Depends(require_super_admin)):
+    """Begin coordinated remediation.
+
+    Coordination fields are stored only if real ones are supplied. With no coordinated
+    disclosure policy configured they stay null, and the researcher message then mentions
+    no date, embargo or credit at all.
+    """
+    report = db.get(VulnerabilityReport, report_id)
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
+    if not vuln_disclosure.start_coordination(
+            db, report, safe_update=data.safe_update,
+            disclosure_date=data.disclosure_date, embargo_until=data.embargo_until,
+            remediation_target=data.remediation_target,
+            public_credit_preference=data.public_credit_preference):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "This report must be triaged before coordination")
+    _audit(db, admin, request, "trust.vuln.coordinate",
+           target_type="vulnerability_report", target_id=report_id)
+    history = vuln_disclosure.reporter_history(db, report)
+    vuln_disclosure.notify_reporter(db, background, report, history[-1])
+    return vuln_disclosure.public_projection(report)
+
+
+@router.post("/trust/security/reports/{report_id}/remediated")
+def remediate_vulnerability_report(report_id: uuid.UUID, data: VulnLifecycleIn,
+                                   request: Request, background: BackgroundTasks,
+                                   db: Session = Depends(get_db),
+                                   admin: User = Depends(require_super_admin)):
+    """Record remediation. Refused from any state before coordination."""
+    report = db.get(VulnerabilityReport, report_id)
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
+    if not data.safe_update:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "A remediation update needs a researcher-safe statement")
+    if not vuln_disclosure.mark_remediated(db, report, safe_update=data.safe_update,
+                                           advisory_id=data.advisory_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Remediation can only be recorded for a report under coordination")
+    _audit(db, admin, request, "trust.vuln.remediated",
+           target_type="vulnerability_report", target_id=report_id)
+    history = vuln_disclosure.reporter_history(db, report)
+    vuln_disclosure.notify_reporter(db, background, report, history[-1])
+    return vuln_disclosure.public_projection(report)
+
+
+@router.post("/trust/security/reports/{report_id}/close")
+def close_vulnerability_report(report_id: uuid.UUID, data: VulnCloseIn, request: Request,
+                               background: BackgroundTasks,
+                               db: Session = Depends(get_db),
+                               admin: User = Depends(require_super_admin)):
+    report = db.get(VulnerabilityReport, report_id)
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
+    if not vuln_disclosure.close_report(db, report, resolution=data.resolution,
+                                        safe_update=data.safe_update):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "A known resolution and a researcher-safe statement are needed")
+    _audit(db, admin, request, "trust.vuln.close",
+           target_type="vulnerability_report", target_id=report_id,
+           meta={"resolution": data.resolution})
+    history = vuln_disclosure.reporter_history(db, report)
+    vuln_disclosure.notify_reporter(db, background, report, history[-1])
+    return vuln_disclosure.public_projection(report)
+
+
+# ── Marketing: digests, announcements, webinars (ZST-EC-001 MKT-001 -> MKT-004) ──────────
+#
+# Approval lives here and only here. Nothing in services/marketing.py can send a digest or
+# an announcement that a named person did not approve, and every recipient still has to hold
+# the matching consent - approval and consent are independent gates and both are required.
+
+
+@router.post("/marketing/releases/{release_id}/approve")
+def approve_release_for_customers(release_id: uuid.UUID, data: ReleaseApprovalIn,
+                                  request: Request, db: Session = Depends(get_db),
+                                  admin: User = Depends(require_super_admin)):
+    """Make one release distributable, with a summary written for customers.
+
+    `Release.notes` stays internal and is never what goes out.
+    """
+    release = db.get(Release, release_id)
+    if release is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Release not found")
+    if not marketing.approve_release(
+            db, release, customer_summary=data.customer_summary, approved_by=admin.id,
+            documentation_path=data.documentation_path,
+            rollout_status=data.rollout_status):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "A customer-facing summary is required")
+    _audit(db, admin, request, "marketing.release.approve", target_type="release",
+           target_id=release_id)
+    return {"id": str(release.id), "customer_visible": release.customer_visible}
+
+
+@router.post("/marketing/digests", status_code=status.HTTP_201_CREATED)
+def draft_release_digest(data: DigestDraftIn, request: Request,
+                         db: Session = Depends(get_db),
+                         admin: User = Depends(require_super_admin)):
+    """Draft a digest. Unapproved releases are silently excluded, and an empty one refused."""
+    digest = marketing.create_digest(
+        db, title=data.title, period_start=data.period_start,
+        period_end=data.period_end, release_ids=data.release_ids, summary=data.summary)
+    if digest is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "A digest needs a valid period and at least one approved, customer-visible "
+            "release")
+    _audit(db, admin, request, "marketing.digest.draft", target_type="release_digest",
+           target_id=digest.id)
+    return {"id": str(digest.id), "status": digest.status,
+            "release_ids": digest.release_ids}
+
+
+@router.post("/marketing/digests/{digest_id}/approve")
+def approve_release_digest(digest_id: uuid.UUID, request: Request,
+                           db: Session = Depends(get_db),
+                           admin: User = Depends(require_super_admin)):
+    digest = db.get(ReleaseDigest, digest_id)
+    if digest is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Digest not found")
+    if not marketing.approve_digest(db, digest, approved_by=admin.id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a draft digest can be approved")
+    _audit(db, admin, request, "marketing.digest.approve", target_type="release_digest",
+           target_id=digest_id)
+    return {"id": str(digest.id), "status": digest.status}
+
+
+@router.post("/marketing/digests/{digest_id}/publish")
+def publish_release_digest(digest_id: uuid.UUID, request: Request,
+                           background: BackgroundTasks, db: Session = Depends(get_db),
+                           admin: User = Depends(require_super_admin)):
+    """Publish an approved digest and fan out to RELEASE_NOTES subscribers only."""
+    digest = db.get(ReleaseDigest, digest_id)
+    if digest is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Digest not found")
+    if not marketing.publish_digest(db, digest, published_by=admin.id):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Only an approved digest can be published")
+    _audit(db, admin, request, "marketing.digest.publish", target_type="release_digest",
+           target_id=digest_id)
+    queued = marketing.notify_digest(db, background, digest)
+    return {"id": str(digest.id), "status": digest.status, "queued": queued}
+
+
+@router.post("/marketing/features")
+def set_feature_availability(data: FeatureAvailabilityIn, request: Request,
+                             db: Session = Depends(get_db),
+                             admin: User = Depends(require_super_admin)):
+    """Record authoritative rollout state. The announcement copy derives from this."""
+    availability = marketing.set_availability(
+        db, feature_key=data.feature_key, feature_name=data.feature_name,
+        lifecycle=data.lifecycle, customer_summary=data.customer_summary,
+        eligible_plans=data.eligible_plans, eligible_regions=data.eligible_regions,
+        rollout_percentage=data.rollout_percentage,
+        documentation_path=data.documentation_path, effective_at=data.effective_at)
+    if availability is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "A known lifecycle value is required")
+    _audit(db, admin, request, "marketing.feature.availability",
+           target_type="feature_availability", target_id=availability.id,
+           meta={"lifecycle": availability.lifecycle})
+    return {"id": str(availability.id), "feature_key": availability.feature_key,
+            "lifecycle": availability.lifecycle}
+
+
+@router.post("/marketing/features/{availability_id}/grants")
+def grant_feature_availability(availability_id: uuid.UUID, data: FeatureGrantIn,
+                               request: Request, db: Session = Depends(get_db),
+                               admin: User = Depends(require_super_admin)):
+    """Record that one organization can actually use a targeted feature."""
+    availability = db.get(FeatureAvailability, availability_id)
+    if availability is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Feature not found")
+    grant = marketing.grant_availability(db, availability, org_id=data.org_id,
+                                         granted_by=admin.id)
+    if grant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    _audit(db, admin, request, "marketing.feature.grant",
+           target_type="feature_availability", target_id=availability_id,
+           org_id=data.org_id)
+    return {"feature_key": availability.feature_key, "org_id": str(data.org_id)}
+
+
+@router.post("/marketing/features/{availability_id}/announcements",
+             status_code=status.HTTP_201_CREATED)
+def draft_feature_announcement(availability_id: uuid.UUID, data: AnnouncementDraftIn,
+                               request: Request, db: Session = Depends(get_db),
+                               admin: User = Depends(require_super_admin)):
+    """Draft an announcement, freezing the lifecycle it describes."""
+    availability = db.get(FeatureAvailability, availability_id)
+    if availability is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Feature not found")
+    announcement = marketing.create_announcement(
+        db, availability, body=data.body, headline=data.headline)
+    if announcement is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A body is required")
+    _audit(db, admin, request, "marketing.announcement.draft",
+           target_type="feature_announcement", target_id=announcement.id)
+    return {"id": str(announcement.id), "lifecycle": announcement.lifecycle,
+            "status": announcement.status,
+            "subject": marketing.announcement_subject(announcement, availability)}
+
+
+@router.post("/marketing/announcements/{announcement_id}/send")
+def send_feature_announcement(announcement_id: uuid.UUID, request: Request,
+                              background: BackgroundTasks,
+                              db: Session = Depends(get_db),
+                              admin: User = Depends(require_super_admin)):
+    """Approve and send. Recipients must be BOTH subscribed AND eligible."""
+    announcement = db.get(FeatureAnnouncement, announcement_id)
+    if announcement is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Announcement not found")
+    if announcement.status == "draft" and not marketing.approve_announcement(
+            db, announcement, approved_by=admin.id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This announcement cannot be approved")
+    _audit(db, admin, request, "marketing.announcement.send",
+           target_type="feature_announcement", target_id=announcement_id,
+           meta={"lifecycle": announcement.lifecycle})
+    queued = marketing.notify_announcement(db, background, announcement)
+    return {"id": str(announcement.id), "lifecycle": announcement.lifecycle,
+            "queued": queued}
+
+
+@router.post("/marketing/webinars", status_code=status.HTTP_201_CREATED)
+def create_webinar(data: WebinarIn, request: Request, db: Session = Depends(get_db),
+                   admin: User = Depends(require_super_admin)):
+    webinar = marketing.schedule_webinar(
+        db, title=data.title, starts_at_utc=data.starts_at_utc,
+        description=data.description, duration_minutes=data.duration_minutes,
+        join_path=data.join_path)
+    if webinar is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A start time is required")
+    _audit(db, admin, request, "marketing.webinar.create",
+           target_type="marketing_webinar", target_id=webinar.id)
+    return {"id": str(webinar.id), "reference": webinar.reference,
+            "starts_at_utc": marketing.as_utc(webinar.starts_at_utc)}
+
+
+@router.post("/marketing/webinars/{webinar_id}/reschedule")
+def reschedule_webinar(webinar_id: uuid.UUID, data: WebinarRescheduleIn, request: Request,
+                       background: BackgroundTasks, db: Session = Depends(get_db),
+                       admin: User = Depends(require_super_admin)):
+    """Move a session and tell everybody who registered. The old time stays visible."""
+    webinar = db.get(MarketingWebinar, webinar_id)
+    if webinar is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    changed, previous = marketing.reschedule_webinar(
+        db, webinar, starts_at_utc=data.starts_at_utc)
+    if not changed:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "That is already the time, or this session has finished")
+    _audit(db, admin, request, "marketing.webinar.reschedule",
+           target_type="marketing_webinar", target_id=webinar_id)
+    queued = marketing.notify_webinar(db, background, webinar, variant="rescheduled",
+                                      previous_start=previous)
+    return {"reference": webinar.reference,
+            "starts_at_utc": marketing.as_utc(webinar.starts_at_utc), "queued": queued}
+
+
+@router.post("/marketing/webinars/{webinar_id}/cancel")
+def cancel_webinar(webinar_id: uuid.UUID, request: Request, background: BackgroundTasks,
+                   db: Session = Depends(get_db),
+                   admin: User = Depends(require_super_admin)):
+    webinar = db.get(MarketingWebinar, webinar_id)
+    if webinar is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    if not marketing.cancel_webinar(db, webinar):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This session is already finished")
+    _audit(db, admin, request, "marketing.webinar.cancel",
+           target_type="marketing_webinar", target_id=webinar_id)
+    queued = marketing.notify_webinar(db, background, webinar, variant="cancelled")
+    return {"reference": webinar.reference, "status": webinar.status, "queued": queued}
+
+
+@router.post("/marketing/webinars/{webinar_id}/remind")
+def remind_webinar_registrants(webinar_id: uuid.UUID, request: Request,
+                               background: BackgroundTasks,
+                               db: Session = Depends(get_db),
+                               admin: User = Depends(require_super_admin)):
+    """Send a reminder.
+
+    Operator-triggered on purpose: no reminder-threshold policy is configured, and inventing
+    one ("24 hours before") would be exactly the fabrication STS-005 already refuses.
+    """
+    webinar = db.get(MarketingWebinar, webinar_id)
+    if webinar is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    _audit(db, admin, request, "marketing.webinar.remind",
+           target_type="marketing_webinar", target_id=webinar_id)
+    queued = marketing.notify_webinar(db, background, webinar, variant="reminder")
+    return {"reference": webinar.reference, "queued": queued}
+
+
+@router.post("/marketing/webinars/{webinar_id}/complete")
+def complete_webinar(webinar_id: uuid.UUID, data: WebinarCompleteIn, request: Request,
+                     background: BackgroundTasks, db: Session = Depends(get_db),
+                     admin: User = Depends(require_super_admin)):
+    """Mark a session delivered and optionally send the APPROVED follow-up.
+
+    The follow-up is marketing: it needs this approval AND each recipient's own
+    LIVE_EVENT_EDUCATION consent. Attendance is not consent and is not consulted.
+    """
+    webinar = db.get(MarketingWebinar, webinar_id)
+    if webinar is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    if not marketing.complete_webinar(
+            db, webinar, followup_body=data.followup_body,
+            followup_approved_by=admin.id if data.followup_body else None):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This session is already finished")
+    _audit(db, admin, request, "marketing.webinar.complete",
+           target_type="marketing_webinar", target_id=webinar_id)
+    queued = (marketing.notify_webinar_followup(db, background, webinar)
+              if data.followup_body else 0)
+    return {"reference": webinar.reference, "status": webinar.status,
+            "followup_queued": queued}

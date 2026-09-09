@@ -413,6 +413,13 @@ class Quote(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # -- LVE-001 (ZST-EC-001) ------------------------------------------------------------
+    # One marker per proposal transition. Durable rather than process-local, so a retry, a
+    # second worker or a redeploy cannot re-announce a transition already communicated.
+    proposal_ready_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expired_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     event: Mapped["Event"] = relationship()
 
 
@@ -1160,6 +1167,33 @@ class EventIncident(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # -- LVE-010 operational lifecycle (ZST-EC-001) --------------------------------------
+    # Added to THIS record rather than beside it: an interruption is already a service-failure
+    # fact, and a parallel table would let the two disagree about whether an event was held.
+    # `review_state` stays the commercial remedy workflow; `operational_state` is what the
+    # customer is told about while it is happening.
+    #
+    # Cancellation is NOT derivable from any of this. A BroadcastSession ending, a producer
+    # disconnecting, a recording stopping and a LiveKit room closing are all ordinary, and
+    # services/event_ops.py requires Event.status == "cancelled" before it will say canceled.
+    operational_state: Mapped[str | None] = mapped_column(String(20))
+    reason_category: Mapped[str | None] = mapped_column(String(40))
+    delay_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hold_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    canceled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Only ever set when an operator explicitly commits to a time. Nothing derives it, so the
+    # message can promise an update only when somebody actually promised one.
+    next_update_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Customer-safe summary. Investigation detail belongs in `evidence`, which is never mailed.
+    customer_summary: Mapped[str | None] = mapped_column(String(300))
+
+    delayed_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hold_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resumed_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    canceled_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_ready_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     event: Mapped["Event"] = relationship()
     platform_incident: Mapped["Incident"] = relationship()

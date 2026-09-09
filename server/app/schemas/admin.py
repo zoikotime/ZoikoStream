@@ -447,3 +447,217 @@ class ElevationRequest(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = Field(min_length=3, max_length=300)
     minutes: int = Field(15, ge=1, le=240)
+
+
+# -- Support case lifecycle (ZST-EC-001 SUP-002 / SUP-003 / SUP-004) ---------------------
+
+class SupportCaseUpdateIn(BaseModel):
+    # The ONLY free text mailed to the customer. Staff notes go in internal_notes via the
+    # existing PATCH, which stays silent.
+    customer_update: str = Field(..., min_length=1)
+    status: str | None = None
+    next_update_at: datetime | None = None
+
+
+class SupportActionRequestIn(BaseModel):
+    action: str = Field(..., min_length=1)
+    due_at: datetime | None = None
+
+
+class SupportEscalateIn(BaseModel):
+    level: int = 1
+    reason_category: str
+    owner_after: str | None = Field(None, max_length=80)
+    # Absent means the message makes no next-update promise at all.
+    next_update_at: datetime | None = None
+
+
+class SupportOwnerChangeIn(BaseModel):
+    owner: str = Field(..., min_length=1, max_length=80)
+
+
+class SupportIncidentLinkIn(BaseModel):
+    incident_id: uuid.UUID
+
+
+class SupportResolveIn(BaseModel):
+    summary: str = Field(..., min_length=1)
+    customer_action_remains: bool = False
+    request_feedback: bool = True
+
+
+class SupportCloseIn(BaseModel):
+    request_feedback: bool = False
+
+
+# ── Trust Center (ZST-EC-001 TRU-001 -> TRU-003) ────────────────────────────────────────
+#
+# Severity, lifecycle, basis, purpose and scope are validated in the SERVICES against the
+# real constant tuples, so an unknown value is refused rather than stored. These models bound
+# shape and size only.
+
+class AdvisoryDraftIn(BaseModel):
+    title: str = Field(..., min_length=4, max_length=300)
+    # One of ADVISORY_SEVERITIES. Recorded, never derived - there is no CVSS feed here.
+    severity: str = Field(..., min_length=3, max_length=20)
+    summary: str = Field(..., min_length=10)
+    affected_components: list[str] = Field(..., min_length=1, max_length=20)
+    customer_impact: str | None = None
+    immediate_mitigation: str | None = None
+    affected_versions: str | None = Field(None, max_length=300)
+    affected_scope_note: str | None = None
+    # Only ever a real vector recorded by a person. Absent means no score is quoted.
+    cvss_vector: str | None = Field(None, max_length=120)
+    workaround_available: bool = False
+    workaround_summary: str | None = None
+    # Correlation only. Neither reaches a customer-facing projection or an email.
+    internal_incident_id: uuid.UUID | None = None
+    vulnerability_report_id: uuid.UUID | None = None
+
+
+class AdvisoryImpactIn(BaseModel):
+    org_id: uuid.UUID
+    # One of IMPACT_BASES. Each names something RECORDED about the tenant; there is no
+    # value meaning "this organization exists".
+    basis: str = Field(..., min_length=3, max_length=30)
+    evidence_note: str | None = Field(None, max_length=400)
+    affected_versions: str | None = Field(None, max_length=300)
+
+
+class AdvisoryUpdateIn(BaseModel):
+    """A material update. Every field is optional; `change_summary` is not.
+
+    Unset fields are excluded from the diff, so an update touches only what it names and a
+    cosmetic edit that changes nothing material is refused rather than mailed.
+    """
+
+    change_summary: str = Field(..., min_length=5)
+    severity: str | None = Field(None, max_length=20)
+    summary: str | None = None
+    customer_impact: str | None = None
+    affected_components: list[str] | None = None
+    affected_versions: str | None = Field(None, max_length=300)
+    immediate_mitigation: str | None = None
+    workaround_available: bool | None = None
+    workaround_summary: str | None = None
+
+
+class AdvisoryRemediationIn(BaseModel):
+    remediation_steps: str = Field(..., min_length=5)
+    fixed_version: str | None = Field(None, max_length=120)
+    # Absent means no deadline exists, and the message then says so rather than implying one.
+    remediation_deadline: datetime | None = None
+    # The ONLY thing that unlocks imperative wording. Not inferred from severity.
+    action_mandatory: bool = False
+
+
+class AdvisoryCloseIn(BaseModel):
+    closure_note: str = Field(..., min_length=5)
+
+
+class TrustDocumentIn(BaseModel):
+    title: str = Field(..., min_length=3, max_length=300)
+    document_type: str = Field(..., min_length=3, max_length=60)
+    version: str = Field(..., min_length=1, max_length=40)
+    classification: str = Field(..., min_length=3, max_length=30)
+    # Both fail closed: an empty allow-list permits nothing.
+    allowed_purposes: list[str] = Field(..., min_length=1, max_length=10)
+    allowed_scopes: list[str] = Field(..., min_length=1, max_length=10)
+    # Goes to private storage, never a column. There is no path from here to a public URL.
+    content: str | None = None
+    content_type: str = Field("application/pdf", max_length=120)
+    expires_at: datetime | None = None
+
+
+class EvidenceDecisionIn(BaseModel):
+    decision_note: str | None = None
+    # Short by default. A forwarded link should be worthless within days.
+    ttl_hours: int | None = Field(None, ge=1, le=720)
+
+
+class VulnLifecycleIn(BaseModel):
+    # Researcher-safe prose. There is no field here for internal analysis.
+    safe_update: str | None = None
+    advisory_id: uuid.UUID | None = None
+
+
+class VulnCoordinateIn(BaseModel):
+    """Coordination. Every timing field is optional and none is defaulted.
+
+    With no coordinated-disclosure policy configured these stay null, and the researcher
+    message then mentions no embargo, date or credit at all.
+    """
+
+    safe_update: str | None = None
+    disclosure_date: datetime | None = None
+    embargo_until: datetime | None = None
+    remediation_target: datetime | None = None
+    public_credit_preference: str | None = Field(None, max_length=30)
+
+
+class VulnCloseIn(BaseModel):
+    # One of VULN_RESOLUTIONS. An outcome, never a verdict on the researcher.
+    resolution: str = Field(..., min_length=3, max_length=30)
+    safe_update: str = Field(..., min_length=5)
+
+
+# ── Marketing (ZST-EC-001 MKT-001 -> MKT-004) ───────────────────────────────────────────
+
+class ReleaseApprovalIn(BaseModel):
+    # Written for customers. `Release.notes` stays internal and is never distributed.
+    customer_summary: str = Field(..., min_length=10)
+    documentation_path: str | None = Field(None, max_length=300)
+    rollout_status: str | None = Field(None, max_length=60)
+
+
+class DigestDraftIn(BaseModel):
+    title: str = Field(..., min_length=3, max_length=200)
+    period_start: datetime
+    period_end: datetime
+    release_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=100)
+    summary: str | None = None
+
+
+class FeatureAvailabilityIn(BaseModel):
+    feature_key: str = Field(..., min_length=2, max_length=80)
+    feature_name: str = Field(..., min_length=2, max_length=160)
+    # One of FEATURE_LIFECYCLES. Only "ga" ever produces generally-available wording.
+    lifecycle: str = Field(..., min_length=2, max_length=30)
+    customer_summary: str | None = None
+    eligible_plans: list[str] = []
+    eligible_regions: list[str] = []
+    rollout_percentage: int | None = Field(None, ge=0, le=100)
+    documentation_path: str | None = Field(None, max_length=300)
+    effective_at: datetime | None = None
+
+
+class FeatureGrantIn(BaseModel):
+    org_id: uuid.UUID
+
+
+class AnnouncementDraftIn(BaseModel):
+    body: str = Field(..., min_length=10)
+    headline: str | None = Field(None, max_length=200)
+
+
+class WebinarIn(BaseModel):
+    title: str = Field(..., min_length=3, max_length=300)
+    # UTC is the canonical record, spelled in the field name.
+    starts_at_utc: datetime
+    description: str | None = None
+    duration_minutes: int = Field(60, ge=5, le=600)
+    join_path: str | None = Field(None, max_length=300)
+
+
+class WebinarRescheduleIn(BaseModel):
+    starts_at_utc: datetime
+
+
+class WebinarCompleteIn(BaseModel):
+    """Completing a session. `followup_body` is what makes the follow-up approved.
+
+    Absent means no follow-up is sent - and even when present, each recipient still needs
+    their own LIVE_EVENT_EDUCATION consent.
+    """
+
+    followup_body: str | None = None

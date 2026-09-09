@@ -406,7 +406,11 @@ def test_security_posture_reads_real_org_settings():
                             status="open", priority="urgent"))
         db.flush()
         s = org_svc.security_support(db, org)
-        assert s["sso_enforced"] and s["two_factor_required"]
+        # `enforce_sso`/`require_2fa` are stored REQUESTS with no enforcement behind
+        # them, so the payload reports the request and refuses to claim the control.
+        assert s["sso_requested"] and s["two_factor_requested"]
+        assert s["sso_enforced"] is False and s["two_factor_required"] is False
+        assert s["sso_available"] is False and s["two_factor_available"] is False
         assert s["allowed_domains"] == "acme.com" and s["domain_verified"]
         assert s["pending_members"] == 1 and s["open_cases"] == 1 and s["urgent_cases"] == 1
         # Unmodelled facts stay None rather than defaulting to a reassuring zero.

@@ -283,6 +283,17 @@ _ADVANCED = {
 }
 
 
+def _looks_like_url(value: str) -> bool:
+    r"""Whether a configured path is actually a URL.
+
+    Deliberately broader than http/https: any scheme here means somebody pasted a link
+    where a filesystem path belongs, and a Windows drive letter ("C:\keys\gcs.json") must
+    not be mistaken for one - hence the two-character minimum on the scheme.
+    """
+    head = (value or "").split("://", 1)[0]
+    return "://" in (value or "") and len(head) > 1 and head.isalpha()
+
+
 @lru_cache(maxsize=1)
 def _gcs_credentials_json() -> str | None:
     """Raw contents of the service account key file, read once per process. LiveKit's
@@ -297,20 +308,54 @@ def _gcs_credentials_json() -> str | None:
     with. In Cloud Run, mount it from Secret Manager as a file (Cloud Run -> Edit & Deploy
     -> Secrets -> "Mount as volume") and point this at the mount path — never bake the key
     into the image or commit it."""
-    if not settings.GCS_CREDENTIALS_PATH:
+    path = settings.GCS_CREDENTIALS_PATH
+    if not path:
         return None
+
+    # Refuse a URL BEFORE touching the filesystem.
+    #
+    # This is the production failure that prompted the audit: the value was a Google Cloud
+    # Console browser link, and the old code handed it straight to Path().read_text(). The
+    # operator got "[Errno 2] No such file or directory" (and on Windows a mangled
+    # "[Errno 22] Invalid argument: 'https:\console...'"), which describes the symptom and
+    # not the mistake. `gcs_config_error()` below already knew how to say this properly; it
+    # simply ran too late to stop the pointless read.
+    if _looks_like_url(path):
+        log.error("gcs_credentials_invalid path_type=url recording_enabled=%s — "
+                  "GCS_CREDENTIALS_PATH is a browser URL, not a file path. Mount the "
+                  "service-account key from Secret Manager (Cloud Run -> Edit & Deploy -> "
+                  "Secrets -> mount as volume) and set GCS_CREDENTIALS_PATH to the mount "
+                  "path, e.g. /secrets/gcs-key.json",
+                  bool(settings.GCS_BUCKET))
+        return None
+
     try:
-        raw = Path(settings.GCS_CREDENTIALS_PATH).read_text()
+        raw = Path(path).read_text()
     except OSError as exc:
-        log.error("Couldn't read GCS_CREDENTIALS_PATH (%s): %s — recording uploads will be "
-                  "rejected by LiveKit Cloud until this is fixed", settings.GCS_CREDENTIALS_PATH, exc)
+        # The path shape was plausible, so name the real errno. Still no secret in the log:
+        # the path is configuration, the contents are never touched on this branch.
+        log.error("gcs_credentials_invalid path_type=file recording_enabled=%s path=%s — "
+                  "could not be read (%s); recording uploads will be rejected by LiveKit "
+                  "Cloud until this is fixed", bool(settings.GCS_BUCKET), path, exc)
         return None
+
     try:
-        json.loads(raw)  # validate now so a bad key fails loudly here, not deep in an egress call
+        info = json.loads(raw)  # validated here so a bad key fails loudly, not mid-egress
     except json.JSONDecodeError as exc:
-        log.error("GCS_CREDENTIALS_PATH (%s) is set but isn't valid JSON — it must be a "
-                  "downloaded service-account key file, not e.g. a console URL: %s",
-                  settings.GCS_CREDENTIALS_PATH, exc)
+        # `exc` carries a position, never the document, so this cannot echo key material.
+        log.error("gcs_credentials_invalid path_type=file_not_json recording_enabled=%s "
+                  "path=%s — must be a downloaded service-account key file (%s)",
+                  bool(settings.GCS_BUCKET), path, exc)
+        return None
+
+    # A readable JSON file is not necessarily a service-account key: an OAuth client secret
+    # or an ADC user credential parses fine and then fails deep inside egress with something
+    # unhelpful. Checked here so the failure lands at load time with a name attached.
+    if info.get("type") != "service_account" or not info.get("client_email"):
+        log.error("gcs_credentials_invalid path_type=file_wrong_kind recording_enabled=%s "
+                  "path=%s — valid JSON but not a service-account key "
+                  "(missing type=service_account / client_email)",
+                  bool(settings.GCS_BUCKET), path)
         return None
     return raw
 
@@ -330,7 +375,7 @@ def gcs_config_error() -> str | None:
     path = settings.GCS_CREDENTIALS_PATH
     if not path:
         return "GCS_CREDENTIALS_PATH is not set — egress has no destination credentials"
-    if path.startswith(("http://", "https://")):
+    if _looks_like_url(path):
         return (
             "GCS_CREDENTIALS_PATH is a URL (looks like a Google Cloud Console link), not a "
             "path to a downloaded service-account JSON key file. Download a key for a "
@@ -339,16 +384,92 @@ def gcs_config_error() -> str | None:
         )
     raw = _gcs_credentials_json()
     if raw is None:
-        return (f"GCS_CREDENTIALS_PATH ({path}) could not be read as a valid service-account "
-                "JSON key file — see the server log for the underlying read/parse error")
-    try:
-        info = json.loads(raw)
-    except json.JSONDecodeError:
-        return f"GCS_CREDENTIALS_PATH ({path}) is not valid JSON"
-    if info.get("type") != "service_account" or not info.get("client_email"):
-        return (f"GCS_CREDENTIALS_PATH ({path}) is valid JSON but doesn't look like a "
-                "downloaded service-account key (missing type=service_account/client_email)")
+        # The loader refuses several distinct problems and logs each precisely. Re-derive
+        # the specific one here rather than pointing the reader at a log they may not have:
+        # this string is shown to a HOST clicking Record, who cannot read server logs.
+        try:
+            body = Path(path).read_text()
+        except OSError as exc:
+            return (f"GCS_CREDENTIALS_PATH ({path}) could not be read: {exc.strerror or exc}. "
+                    "In Cloud Run, mount the key from Secret Manager as a volume and point "
+                    "this at the mount path, e.g. /secrets/gcs-key.json")
+        try:
+            info = json.loads(body)
+        except json.JSONDecodeError:
+            return (f"GCS_CREDENTIALS_PATH ({path}) is not valid JSON — it must be a "
+                    "downloaded service-account key file")
+        if info.get("type") != "service_account" or not info.get("client_email"):
+            return (f"GCS_CREDENTIALS_PATH ({path}) is valid JSON but is not a "
+                    "service-account key (missing type=service_account / client_email). A "
+                    "user ADC credential or OAuth client secret will not work for egress.")
+        return (f"GCS_CREDENTIALS_PATH ({path}) could not be loaded — see the server log "
+                "for the underlying error")
     return None
+
+
+def gcs_diagnostics() -> dict:
+    """A safe, structured view of how storage is configured. Logged at startup.
+
+    Reports MODE, never contents. Nothing here reads or echoes the key material: the only
+    credential-derived value that escapes is `client_email`, which is an account identifier
+    (not a secret) and is what an operator needs to check the IAM binding against.
+
+    `mode` is the question an operator actually has:
+
+        absent        no path configured. This process falls back to ADC for its own reads;
+                      LiveKit egress has no credential at all and cannot upload.
+        url           a browser link was pasted where a file path belongs. THE BUG.
+        missing       a plausible path that is not readable from this container.
+        malformed     readable, but not valid JSON.
+        wrong_kind    valid JSON, but not a service-account key.
+        mounted_file  a usable service-account key. What production should report.
+    """
+    path = settings.GCS_CREDENTIALS_PATH
+    mode = "absent"
+    exists = False
+    client_email = None
+
+    if path:
+        if _looks_like_url(path):
+            mode = "url"
+        else:
+            try:
+                exists = Path(path).is_file()
+            except OSError:
+                exists = False
+            if not exists:
+                mode = "missing"
+            else:
+                raw = _gcs_credentials_json()
+                if raw is None:
+                    # The loader already logged precisely why; distinguish the two failures
+                    # it can have on a readable file.
+                    try:
+                        json.loads(raw if raw is not None else Path(path).read_text())
+                        mode = "wrong_kind"
+                    except Exception:  # noqa: BLE001
+                        mode = "malformed"
+                else:
+                    mode = "mounted_file"
+                    try:
+                        client_email = json.loads(raw).get("client_email")
+                    except Exception:  # noqa: BLE001
+                        client_email = None
+
+    return {
+        "gcs_credentials_mode": mode,
+        "gcs_credentials_path_exists": exists,
+        # Whether THIS process can reach GCS at all — it may still work via ADC on Cloud Run
+        # even when egress cannot, because egress runs outside this project.
+        "gcs_app_reads_available": bool(settings.GCS_BUCKET and _gcs_client() is not None),
+        # Whether LiveKit EGRESS can upload. This is the one the recording depends on.
+        "gcs_egress_uploads_available": gcs_configured(),
+        "gcs_bucket_configured": bool(settings.GCS_BUCKET),
+        "livekit_configured": configured(),
+        "livekit_webhooks_verifiable": webhook_receiver() is not None,
+        # An identifier, not a credential — the thing to check the bucket IAM binding against.
+        "service_account": client_email,
+    }
 
 
 def gcs_configured() -> bool:

@@ -359,6 +359,21 @@ class ContributorSession(_EventScoped):
     last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # -- CON-001 / CON-005 (ZST-EC-001) --------------------------------------------------
+    # Links this runtime record to its AUTHORIZATION (models/contributor_access.py). Nullable
+    # because every session created before contributor grants existed has none, and because
+    # an org member assigned the old way still works exactly as before.
+    grant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+
+    # CON-005. Deliberately SEPARATE from last_disconnected_at above, which a transient
+    # websocket drop already writes on every reconnect. A drop is not an ending: `ended_at`
+    # is set only by services/contributor_access.end_session() for one of the four
+    # authoritative reasons, which is what stops a flaky connection from mailing somebody
+    # that their session is over.
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    end_reason: Mapped[str | None] = mapped_column(String(20))
+    ended_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
 
 INGRESS_TYPES = ("rtmp", "whip")
 INGRESS_STATES = ("inactive", "buffering", "publishing", "error", "complete")

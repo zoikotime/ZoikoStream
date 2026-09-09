@@ -13,6 +13,7 @@ Permissions:
 import uuid
 from datetime import datetime, timezone
 
+from fastapi.responses import JSONResponse
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,9 +27,38 @@ from ..email import (
     send_assignment_email, send_contributor_invite_email, send_event_created_email,
     send_registration_confirmation_email, send_viewer_invite_email,
 )
-from ..models import Event, LiveRecording, User
+from ..models import (
+    CONTRIBUTOR_ROLES,
+    INCIDENT_REASON_CATEGORIES,
+    NETWORK_TEST_SUPPORTED,
+    SESSION_END_REASONS,
+    TOKEN_PURPOSE_EVENT_ACCESS,
+    TOKEN_PURPOSE_INVITATION,
+    INTAKE_SECTIONS,
+    Event,
+    EventBrief,
+    EventContributorGrant,
+    EventIncident,
+    EventIntake,
+    PostEventReport,
+    EventRehearsal,
+    LiveRecording,
+    User,
+)
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
+    ContributorAccept,
+    ContributorInvite,
+    ContributorRevoke,
+    SessionEndIn,
+    TechnicalCheckIn,
+    IncidentCancelIn,
+    IncidentStateIn,
+    IntakeOpen,
+    IntakeReopen,
+    PlanningUpdate,
+    RehearsalCreate,
+    RehearsalOutcome,
     AccessLinkCreate, AccessLinkIssued, AccessLinkOut,
     AssignmentUpdate, ContributorInvite, ContributorSessionOut, EventCreate, EventOut,
     EventUpdate, FeedbackOut,
@@ -40,6 +70,11 @@ from ..security import (
 )
 from ..services import broadcast as broadcast_svc
 from ..services import livekit
+from ..services import event_comms
+from ..services import contributor_access
+from ..services import event_closeout
+from ..services import event_ops
+from ..services import event_planning
 from ..services import moderation as mod
 from ..services import webhooks
 
@@ -93,6 +128,55 @@ def list_events(
                                     date_from=date_from, date_to=date_to,
                                     sort_by=sort_by, order=order, page=page, page_size=page_size)
     return Page(items=[EventOut.model_validate(e) for e in items], total=total, page=page, page_size=page_size)
+
+
+# ── console access (ZST post-login routing) ─────────────────────────────────────────────
+#
+# Declared BEFORE the "/{event_id}" routes on purpose: FastAPI matches in declaration order,
+# and "assignments" would otherwise be parsed as an event_id UUID and 422.
+#
+# These exist because the browser previously had no way to ASK whether the signed-in user
+# actually runs an event. It guessed from the account role instead, which is how a
+# "host"-persona account with no assignment ended up in a read-only Producer Console on an
+# arbitrary event straight after login.
+
+@router.get("/assignments/mine")
+def my_assignments(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Events this user is assigned to, and in what event role.
+
+    Assignment rows only. An org_admin's authority over every event in their organization is
+    deliberately not expanded into this list: "events I was put on" is a different question
+    from "events I could run", and the console picker wants the first one.
+    """
+    rows = crud.list_my_assignments(db, user)
+    return {
+        "items": [
+            {
+                "event_id": str(entry["event"].id),
+                "title": entry["event"].title,
+                "status": entry["event"].status,
+                "start_time": entry["event"].start_time,
+                "roles": entry["roles"],
+                "can_host": "host" in entry["roles"],
+            }
+            for entry in rows
+        ],
+        # The caller's ACCOUNT role, echoed so a client never has to infer it.
+        "account_role": user.role,
+    }
+
+
+@router.get("/{event_id}/assignment")
+def my_assignment(event_id: uuid.UUID, user: User = Depends(get_current_user),
+                  db: Session = Depends(get_db)):
+    """Does the caller have console access to THIS event, and of what kind?
+
+    404s through _get_event_or_404 when the event is not in the caller's organization, so
+    this cannot be used to probe for events elsewhere. The answer is computed by the same
+    rule that grants broadcast control on the live socket.
+    """
+    ev = _get_event_or_404(db, user, event_id)
+    return crud.console_access(db, ev, user)
 
 
 @router.post("", response_model=EventOut, status_code=status.HTTP_201_CREATED)
@@ -407,7 +491,7 @@ def register_for_event(
 
 
 @router.patch("/{event_id}", response_model=EventOut)
-def update_event(event_id: uuid.UUID, data: EventUpdate,
+def update_event(event_id: uuid.UUID, data: EventUpdate, background: BackgroundTasks,
                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, user, event_id)
     if not _can_edit(db, ev, user):
@@ -450,7 +534,36 @@ def update_event(event_id: uuid.UUID, data: EventUpdate,
     if start and end and end <= start:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end_time must be after start_time")
 
-    return crud.update_event(db, ev, fields, actor=user)
+    # ZST-EC-001 LVE-008 (SEV-1). The window as it stood BEFORE the write, captured here
+    # because update_event mutates the row in place. Previously start_time could be changed
+    # with no record and no notice whatsoever - the silent mutation this family exists to
+    # close. record_change() is a no-op when nothing material moved, so an ordinary save that
+    # happens to include the same start_time still sends nothing.
+    previous_start, previous_end = ev.start_time, ev.end_time
+    previous_zone = ev.timezone
+
+    # `actor=user` (from the other side of this merge) attributes the edit in the audit
+    # trail; the result is bound because every notice below reports COMMITTED state.
+    updated = crud.update_event(db, ev, fields, actor=user)
+
+    change = event_ops.record_change(
+        db, updated, previous_start=previous_start, previous_end=previous_end,
+        previous_timezone=previous_zone, actor_id=user.id)
+    if change is not None:
+        event_ops.notify_schedule_change(db, background, updated, change)
+
+    # ZST-EC-001 LVE-003. is_approved() gates this on a real confirmed state (a SCHEDULED
+    # event with a start time, or a CONFIRMED commercial order) - creating or merely
+    # publishing an event reaches neither, which is what keeps this distinct from the
+    # long-standing "event created" notice.
+    event_comms.notify_event_approved(db, background, updated)
+    # LVE-009: armed/live are read from the COMMITTED status, so a go-live the backend
+    # refused above never reaches this line and never announces "live".
+    event_ops.notify_activation(db, background, updated)
+    # LVE-011: completion is announced from the committed ended status, and reports where the
+    # recording actually is rather than implying it is finished.
+    event_closeout.notify_event_ended(db, background, updated)
+    return updated
 
 
 @router.post("/{event_id}/end", response_model=EventOut)
@@ -535,6 +648,12 @@ def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
             continue  # already held this role — don't re-notify on every save
         background.add_task(send_assignment_email, u.email, u.full_name, ev.title, role, org_name, event_url)
 
+    # ZST-EC-001 LVE-003. Safe to call after ANY assignment save: notify_team compares a
+    # signature of (role, user_id) pairs, so a save that changes nobody - or a staff display
+    # name being edited elsewhere - produces an identical signature and sends nothing. This
+    # is the customer-facing team notice; the per-assignee console mail above is a different
+    # audience and stays as it was.
+    event_comms.notify_team(db, background, ev)
     return [_user_out(u) for u in assignees]
 
 
@@ -774,3 +893,502 @@ def delete_access_link(
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
     crud.delete_access_link(db, link)
+
+# ── Event intake / planning / rehearsal (ZST-EC-001 LVE-002 / LVE-004 / LVE-005) ────────
+# Every route commits authoritative state FIRST and only then queues a notice, so a Resend
+# outage can never undo an intake completion, a planning decision or a rehearsal outcome.
+
+@router.post("/{event_id}/intake", status_code=status.HTTP_201_CREATED)
+def open_event_intake(event_id: uuid.UUID, data: IntakeOpen, background: BackgroundTasks,
+                      admin: User = Depends(require_org_admin),
+                      db: Session = Depends(get_db)):
+    """Open the intake for an event."""
+    ev = _get_event_or_404(db, admin, event_id)
+    intake = event_planning.open_intake(db, ev, owner_id=data.owner_id, due_at=data.due_at)
+    event_planning.notify_opened(db, background, intake)
+    return {"id": str(intake.id), "status": intake.status, "due_at": intake.due_at,
+            "outstanding_sections": intake.outstanding_sections or []}
+
+
+@router.get("/{event_id}/intake")
+def get_event_intake(event_id: uuid.UUID, user: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
+    intake = db.scalar(select(EventIntake).where(EventIntake.event_id == ev.id))
+    if intake is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No intake has been opened")
+    return {"id": str(intake.id), "status": intake.status, "due_at": intake.due_at,
+            "completed_at": intake.completed_at,
+            "outstanding_sections": event_planning.validate(db, ev)}
+
+
+@router.post("/{event_id}/intake/complete")
+def complete_event_intake(event_id: uuid.UUID, background: BackgroundTasks,
+                          admin: User = Depends(require_org_admin),
+                          db: Session = Depends(get_db)):
+    """Complete an intake. Refused while validation still finds anything missing."""
+    ev = _get_event_or_404(db, admin, event_id)
+    intake = db.scalar(select(EventIntake).where(EventIntake.event_id == ev.id))
+    if intake is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No intake has been opened")
+    if not event_planning.complete(db, intake, ev):
+        # The intake is now authoritatively INCOMPLETE, so the notice describes committed
+        # state. Returned as a response carrying the background tasks: raising here would
+        # build a fresh response and silently discard them.
+        event_planning.notify_incomplete(db, background, intake)
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": "Required information is still missing",
+                     "outstanding_sections": intake.outstanding_sections or []},
+            background=background)
+    event_planning.notify_completed(db, background, intake)
+    return {"status": intake.status, "completed_at": intake.completed_at}
+
+
+@router.post("/{event_id}/intake/reopen")
+def reopen_event_intake(event_id: uuid.UUID, data: IntakeReopen, background: BackgroundTasks,
+                        admin: User = Depends(require_org_admin),
+                        db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, admin, event_id)
+    intake = db.scalar(select(EventIntake).where(EventIntake.event_id == ev.id))
+    if intake is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No intake has been opened")
+    if not event_planning.reopen(db, intake, sections=data.sections, reason=data.reason,
+                                 actor_id=admin.id, due_at=data.due_at):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            f"Unknown sections. Expected any of {list(INTAKE_SECTIONS)}")
+    event_planning.notify_reopened(db, background, intake)
+    return {"status": intake.status, "outstanding_sections": intake.outstanding_sections}
+
+
+@router.get("/{event_id}/planning")
+def get_event_planning(event_id: uuid.UUID, user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    """Re-evaluate and return every planning category."""
+    ev = _get_event_or_404(db, user, event_id)
+    event_planning.evaluate(db, ev)
+    return [{"category": r.category, "status": r.status, "blocking": r.blocking,
+             "due_at": r.due_at, "assigned_to": str(r.assigned_to) if r.assigned_to else None,
+             "outstanding": r.outstanding or []}
+            for r in event_planning.requirements(db, ev)]
+
+
+@router.post("/{event_id}/planning/notify")
+def notify_event_planning(event_id: uuid.UUID, background: BackgroundTasks,
+                          admin: User = Depends(require_org_admin),
+                          db: Session = Depends(get_db)):
+    """Re-evaluate, then notify each outstanding action's own assigned owner."""
+    ev = _get_event_or_404(db, admin, event_id)
+    return {"notified": event_planning.sweep_planning(db, ev, background)}
+
+
+@router.patch("/{event_id}/planning/{category}")
+def update_event_planning(event_id: uuid.UUID, category: str, data: PlanningUpdate,
+                          admin: User = Depends(require_org_admin),
+                          db: Session = Depends(get_db)):
+    """Record an operator decision on one planning category.
+
+    Only the attested-only categories accept a status directly. The three evaluated ones are
+    recomputed from committed state, so accepting an asserted status for them would let a
+    click override the facts.
+    """
+    ev = _get_event_or_404(db, admin, event_id)
+    rows = {r.category: r for r in event_planning.requirements(db, ev)}
+    row = rows.get(category)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"Unknown planning category. Expected one of {list(rows)}")
+    if data.assigned_to is not None:
+        row.assigned_to = data.assigned_to
+    if data.due_at is not None:
+        row.due_at = data.due_at
+    if data.blocking is not None:
+        row.blocking = data.blocking
+    db.commit()
+    if data.status is not None:
+        if category not in event_planning.ATTESTED_ONLY:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"'{category}' is evaluated from committed event state and cannot be set "
+                f"directly. Change the underlying event configuration instead.")
+        if not event_planning.attest(db, row, status=data.status,
+                                     outstanding=data.outstanding):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown status")
+    return {"category": row.category, "status": row.status, "blocking": row.blocking,
+            "due_at": row.due_at, "outstanding": row.outstanding or []}
+
+
+@router.post("/{event_id}/rehearsals", status_code=status.HTTP_201_CREATED)
+def schedule_event_rehearsal(event_id: uuid.UUID, data: RehearsalCreate,
+                             background: BackgroundTasks,
+                             admin: User = Depends(require_org_admin),
+                             db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, admin, event_id)
+    rehearsal = event_planning.schedule(db, ev, scheduled_at=data.scheduled_at,
+                                        purpose=data.purpose, actor_id=admin.id)
+    event_planning.notify_scheduled(db, background, rehearsal)
+    return {"id": str(rehearsal.id), "status": rehearsal.status,
+            "scheduled_at": rehearsal.scheduled_at, "timezone": rehearsal.timezone_name}
+
+
+@router.get("/{event_id}/rehearsals")
+def list_event_rehearsals(event_id: uuid.UUID, user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
+    rows = db.scalars(
+        select(EventRehearsal).where(EventRehearsal.event_id == ev.id)
+        .order_by(EventRehearsal.created_at.desc())).all()
+    return [{"id": str(r.id), "status": r.status, "scheduled_at": r.scheduled_at,
+             "timezone": r.timezone_name, "completed_at": r.completed_at,
+             "repeat_required": r.repeat_required,
+             "outstanding_issues": r.outstanding_issues or []} for r in rows]
+
+
+@router.post("/{event_id}/rehearsals/{rehearsal_id}/outcome")
+def record_rehearsal_outcome(event_id: uuid.UUID, rehearsal_id: uuid.UUID,
+                             data: RehearsalOutcome, background: BackgroundTasks,
+                             admin: User = Depends(require_org_admin),
+                             db: Session = Depends(get_db)):
+    """Record a real rehearsal outcome.
+
+    Needs Repeat is reachable ONLY from here - an authorized operator recording it - which is
+    what stops that escalation from being derived from a guess.
+    """
+    ev = _get_event_or_404(db, admin, event_id)
+    rehearsal = db.get(EventRehearsal, rehearsal_id)
+    if rehearsal is None or rehearsal.event_id != ev.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Rehearsal not found")
+    if rehearsal.status != "scheduled":
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"This rehearsal is already {rehearsal.status}")
+    result = event_planning.complete_rehearsal(
+        db, rehearsal, validated=data.validated, outstanding=data.outstanding,
+        repeat_required=data.repeat_required, repeat_reason=data.repeat_reason,
+        next_at=data.next_rehearsal_at, outcome=data.outcome)
+    if result == "needs_repeat":
+        event_planning.notify_needs_repeat(db, background, rehearsal)
+    else:
+        event_planning.notify_completed_rehearsal(db, background, rehearsal)
+    return {"status": result, "completed_at": rehearsal.completed_at}
+
+
+# ── Event brief / incidents / post-event report (LVE-007 / LVE-010 / LVE-012) ───────────
+# State is committed first, then a notice is queued, so a Resend outage can never roll back
+# a brief approval, an incident transition or a report.
+
+@router.post("/{event_id}/briefs", status_code=status.HTTP_201_CREATED)
+def create_event_brief(event_id: uuid.UUID, admin: User = Depends(require_org_admin),
+                       db: Session = Depends(get_db)):
+    """Open a new DRAFT event-day brief. A draft communicates nothing."""
+    ev = _get_event_or_404(db, admin, event_id)
+    brief = event_closeout.create_brief(db, ev, actor_id=admin.id)
+    return {"id": str(brief.id), "version": brief.version, "status": brief.status}
+
+
+@router.get("/{event_id}/briefs")
+def list_event_briefs(event_id: uuid.UUID, user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
+    rows = db.scalars(
+        select(EventBrief).where(EventBrief.event_id == ev.id)
+        .order_by(EventBrief.version.desc())).all()
+    return [{"id": str(b.id), "version": b.version, "status": b.status,
+             "approved_at": b.approved_at, "superseded_at": b.superseded_at,
+             "content": b.content or {}} for b in rows]
+
+
+@router.post("/{event_id}/briefs/{brief_id}/approve")
+def approve_event_brief(event_id: uuid.UUID, brief_id: uuid.UUID,
+                        background: BackgroundTasks,
+                        admin: User = Depends(require_org_admin),
+                        db: Session = Depends(get_db)):
+    """Approve one version. Any previously approved version becomes SUPERSEDED."""
+    ev = _get_event_or_404(db, admin, event_id)
+    brief = db.get(EventBrief, brief_id)
+    if brief is None or brief.event_id != ev.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Brief not found")
+    if not event_closeout.approve_brief(db, ev, brief, actor_id=admin.id):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"A brief in status '{brief.status}' cannot be approved")
+    event_closeout.notify_brief_approved(db, background, brief)
+    return {"id": str(brief.id), "version": brief.version, "status": brief.status,
+            "approved_at": brief.approved_at}
+
+
+@router.post("/{event_id}/incidents")
+def open_event_incident(event_id: uuid.UUID, data: IncidentStateIn,
+                        background: BackgroundTasks,
+                        admin: User = Depends(require_org_admin),
+                        db: Session = Depends(get_db)):
+    """Record a DELAYED or TEMPORARY_HOLD interruption.
+
+    A next-update time is stored only when the caller supplies one, which is what lets the
+    message promise an update exactly when somebody actually committed to it.
+    """
+    ev = _get_event_or_404(db, admin, event_id)
+    incident = event_ops.open_incident(
+        db, ev, state=data.state, reason_category=data.reason_category,
+        summary=data.summary, next_update_at=data.next_update_at, actor_id=admin.id)
+    if incident is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "state must be 'delayed' or 'temporary_hold' and reason_category must be one of "
+            f"{list(INCIDENT_REASON_CATEGORIES)}")
+    event_ops.notify_incident(db, background, ev, incident)
+    return {"id": str(incident.id), "operational_state": incident.operational_state,
+            "next_update_at": incident.next_update_at}
+
+
+@router.post("/{event_id}/incidents/{incident_id}/resume")
+def resume_event_incident(event_id: uuid.UUID, incident_id: uuid.UUID,
+                          background: BackgroundTasks,
+                          admin: User = Depends(require_org_admin),
+                          db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, admin, event_id)
+    incident = db.get(EventIncident, incident_id)
+    if incident is None or incident.event_id != ev.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incident not found")
+    if not event_ops.resume_incident(db, incident):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"An incident in state '{incident.operational_state}' cannot resume")
+    event_ops.notify_incident(db, background, ev, incident)
+    return {"operational_state": incident.operational_state, "resumed_at": incident.resumed_at}
+
+
+@router.post("/{event_id}/incidents/{incident_id}/cancel")
+def cancel_event_incident(event_id: uuid.UUID, incident_id: uuid.UUID, data: IncidentCancelIn,
+                          background: BackgroundTasks,
+                          admin: User = Depends(require_org_admin),
+                          db: Session = Depends(get_db)):
+    """Record a cancellation.
+
+    Refused unless the EVENT itself is authoritatively `cancelled`. This is the guard that
+    stops a broadcast ending, a producer disconnecting or a room closing from ever reaching a
+    customer as "your event was canceled".
+    """
+    ev = _get_event_or_404(db, admin, event_id)
+    incident = db.get(EventIncident, incident_id)
+    if incident is None or incident.event_id != ev.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incident not found")
+    if not event_ops.cancel_incident(db, ev, incident,
+                                     reason_category=data.reason_category,
+                                     summary=data.summary):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cancellation requires the event itself to be cancelled first, and a valid "
+            f"reason category from {list(INCIDENT_REASON_CATEGORIES)}")
+    event_ops.notify_incident(db, background, ev, incident)
+    return {"operational_state": incident.operational_state,
+            "canceled_at": incident.canceled_at}
+
+
+@router.post("/{event_id}/report", status_code=status.HTTP_202_ACCEPTED)
+def generate_post_event_report(event_id: uuid.UUID, background: BackgroundTasks,
+                               admin: User = Depends(require_org_admin),
+                               db: Session = Depends(get_db)):
+    """Generate a post-event report from the existing EventReport generator."""
+    ev = _get_event_or_404(db, admin, event_id)
+    row = event_closeout.open_report(db, ev, actor=admin)
+    event_closeout.generate(db, ev, row, actor=admin)
+    event_closeout.notify_report(db, background, ev, row)
+    return {"id": str(row.id), "version": row.report_version, "status": row.status,
+            "privacy_suppression_applied": row.privacy_suppression_applied}
+
+
+@router.post("/{event_id}/report/{report_id}/close")
+def close_event_record(event_id: uuid.UUID, report_id: uuid.UUID,
+                       background: BackgroundTasks,
+                       admin: User = Depends(require_org_admin),
+                       db: Session = Depends(get_db)):
+    """Close the operational record. Never claims erasure - see the message footer."""
+    ev = _get_event_or_404(db, admin, event_id)
+    row = db.get(PostEventReport, report_id)
+    if row is None or row.event_id != ev.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
+    if not event_closeout.notify_record_closed(db, background, ev, row):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "The record can only be closed once a report is ready")
+    return {"closed": True, "retention": event_closeout.retention_position(db, ev)}
+
+
+# ── Event contributors (ZST-EC-001 CON-001 .. CON-005) ─────────────────────────────────
+# Authorization is committed BEFORE any notice is queued, so a Resend outage can never undo
+# a grant, an acceptance, a revocation, a technical-check result or a session close.
+#
+# These endpoints are DISTINCT from the host/moderator/speaker assignment endpoints above.
+# Those still require organization membership (crud.valid_member_ids) and are unchanged; a
+# contributor grant deliberately does not, which is the whole point of it existing.
+
+@router.post("/{event_id}/contributors", status_code=status.HTTP_201_CREATED)
+def invite_contributor(event_id: uuid.UUID, data: ContributorInvite,
+                       background: BackgroundTasks,
+                       admin: User = Depends(require_org_admin),
+                       db: Session = Depends(get_db)):
+    """Invite a contributor by EMAIL.
+
+    The invitee needs no platform account and no organization membership. Nothing here
+    creates a user or writes User.org_id / User.role - holding a grant confers access to this
+    one event and nothing else.
+    """
+    ev = _get_event_or_404(db, admin, event_id)
+    grant, raw = contributor_access.invite(
+        db, ev, email=data.email, role=data.role, invited_by=admin.id,
+        display_name=data.display_name, expires_at=data.expires_at,
+        technical_check_required=data.technical_check_required,
+        rehearsal_required=data.rehearsal_required)
+    if grant is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"A valid email and a role from {list(CONTRIBUTOR_ROLES)} are required")
+    contributor_access.notify_invited(db, background, grant, raw)
+    return {"id": str(grant.id), "email": grant.email, "role": grant.role,
+            "status": grant.status, "expires_at": grant.expires_at,
+            "external": grant.user_id is None}
+
+
+@router.get("/{event_id}/contributors")
+def list_contributors(event_id: uuid.UUID, user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
+    rows = db.scalars(
+        select(EventContributorGrant).where(EventContributorGrant.event_id == ev.id)
+        .order_by(EventContributorGrant.created_at)).all()
+    return [{"id": str(g.id), "email": g.email, "display_name": g.display_name,
+             "role": g.role, "status": g.status, "external": g.user_id is None,
+             "technical_check_required": g.technical_check_required,
+             "rehearsal_required": g.rehearsal_required,
+             "access_window_start": g.access_window_start,
+             "access_window_end": g.access_window_end,
+             "outstanding": contributor_access.outstanding_actions(db, g)} for g in rows]
+
+
+@router.post("/{event_id}/contributors/{grant_id}/revoke")
+def revoke_contributor(event_id: uuid.UUID, grant_id: uuid.UUID, data: ContributorRevoke,
+                       background: BackgroundTasks,
+                       admin: User = Depends(require_org_admin),
+                       db: Session = Depends(get_db)):
+    """Withdraw contributor authorization.
+
+    Revocation invalidates every unconsumed token and closes any open backstage session, so
+    an old personal link stops working immediately rather than merely being unadvertised.
+    """
+    ev = _get_event_or_404(db, admin, event_id)
+    grant = db.get(EventContributorGrant, grant_id)
+    if grant is None or grant.event_id != ev.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Contributor grant not found")
+    if not contributor_access.revoke(db, grant, actor_id=admin.id, reason=data.reason):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This grant is already revoked")
+    contributor_access.notify_revoked(db, background, grant)
+    return {"status": grant.status, "revoked_at": grant.revoked_at}
+
+
+@router.post("/{event_id}/contributors/accept")
+def accept_contributor_invitation(event_id: uuid.UUID, data: ContributorAccept,
+                                  background: BackgroundTasks,
+                                  request: Request,
+                                  db: Session = Depends(get_db)):
+    """Accept a contributor invitation using the personal token from the invitation email.
+
+    Deliberately UNAUTHENTICATED: an external contributor has no account to sign in with, so
+    requiring one would reintroduce the membership coupling this family removes. The token is
+    the credential - purpose-bound, hashed at rest, and expiring.
+    """
+    grant, error = contributor_access.exchange(
+        db, data.token, purpose=TOKEN_PURPOSE_INVITATION)
+    if grant is None or grant.event_id != event_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, error or "This link is not valid.")
+    ok, reason = contributor_access.accept(db, grant)
+    if not ok:
+        raise HTTPException(status.HTTP_409_CONFLICT, reason or "Cannot accept.")
+    contributor_access.notify_accepted(db, background, grant)
+    return {"status": grant.status, "role": grant.role,
+            "event_id": str(grant.event_id),
+            "technical_check_required": grant.technical_check_required}
+
+
+@router.post("/{event_id}/contributors/join")
+def contributor_join(event_id: uuid.UUID, data: ContributorAccept, request: Request,
+                     db: Session = Depends(get_db)):
+    """Exchange a personal backstage link for a short-lived media credential.
+
+    This is the only path that mints a LiveKit token for a contributor, and it runs AFTER
+    token validation, grant authorization and access-window enforcement. The media credential
+    is returned over HTTPS here - it is never placed in an email or a URL.
+    """
+    signed_in = None
+    token_header = request.headers.get("authorization", "")
+    if token_header.lower().startswith("bearer "):
+        # Best-effort identity for binding. Absent is fine for an external contributor; when
+        # the grant HAS a user_id, exchange() refuses a mismatch.
+        try:
+            from ..security import ALGORITHM
+            from jose import jwt
+
+            claims = jwt.decode(token_header.split(" ", 1)[1], settings.SECRET_KEY,
+                                algorithms=[ALGORITHM])
+            signed_in = claims.get("sub")
+        except Exception:  # noqa: BLE001 - an unreadable token is simply no identity
+            signed_in = None
+
+    grant, error = contributor_access.exchange(
+        db, data.token, purpose=TOKEN_PURPOSE_EVENT_ACCESS, signed_in_user_id=signed_in)
+    if grant is None or grant.event_id != event_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, error or "This link is not valid.")
+    credential = contributor_access.issue_media_credential(db, grant)
+    if credential is None:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Backstage access is not open for this event right now.")
+    return {"role": grant.role, "event_id": str(grant.event_id), **credential}
+
+
+@router.post("/{event_id}/contributors/{grant_id}/technical-check")
+def submit_contributor_technical_check(event_id: uuid.UUID, grant_id: uuid.UUID,
+                                       data: TechnicalCheckIn,
+                                       background: BackgroundTasks,
+                                       db: Session = Depends(get_db)):
+    """Record a REAL browser preflight result against the governed lifecycle.
+
+    The booleans come from the contributor's own device, in the same shape
+    services/contributor._preflight_result already produces. Nothing is inferred: a
+    capability the browser did not confirm is reported as needing attention.
+    """
+    ev = db.get(Event, event_id)
+    grant = db.get(EventContributorGrant, grant_id)
+    if ev is None or grant is None or grant.event_id != ev.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Contributor grant not found")
+    if grant.status != "accepted":
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Accept the contributor invitation first")
+    check = contributor_access.apply_preflight(db, grant, data.model_dump())
+    if check is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "No results supplied")
+    contributor_access.notify_technical_check(db, background, grant, check)
+    return {"status": check.status,
+            "failure_categories": check.failure_categories or [],
+            "network_test_supported": NETWORK_TEST_SUPPORTED}
+
+
+@router.post("/{event_id}/contributors/{grant_id}/session/end")
+def end_contributor_session(event_id: uuid.UUID, grant_id: uuid.UUID,
+                            data: SessionEndIn, background: BackgroundTasks,
+                            admin: User = Depends(require_org_admin),
+                            db: Session = Depends(get_db)):
+    """Close a backstage session authoritatively.
+
+    A transient websocket drop does NOT come here - services/contributor.mark_disconnected
+    only writes last_disconnected_at, which is not an ending and produces no message.
+    """
+    ev = _get_event_or_404(db, admin, event_id)
+    grant = db.get(EventContributorGrant, grant_id)
+    if grant is None or grant.event_id != ev.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Contributor grant not found")
+    session = contributor_access._session_for(db, grant)
+    if session is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "This contributor has no backstage session")
+    if not contributor_access.end_session(db, session, reason=data.reason):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Session already ended, or reason not one of {list(SESSION_END_REASONS)}")
+    contributor_access.notify_session_ended(db, background, grant, session)
+    return {"ended_at": session.ended_at, "end_reason": session.end_reason}
