@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Select, Label } from "../../ui/forms";
@@ -11,19 +11,23 @@ const statusLabel = (s) => s.split("_").map((w) => w[0].toUpperCase() + w.slice(
 // Edit an org's subscription: status, seats, plan, renewal date. No create mode — a
 // subscription is created implicitly (org create with plan_slug, or org plan switch).
 export default function SubscriptionModal({ open, onClose, subscription, plans = [], onSaved }) {
-  const [form, setForm] = useState({ status: "trial", seats: 1, plan_slug: "", current_period_end: "" });
+  // Mounted only while open and keyed by the subscription being edited (Subscriptions.jsx),
+  // so this initial state IS the per-open reset. The `!subscription` fallback is kept: the
+  // component still renders (and submit() no-ops) if it is ever mounted without one.
+  const [form, setForm] = useState(() =>
+    subscription
+      ? {
+          status: subscription.status || "trial",
+          seats: subscription.seats ?? 1,
+          plan_slug: (plans.find((p) => p.name === subscription.plan) || {}).slug || "",
+          current_period_end: subscription.current_period_end
+            ? subscription.current_period_end.slice(0, 10)
+            : "",
+        }
+      : { status: "trial", seats: 1, plan_slug: "", current_period_end: "" }
+  );
   const [saving, setSaving] = useState(false);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
-
-  useEffect(() => {
-    if (!open || !subscription) return;
-    setForm({
-      status: subscription.status || "trial",
-      seats: subscription.seats ?? 1,
-      plan_slug: (plans.find((p) => p.name === subscription.plan) || {}).slug || "",
-      current_period_end: subscription.current_period_end ? subscription.current_period_end.slice(0, 10) : "",
-    });
-  }, [open, subscription, plans]);
 
   const close = () => !saving && onClose();
 

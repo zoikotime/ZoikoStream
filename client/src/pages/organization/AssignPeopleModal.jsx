@@ -1,26 +1,24 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import MemberPicker from "./MemberPicker";
+import { ROLE_PATH } from "./roleConfig";
 
-// PATCH /events/{id}/{hosts|speakers} replaces the WHOLE assignee set in one
-// call, so this modal works off a local selection and submits it in full rather than
-// diffing adds/removes against the server.
-// Maps a role tab to its /events/{id}/<path> endpoint. "Moderator" is gone because the
-// endpoint is gone (routers/events.py) — the role is retired.
-export const ROLE_PATH = { Host: "hosts", Speaker: "speakers" };
+// This modal works off a local selection and submits it in full — see roleConfig.js for why
+// the endpoint requires that.
 
 export default function AssignPeopleModal({ open, onClose, eventId, role, assigned, onSaved }) {
-  const [selected, setSelected] = useState(() => new Set());
+  // Seeded once, at mount, from the props that are the source of truth.
+  //
+  // EventDetails mounts this conditionally and keys it by role, so "the modal opened" and
+  // "this component mounted" are the same event — which is why the initial selection belongs
+  // in useState. The effect this replaces re-seeded on `open`, and since the only call site
+  // mounts with open={true}, that bought one guaranteed cascading re-render per open and
+  // nothing else.
+  const [selected, setSelected] = useState(() => new Set(assigned.map((u) => u.id)));
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (open) setSelected(new Set(assigned.map((u) => u.id)));
-    // `assigned` is a fresh array every render; only re-seed when the modal actually opens.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
 
   const toggle = (id) => {
     setSelected((s) => {

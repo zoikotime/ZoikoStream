@@ -266,7 +266,6 @@ describe("producer publication", () => {
       }));
       // Six failed attempts crosses the threshold; the capped backoff tops out at 15s.
       for (let i = 0; i < 7; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
         await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
       }
       expect(result.current.publishing).toBe(false);

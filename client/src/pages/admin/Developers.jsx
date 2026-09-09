@@ -17,31 +17,51 @@ function useOrgsData() {
 // The raw key is only ever visible once, right after generation.
 export default function Developers() {
   const { data: organizations, loading: loadingOrgs, error: orgsError } = useOrgsData();
-  const [orgId, setOrgId] = useState("");
+  const [chosenOrgId, setChosenOrgId] = useState("");
   const [keys, setKeys] = useState(null);
-  const [loadingKeys, setLoadingKeys] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
+
+  // The selected organization DERIVES its default from the loaded list instead of an effect
+  // writing it into state. `organizations` arrives asynchronously, so the effect that used to
+  // do this could only run after a render in which nothing was selected — one guaranteed extra
+  // render pass, and a frame in which the picker showed no organization at all.
+  const orgId = chosenOrgId || organizations?.[0]?.id || "";
+
+  // Which request the `keys` in state came from. `loadingKeys` is derived from a mismatch
+  // rather than written by a synchronous setState at the top of the effect below: the render
+  // that first sees a new `orgId` already knows the keys it holds belong to a different
+  // request, so the skeleton appears on that same pass. Including the nonce means an explicit
+  // reload (after generate/revoke) shows the skeleton too, as it did before.
+  const [keysRequest, setKeysRequest] = useState(null);
+  const request = orgId ? `${orgId}:${reloadNonce}` : null;
+  const loadingKeys = !!request && keysRequest !== request;
+
+  const reloadKeys = () => setReloadNonce((n) => n + 1);
 
   useEffect(() => {
-    if (!orgId && organizations?.length) setOrgId(organizations[0].id);
-  }, [organizations, orgId]);
-
-  const loadKeys = async (id) => {
-    if (!id) return;
-    setLoadingKeys(true);
-    try {
-      const { data } = await api.get(`/admin/organizations/${id}/api-keys`);
-      setKeys(data);
-    } catch (e) {
-      toast.error(errMsg(e));
-    } finally {
-      setLoadingKeys(false);
-    }
-  };
-
-  useEffect(() => {
-    if (orgId) loadKeys(orgId);
-  }, [orgId]);
+    if (!request) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get(`/admin/organizations/${orgId}/api-keys`);
+        if (cancelled) return;
+        setKeys(data);
+      } catch (e) {
+        if (cancelled) return;
+        toast.error(errMsg(e));
+        // Never leave another organization's keys on screen under this one's heading.
+        setKeys(null);
+      } finally {
+        // Marking the request done in `finally` is what clears the skeleton on failure too —
+        // otherwise a rejected fetch would leave it spinning for ever.
+        if (!cancelled) setKeysRequest(request);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [request, orgId]);
 
   const selectedOrg = useMemo(() => organizations?.find((o) => o.id === orgId), [organizations, orgId]);
   const activeKeys = (keys || []).filter((k) => !k.revoked);
@@ -52,7 +72,7 @@ export default function Developers() {
     try {
       await api.delete(`/admin/organizations/${orgId}/api-keys/${key.id}`);
       toast.success(`${key.label} revoked`);
-      loadKeys(orgId);
+      reloadKeys();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -80,7 +100,7 @@ export default function Developers() {
       ) : (
         <div className="max-w-xs">
           <Label>Organization</Label>
-          <Select variant="console" value={orgId} onChange={(e) => setOrgId(e.target.value)}>
+          <Select variant="console" value={orgId} onChange={(e) => setChosenOrgId(e.target.value)}>
             {organizations.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
           </Select>
         </div>
@@ -129,8 +149,8 @@ export default function Developers() {
         </Panel>
       )}
 
-      {orgId && (
-        <GenerateApiKeyModal open={modalOpen} onClose={() => setModalOpen(false)} orgId={orgId} onCreated={() => loadKeys(orgId)} />
+      {orgId && modalOpen && (
+        <GenerateApiKeyModal open onClose={() => setModalOpen(false)} orgId={orgId} onCreated={reloadKeys} />
       )}
     </div>
   );

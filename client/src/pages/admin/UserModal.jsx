@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Select, Label, Switch } from "../../ui/forms";
@@ -10,17 +10,20 @@ import { ROLES, roleLabel, STAFF_COMMERCIAL_ROLES } from "./roleInfo";
 // creation route (accounts are created through org signup/invitations), so this is
 // edit-only — no create mode.
 export default function UserModal({ open, onClose, user, onSaved }) {
-  const [form, setForm] = useState({ full_name: "", role: "viewer", is_active: true, staff_commercial_role: "" });
+  // Mounted only while open and keyed by the user being edited (Users.jsx), so this initial
+  // state IS the per-open reset.
+  const [form, setForm] = useState(() =>
+    user
+      ? {
+          full_name: user.full_name || "",
+          role: user.role || "viewer",
+          is_active: !!user.is_active,
+          staff_commercial_role: user.staff_commercial_role || "",
+        }
+      : { full_name: "", role: "viewer", is_active: true, staff_commercial_role: "" }
+  );
   const [saving, setSaving] = useState(false);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
-
-  useEffect(() => {
-    if (!open || !user) return;
-    setForm({
-      full_name: user.full_name || "", role: user.role || "viewer", is_active: !!user.is_active,
-      staff_commercial_role: user.staff_commercial_role || "",
-    });
-  }, [open, user]);
 
   const close = () => !saving && onClose();
 

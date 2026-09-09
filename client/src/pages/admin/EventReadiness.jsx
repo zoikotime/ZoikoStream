@@ -9,6 +9,11 @@ import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
 import ReadinessRecordDrawer from "./ReadinessRecordDrawer";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 // Event Readiness — the pre-broadcast gate for upcoming events. Real GET /admin/event-
 // readiness (services/ops.py's event_readiness), the same gate computation the Command
 // Center's "Event Readiness" badge and upcoming-events widget already use — this page is
@@ -49,7 +54,7 @@ export default function EventReadiness() {
   const [ageSeconds, setAgeSeconds] = useState(0);
   useInterval(() => setAgeSeconds(Math.floor((Date.now() - data.fetched_at) / 1000)), 1000, Boolean(data));
 
-  const events = data?.items || [];
+  const events = data?.items || NONE;
 
   const counts = useMemo(() => ({
     blocked: events.filter((e) => e.verdict === "blocked").length,

@@ -103,20 +103,68 @@ jobs:
       # anything else that inspects it.
       ENVIRONMENT: test
       # Localhost because the service ports are mapped to the runner, not because the job runs
-      # inside the compose network.
-      CI_DB_HOST: 127.0.0.1
+      # inside the compose network. This is the EPHEMERAL redis service below — never the
+      # production Upstash instance, which is not available to this job in any form.
       REDIS_URL: redis://127.0.0.1:6379/0
       # Deterministic, throwaway, and NOT a production value. Present because app.config
       # requires it; it signs nothing that outlives the job.
       SECRET_KEY: ci-only-not-a-production-secret
       SUPER_ADMIN_EMAIL: ci@example.invalid
       SUPER_ADMIN_PASSWORD: ci-only-password
-      # Every external integration stays UNSET on purpose. app.config treats blank as
-      # "not configured", and the code paths degrade rather than reaching out — so a pull
-      # request cannot send email through Resend, charge Stripe, create a LiveKit room, or
-      # write to the production GCS bucket. Listed explicitly so the intent is legible:
-      #   RESEND_API_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
-      #   LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET,
+      # A canonical HTTPS origin, which is all the suite needs.
+      #
+      # app/email.py::public_base_url refuses to build a link that is not HTTPS unless
+      # ENVIRONMENT is exactly "development" — an audit fix, because APP_URL was absent from
+      # the deployed environment file and every emailed link silently became a non-TLS
+      # localhost address while still carrying a single-use credential. ENVIRONMENT=test is
+      # (correctly) not exempt, so without this the guard fires on every send path.
+      #
+      # `.invalid` is reserved by RFC 2606 and can never resolve, so this cannot point at
+      # anything real. It is deliberately NOT the production origin and deliberately not
+      # https://localhost:5173 — the tests need a canonical secure URL to embed in a link,
+      # not a server to talk to. Nothing is delivered regardless: RESEND_API_KEY is unset,
+      # and conftest.py additionally swaps the mail transport for a stub.
+      APP_URL: https://ci.zoikostream.invalid
+      # Test-only LiveKit credentials, for LOCAL TOKEN SIGNING ONLY.
+      #
+      # Verified before adding: services/livekit.py::create_stream_token builds an
+      # api.AccessToken and returns to_jwt(), which is an HMAC signature over a local claim
+      # set — it opens no socket. It was checked by signing a token with every socket connect
+      # blocked; it succeeded. test_storage_config.py then decodes the issued JWT and asserts
+      # a host token carries canPublish and a viewer token does not, so it needs a signing
+      # key to exist and nothing more.
+      #
+      # These are not production credentials and grant nothing: the key/secret pair is
+      # meaningless to any real LiveKit deployment, and the URL is an RFC 2606 `.invalid`
+      # host that cannot resolve. Server-side room control (services/livekit.py::_with_room)
+      # therefore fails DNS and returns False, which the callers already treat as
+      # "not enforced" — the same path a blank configuration takes.
+      LIVEKIT_URL: wss://livekit.example.invalid
+      LIVEKIT_API_KEY: APIcitestonly000000
+      LIVEKIT_API_SECRET: ci-only-livekit-secret-not-a-real-credential
+      # A placeholder key that must be NON-EMPTY, and is never used to reach Resend.
+      #
+      # app/email.py::_send returns EARLY when RESEND_API_KEY is blank — before it reaches
+      # httpx.post. The email suites assert on the ATTEMPTED send by capturing that exact
+      # call and inspecting the payload (recipient, subject, unsubscribe header, absence of
+      # secrets), so a blank key does not make them safe, it makes them VACUOUS: the capture
+      # list stays empty and ~160 assertions fail on an empty list. conftest.py says the same
+      # thing in its own words, which is why it stubs the transport instead of blanking this.
+      #
+      # Nothing can leave the machine, and that is enforced in two independent places rather
+      # than by this value:
+      #   * conftest.py installs a session-scoped autouse fixture that replaces
+      #     email_mod.httpx.post with a stub for every pytest-collected test.
+      #   * each self-check suite (which runs outside pytest, so it gets no conftest)
+      #     replaces email_mod.httpx.post at MODULE IMPORT with a `_deny` that RAISES on any
+      #     send outside an explicit capture context.
+      # Both are in place before a single test runs, so the key's value is inert.
+      RESEND_API_KEY: re_ci_only_not_a_real_key
+      # Every remaining external integration stays UNSET on purpose. app.config treats blank
+      # as "not configured", and the code paths degrade rather than reaching out — so a pull
+      # request cannot charge Stripe or write to the production GCS bucket. Listed explicitly
+      # so the intent is legible:
+      #   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
       #   GCS_BUCKET / GCS_CREDENTIALS_PATH
       # are all absent from this block and must stay absent.
       PYTHONIOENCODING: utf-8
@@ -148,6 +196,27 @@ jobs:
           pip install -r server/requirements.txt
           pip install pytest pytest-asyncio
 
+      # Prove the two backing services the suite talks to are the EPHEMERAL ones before
+      # running anything against them. Cheap, and it turns "some async test hung" into a
+      # one-line answer. It also documents, in the run log, which endpoints CI actually used.
+      - name: Check the service containers
+        working-directory: server
+        run: |
+          python - <<'PY'
+          import os
+          import redis
+          url = os.environ["REDIS_URL"]
+          assert "127.0.0.1" in url or "localhost" in url, f"REDIS_URL is not the CI service: {url}"
+          print("redis", url, "->", redis.Redis.from_url(url, socket_connect_timeout=5).ping())
+          PY
+          python - <<'PY'
+          import psycopg2
+          dsn = "postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci"
+          with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+              cur.execute("select current_database(), inet_server_addr()")
+              print("postgres ->", cur.fetchone())
+          PY
+
       # Schema AND the plan catalogue. `seed.py` calls create_tables.ensure_schema() and then
       # seeds plans idempotently by slug — including `developer`, which
       # test_subscription_provisioning.py and test_entitlement_enforcement.py assert exists
@@ -161,6 +230,24 @@ jobs:
         env:
           DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
         run: python seed.py
+
+      # This project has no Alembic — schema evolves through small idempotent scripts run
+      # against DATABASE_URL, and `ensure_schema()` does not create all of them.
+      #
+      # `uq_broadcast_sessions_open` is the one this suite requires. It is the partial unique
+      # index on broadcast_sessions (event_id) WHERE ended_at IS NULL, and
+      # services/broadcast.py::_golive is written around it: two simultaneous Go Live clicks
+      # both see "no open session", both INSERT, and the index is what rejects the loser so
+      # the retry can resolve against the winner. Without it a fresh database silently accepts
+      # BOTH rows — test_broadcast.py::test_concurrent_golive_creates_exactly_one_open_session
+      # found exactly that here.
+      #
+      # `CREATE UNIQUE INDEX IF NOT EXISTS`, so re-running is a no-op.
+      - name: Apply schema migrations the suite depends on
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
+        run: python migrate_broadcast_session_unique.py
 
       # The 12 suites that pytest cannot run are computed, not hardcoded: each one is driven
       # by `if __name__ == "__main__"` and takes a `World` positional argument, so pytest

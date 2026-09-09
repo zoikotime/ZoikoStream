@@ -5,6 +5,11 @@ import api from "../../api";
 import useApi from "../../hooks/useApi";
 import SubscriptionModal from "./SubscriptionModal";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 const STATUS_TONE = { active: "success", trial: "warning", past_due: "danger", cancelled: "neutral" };
 const statusLabel = (s) => s.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 
@@ -32,7 +37,7 @@ export default function Subscriptions() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingSub, setEditingSub] = useState(null);
 
-  const subs = data?.subscriptions || [];
+  const subs = data?.subscriptions || NONE;
   const plans = data?.plans || [];
 
   const kpis = useMemo(() => {
@@ -133,13 +138,16 @@ export default function Subscriptions() {
         />
       </Panel>
 
-      <SubscriptionModal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        subscription={editingSub}
-        plans={plans}
-        onSaved={reload}
-      />
+      {modalOpen && (
+        <SubscriptionModal
+          key={editingSub?.id ?? "none"}
+          open
+          onClose={() => setModalOpen(false)}
+          subscription={editingSub}
+          plans={plans}
+          onSaved={reload}
+        />
+      )}
     </div>
   );
 }

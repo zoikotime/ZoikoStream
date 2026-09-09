@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Textarea, Label, Switch } from "../../ui/forms";
@@ -10,13 +10,12 @@ const EMPTY = { key: "", name: "", description: "", enabled: false };
 // Create a new feature flag. No edit-key mode — flags are toggled/edited via the row
 // switch and edit action; this modal is create-only.
 export default function FeatureFlagModal({ open, onClose, onSaved }) {
+  // Mounted only while open (the call site does `{modalOpen && ...}`), so this initial state
+  // IS the per-open reset. It replaces an effect that called setForm on `open`, which cost a
+  // cascading re-render every time the dialog appeared.
   const [form, setForm] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
-
-  useEffect(() => {
-    if (open) setForm(EMPTY);
-  }, [open]);
 
   const close = () => !saving && onClose();
 

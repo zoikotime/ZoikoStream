@@ -96,7 +96,7 @@ export default function ReleaseCenter() {
         )}
       </Panel>
 
-      <ReleaseModal open={modalOpen} onClose={() => setModalOpen(false)} onSaved={reload} />
+      {modalOpen && <ReleaseModal open onClose={() => setModalOpen(false)} onSaved={reload} />}
     </div>
   );
 }

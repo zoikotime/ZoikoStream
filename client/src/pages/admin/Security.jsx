@@ -12,6 +12,11 @@ import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
 import { notify } from "../../ui/Toast";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 // Trust & Safety — real case tracking for tenant-originated security/policy incidents.
 // GET/POST/PATCH against /admin/incidents (kind=security): the same `incidents` table the
 // Command Center's Incidents panel and action queues already read (services/ops.py) —
@@ -201,7 +206,7 @@ export default function Security() {
   const [ageSeconds, setAgeSeconds] = useState(0);
   useInterval(() => setAgeSeconds(Math.floor((Date.now() - data.fetched_at) / 1000)), 1000, Boolean(data));
 
-  const incidents = data?.items || [];
+  const incidents = data?.items || NONE;
 
   // If the drawer's selected row is stale after a reload, resync it to the fresh copy.
   const selectedLive = selected ? incidents.find((i) => i.id === selected.id) || selected : null;

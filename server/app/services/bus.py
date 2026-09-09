@@ -54,10 +54,22 @@ CHANNELS = (
 # ponytail: 200 is ~10s of a very busy room; raise it only if drops show up in logs.
 QUEUE_MAX = 200
 
+# How long subscribe() will wait for a Redis pump's SUBSCRIBE to take effect. Generous for a
+# round-trip to a healthy Redis, short enough that an unreachable one does not hold up a
+# connection — it degrades to "may miss the next envelope" instead, which is what the code
+# did unconditionally before.
+PUMP_READY_TIMEOUT = 5.0
+
 _local: dict[str, set[asyncio.Queue]] = {}      # event_id -> subscriber queues (this process)
 _pumps: dict[str, asyncio.Task] = {}            # event_id -> redis subscriber task
+# event_id -> "this pump's Redis SUBSCRIBE is live". Redis Pub/Sub keeps no backlog, so a
+# subscriber that is merely *scheduled* receives nothing; see subscribe() below.
+_pump_ready: dict[str, asyncio.Event] = {}
 _memory: dict[str, dict[str, dict]] = {}        # event_id -> identity -> participant (no-Redis fallback)
 _redis = None
+# The event loop `_redis`'s connection pool is bound to. See redis() below for why a client
+# cannot outlive its loop.
+_redis_loop: asyncio.AbstractEventLoop | None = None
 
 
 def eid(event_id) -> str:
@@ -71,11 +83,35 @@ def _key(event_id) -> str:
 
 
 async def redis():
-    """Lazy shared client. None when REDIS_URL is unset — every caller degrades to
-    in-process behaviour rather than failing."""
-    global _redis
+    """Lazy shared client, per event loop. None when REDIS_URL is unset — every caller
+    degrades to in-process behaviour rather than failing.
+
+    Cached PER LOOP, not just once. A redis-asyncio pool binds each connection — and the
+    futures its parser awaits — to the loop that created it, so handing one client to a
+    second loop fails from deep inside the parser with "got Future attached to a different
+    loop", or "Event loop is closed" once the first loop has gone.
+
+    The server runs a single loop for the life of the process and so takes the fast path
+    every time: one client, created once. A test suite is the case that made this necessary —
+    several suites call asyncio.run() per test, which builds and destroys a loop each time,
+    and the module-level client from the first of them was still being handed out to all the
+    rest.
+    """
+    global _redis, _redis_loop
     if not settings.REDIS_URL:
         return None
+
+    loop = asyncio.get_running_loop()
+    if _redis is not None and _redis_loop is not loop:
+        # Deliberately dropped WITHOUT aclose(): closing a pool has to run on the loop that
+        # owns its connections, and that loop is exactly what we no longer have. Its sockets
+        # are released when the object is finalized. Any pump task started on that loop died
+        # with it, so its entry is cleared too rather than left to be cancelled from here.
+        _redis = None
+        _redis_loop = None
+        _pumps.clear()
+        _pump_ready.clear()
+
     if _redis is None:
         from redis import asyncio as aioredis  # imported lazily: unused without REDIS_URL
 
@@ -86,6 +122,7 @@ async def redis():
             settings.REDIS_URL, decode_responses=True,
             retry_on_timeout=True, health_check_interval=30,
         )
+        _redis_loop = loop
     return _redis
 
 
@@ -117,11 +154,16 @@ async def publish(event_id, channel: str, type_: str, data: dict | None = None) 
     return env
 
 
-async def _pump(event_id: str) -> None:
-    """Relay one event's Redis channel into this process's queues."""
+async def _pump(event_id: str, ready: asyncio.Event) -> None:
+    """Relay one event's Redis channel into this process's queues.
+
+    `ready` is set once the SUBSCRIBE has actually taken effect — not when this task is
+    created. Callers wait on it; see subscribe().
+    """
     r = await redis()
     pubsub = r.pubsub()
     await pubsub.subscribe(_key(event_id))
+    ready.set()
     try:
         async for msg in pubsub.listen():
             if msg.get("type") == "message":
@@ -130,6 +172,8 @@ async def _pump(event_id: str) -> None:
                 except (ValueError, TypeError):
                     log.warning("live bus: undecodable payload on %s", _key(event_id))
     finally:
+        if _pump_ready.get(event_id) is ready:
+            _pump_ready.pop(event_id, None)
         with contextlib.suppress(Exception):
             await pubsub.unsubscribe(_key(event_id))
             await pubsub.aclose()
@@ -143,8 +187,35 @@ async def subscribe(event_id):
     q: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAX)
     subs = _local.setdefault(event_id, set())
     subs.add(q)
-    if await redis() is not None and event_id not in _pumps:
-        _pumps[event_id] = asyncio.create_task(_pump(event_id))
+    if await redis() is not None:
+        task = _pumps.get(event_id)
+        if task is None or task.done():
+            ready = asyncio.Event()
+            _pump_ready[event_id] = ready
+            _pumps[event_id] = asyncio.create_task(_pump(event_id, ready))
+        # WAIT for the pump's SUBSCRIBE to be live, rather than merely having created the
+        # task. With Redis on, publish() sends to Redis ONLY and relies on the pump to relay
+        # the envelope back into this process — and Redis Pub/Sub has no backlog for a
+        # subscriber that arrives late. So everything published between this function
+        # returning and the SUBSCRIBE landing was delivered to nobody here.
+        #
+        # That window is a Redis round-trip, and routers/live.py publishes inside it: the
+        # socket subscribes, sends its snapshot, then publishes its own participant.join.
+        # The join was being dropped, and with it anything else on the event in those few
+        # milliseconds — including a `session`/`removed` envelope the writer task is
+        # watching for. It showed up as test_socket_loop hanging on its second frame; on a
+        # live event it is a viewer silently missing the next thing that happens.
+        ready = _pump_ready.get(event_id)
+        if ready is not None and not ready.is_set():
+            try:
+                await asyncio.wait_for(ready.wait(), PUMP_READY_TIMEOUT)
+            except asyncio.TimeoutError:
+                # Bounded on purpose: an unreachable Redis must degrade to the old
+                # best-effort behaviour, not wedge the connection that is waiting to serve a
+                # viewer. Logged because a subscriber that starts deaf is worth knowing about.
+                log.warning("live bus: redis pump for %s not ready after %ss; "
+                            "envelopes published now may not reach this worker",
+                            event_id, PUMP_READY_TIMEOUT)
     try:
         yield q
     finally:
@@ -152,6 +223,7 @@ async def subscribe(event_id):
         if not subs:
             _local.pop(event_id, None)
             task = _pumps.pop(event_id, None)
+            _pump_ready.pop(event_id, None)
             if task:
                 task.cancel()
 
@@ -162,11 +234,31 @@ def local_subscribers(event_id) -> int:
 
 
 async def shutdown() -> None:
+    """Release the bus's shared resources. Called from the application lifespan.
+
+    Everything here is scoped to the CURRENT loop, because that is the only loop whose
+    objects this coroutine can legally touch. A pump task or a connection pool belonging to
+    a loop that has already closed cannot be cancelled or closed from here — cancel() and
+    aclose() both schedule through the owning loop and raise "Event loop is closed". It is
+    already dead; dropping the reference is the whole of the cleanup it can be given.
+
+    This is not error suppression: nothing is caught. The check is on the resource's owner,
+    so a genuine failure closing a client that DOES belong to this loop still propagates —
+    which is what a shutdown hook is for.
+    """
+    global _redis, _redis_loop
+    loop = asyncio.get_running_loop()
+
     for task in _pumps.values():
-        task.cancel()
+        if task.get_loop() is loop:
+            task.cancel()
     _pumps.clear()
-    if _redis is not None:
-        await _redis.aclose()
+
+    client, client_loop = _redis, _redis_loop
+    _redis = None
+    _redis_loop = None
+    if client is not None and client_loop is loop:
+        await client.aclose()
 
 
 # ── presence (participants) ───────────────────────────────────────────────────

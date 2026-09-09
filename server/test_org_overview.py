@@ -84,8 +84,16 @@ def test_overview_only_reports_the_callers_org():
         ua, ub = _user(db, a), _user(db, b)
         ea, eb = _event(db, a, ua), _event(db, b, ub)
         _session(db, a, ea, status="live", started_at=NOW - timedelta(hours=1))
+        # B's three live sessions are on three DIFFERENT events, because
+        # uq_broadcast_sessions_open (migrate_broadcast_session_unique.py) permits at most
+        # one session per event with ended_at IS NULL. Three open ones on a single event is
+        # a state production cannot hold, so building it here was testing an impossibility —
+        # and it raised UniqueViolation the moment CI's schema gained the index. Three live
+        # events in one organization is the real shape, and the count under test is
+        # unchanged.
         for _ in range(3):
-            _session(db, b, eb, status="live", started_at=NOW - timedelta(hours=1))
+            _session(db, b, _event(db, b, ub), status="live",
+                     started_at=NOW - timedelta(hours=1))
         db.add_all([
             LiveRecording(event_id=ea.id, org_id=a.id, status="stopped", enforced=True),
             LiveRecording(event_id=eb.id, org_id=b.id, status="stopped", enforced=True),
@@ -307,9 +315,17 @@ def test_session_modes_and_states():
     try:
         org = _org(db)
         u = _user(db, org)
+        # One event per OPEN session. A pause does not end a session (models/live.py:
+        # ended_at is set once), so a live one and a paused one are both open — and
+        # uq_broadcast_sessions_open allows only one open session per event. The service
+        # under test is organization-scoped, so spreading them across two of this
+        # organization's events exercises exactly the same rollup while describing a state
+        # production can actually be in: one event live, another held. The already-ended
+        # session shares an event freely, since ended_at excludes it from the index.
         ev = _event(db, org, u)
+        paused_ev = _event(db, org, u)
         _session(db, org, ev, status="live", started_at=NOW - timedelta(hours=2))
-        _session(db, org, ev, status="paused", started_at=NOW - timedelta(minutes=18))
+        _session(db, org, paused_ev, status="paused", started_at=NOW - timedelta(minutes=18))
         _session(db, org, ev, status="ended", started_at=NOW - timedelta(days=1),
                 ended_at=NOW - timedelta(days=1) + timedelta(hours=1))
         db.flush()

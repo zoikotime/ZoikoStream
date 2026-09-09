@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Textarea, Select, Label } from "../../ui/forms";
@@ -10,13 +10,13 @@ const EMPTY = { org_id: "", subject: "", message: "", priority: "normal", reques
 // Log a new support ticket against an organization. Create-only — status/priority are
 // edited inline from the queue.
 export default function SupportTicketModal({ open, onClose, organizations = [], onSaved }) {
-  const [form, setForm] = useState(EMPTY);
+  // Mounted only while open (the call site does `{modalOpen && ...}`), so this initial state
+  // IS the per-open reset. Defaulting org_id here rather than in an effect is safe because the
+  // "Log Ticket" button is disabled until `organizations` has loaded (Support.jsx) — the list
+  // can never arrive after this mounts.
+  const [form, setForm] = useState(() => ({ ...EMPTY, org_id: organizations[0]?.id || "" }));
   const [saving, setSaving] = useState(false);
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }));
-
-  useEffect(() => {
-    if (open) setForm({ ...EMPTY, org_id: organizations[0]?.id || "" });
-  }, [open, organizations]);
 
   const close = () => !saving && onClose();
 

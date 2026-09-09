@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { FiSave } from "react-icons/fi";
 import { Panel, Button } from "../../components/admin";
 import { Input, Label, Switch } from "../../ui/forms";
@@ -30,18 +30,45 @@ function useSettingsData() {
 // (brand / storage_limits / streaming_limits / global). GET/PATCH /admin/settings.
 export default function Settings() {
   const { data, loading, error, reload } = useSettingsData();
-  const [form, setForm] = useState(DEFAULTS);
-  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    if (!data) return;
-    setForm({
-      brand: { ...DEFAULTS.brand, ...(data.brand?.value || {}) },
-      storage_limits: { ...DEFAULTS.storage_limits, ...(data.storage_limits?.value || {}) },
-      streaming_limits: { ...DEFAULTS.streaming_limits, ...(data.streaming_limits?.value || {}) },
-      global: { ...DEFAULTS.global, ...(data.global?.value || {}) },
-    });
-  }, [data]);
+  if (error) {
+    return (
+      <div className="mx-auto max-w-[1000px] rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
+        Couldn't load platform settings. Try refreshing the page.
+      </div>
+    );
+  }
+
+  // `!data` is part of the guard, not just `loading`: SettingsForm below reads
+  // `settings.brand` at mount, so "loaded but empty" has to stay on this side of the fence.
+  // The effect this replaced was guarded by `if (!data) return;` for the same reason.
+  if (loading || !data) {
+    return (
+      <div className="mx-auto max-w-[1000px] space-y-6">
+        <Skeleton variant="title" className="w-64" />
+        <Skeleton variant="block" className="h-40" />
+        <Skeleton variant="block" className="h-40" />
+        <Skeleton variant="block" className="h-24" />
+      </div>
+    );
+  }
+
+  // The form lives in its own component so it can be MOUNTED only once `data` exists, which
+  // is what lets its initial state be seeded straight from the server response instead of by
+  // an effect. The behaviour is identical to the effect it replaces because useApi's reload()
+  // sets loading=true: the guards above unmount this subtree during every refetch and remount
+  // it against the fresh response, so a save still redisplays the canonical stored values.
+  return <SettingsForm settings={data} onSaved={reload} />;
+}
+
+function SettingsForm({ settings, onSaved }) {
+  const [form, setForm] = useState(() => ({
+    brand: { ...DEFAULTS.brand, ...(settings.brand?.value || {}) },
+    storage_limits: { ...DEFAULTS.storage_limits, ...(settings.storage_limits?.value || {}) },
+    streaming_limits: { ...DEFAULTS.streaming_limits, ...(settings.streaming_limits?.value || {}) },
+    global: { ...DEFAULTS.global, ...(settings.global?.value || {}) },
+  }));
+  const [saving, setSaving] = useState(false);
 
   const setField = (group, key, value) =>
     setForm((f) => ({ ...f, [group]: { ...f[group], [key]: value } }));
@@ -66,32 +93,13 @@ export default function Settings() {
         },
       });
       notify.success("Platform settings saved");
-      reload();
+      onSaved();
     } catch (e) {
       notify.error(errMsg(e));
     } finally {
       setSaving(false);
     }
   };
-
-  if (error) {
-    return (
-      <div className="mx-auto max-w-[1000px] rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
-        Couldn't load platform settings. Try refreshing the page.
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="mx-auto max-w-[1000px] space-y-6">
-        <Skeleton variant="title" className="w-64" />
-        <Skeleton variant="block" className="h-40" />
-        <Skeleton variant="block" className="h-40" />
-        <Skeleton variant="block" className="h-24" />
-      </div>
-    );
-  }
 
   return (
     <div className="mx-auto max-w-[1000px] space-y-6">

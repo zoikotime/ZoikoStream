@@ -26,8 +26,11 @@ export default function AcceptInvitation() {
   const token = params.get("token") || "";
 
   const [invite, setInvite] = useState(null);
-  const [loadError, setLoadError] = useState("");
-  const [loadingInvite, setLoadingInvite] = useState(true);
+  // A link with no token needs no request, so both of these start at their final values
+  // instead of being written by a synchronous setState at the top of the effect below. That
+  // also removes a frame in which a plainly malformed link showed a loading spinner.
+  const [loadError, setLoadError] = useState(token ? "" : "This invitation link is missing its token.");
+  const [loadingInvite, setLoadingInvite] = useState(!!token);
 
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -36,11 +39,8 @@ export default function AcceptInvitation() {
   const [errors, setErrors] = useState({});
 
   useEffect(() => {
-    if (!token) {
-      setLoadError("This invitation link is missing its token.");
-      setLoadingInvite(false);
-      return;
-    }
+    // Nothing to fetch and nothing to set — the initial state above already says so.
+    if (!token) return;
     let cancelled = false;
     api
       .get("/organization/invitations/preview", { params: { token } })

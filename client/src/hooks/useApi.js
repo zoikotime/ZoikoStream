@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // Fetch-on-mount hook: standardizes the { data, loading, error, reload } lifecycle
 // the org pages were missing. Pass a thunk that returns the parsed data.
@@ -39,11 +39,17 @@ export default function useApi(fn) {
   }, [tick]);
 
   // reload() runs from event handlers, so setting state here is allowed.
-  const reload = () => {
+  //
+  // useCallback with no dependencies because it closes over nothing but the three state
+  // setters, whose identities React guarantees are stable. That matters to callers, not to
+  // this hook: as a fresh arrow per render it could not honestly be listed in a dependency
+  // array — an effect that re-fetches when a filter changes had to omit it, or loop for ever
+  // (see pages/admin/Users.jsx). A stable identity lets that effect declare what it uses.
+  const reload = useCallback(() => {
     setLoading(true);
     setError(null);
     setTick((t) => t + 1);
-  };
+  }, []);
 
   return { data, loading, error, reload };
 }

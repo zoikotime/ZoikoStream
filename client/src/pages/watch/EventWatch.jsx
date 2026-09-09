@@ -113,6 +113,20 @@ const LIVE_EMPTY = {
 // eslint-disable-next-line react-refresh/only-export-components
 export { LIVE_EMPTY, liveReducer };
 
+// `your_vote` is per-connection and DELIBERATELY absent from the public poll broadcasts:
+// services/moderation.py::poll_out fills it only for the per-socket snapshot, and its
+// docstring is explicit that "callers that build a public broadcast (poll.new/update/delete)
+// simply omit it and every viewer gets your_vote: None". Merging that null over the value the
+// snapshot — or this viewer's own vote — established would silently un-vote them the moment
+// anyone else voted and a new tally arrived. So a blank here means "not included", never
+// "no vote", and is dropped before the merge.
+const keepingOwnVote = (data) => {
+  if (data.your_vote != null) return data;
+  const rest = { ...data };
+  delete rest.your_vote;
+  return rest;
+};
+
 function liveReducer(state, env) {
   const { channel, type, data } = env;
 
@@ -177,9 +191,24 @@ function liveReducer(state, env) {
     case "poll/poll.new":
       return { ...state, polls: [data, ...state.polls] };
     case "poll/poll.update":
-      return { ...state, polls: state.polls.map((p) => (p.id === data.id ? { ...p, ...data } : p)) };
+      return {
+        ...state,
+        polls: state.polls.map((p) => (p.id === data.id ? { ...p, ...keepingOwnVote(data) } : p)),
+      };
     case "poll/poll.delete":
       return { ...state, polls: state.polls.filter((p) => p.id !== data.id) };
+    // This viewer's OWN ballot, applied optimistically by the send wrapper below so the vote
+    // buttons switch to the result view without waiting for the round trip.
+    //
+    // It lives here rather than as local state inside WatchPanel's Poll component for one
+    // specific reason: the server answers a vote with a public `poll.update` carrying new
+    // tallies, and a component holding its own copy then had to reconcile the two — which is
+    // exactly the effect this replaced. One field, one owner.
+    case "local/poll.vote":
+      return {
+        ...state,
+        polls: state.polls.map((p) => (p.id === data.id ? { ...p, your_vote: data.option } : p)),
+      };
     // `reactions/reaction.burst` intentionally has NO case: a reaction must not become
     // reducer state. Dispatching it here would re-render the whole page (and the chat
     // list, and the player) once per tap in the audience, for something that is already
@@ -372,6 +401,24 @@ export default function EventWatch() {
     send: sendLive,
     disconnect: disconnectLive,
   } = useEventStream(eventId, onLiveEnvelope, regToken, linkToken);
+
+  // The panel's send, wrapped so a poll vote also lands in reducer state at once. The server
+  // answers with a public `poll.update` whose `your_vote` is blank for everybody (see
+  // keepingOwnVote above), so without this the viewer would watch the tallies move while the
+  // vote buttons sat there as if they had not voted. Everything else passes straight through.
+  //
+  // Dispatched unconditionally, exactly as the previous local `choice` state was set before
+  // the send: a refused vote leaves the optimistic value showing and is surfaced by the
+  // rejection toast, which is the behaviour this replaces rather than a new one.
+  const sendPanel = useCallback(
+    (type, payload) => {
+      if (type === "poll.vote") {
+        dispatchPanel({ channel: "local", type: "poll.vote", data: payload });
+      }
+      return sendLive(type, payload);
+    },
+    [sendLive]
+  );
 
   // An honest word about the CONTROL socket, kept strictly separate from media state.
   // liveStatus was previously consumed in only two places — a disabled control and the chat
@@ -628,7 +675,7 @@ export default function EventWatch() {
               typing={panel.typing}
               questions={panel.questions}
               polls={panel.polls}
-              send={sendLive}
+              send={sendPanel}
               identified={identified}
               eventId={eventId}
               onIdentified={setRegToken}

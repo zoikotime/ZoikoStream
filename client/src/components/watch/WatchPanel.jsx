@@ -294,26 +294,23 @@ const QA = memo(function QA({ questions = [], send, connected }) {
 // Options are index-addressed on the server (moderation._poll_vote takes `option` as an
 // array index, not an id — see poll_out), so voting sends the option's position, not a key.
 //
-// `poll.your_vote` is the server's own memory of this ballot (server/app/services/
-// moderation.py poll_out, filled in from the snapshot's per-viewer vote lookup) — it's
-// what makes a refreshed or reconnected page open already showing "you voted for X"
-// instead of the vote buttons again. `choice` still exists as local state so a vote cast
-// THIS session updates the UI instantly, without waiting on a round trip; it's seeded
-// from your_vote on mount so a returning viewer starts in the right state.
+// `poll.your_vote` is the ONE record of this ballot, and this component holds no copy of it.
+// The per-socket snapshot fills it (server/app/services/moderation.py poll_out, from the
+// per-viewer vote lookup), which is what makes a refreshed or reconnected page open already
+// showing "you voted for X" instead of the vote buttons; and a vote cast in this session is
+// written into the same field immediately by EventWatch's `local/poll.vote` action, so the UI
+// still updates without waiting on a round trip.
+//
+// It used to be mirrored into local `choice` state, which then needed an effect to reconcile
+// itself against the prop on every reconnect. Two owners for one fact also meant a viewer who
+// had reconnected (so your_vote was set) and then changed their vote saw the buttons snap back
+// to the old option until the server caught up. One field, one owner, no effect.
 //
 // A vote can still be CHANGED while the poll is live — the ledger row moves to the new
 // option server-side (see moderation._poll_vote) instead of being rejected as a second
-// vote, so re-picking here is just another `poll.vote` send. Once the poll closes, or on
-// reconnect, `your_vote` is what's trusted — that's the option a refresh will show.
+// vote, so re-picking here is just another `poll.vote` send.
 function Poll({ poll, send }) {
-  const [choice, setChoice] = useState(() => (poll.your_vote ?? null));
-  // The server is the source of truth once it has an opinion — if this poll object came
-  // back from a fresh snapshot (reconnect) with your_vote set, trust it over whatever
-  // stale local choice this component instance happened to hold.
-  useEffect(() => {
-    if (poll.your_vote != null && poll.your_vote !== choice) setChoice(poll.your_vote);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [poll.your_vote]);
+  const choice = poll.your_vote ?? null;
   const voted = choice !== null;
   const canChange = poll.status === "live";
   const opts = poll.options || [];
@@ -321,7 +318,6 @@ function Poll({ poll, send }) {
 
   const vote = (index) => {
     if (index === choice) return; // already this option — nothing to send
-    setChoice(index);
     send("poll.vote", { id: poll.id, option: index });
   };
 

@@ -7,6 +7,11 @@ import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import FeatureFlagModal from "./FeatureFlagModal";
 
+// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
+// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
+// (permanently, for a response that simply omits the field). It is never mutated.
+const NONE = [];
+
 function useFlagsData() {
   return useApi(() => api.get("/admin/feature-flags").then((r) => r.data));
 }
@@ -21,7 +26,7 @@ export default function FeatureFlags() {
   const { data: flags, loading, error, reload } = useFlagsData();
   const [modalOpen, setModalOpen] = useState(false);
 
-  const rows = flags || [];
+  const rows = flags || NONE;
   const kpis = useMemo(
     () => ({ total: rows.length, enabled: rows.filter((f) => f.enabled).length }),
     [rows]
@@ -117,7 +122,7 @@ export default function FeatureFlags() {
         )}
       </Panel>
 
-      <FeatureFlagModal open={modalOpen} onClose={() => setModalOpen(false)} onSaved={reload} />
+      {modalOpen && <FeatureFlagModal open onClose={() => setModalOpen(false)} onSaved={reload} />}
     </div>
   );
 }
