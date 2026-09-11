@@ -360,7 +360,10 @@ export default function DataTable({
 
             {!loading && sorted.length === 0 && (
               <tr>
-                <td colSpan={colCount} className="px-4 py-20 text-center">
+                {/* py-20 gave an empty table ~250px of blank before the message even
+                    began. Content-driven height reads as "nothing here yet" rather
+                    than as a page that failed to load. */}
+                <td colSpan={colCount} className="px-4 py-12 text-center">
                   {empty ? (
                     <div className="zk-fade-in mx-auto max-w-sm">
                       {empty.icon && (

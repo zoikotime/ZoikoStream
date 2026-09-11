@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  FiSearch, FiPlay, FiMonitor, FiShield, FiRefreshCw, FiAlignLeft,
+  FiSearch, FiPlay, FiMonitor, FiShield, FiAlignLeft,
   FiTrendingUp, FiCheckSquare, FiChevronRight,
 } from "react-icons/fi";
 import api from "../../api";
@@ -58,12 +58,6 @@ const QUICKSTARTS = [
     title: "Secure playback with signed tokens",
     desc: "Issue short-lived access grants and verify sessions before serving protected media.",
     crumb: "Secure", stages: ["secure"],
-  },
-  {
-    icon: FiRefreshCw, tile: ACCENT.amber.chip, to: "/organization/webhooks",
-    title: "Verify webhook signatures",
-    desc: "Validate delivery authenticity and handle retries idempotently in your endpoint.",
-    crumb: "Platform", stages: ["platform"],
   },
   {
     icon: FiAlignLeft, tile: GREEN_TILE, to: "/organization/recordings",

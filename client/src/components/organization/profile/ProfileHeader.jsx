@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
-import { Building2, CalendarDays, Layers, Lock, Mail, Pencil, Sparkles, Star } from "lucide-react";
+import { Building2, CalendarDays, Layers, Mail, Pencil, Sparkles, Star } from "lucide-react";
 import { cx, focusRing } from "../../../ui/tokens";
 import Skeleton from "../../../ui/Skeleton";
 import { CARD, TXT } from "./styles";
@@ -75,7 +75,6 @@ export default function ProfileHeader({
   plan,
   memberSince,
   loading = false,
-  onChangePassword,
 }) {
   const verdict = VERDICT[health?.status] || VERDICT.not_configured;
   const name = user?.full_name || "—";
@@ -169,18 +168,6 @@ export default function ProfileHeader({
               <Pencil className="h-4 w-4" aria-hidden="true" />
               Edit Profile
             </Link>
-            <button
-              type="button"
-              onClick={onChangePassword}
-              title="Sends a one-time code to your email address"
-              className={cx(
-                "inline-flex h-11 items-center gap-2 rounded-xl bg-violet-600 px-5 text-sm font-semibold text-white shadow-sm shadow-violet-600/25 transition-colors duration-150 hover:bg-violet-700 active:bg-violet-800",
-                focusRing
-              )}
-            >
-              <Lock className="h-4 w-4" aria-hidden="true" />
-              Change Password
-            </button>
           </div>
         </div>
 

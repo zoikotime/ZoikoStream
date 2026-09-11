@@ -38,7 +38,7 @@ export const QUICK_ACTIONS = [
     icon: KeyRound,
     title: "API Keys",
     desc: "Credential inventory, expiry and rotation posture.",
-    to: "/organization/credentials",
+    to: "/organization/settings?tab=developer",
     tone: "emerald",
   },
   {

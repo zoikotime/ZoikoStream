@@ -9,13 +9,29 @@ import { Field, PasswordField, SubmitButton } from "../../ui/forms";
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
 // Steps: email (request code) -> reset (enter code + new password) -> done.
-// The backend emails a 4-digit OTP; /auth/reset-password re-validates it, so there's
-// no separate verify call here.
+// /auth/reset-password re-validates the code, so there is no separate verify call here.
+//
+// This page used to state the challenge policy itself: it asked for a "4-digit code",
+// capped the input at 4, and promised a 10-minute expiry. The backend mints SIX digits
+// (crud/recovery.CODE_DIGITS) and keeps them for FIFTEEN minutes (RECOVERY_TTL_MINUTES),
+// so the real emailed code could not physically be typed in. /auth/forgot-password now
+// reports both values and they are used below; the constants here are only the fallback
+// for a server that predates that field, and they match the backend as it stands.
+const DEFAULT_CODE_LENGTH = 6;
+const DEFAULT_TTL_MINUTES = 15;
+
+// Digits only, so a pasted "071487 " or "071 487" still lands as 071487. Kept as a STRING
+// throughout: the server stores sha256 of the string it mailed, so Number("071487") would
+// hash as "71487" and never match. Nothing in this file parses it.
+const sanitizeCode = (raw, length) => String(raw ?? "").replace(/\D/g, "").slice(0, length);
+
 export default function ForgotPassword() {
   const [step, setStep] = useState("email"); // email | reset | done
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
+  const [codeLength, setCodeLength] = useState(DEFAULT_CODE_LENGTH);
+  const [ttlMinutes, setTtlMinutes] = useState(DEFAULT_TTL_MINUTES);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [errors, setErrors] = useState({});
@@ -29,7 +45,12 @@ export default function ForgotPassword() {
     setErrors({});
     setLoading(true);
     try {
-      await api.post("/auth/forgot-password", { email: email.trim() });
+      const { data } = await api.post("/auth/forgot-password", { email: email.trim() });
+      // Only accept sane values; a malformed field must not make the input unusable.
+      if (Number.isInteger(data?.code_length) && data.code_length > 0) setCodeLength(data.code_length);
+      if (Number.isInteger(data?.expires_in_minutes) && data.expires_in_minutes > 0) {
+        setTtlMinutes(data.expires_in_minutes);
+      }
       setStep("reset");
     } catch (error) {
       notify.error(errMsg(error, "We couldn't send the reset code right now."));
@@ -41,7 +62,9 @@ export default function ForgotPassword() {
   const resetPassword = async (e) => {
     e.preventDefault();
     const errs = {};
-    if (!/^\d{4}$/.test(otp)) errs.otp = "Enter the 4-digit code from your email.";
+    const code = sanitizeCode(otp, codeLength);
+    if (!code) errs.otp = "Enter the verification code.";
+    else if (code.length < codeLength) errs.otp = `Enter the ${codeLength}-digit code.`;
     if (password.length < 8) errs.password = "Use at least 8 characters.";
     if (confirm !== password) errs.confirm = "Passwords don't match.";
     if (Object.keys(errs).length) {
@@ -51,7 +74,7 @@ export default function ForgotPassword() {
     setErrors({});
     setLoading(true);
     try {
-      await api.post("/auth/reset-password", { email: email.trim(), otp, password });
+      await api.post("/auth/reset-password", { email: email.trim(), otp: code, password });
       setStep("done");
     } catch (error) {
       notify.error(errMsg(error, "That code is invalid or expired. Request a new one."));
@@ -85,19 +108,24 @@ export default function ForgotPassword() {
       <Card padding="xl">
         <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Enter reset code</h1>
         <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-          We sent a 4-digit code to <span className="font-semibold text-slate-800 dark:text-slate-100">{email.trim()}</span>.
-          Enter it below with your new password. The code expires in 10 minutes.
+          We sent a {codeLength}-digit code to <span className="font-semibold text-slate-800 dark:text-slate-100">{email.trim()}</span>.
+          Enter it below with your new password. The code expires in {ttlMinutes} minutes.
         </p>
 
         <form onSubmit={resetPassword} noValidate className="mt-8 space-y-5">
           <Field
-            label="4-digit code"
+            label={`${codeLength}-digit code`}
             inputMode="numeric"
-            maxLength={4}
+            // pattern for the numeric keypad on mobile. Deliberately NO maxLength: that
+            // attribute truncates the RAW value before onChange runs, so pasting a code
+            // copied out of an email with its spaces (" 071 487 ") was cut to six raw
+            // characters and sanitized down to "0714" — two real digits silently lost.
+            // sanitizeCode is the single authority on length, and it counts digits.
+            pattern="[0-9]*"
             autoComplete="one-time-code"
-            placeholder="0000"
+            placeholder={"0".repeat(codeLength)}
             value={otp}
-            onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            onChange={(e) => setOtp(sanitizeCode(e.target.value, codeLength))}
             error={errors.otp}
           />
           <PasswordField
@@ -136,7 +164,7 @@ export default function ForgotPassword() {
     <Card padding="xl">
       <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Reset Password</h1>
       <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-        Enter your work email and we'll send you a 4-digit code to reset your password.
+        Enter your work email and we'll send you a {DEFAULT_CODE_LENGTH}-digit code to reset your password.
       </p>
 
       <form onSubmit={sendCode} noValidate className="mt-8 space-y-5">

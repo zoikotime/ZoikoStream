@@ -11,7 +11,7 @@ import Badge from "../../ui/Badge";
 import DataTable from "../../components/admin/DataTable";
 import Panel from "../../components/admin/Panel";
 import StatCard from "../../components/admin/StatCard";
-import StatRow from "../../components/admin/StatRow";
+import FactGrid from "../../components/organization/FactGrid";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import { fmtDateTime, visLabel } from "../../data/events";
@@ -231,8 +231,7 @@ export default function AudienceAccess() {
         <StatCard label="At capacity" value={totals.atCapacity} loading={events.loading} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <Panel
+      <Panel
           title="Access by event"
           count={totals.atCapacity}
           action={
@@ -265,92 +264,90 @@ export default function AudienceAccess() {
               ),
             }}
           />
-        </Panel>
+      </Panel>
 
-        <div className="space-y-4">
-          <Panel title="Attendance" eyebrow={`Last ${range}`}>
-            <StatRow
-              label="Unique attendees"
-              value={attendance.loading ? null : a.unique_attendees ?? null}
-              reason="Loading"
-            />
-            <StatRow
-              label="Returning attendees"
-              value={attendance.loading ? null : a.returning ?? null}
-              reason="Loading"
-            />
-            <StatRow
-              label="Average watch time"
-              value={attendance.loading || a.avg_watch_minutes == null ? null : `${a.avg_watch_minutes}m`}
-              reason="No sampled viewer data for this window"
-            />
-            <StatRow
-              label="Registration → attendance"
-              value={attendance.loading || a.show_rate == null ? null : `${a.show_rate}%`}
-              reason="No private-event registrations in this window"
-            />
-            {/* Honest, not hidden: unique_attendees/avg_watch_minutes are derived from 15s
-                concurrent-viewer sampling, not counted per person — see
-                services/org.py::audience_attendance's docstring for exactly why no true
-                per-person duration exists in this stack. */}
-            {!attendance.loading && (a.unique_attendees_estimated || a.avg_watch_minutes_estimated) && (
-              <p className={cx("mt-2 border-t pt-2 text-[11px] leading-relaxed", CONSOLE.divider, CONSOLE.faint)}>
-                Attendees and watch time are estimated from sampled concurrent viewers, not counted
-                per person. Show rate only covers private, invite-only events.
-              </p>
-            )}
-          </Panel>
+      <Panel title="Attendance" eyebrow={`Last ${range}`}>
+        <FactGrid
+          columns={4}
+          facts={[
+            {
+              label: "Unique attendees",
+              value: attendance.loading ? null : a.unique_attendees ?? null,
+              reason: "Loading",
+            },
+            {
+              label: "Returning attendees",
+              value: attendance.loading ? null : a.returning ?? null,
+              reason: "Loading",
+            },
+            {
+              label: "Average watch time",
+              value:
+                attendance.loading || a.avg_watch_minutes == null ? null : `${a.avg_watch_minutes}m`,
+              reason: "No sampled viewer data for this window",
+            },
+            {
+              label: "Registration → attendance",
+              value: attendance.loading || a.show_rate == null ? null : `${a.show_rate}%`,
+              reason: "No private-event registrations in this window",
+            },
+          ]}
+        />
+        {/* Honest, not hidden: unique_attendees/avg_watch_minutes are derived from 15s
+            concurrent-viewer sampling, not counted per person — see
+            services/org.py::audience_attendance's docstring for exactly why no true
+            per-person duration exists in this stack. */}
+        {!attendance.loading && (a.unique_attendees_estimated || a.avg_watch_minutes_estimated) && (
+          <p className={cx("mt-4 border-t pt-3 text-[12px] leading-relaxed", CONSOLE.divider, CONSOLE.faint)}>
+            Attendees and watch time are estimated from sampled concurrent viewers, not counted
+            per person. Show rate only covers private, invite-only events.
+          </p>
+        )}
+      </Panel>
 
-          <Panel title="Not measured">
-            <StatRow
-              label="Audience geography"
-              value={null}
-              reason="Per-viewer location is not collected"
-            />
-            <StatRow
-              label="Device and player mix"
-              value={null}
-              reason="Client-side playback telemetry is not ingested"
-            />
-            <StatRow
-              label="Blocked join attempts"
-              value={null}
-              reason="Refused playback attempts are not recorded"
-            />
-            <p className={cx("mt-3 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
-              Deliberate: this platform records registration and presence, not per-person
-              profiling. These stay “—” until something is actually collected.
-            </p>
-          </Panel>
+      <Panel title="Not measured">
+        <FactGrid
+          columns={3}
+          facts={[
+            { label: "Audience geography", value: null, reason: "Per-viewer location is not collected" },
+            { label: "Device and player mix", value: null, reason: "Client-side playback telemetry is not ingested" },
+            { label: "Blocked join attempts", value: null, reason: "Refused playback attempts are not recorded" },
+          ]}
+        />
+        <p className={cx("mt-4 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
+          Deliberate: this platform records registration and presence, not per-person
+          profiling. These stay “—” until something is actually collected.
+        </p>
+      </Panel>
 
-          <Panel title="Controls that shape the audience">
-            <ul className="space-y-2">
-              {[
-                [FiUsers, "Members & Access", "/organization/users", "Who inside the organization can operate events."],
-                [FiSlash, "Playback & Access", "/organization/playback", "Visibility, passphrase and registration gates."],
-                [FiCalendar, "Live Events", "/organization/events", "Capacity, schedule and the watch window."],
-                [FiTrendingUp, "Analytics", "/organization/analytics", "Engagement once they are in the room."],
-              ].map(([Icon, label, to, desc]) => (
-                <li key={to}>
-                  <Link
-                    to={to}
-                    className={cx(
-                      "flex items-start gap-2.5 rounded-lg px-2 py-2 transition-colors duration-150 motion-reduce:transition-none",
-                      "hover:bg-slate-100 dark:hover:bg-white/[0.06]"
-                    )}
-                  >
-                    <Icon className={cx("mt-0.5 shrink-0 text-[14px]", CONSOLE.faint)} aria-hidden="true" />
-                    <span className="min-w-0">
-                      <span className={cx("block text-[13px] font-semibold", CONSOLE.heading)}>{label}</span>
-                      <span className={cx("block text-[12px]", CONSOLE.faint)}>{desc}</span>
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </Panel>
-        </div>
-      </div>
+      <Panel title="Controls that shape the audience">
+        {/* Two columns INSIDE the section — a grid where it helps reading, which is a
+            different thing from the page-level rail this replaced. */}
+        <ul className="grid gap-1 sm:grid-cols-2">
+          {[
+            [FiUsers, "Members & Access", "/organization/users", "Who inside the organization can operate events."],
+            [FiSlash, "Playback & Access", "/organization/playback", "Visibility, passphrase and registration gates."],
+            [FiCalendar, "Live Events", "/organization/events", "Capacity, schedule and the watch window."],
+            [FiTrendingUp, "Analytics", "/organization/analytics", "Engagement once they are in the room."],
+          ].map(([Icon, label, to, desc]) => (
+            <li key={to}>
+              <Link
+                to={to}
+                className={cx(
+                  "flex items-start gap-2.5 rounded-lg px-2 py-2 transition-colors duration-150 motion-reduce:transition-none",
+                  "hover:bg-slate-100 dark:hover:bg-white/[0.06]"
+                )}
+              >
+                <Icon className={cx("mt-0.5 shrink-0 text-[14px]", CONSOLE.faint)} aria-hidden="true" />
+                <span className="min-w-0">
+                  <span className={cx("block text-[13px] font-semibold", CONSOLE.heading)}>{label}</span>
+                  <span className={cx("block text-[12px]", CONSOLE.faint)}>{desc}</span>
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      </Panel>
     </div>
   );
 }

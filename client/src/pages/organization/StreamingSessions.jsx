@@ -10,7 +10,7 @@ import Badge from "../../ui/Badge";
 import DataTable from "../../components/admin/DataTable";
 import Panel from "../../components/admin/Panel";
 import StatCard from "../../components/admin/StatCard";
-import StatRow from "../../components/admin/StatRow";
+import FactGrid from "../../components/organization/FactGrid";
 import { timeAgo } from "../../components/admin/format";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
@@ -162,8 +162,7 @@ export default function StreamingSessions() {
         />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <Panel
+      <Panel
           title="Recent sessions"
           description={
             items.length
@@ -206,75 +205,84 @@ export default function StreamingSessions() {
               ),
             }}
           />
-        </Panel>
+      </Panel>
 
-        <div className="space-y-4">
-          <Panel title="Audience">
-            <StatRow
-              label="Current across live sessions"
-              value={sessions.current_audience ?? null}
-              reason="No live session is being sampled right now"
-            />
-            <StatRow
-              label="All-time peak"
-              value={sessions.peak_audience ?? null}
-              reason="No session has recorded a peak yet"
-            />
-            <StatRow
-              label="Unique viewers this window"
-              value={null}
-              reason="Windowed unique-viewer metering is not integrated"
-            />
-          </Panel>
+      <Panel title="Audience">
+        <FactGrid
+          columns={3}
+          facts={[
+            {
+              label: "Current across live sessions",
+              value: sessions.current_audience ?? null,
+              reason: "No live session is being sampled right now",
+            },
+            {
+              label: "All-time peak",
+              value: sessions.peak_audience ?? null,
+              reason: "No session has recorded a peak yet",
+            },
+            {
+              label: "Unique viewers this window",
+              value: null,
+              reason: "Windowed unique-viewer metering is not integrated",
+            },
+          ]}
+        />
+      </Panel>
 
-          <Panel title="Not measured here">
-            <StatRow
-              label="Ingest protocol"
-              value={null}
-              reason="Protocol is not recorded on a session (documented gap)"
-            />
-            <StatRow
-              label="Ingest region"
-              value={null}
-              reason="Region is not recorded on a session (documented gap)"
-            />
-            <StatRow
-              label="Self-service vs managed"
-              value={null}
-              reason={sessions.breakdown_note || "Not modelled in the schema"}
-            />
-            <p className={cx("mt-3 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
-              These read “—” because nothing produces them, not because the value is zero.
-            </p>
-          </Panel>
+      <Panel title="Not measured here">
+        <FactGrid
+          columns={3}
+          facts={[
+            {
+              label: "Ingest protocol",
+              value: null,
+              reason: "Protocol is not recorded on a session (documented gap)",
+            },
+            {
+              label: "Ingest region",
+              value: null,
+              reason: "Region is not recorded on a session (documented gap)",
+            },
+            {
+              label: "Self-service vs managed",
+              value: null,
+              reason: sessions.breakdown_note || "Not modelled in the schema",
+            },
+          ]}
+        />
+        <p className={cx("mt-4 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
+          These read “—” because nothing produces them, not because the value is zero.
+        </p>
+      </Panel>
 
-          <Panel title="Where to go next">
-            <ul className="space-y-2">
-              {[
-                ["Live Events", "/organization/events", "Schedule, staff and run a broadcast."],
-                ["Playback & Access", "/organization/playback", "Who may watch, and on what link."],
-                ["Media & Replay", "/organization/recordings", "What each session left behind."],
-              ].map(([label, to, desc]) => (
-                <li key={to}>
-                  <Link
-                    to={to}
-                    className={cx(
-                      "flex items-start gap-2.5 rounded-lg px-2 py-2 transition-colors duration-150 motion-reduce:transition-none",
-                      "hover:bg-slate-100 dark:hover:bg-white/[0.06]"
-                    )}
-                  >
-                    <FiUsers className={cx("mt-0.5 shrink-0 text-[14px]", CONSOLE.faint)} aria-hidden="true" />
-                    <span className="min-w-0">
-                      <span className={cx("block text-[13px] font-semibold", CONSOLE.heading)}>{label}</span>
-                      <span className={cx("block text-[12px]", CONSOLE.faint)}>{desc}</span>
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </Panel>
-        </div>
-      </div>
+      <Panel title="Where to go next">
+        {/* Three across on desktop, stacking on mobile — a grid inside the section, not a
+            rail beside the page. */}
+        <ul className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
+          {[
+            ["Live Events", "/organization/events", "Schedule, staff and run a broadcast."],
+            ["Playback & Access", "/organization/playback", "Who may watch, and on what link."],
+            ["Media & Replay", "/organization/recordings", "What each session left behind."],
+          ].map(([label, to, desc]) => (
+            <li key={to}>
+              <Link
+                to={to}
+                className={cx(
+                  "flex h-full items-start gap-2.5 rounded-lg px-2 py-2 transition-colors duration-150 motion-reduce:transition-none",
+                  "hover:bg-slate-100 dark:hover:bg-white/[0.06]"
+                )}
+              >
+                <FiUsers className={cx("mt-0.5 shrink-0 text-[14px]", CONSOLE.faint)} aria-hidden="true" />
+                <span className="min-w-0">
+                  <span className={cx("block text-[13px] font-semibold", CONSOLE.heading)}>{label}</span>
+                  <span className={cx("block text-[12px]", CONSOLE.faint)}>{desc}</span>
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      </Panel>
     </div>
   );
 }

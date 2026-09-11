@@ -1,42 +1,31 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  FiMenu, FiLogOut, FiUser, FiChevronDown, FiPlus, FiClock, FiRefreshCw,
+  FiMenu, FiLogOut, FiUser, FiChevronDown, FiPlus, FiRefreshCw,
 } from "react-icons/fi";
 import { useAuth } from "../../auth/AuthContext";
 import { CONSOLE, brand, brandButton, cx, focusRing } from "../../ui/tokens";
-import Dropdown from "../../ui/Dropdown";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import ThemeToggle from "../../ui/ThemeToggle";
 import HealthDot from "../admin/HealthDot";
 import QuickActionsMenu from "../organization/QuickActionsMenu";
 
-// Organization console topbar: workspace + range scoping, the primary "request live event"
-// action, then health verdict, theme and account.
+// Organization console topbar. One presentation for every /organization/* route: the
+// primary "request live event" action, theme, and the account menu.
 //
-// `filters`/`onFilters` are optional — only the Overview page scopes by window, so other org
-// pages render the bar without them rather than showing dead controls.
+// What it deliberately no longer carries:
+//   * the workspace and time-range selectors — no page read them any more, so they were
+//     dead controls occupying the bar on every screen
+//   * a permanent health verdict — a "Healthy" pill the reader cannot act on, duplicated on
+//     every page; the real verdict and its history live on Support & Status
+// The FAILURE case is kept: if /organization/console-state cannot be reached the shell has
+// no identity, no badges and no verdict, and that is worth saying with a retry attached.
 //
-// `quickActions` swaps the health verdict for a Quick Actions menu in the SAME slot. Only the
-// Profile page asks for it (via useOrgScope), because that page's own reason to exist is
-// those shortcuts; everywhere else keeps the live verdict and its retry affordance. Same
-// opt-in shape as `filters` above, and the same reasoning: the control lives here, the
-// decision belongs to the page.
+// `quickActions` swaps in the Quick Actions menu for the Profile page, which asks for it
+// through useOrgScope — the control lives here, the decision belongs to the page.
 //
 // The notification bell that used to live here was hardcoded to "3" with no data source; it
 // is gone rather than lying about unread items.
-const RANGES = [
-  ["1h", "Last hour"],
-  ["24h", "Last 24 hours"],
-  ["7d", "Last 7 days"],
-  ["30d", "Last 30 days"],
-];
-
-const VERDICT = {
-  ok: { status: "ok", label: "Healthy" },
-  warn: { status: "warn", label: "Degraded" },
-  down: { status: "down", label: "Disrupted" },
-  not_configured: { status: "neutral", label: "Not configured" },
-};
 const UNKNOWN = { status: "neutral", label: "Status unavailable" };
 
 const initials = (name = "") =>
@@ -52,38 +41,21 @@ function useClickOutside(onClose) {
   return ref;
 }
 
-export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, onFilters,
-                                quickActions = false }) {
+export default function Topbar({
+  onMenuClick,
+  state,
+  unknown,
+  onRetry,
+  quickActions = false,
+  collapsed = false,
+  onToggleCollapse,
+}) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useClickOutside(() => setMenuOpen(false));
 
   const person = state?.user || { name: user?.full_name, email: user?.email };
-  const verdict = unknown ? UNKNOWN : VERDICT[state?.health?.status] || UNKNOWN;
-  const workspaces = state?.workspaces || [];
-  const single = workspaces.length < 2;
-  const orgName = state?.organization?.name || "Organization";
-
-  // Workspace options carry the org identity in the trigger, so the bar answers "which
-  // organization, which workspace" without a second control. Options come from
-  // /organization/console-state — nothing here is a hardcoded workspace.
-  // `dot` is Dropdown's leading-node slot — an element, not a component type, so it does
-  // not remount the avatar on every render the way an inline icon component would.
-  const orgAvatar = (
-    <span className={cx("grid h-5 w-5 shrink-0 place-items-center rounded text-[9px] font-bold text-white", brand.chip)}>
-      {initials(orgName)}
-    </span>
-  );
-  const workspaceOptions = [
-    { value: "", label: "All workspaces", hint: orgName, dot: orgAvatar },
-    ...workspaces.map((w) => ({
-      value: w.slug,
-      label: w.label,
-      hint: w.name || orgName,
-      dot: orgAvatar,
-    })),
-  ];
 
   const iconBtn = cx(
     "grid h-9 w-9 place-items-center rounded-lg transition-colors duration-150 motion-reduce:transition-none",
@@ -100,43 +72,40 @@ export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, 
         CONSOLE.bar
       )}
     >
+      {/* Two controls, one job each, and never both at once.
+          Under lg the rail is an overlay drawer, so the hamburger opens and closes it.
+          At lg and up the rail is always present and this collapses it to an icon strip.
+          The desktop control sits at the very start of the bar, against the boundary it
+          acts on — it reads as a handle on the sidebar rather than a page action. */}
       <button onClick={onMenuClick} className={cx(iconBtn, "lg:hidden")} aria-label="Toggle menu">
         <FiMenu className="text-xl" />
       </button>
 
-      <div className="ml-auto flex items-center gap-2 sm:gap-2.5">
-        {/* Scope controls — rendered only where the page actually reads them. */}
-        {filters && onFilters && (
-          <>
-            <Dropdown
-              label="Workspace"
-              className="hidden w-[13rem] sm:block"
-              width="w-[15rem]"
-              value={filters.workspace || ""}
-              onChange={(v) => onFilters({ ...filters, workspace: v || null })}
-              options={workspaceOptions}
-              title={single ? "This organization has a single workspace" : undefined}
-            />
-
-            <Dropdown
-              label="Time range"
-              className="w-[10.5rem]"
-              width="w-[10.5rem]"
-              value={filters.range}
-              onChange={(v) => onFilters({ ...filters, range: v })}
-              options={RANGES.map(([value, label]) => ({ value, label }))}
-              icon={FiClock}
-            />
-          </>
+      <button
+        type="button"
+        onClick={onToggleCollapse}
+        // Icon-only, so the accessible name has to carry the whole meaning — and it names
+        // the ACTION, not the state, because that is what a click will do.
+        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-expanded={!collapsed}
+        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        className={cx(iconBtn, "hidden lg:grid")}
+      >
+        {collapsed ? (
+          <PanelLeftOpen className="h-[18px] w-[18px]" aria-hidden="true" />
+        ) : (
+          <PanelLeftClose className="h-[18px] w-[18px]" aria-hidden="true" />
         )}
+      </button>
 
-        {/* This slot holds EITHER the Quick Actions menu (Profile only, see `quickActions`)
-            OR the health verdict — never both, so the row's spacing is identical either way.
-
-            Health verdict — real, from /organization/console-state. When that call failed it
-            becomes a retry, never a reassuring default. The pill pulses only while the
-            platform is actually healthy or actually down: a static amber reads as "look at
-            me later", a pulsing one as "look now". */}
+      <div className="ml-auto flex items-center gap-2 sm:gap-2.5">
+        {/* Silent when things are fine, actionable when they are not.
+            A permanent "Healthy" pill on every page is a readout nobody can act on, and it
+            is what made the console feel like a monitoring tool; the real verdict, with its
+            history, lives on Support & Status. What is NOT dropped is the failure case: when
+            /organization/console-state cannot be reached the shell has no identity, no
+            badges and no verdict, and the reader needs to know that and be able to retry.
+            So: healthy renders nothing, unreachable renders a retry. */}
         {quickActions ? (
           // `md:inline-flex` on the pill it replaces hid the verdict on phones; the menu is
           // an ACTION, not a readout, so it stays available at every width.
@@ -156,22 +125,7 @@ export default function Topbar({ onMenuClick, state, unknown, onRetry, filters, 
             <HealthDot status={UNKNOWN.status}>{UNKNOWN.label}</HealthDot>
             <FiRefreshCw className={cx("text-[12px]", CONSOLE.faint)} aria-hidden="true" />
           </button>
-        ) : (
-          <span
-            className={cx(
-              "hidden items-center rounded-full border px-2.5 py-1.5 md:inline-flex",
-              "border-slate-200 bg-slate-50 dark:border-white/10 dark:bg-white/[0.04]"
-            )}
-            title={`Platform status: ${verdict.label}`}
-          >
-            <HealthDot
-              status={verdict.status}
-              pulse={verdict.status === "ok" || verdict.status === "down"}
-            >
-              {verdict.label}
-            </HealthDot>
-          </span>
-        )}
+        ) : null}
 
         {/* Primary action: schedule a live event for this organization. Reuses the existing
             Events page create flow rather than adding a second creation path. */}

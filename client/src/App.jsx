@@ -72,7 +72,6 @@ const Infrastructure = lazy(() => import("./pages/admin/Infrastructure"));
 const OrganizationProfile = lazy(() => import("./pages/organization/Profile"));
 const DeveloperPlatform = lazy(() => import("./pages/organization/DeveloperPlatform"));
 const Credentials = lazy(() => import("./pages/organization/Credentials"));
-const Webhooks = lazy(() => import("./pages/organization/Webhooks"));
 const LiveInputs = lazy(() => import("./pages/organization/LiveInputs"));
 const StreamingSessions = lazy(() => import("./pages/organization/StreamingSessions"));
 const PlaybackAccess = lazy(() => import("./pages/organization/PlaybackAccess"));
@@ -308,7 +307,6 @@ export default function App() {
                 {/* Build */}
                 <Route path="/organization/developers" element={<DeveloperPlatform />} />
                 <Route path="/organization/credentials" element={<Credentials />} />
-                <Route path="/organization/webhooks" element={<Webhooks />} />
                 <Route path="/organization/live-inputs" element={<LiveInputs />} />
                 {/* Operate */}
                 <Route path="/organization/sessions" element={<StreamingSessions />} />

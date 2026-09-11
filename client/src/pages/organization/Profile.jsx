@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+
 import { MotionConfig, motion } from "framer-motion";
 import {
   AtSign, BadgeCheck, Building2, CreditCard, Database, Gauge, Layers, Mail,
@@ -16,7 +16,6 @@ import ProfileHeader from "../../components/organization/profile/ProfileHeader";
 import MetricCard from "../../components/organization/profile/MetricCard";
 import InfoCard from "../../components/organization/profile/InfoCard";
 import ActivityTimeline from "../../components/organization/profile/ActivityTimeline";
-import SecurityPanel from "../../components/organization/profile/SecurityPanel";
 import Section from "../../components/organization/profile/Section";
 import { CARD, TXT } from "../../components/organization/profile/styles";
 import { inView, stagger } from "../../components/organization/profile/motion";
@@ -63,7 +62,6 @@ const PLAN_TONE = { active: "success", trial: "warning", past_due: "danger" };
 
 export default function OrganizationProfile() {
   const { user } = useAuth();
-  const navigate = useNavigate();
   // `quickActions: true` puts the Quick Actions menu in the topbar for this page, in the
   // slot the health pill occupies elsewhere. Asked for here rather than set in the layout
   // so no other org page loses its live health verdict.
@@ -105,10 +103,6 @@ export default function OrganizationProfile() {
     reloadShell?.();
   };
 
-  // No signed-in password change exists in this stack; the emailed one-time code at
-  // /forgot-password is the real flow, so the button goes there instead of nowhere.
-  const changePassword = () => navigate("/forgot-password");
-
   return (
     <MotionConfig reducedMotion="user">
       <div className="mx-auto max-w-7xl space-y-8 pb-4">
@@ -121,7 +115,6 @@ export default function OrganizationProfile() {
           plan={ent?.plan || state?.organization?.plan}
           memberSince={me?.created_at}
           loading={loading && !data}
-          onChangePassword={changePassword}
         />
 
         {error && (
@@ -191,7 +184,7 @@ export default function OrganizationProfile() {
               value={fmtNum(overview?.developer_ops?.credentials_active)}
               sub={`active of ${fmtNum(overview?.developer_ops?.credentials_total ?? 0)} issued · ${fmtNum(overview?.developer_ops?.webhooks_configured ?? 0)} webhooks`}
               note="Request volume and success rate are not attributed per organization, so no usage figure is shown."
-              to="/organization/credentials"
+              to="/organization/settings?tab=developer"
               loading={loading && !data}
             />
 
@@ -293,8 +286,13 @@ export default function OrganizationProfile() {
           </motion.div>
         </Section>
 
-        {/* ── Recent Activity + Security ────────────────────────────────────── */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,400px)]">
+        {/* ── Recent Activity ───────────────────────────────────────────────────
+            The Security panel used to sit in a 400px column beside this. It has moved to
+            Settings -> Security, where the controls the score is computed FROM already live
+            — a posture readout on one page and the switches that change it on another is a
+            split nobody benefits from. The grid went with it rather than being left as an
+            empty track. */}
+        <div>
           <Section
             title="Recent Activity"
             description="Member, invitation and streaming events across this workspace."
@@ -308,14 +306,6 @@ export default function OrganizationProfile() {
                 </p>
               )}
             </div>
-          </Section>
-
-          <Section title="Security" description="Credentials and organization posture.">
-            <SecurityPanel
-              posture={posture}
-              loading={loading && !data}
-              onChangePassword={changePassword}
-            />
           </Section>
         </div>
 

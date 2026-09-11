@@ -34,6 +34,7 @@ from ..schemas import (
     RegisterIn,
     RegistrationPendingOut,
     ResendVerificationIn,
+    ChangePasswordIn,
     ResetPasswordIn,
     TokenOut,
     UserOut,
@@ -76,6 +77,11 @@ _VERIFY_EMAIL_LIMIT = rate_limit("verify-email", limit=20, window=300.0)
 # Resend is the expensive one: it sends mail to an address the caller merely names, so it
 # is both a spam vector against third parties and a cost vector. Tightest budget here.
 _RESEND_VERIFICATION_LIMIT = rate_limit("resend-verification", limit=3, window=900.0)
+# A signed-in password change still guesses the CURRENT password on every attempt, so it is
+# an online guessing surface like login and is limited like one. Slightly tighter than login
+# because a legitimate user gets this right on the first or second try — they are typing a
+# password they already know.
+_PASSWORD_CHANGE_LIMIT = rate_limit("password-change", limit=5, window=300.0)
 
 
 def _mask_email(email: str) -> str:
@@ -446,7 +452,17 @@ def forgot_password(data: ForgotPasswordIn, background: BackgroundTasks,
                     db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == data.email.lower()))
     # Unchanged property: always the same answer, so this cannot probe which addresses exist.
-    resp = {"message": "If that email exists, a verification code has been sent."}
+    #
+    # `expires_in_minutes` is policy, not account state: identical for an address that
+    # exists and one that does not, so it discloses nothing the enumeration guard protects.
+    # It is here because the UI used to hardcode its own number and drifted — it told people
+    # the code lasted 10 minutes while the challenge actually lived 15. A client that reads
+    # the TTL from the server cannot drift from it again.
+    resp = {
+        "message": "If that email exists, a verification code has been sent.",
+        "expires_in_minutes": recovery_crud.RECOVERY_TTL_MINUTES,
+        "code_length": recovery_crud.CODE_DIGITS,
+    }
     if user is None:
         return resp
 
@@ -641,6 +657,65 @@ def step_up(data: StepUpIn, request: Request, db: Session = Depends(get_db),
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, stepup_svc.describe(outcome))
     return StepUpOut(reference=reference, purpose=data.purpose,
                      expires_in_minutes=STEP_UP_TTL_MINUTES)
+
+
+@router.patch("/password", dependencies=[_PASSWORD_CHANGE_LIMIT])
+def change_password(data: ChangePasswordIn, background: BackgroundTasks,
+                    user: User = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    """Change the signed-in user's password.
+
+    The same credential lifecycle as reset-password, minus the recovery code: verify, check
+    the organization's policy, hash, commit, then notify. It exists because there was no
+    authenticated path at all — "Change Password" in the console sent people to
+    /forgot-password, which mails a one-time code to change a password they already know.
+
+    Deliberately NOT taking an email or a user id: the account comes from the bearer token,
+    so this endpoint cannot be pointed at somebody else's credential.
+
+    Order matters, and it is the same order reset-password uses:
+      * verify the current password FIRST — a caller who cannot prove ownership learns
+        nothing about the policy
+      * check the policy BEFORE writing, so a rejected password leaves the stored hash
+        untouched
+      * commit, and only then queue the notification, so no mail can claim a change that
+        was rolled back
+    """
+    # Constant-time comparison inside verify_password (passlib); never a manual == on hashes.
+    if not verify_password(data.current_password, user.password_hash or ""):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect")
+
+    # Rejected as a policy failure rather than silently succeeding: a "change" that changes
+    # nothing still sends a credential-changed email, which trains people to ignore it.
+    if verify_password(data.new_password, user.password_hash or ""):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "New password must be different from your current password")
+
+    # The organization's floor, from the one place that defines it. Never re-implemented
+    # here, and never weaker than the platform baseline (services/org_policy).
+    violation = org_policy.password_violation(user.organization, data.new_password)
+    if violation:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, violation)
+
+    user.password_hash = hash_password(data.new_password)
+    db.commit()
+
+    # IDN-005, after the commit — same family, same wording and the same session statement
+    # the recovery path makes. This platform does not revoke sessions on a credential
+    # change, so the mail says so rather than implying a logout that never happens.
+    background.add_task(
+        email_mod.send_credential_changed_email,
+        user.email,
+        credential_type="password",
+        changed_at=_utc_stamp(datetime.now(timezone.utc)),
+        session_effect=email_mod.SESSION_EFFECT_NOT_REVOKED,
+        # No audit row exists for a self-service change (nothing persists one yet), so the
+        # reference identifies the ACCOUNT for a support conversation — the same id-prefix
+        # shape reset-password uses for its recovery row.
+        security_reference=str(user.id)[:8],
+    )
+    # Never the hash, never either password.
+    return {"message": "Password updated successfully"}
 
 
 @router.get("/me", response_model=UserOut)

@@ -10,7 +10,7 @@ export default function OrganizationEmptyState({
   className = "",
 }) {
   return (
-    <div className={cx("flex flex-col items-center justify-center px-6 py-14 text-center", className)}>
+    <div className={cx("flex flex-col items-center justify-center px-6 py-10 text-center", className)}>
       {Icon && (
         <div className="mb-3 grid h-11 w-11 place-items-center rounded-full bg-slate-100 text-slate-400 dark:bg-slate-800">
           <Icon className="text-lg" />

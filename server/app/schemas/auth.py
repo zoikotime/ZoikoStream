@@ -32,6 +32,22 @@ class ResetPasswordIn(BaseModel):
     password: str = Field(min_length=8, max_length=72)
 
 
+class ChangePasswordIn(BaseModel):
+    """A signed-in password change. No email — the caller is already authenticated, so the
+    account is taken from the token rather than from the body, which is what stops this
+    becoming a way to set somebody else's password.
+
+    `new_password` carries the same 8..72 bound as registration and recovery (bcrypt caps at
+    72 bytes); the ORGANIZATION's floor is enforced in the router through
+    org_policy.password_violation, exactly as reset-password does it — one policy, one place.
+    `current_password` is only ever compared against the stored hash, so it needs no floor of
+    its own: an account created before a tenant raised its minimum must still be able to
+    prove ownership with the password it actually has.
+    """
+    current_password: str = Field(min_length=1, max_length=72)
+    new_password: str = Field(min_length=8, max_length=72)
+
+
 # ── IDN-001 email verification ──────────────────────────────────────────────────────────
 
 class VerifyEmailIn(BaseModel):

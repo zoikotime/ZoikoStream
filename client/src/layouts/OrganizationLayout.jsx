@@ -39,10 +39,7 @@ export default function OrganizationLayout() {
   );
   useInterval(reload, REFRESH_MS);
 
-  const [filters, setFilters] = useState({ workspace: null, range: "24h" });
-  const [scoped, setScoped] = useState(false);
-  // Set by the page that wants the topbar's Quick Actions menu (Profile). Kept here beside
-  // `scoped` because both are "which topbar controls does the current page want".
+  // Set by the page that wants the topbar's Quick Actions menu (Profile).
   const [quickActions, setQuickActions] = useState(false);
   const [collapsed, setCollapsed] = useState(readCollapsed);
 
@@ -58,27 +55,33 @@ export default function OrganizationLayout() {
     });
   }, []);
 
-  // A page opts into the topbar's scope controls by calling this; pages that don't
-  // (Events, Settings…) leave the controls hidden instead of showing dead ones.
-  const enableScope = useCallback(() => setScoped(true), []);
-  const enableQuickActions = useCallback(() => setQuickActions(true), []);
+  // Returns its own undo, which useOrgScope hands back as an effect cleanup, so the menu
+  // belongs to the page that asked for it. Without that it was a one-way switch: the first
+  // page to turn it on left it on for every page after.
+  const enableQuickActions = useCallback(() => {
+    setQuickActions(true);
+    return () => setQuickActions(false);
+  }, []);
 
   const unknown = Boolean(error) || (!state && !loading);
 
   return (
     <OrgScopeContext.Provider
-      value={{ filters, setFilters, enableScope, enableQuickActions, state, reload }}
+      value={{ enableQuickActions, state, reload }}
     >
       <AppShell
         surface={`${CONSOLE.page} text-slate-800 dark:text-neutral-200`}
-        mainClass="p-4 sm:p-6 lg:px-8 lg:py-7"
+        // One content container for every organization page, so a table screen and the
+        // dashboard start and end on the same vertical lines. Capped rather than fluid: past
+        // ~1400px a data table becomes a scan across the full width of a 27" display. Pages
+        // that set their own narrower max-width still win inside this.
+        mainClass="mx-auto w-full max-w-[1400px] p-4 sm:p-6 lg:px-8 lg:py-7"
         renderSidebar={({ open, setOpen }) => (
           <Sidebar
             open={open}
             onClose={() => setOpen(false)}
             state={state}
             collapsed={collapsed}
-            onToggleCollapse={toggleCollapsed}
           />
         )}
         renderTopbar={({ setOpen }) => (
@@ -87,9 +90,12 @@ export default function OrganizationLayout() {
             state={state}
             unknown={unknown}
             onRetry={reload}
-            filters={scoped ? filters : undefined}
-            onFilters={scoped ? setFilters : undefined}
             quickActions={quickActions}
+            // The collapse control lives in the header, at the sidebar boundary. The STATE
+            // still belongs here, because both bars read it — the rail to size itself, the
+            // header to pick its icon.
+            collapsed={collapsed}
+            onToggleCollapse={toggleCollapsed}
           />
         )}
       />

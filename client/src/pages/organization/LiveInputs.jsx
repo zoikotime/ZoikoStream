@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   FiUploadCloud, FiSearch, FiPlus, FiTrash2, FiEye, FiEyeOff, FiCopy, FiRefreshCw,
 } from "react-icons/fi";
@@ -45,12 +46,28 @@ const STATE_BADGE = {
 };
 
 export default function LiveInputs() {
+  // `?event=<id>` is how Event Details hands over: it opens the create dialog with that
+  // event already chosen, so an organizer setting up an encoder for one event never has to
+  // find it again in a list. The parameter is consumed once and stripped, so a refresh or a
+  // back-navigation does not reopen the dialog over a page the reader wanted to read.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const handoffEventId = searchParams.get("event") || "";
+
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(Boolean(handoffEventId));
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [detail, setDetail] = useState(null); // the input row, or null
+
+  // Strip the handoff parameter once it has been read. A real external-system sync (the
+  // browser URL), not a state update, so it stays in an effect.
+  useEffect(() => {
+    if (!searchParams.has("event")) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("event");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const { data, loading, reload } = useApi(() =>
     api.get("/organization/live-inputs").then((r) => r.data)
@@ -259,6 +276,7 @@ export default function LiveInputs() {
 
       <CreateInputModal
         open={creating}
+        preselectEventId={handoffEventId}
         onClose={() => setCreating(false)}
         onCreated={() => {
           setPage(1);
@@ -403,7 +421,7 @@ function InputDetailSheet({ input, onClose, onCopy }) {
   );
 }
 
-function CreateInputModal({ open, onClose, onCreated }) {
+function CreateInputModal({ open, onClose, onCreated, preselectEventId = "" }) {
   const [form, setForm] = useState({ event_id: "", title: "", description: "", input_type: "rtmp" });
   const [saving, setSaving] = useState(false);
   const { data: events } = useApi(() =>
@@ -415,7 +433,14 @@ function CreateInputModal({ open, onClose, onCreated }) {
   const [wasOpen, setWasOpen] = useState(open);
   if (open !== wasOpen) {
     setWasOpen(open);
-    if (open) setForm({ event_id: list[0]?.id || "", title: "", description: "", input_type: "rtmp" });
+    // Arriving from an event ("External input" on Event Details) preselects THAT event;
+    // opening the page cold falls back to the most recent one, as before.
+    if (open) {
+      const seed = list.some((e) => String(e.id) === String(preselectEventId))
+        ? preselectEventId
+        : list[0]?.id || "";
+      setForm({ event_id: seed, title: "", description: "", input_type: "rtmp" });
+    }
   }
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));

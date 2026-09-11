@@ -1,4 +1,4 @@
-import { cx, type } from "../../ui/tokens";
+import { cx } from "../../ui/tokens";
 
 // Page-level header for every Organization Admin screen: title (+ optional subtitle)
 // on the left, an actions slot (buttons, filters) on the right. Replaces the
@@ -26,9 +26,15 @@ export default function OrganizationPageHeader({
       )}
     >
       <div className="min-w-0">
-        <h1 className={cx(type.h1, "truncate text-slate-900 dark:text-white")}>{title}</h1>
+        {/* Matched to the dashboard's welcome heading (26/30px bold) so a page title looks
+            the same size whichever organization screen you are on. `type.h1` is 24px
+            semibold and is still what the rest of the app uses — changing it here rather
+            than in the token keeps this to the organization console. */}
+        <h1 className="truncate text-[26px] font-bold leading-tight tracking-tight text-slate-900 sm:text-[30px] dark:text-white">
+          {title}
+        </h1>
         {subtitle && (
-          <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">{subtitle}</p>
+          <p className="mt-1.5 text-[14px] text-slate-500 dark:text-neutral-400">{subtitle}</p>
         )}
       </div>
       {actions && (

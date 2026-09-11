@@ -7,8 +7,8 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   FiUser, FiImage, FiShield, FiBell, FiCode, FiAlertTriangle,
-  FiUploadCloud, FiGlobe, FiCheck, FiCopy, FiTrash2, FiPlus, FiSave,
-  FiVideo, FiCloud, FiLink,
+  FiUploadCloud, FiGlobe, FiCheck, FiCopy, FiSave,
+  FiVideo, FiCloud,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
@@ -17,10 +17,10 @@ import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import Badge from "../../ui/Badge";
 import { Input, Textarea, Select, Switch } from "../../ui/forms";
-import Modal from "../../ui/Modal";
 import { notify } from "../../ui/Toast";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
-import { fmtDate } from "../../data/events";
+import ApiCredentials from "../../components/organization/ApiCredentials";
+import ChangePasswordForm from "../../components/organization/profile/ChangePasswordForm";
 import {
   INDUSTRIES, COMPANY_SIZES, ACCENTS,
   SESSION_TIMEOUTS, PASSWORD_LENGTHS,
@@ -81,23 +81,6 @@ function SettingRow({ title, desc, children }) {
     </div>
   );
 }
-function IconButton({ icon: Icon, title, danger, onClick }) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      className={cx(
-        "grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition",
-        danger
-          ? "hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
-          : "hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
-      )}
-    >
-      <Icon />
-    </button>
-  );
-}
 
 // ── API ⇄ form-state mapping ──────────────────────────────────────────────────
 // The form keeps its camelCase shape; these translate at the network boundary so the
@@ -105,16 +88,12 @@ function IconButton({ icon: Icon, title, danger, onClick }) {
 // domain have a backend — permissions, API keys, integrations, domain-verify and the
 // danger zone stay local (no endpoint yet) and are marked at their call sites.
 const loadSettings = async () => {
-  const [profile, security, notifs, domainData, branding, keys, notifCatalog] = await Promise.all([
+  const [profile, security, notifs, domainData, branding, notifCatalog] = await Promise.all([
     api.get("/organization/profile").then((r) => r.data),
     api.get("/organization/security").then((r) => r.data),
     api.get("/organization/notifications").then((r) => r.data),
     api.get("/organization/domain").then((r) => r.data),
     api.get("/organization/branding").then((r) => r.data),
-    // Deliberately tolerant: the key list backs ONE panel, while the five above are the form
-    // itself. An API build that predates /organization/api-keys 404s here, and taking the
-    // whole settings page down over a panel is the wrong trade. null = "couldn't load".
-    api.get("/organization/api-keys").then((r) => r.data).catch(() => null),
     // The notification catalog is the server's description of what each preference actually
     // controls — its message class, whether it is mandatory, and whether a send path for it
     // exists at all. Rendering the panel from this instead of a hardcoded list is what stops
@@ -122,7 +101,7 @@ const loadSettings = async () => {
     // list above: an older API 404s here and the panel falls back to the static grouping.
     api.get("/organization/notifications/catalog").then((r) => r.data).catch(() => null),
   ]);
-  return { profile, security, notifs, domain: domainData, branding, keys, notifCatalog };
+  return { profile, security, notifs, domain: domainData, branding, notifCatalog };
 };
 
 // Slugs are constrained server-side (^[a-z0-9][a-z0-9-]*$, 3-140). Normalising as the user
@@ -242,7 +221,6 @@ export default function OrganizationSettings() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState({});
-  const [apiKeys, setApiKeys] = useState([]);
 
   // Seed the editable form the first render fetched data arrives (and again after a
   // retry, which yields a fresh object). React's "adjust state during render" pattern,
@@ -250,17 +228,9 @@ export default function OrganizationSettings() {
   if (data && data !== seededData) {
     setSeededData(data);
     setSettings(fromApi(data));
-    setApiKeys(data.keys || []);
     setDirty(false);
     setErrors({});
   }
-
-  // API-key creation: label + optional expiry, then the raw key shown exactly once.
-  const [keyModalOpen, setKeyModalOpen] = useState(false);
-  const [keyLabel, setKeyLabel] = useState("");
-  const [keyExpiry, setKeyExpiry] = useState("");
-  const [creatingKey, setCreatingKey] = useState(false);
-  const [freshKey, setFreshKey] = useState(null);
 
   if (error) {
     return (
@@ -341,42 +311,11 @@ export default function OrganizationSettings() {
     }
   };
 
-  const createKey = async () => {
-    if (!keyLabel.trim()) return;
-    setCreatingKey(true);
-    try {
-      const { data: created } = await api.post("/organization/api-keys", {
-        label: keyLabel.trim(),
-        expires_in_days: keyExpiry ? Number(keyExpiry) : null,
-      });
-      // The raw key is in this response and nowhere else — the server stores only its hash.
-      setFreshKey(created);
-      setApiKeys((k) => [{ ...created, key: undefined }, ...k]);
-      setKeyModalOpen(false);
-      setKeyLabel("");
-      setKeyExpiry("");
-    } catch (e) {
-      notify.error(errMsg(e, "Couldn't create the API key."));
-    } finally {
-      setCreatingKey(false);
-    }
-  };
 
-  const revokeKey = async (id) => {
-    try {
-      await api.delete(`/organization/api-keys/${id}`);
-      // The server marks the record revoked rather than dropping it, so mirror that.
-      setApiKeys((k) => k.map((x) => (x.id === id ? { ...x, revoked: true } : x)));
-      notify.success("API key revoked");
-    } catch (e) {
-      notify.error(errMsg(e, "Couldn't revoke that key."));
-    }
-  };
 
   const orgName = settings.profile.name;
   const hasErrors = Object.values(errors).some(Boolean);
   // null (not []) means the key list request failed — an empty list would claim "no keys".
-  const keysUnavailable = seededData?.keys == null;
 
   return (
     <div className="space-y-6">
@@ -585,7 +524,16 @@ export default function OrganizationSettings() {
           {/* ── SECURITY + User Permissions ── */}
           {tab === "security" && (
             <>
-              <Panel title="Security" desc="Authentication and access policies for your organization">
+              {/* The password change itself, in place. It used to be a button that sent a
+                  signed-IN admin to /forgot-password — the signed-out recovery flow — to
+                  re-prove an identity the session had already proved. The minimum is passed
+                  as a hint only; PATCH /api/auth/password re-validates against the same
+                  org_policy the control below writes to. */}
+              <Panel title="Account Security" desc="Change the password you sign in with">
+                <ChangePasswordForm minLength={settings.security.minPasswordLength} />
+              </Panel>
+
+              <Panel title="Security Configuration" desc="Authentication and access policies for your organization">
                 <SettingRow title="Require two-factor authentication" desc="Every member must enable 2FA to sign in">
                   <Switch checked={settings.security.require2fa} onChange={(v) => setSec("require2fa", v)} />
                 </SettingRow>
@@ -732,83 +680,15 @@ export default function OrganizationSettings() {
           {/* ── DEVELOPER: API Keys + Integrations ── */}
           {tab === "developer" && (
             <>
-              <Panel
-                title="API Keys"
-                desc="Authenticate requests to the ZoikoStream API"
-                action={
-                  <Button variant="secondary" size="sm" onClick={() => setKeyModalOpen(true)} disabled={keysUnavailable}>
-                    <FiPlus className="text-base" /> Generate Key
-                  </Button>
-                }
-              >
-                {keysUnavailable && (
-                  <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50/70 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">Couldn't load API keys</p>
-                      <p className="mt-0.5 text-xs text-amber-700/90 dark:text-amber-400/90">
-                        Every other setting on this page loaded fine. If the API was just updated it
-                        needs a restart to serve <code className="font-mono">/organization/api-keys</code>.
-                      </p>
-                    </div>
-                    <Button variant="secondary" size="sm" onClick={reload}>Retry</Button>
-                  </div>
-                )}
-
-                {/* The key itself is shown once, here, and never again: the server keeps only
-                    its sha256. Copy it before leaving this panel. */}
-                {freshKey && (
-                  <div className="mb-4 rounded-xl border border-emerald-300 bg-emerald-50/70 p-4 dark:border-emerald-500/40 dark:bg-emerald-500/10">
-                    <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">
-                      Copy “{freshKey.label}” now — it can't be shown again.
-                    </p>
-                    <div className="mt-2.5 flex items-center gap-2">
-                      <code className="min-w-0 flex-1 truncate rounded-lg bg-white px-3 py-2 font-mono text-xs text-slate-700 dark:bg-slate-900 dark:text-slate-200">
-                        {freshKey.key}
-                      </code>
-                      <Button variant="secondary" size="sm" onClick={() => copyText(freshKey.key, "API key")}>
-                        <FiCopy className="text-base" /> Copy
-                      </Button>
-                      <Button variant="ghost" size="sm" onClick={() => setFreshKey(null)}>Done</Button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-2.5">
-                  {apiKeys.map((k) => (
-                    <div key={k.id} className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-100 p-3 dark:border-slate-800">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-medium text-slate-800 dark:text-slate-100">{k.label || "Untitled key"}</p>
-                          <Badge status={k.revoked ? "neutral" : "success"} dot>{k.revoked ? "Revoked" : "Active"}</Badge>
-                        </div>
-                        <code className="mt-1 block truncate font-mono text-xs text-slate-500 dark:text-slate-400">
-                          {k.prefix}…
-                        </code>
-                        <p className="mt-0.5 text-[11px] text-slate-400">
-                          Created {fmtDate(k.created_at)}
-                          {k.expires_at ? ` · Expires ${fmtDate(k.expires_at)}` : " · No expiry"}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <IconButton icon={FiCopy} title="Copy key prefix" onClick={() => copyText(k.prefix, "Key prefix")} />
-                        {!k.revoked && <IconButton icon={FiTrash2} title="Revoke" danger onClick={() => revokeKey(k.id)} />}
-                      </div>
-                    </div>
-                  ))}
-                  {/* Not shown when the list failed to load — "no keys yet" would be a claim we
-                      can't make from a failed request. */}
-                  {apiKeys.length === 0 && !keysUnavailable && (
-                    <p className="py-6 text-center text-sm text-slate-400">No API keys yet. Generate one to get started.</p>
-                  )}
-                </div>
-                <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
-                  Only the prefix is stored in readable form, so an existing key can never be
-                  re-displayed. Full inventory and expiry tracking live in{" "}
-                  <Link to="/organization/credentials" className="font-medium text-emerald-700 hover:underline dark:text-emerald-400">
-                    Credentials
-                  </Link>
-                  .
-                </p>
+              {/* The FULL credential UI, not a second copy of it.
+                  This panel used to be a lite list/create/revoke talking to its own route
+                  pair (/organization/api-keys) against the same `org.api_keys` column the
+                  Credentials screen writes through /organization/developer/api-keys. Two
+                  code paths over one store is how two screens quietly start disagreeing —
+                  and this one could not show expiry, lifecycle state or inventory at all.
+                  Both now render the same component. */}
+              <Panel title="API Credentials" desc="Keys this organization authenticates API requests with">
+                <ApiCredentials embedded />
               </Panel>
 
               {/* Was a grid of connect/disconnect toggles for Slack, Zoom, Salesforce… none of
@@ -817,9 +697,8 @@ export default function OrganizationSettings() {
               <Panel title="Integrations" desc="Connect ZoikoStream to the tools your team already uses">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   {[
-                    [FiLink, "Webhooks", "Send event notifications to your endpoints", "/organization/webhooks"],
-                    [FiCode, "Developer platform", "Keys, usage and API reference", "/organization/developers"],
-                    [FiVideo, "Live inputs", "RTMP and SRT ingest endpoints", "/organization/live-inputs"],
+                    [FiCode, "API reference", "Endpoints, versioning and platform status", "/organization/developers"],
+                    [FiVideo, "Live inputs", "RTMP / WHIP ingest for OBS, vMix and hardware encoders", "/organization/live-inputs"],
                     [FiCloud, "Playback & access", "Where and how your streams can be watched", "/organization/playback"],
                   ].map(([Icon, name, desc, to]) => (
                     <Link
@@ -884,42 +763,6 @@ export default function OrganizationSettings() {
         </div>
       </div>
 
-      {/* Generate API key */}
-      <Modal
-        open={keyModalOpen}
-        onClose={() => setKeyModalOpen(false)}
-        title="Generate API key"
-        footer={
-          <>
-            <Button variant="secondary" size="sm" onClick={() => setKeyModalOpen(false)}>Cancel</Button>
-            <Button size="sm" onClick={createKey} disabled={!keyLabel.trim() || creatingKey}>
-              {creatingKey ? "Generating…" : "Generate key"}
-            </Button>
-          </>
-        }
-      >
-        <p className="mb-3">
-          The key is shown once, immediately after it's created. ZoikoStream stores only a hash,
-          so it can't be recovered later — you'd generate a replacement instead.
-        </p>
-        <Field label="Label" hint="How you'll recognise this key later, e.g. “Production server”.">
-          <Input
-            variant="form"
-            maxLength={80}
-            value={keyLabel}
-            onChange={(e) => setKeyLabel(e.target.value)}
-            placeholder="Production server"
-          />
-        </Field>
-        <Field label="Expires" className="mt-4" hint="A rotation deadline you can act on. Optional.">
-          <Select variant="form" value={keyExpiry} onChange={(e) => setKeyExpiry(e.target.value)}>
-            <option value="">No expiry</option>
-            <option value="30">30 days</option>
-            <option value="90">90 days</option>
-            <option value="365">1 year</option>
-          </Select>
-        </Field>
-      </Modal>
 
     </div>
   );
