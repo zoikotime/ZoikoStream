@@ -39,7 +39,11 @@ RECOVERY_LOCKOUT_MINUTES = 30
 
 # Six digits, not four. 10^6 with a 5-attempt lockout and a 15-minute window is a very
 # different proposition from 10^4 with unlimited tries, which is what this replaced.
-_CODE_DIGITS = 6
+#
+# Public because /auth/forgot-password now reports it to the client. The sign-in UI had its
+# own idea of how long a code was and asked for four digits of a six-digit code, which made
+# the real code unenterable; a client that is told the length cannot disagree with it.
+CODE_DIGITS = 6
 
 # Outcomes of redeeming a code. Returned rather than raised so the router owns the HTTP
 # mapping and the copy.
@@ -59,7 +63,7 @@ def _hash(raw: str) -> str:
 
 def _new_code() -> str:
     """Cryptographically random, zero-padded. `secrets`, never `random`."""
-    return f"{secrets.randbelow(10 ** _CODE_DIGITS):0{_CODE_DIGITS}d}"
+    return f"{secrets.randbelow(10 ** CODE_DIGITS):0{CODE_DIGITS}d}"
 
 
 def mask_destination(address: str | None) -> str:

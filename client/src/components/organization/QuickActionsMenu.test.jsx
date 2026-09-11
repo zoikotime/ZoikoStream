@@ -147,12 +147,21 @@ describe("the topbar slot", () => {
     expect(screen.queryByText("Healthy")).not.toBeInTheDocument();
   });
 
-  it("keeps the health verdict on every page that does not", () => {
-    // The regression this guards: scoping it wrongly would strip the live verdict — and its
-    // retry affordance — from Overview, Events, Billing and the rest.
+  it("shows nothing in the slot on a healthy page that does not ask", () => {
+    // The permanent "Healthy" pill is gone from the whole organization console: it is a
+    // readout nobody can act on, repeated on every screen, and the real verdict lives on
+    // Support & Status. What must NOT come back is a page silently claiming health.
     renderTopbar({});
-    expect(screen.getByText("Healthy")).toBeInTheDocument();
+    expect(screen.queryByText("Healthy")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /quick actions/i })).not.toBeInTheDocument();
+  });
+
+  it("still surfaces a retry when the console-state call failed", () => {
+    // The failure case is the half worth keeping: with no console-state the shell has no
+    // identity, no badges and no verdict, so the reader needs to be told and be able to act.
+    renderTopbar({ unknown: true });
+    expect(screen.getByText(/status unavailable/i)).toBeInTheDocument();
+    expect(screen.getByTitle(/click to retry/i)).toBeInTheDocument();
   });
 
   it("leaves the rest of the header intact", () => {

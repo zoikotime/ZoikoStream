@@ -621,6 +621,30 @@ export default function EventDetails() {
               </div>
             ))}
           </dl>
+            {/* Advanced: publishing from something other than the browser.
+                Live Inputs is event-scoped and only matters to someone running an external
+                encoder, so it belongs here — beside the event it serves — rather than in the
+                global sidebar, where every organizer running a browser broadcast had to
+                scroll past it. The link hands this event over so the input is created against
+                it without hunting through a list. */}
+            <div className="mt-4 border-t border-slate-100 pt-4 dark:border-slate-800">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                Advanced
+              </p>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-slate-800 dark:text-slate-100">External input</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    RTMP / WHIP — connect OBS, vMix or another encoder instead of publishing from
+                    the browser.
+                  </p>
+                </div>
+                <Button variant="secondary" size="sm" href={`/organization/live-inputs?event=${event.id}`}>
+                  Set up external input
+                </Button>
+              </div>
+            </div>
+
           <div className="mt-4 border-t border-slate-100 pt-4 dark:border-slate-800">
             <Button variant="danger" size="sm" leftIcon={FiTrash2} disabled={busy} onClick={del}>Delete Event</Button>
           </div>

@@ -1,73 +1,73 @@
 import { NavLink } from "react-router-dom";
 import {
-  FiX, FiGrid, FiLayers, FiUsers, FiCode, FiKey, FiLink2, FiUploadCloud,
+  FiX, FiGrid, FiLayers, FiUsers,
   FiActivity, FiFilm, FiPlayCircle, FiRadio, FiUserCheck, FiBarChart2,
-  FiCreditCard, FiShield, FiLifeBuoy, FiChevronDown, FiChevronsLeft, FiChevronsRight,
+  FiCreditCard, FiLifeBuoy, FiSettings,
 } from "react-icons/fi";
 import { CONSOLE, brand, cx, focusRing, type } from "../../ui/tokens";
 import Logo from "../../ui/Logo";
 
-// Organization console navigation, grouped by what the operator is doing:
-//   HOME    — where the organization stands
-//   BUILD   — the integration surface they develop against
-//   OPERATE — running live sessions and their audience
-//   MANAGE  — commercial, security and support
+// Organization console navigation.
 //
-// `badge` names a counter on /organization/console-state; only non-zero counts render, so a
-// quiet organization shows a quiet sidebar. Every destination is org-scoped — nothing here
-// links into /admin/*, which an org admin is not authorized to load.
-const GROUPS = [
+// ONE presentation for every /organization/* route. There used to be two — a grouped
+// HOME/BUILD/OPERATE/MANAGE rail for the console and a flat one the dashboard opted into —
+// and the seam showed the moment you clicked out of the dashboard: the rail changed
+// structure, width and density mid-session. A console that redecorates itself as you move
+// through it reads as two applications.
+//
+// Ordered by how often somebody needs the destination, not by which subsystem owns it:
+//
+//   primary    the event workflow — what this product is for
+//   secondary  the integration surface and org identity, reached occasionally
+//   footer     Analytics, Billing, Settings — management, deliberately last
+//
+// Every `to` is a route that exists in App.jsx. `badge` names a counter on
+// /organization/console-state; only non-zero counts render, so a quiet organization shows a
+// quiet sidebar. Nothing here links into /admin/*, which an org admin cannot load.
+const NAV = [
   {
-    label: "Home",
     items: [
-      { to: "/organization/dashboard", label: "Overview", icon: FiGrid, end: true },
-      { to: "/organization/profile", label: "Organization & Workspaces", icon: FiLayers },
-      { to: "/organization/users", label: "Members & Access", icon: FiUsers },
-    ],
-  },
-  {
-    label: "Build",
-    items: [
-      { to: "/organization/developers", label: "Developer Platform", icon: FiCode },
-      { to: "/organization/credentials", label: "Credentials", icon: FiKey },
-      { to: "/organization/webhooks", label: "Webhooks", icon: FiLink2, badge: "webhooks" },
-      { to: "/organization/live-inputs", label: "Live Inputs", icon: FiUploadCloud },
-    ],
-  },
-  {
-    label: "Operate",
-    items: [
+      { to: "/organization/dashboard", label: "Dashboard", icon: FiGrid, end: true },
+      { to: "/organization/events", label: "Events", icon: FiRadio, badge: "live_events" },
+      { to: "/organization/audience", label: "Audience", icon: FiUserCheck },
+      { to: "/organization/users", label: "Members", icon: FiUsers },
+      { to: "/organization/recordings", label: "Recordings", icon: FiFilm },
       { to: "/organization/sessions", label: "Streaming Sessions", icon: FiActivity, badge: "streaming_sessions" },
-      { to: "/organization/recordings", label: "Media & Replay", icon: FiFilm },
       { to: "/organization/playback", label: "Playback & Access", icon: FiPlayCircle },
-      { to: "/organization/events", label: "Live Events", icon: FiRadio, badge: "live_events" },
-      { to: "/organization/audience", label: "Audience Access", icon: FiUserCheck },
     ],
   },
   {
-    label: "Manage",
+    // Developer Platform, Credentials and Live Inputs used to sit here. All three are
+    // developer- or encoder-only, low-frequency, and none is needed to schedule, run or
+    // review an event — so they no longer hold permanent top-level space. Their routes are
+    // unchanged and every one of them is reachable from Settings -> Developer (and, for a
+    // live input, from the event it belongs to).
+    rule: true,
+    items: [
+      { to: "/organization/profile", label: "Organization", icon: FiLayers },
+    ],
+  },
+  {
+    // Pushed to the bottom of the rail by `mt-auto`, not merely listed last: management
+    // utilities should be findable without ever competing with the event workflow above.
+    // Support & Status sits at the very end — it is where you go when something is wrong,
+    // which is the least frequent and most deliberate trip in the console.
+    rule: true,
+    footer: true,
     items: [
       { to: "/organization/analytics", label: "Analytics", icon: FiBarChart2 },
-      // Named "Billing" to match the page's own heading. It was "Usage & Entitlements", which
-      // described one section rather than the destination, so nobody looking for billing found
-      // it. Same route, same page — this is the organization SUBSCRIPTION ledger (plan, seats,
-      // streaming hours, storage, invoices). Event order payments live on an event's own
-      // Commercial tab and deliberately never appear here.
       { to: "/organization/billing", label: "Billing", icon: FiCreditCard },
-      // Deep-links to the panel this row is named after. Without the ?tab= the row opened
-      // Settings on General — a nav item labelled "Security & Governance" landing on an
-      // organization-name field, which read as the rail pointing at the wrong page.
-      { to: "/organization/settings?tab=security", label: "Security & Governance", icon: FiShield },
+      { to: "/organization/settings", label: "Settings", icon: FiSettings },
       { to: "/organization/support", label: "Support & Status", icon: FiLifeBuoy },
     ],
   },
 ];
 
-// Active row: the filled brand ramp with a soft cast beneath it, so the current destination is
-// unmistakable at a glance. This used to be a private violet→indigo copy declared here because
-// the shared token was a pale tint; the token now carries this exact treatment, so both consoles
-// share one answer and there is nothing to keep in sync.
-const NAV_ON = CONSOLE.navOn;
+// Active row: a soft violet pill. The filled brand ramp this replaces was the right answer
+// for a dense operational rail, but at this row height and spacing a saturated gradient in
+// the sidebar competes with the primary action in the topbar — and the tint still reads
+// unmistakably as "you are here".
+const NAV_ON = "bg-violet-50 text-violet-700 dark:bg-violet-500/[0.16] dark:text-violet-200";
 const NAV_OFF = CONSOLE.navOff;
 
 const initials = (name = "") =>
@@ -95,51 +95,13 @@ function Tip({ children, show }) {
   );
 }
 
-// Workspace identity block. This platform has ONE implicit workspace per organization, so
-// the control shows what exists rather than pretending to switch between several — the
-// chevron is disabled until real workspaces exist, with a title saying why. The switcher
-// that DOES work lives in the topbar, where it drives the page's scope.
-function WorkspaceHeader({ organization, workspace, count, collapsed }) {
-  const name = organization?.name || "Organization";
-  const scope = `workspace · ${workspace?.label || "—"}`;
-  return (
-    <div className={cx("group relative shrink-0", collapsed ? "px-3 lg:px-2.5" : "px-3")}>
-      <div
-        className={cx(
-          "flex items-center gap-2.5 rounded-lg px-3 py-2",
-          "transition-colors duration-150 motion-reduce:transition-none",
-          CONSOLE.inset,
-          collapsed && "lg:justify-center lg:px-2"
-        )}
-      >
-        <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-md text-[11px] font-bold text-white shadow-sm shadow-violet-900/25", brand.chip)}>
-          {initials(name)}
-        </span>
-        <div className={cx("min-w-0 flex-1", collapsed && "lg:hidden")}>
-          <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>{name}</p>
-          <p className={cx("truncate text-[11px]", CONSOLE.faint)}>{scope}</p>
-        </div>
-        <FiChevronDown
-          className={cx(
-            "shrink-0 text-[14px]",
-            CONSOLE.faint,
-            count < 2 && "opacity-40",
-            collapsed && "lg:hidden"
-          )}
-          title={count < 2 ? "This organization has a single workspace" : "Switch workspace"}
-          aria-hidden="true"
-        />
-      </div>
-      <Tip show={collapsed}>
-        {name} · {scope}
-      </Tip>
-    </div>
-  );
-}
-
-export default function Sidebar({ open, onClose, state, collapsed = false, onToggleCollapse }) {
+export default function Sidebar({ open, onClose, state, collapsed = false }) {
   const badges = state?.badges || {};
   const person = state?.user;
+
+  // ~44px rows: this rail is navigated, not scanned like a table, and the extra height is
+  // what makes it read as a product menu rather than a tool palette.
+  const rowShape = "gap-3 px-3 py-2.5 text-[14px]";
 
   return (
     <>
@@ -183,15 +145,9 @@ export default function Sidebar({ open, onClose, state, collapsed = false, onTog
             alt="ZoikoStream"
             className={cx("hidden h-9 w-9 object-contain", collapsed && "lg:block")}
           />
-          <p
-            className={cx(
-              "mt-2 text-center text-[10px] font-semibold uppercase tracking-[0.14em]",
-              CONSOLE.faint,
-              collapsed && "lg:hidden"
-            )}
-          >
-            Organization Console
-          </p>
+          {/* No "ORGANIZATION CONSOLE" eyebrow and no workspace chip. Both answered "where
+              am I in the console", which is a question the navigation itself answers, and
+              between them they pushed the first real destination ~120px down the rail. */}
           <button
             onClick={onClose}
             className={cx("absolute right-4 top-5 shrink-0 lg:hidden", CONSOLE.muted)}
@@ -201,36 +157,25 @@ export default function Sidebar({ open, onClose, state, collapsed = false, onTog
           </button>
         </div>
 
-        <WorkspaceHeader
-          organization={state?.organization}
-          workspace={state?.workspace}
-          count={state?.workspaces?.length ?? 1}
-          collapsed={collapsed}
-        />
-
         <nav
           className={cx(
-            "zk-scroll-thin mt-4 flex-1 space-y-4 overflow-y-auto overflow-x-hidden pb-4",
+            // flex column with `gap`, not `space-y`: the footer group positions itself
+            // with mt-auto, and space-y sets margin-top on the same element — the two
+            // would be fighting over one property.
+            "zk-scroll-thin mt-4 flex flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden pb-4",
             collapsed ? "px-3 lg:px-2.5" : "px-3"
           )}
         >
-          {GROUPS.map((group) => (
-            <div key={group.label} className="space-y-px">
-              {/* Collapsed, the heading text would not fit — a rule keeps the grouping
-                  legible instead of running all sixteen icons together. */}
-              <p
-                className={cx(
-                  "px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em]",
-                  CONSOLE.faint,
-                  collapsed && "lg:hidden"
-                )}
-              >
-                {group.label}
-              </p>
-              <div
-                aria-hidden="true"
-                className={cx("mx-2 mb-2 hidden border-t", CONSOLE.divider, collapsed && "lg:block")}
-              />
+          {NAV.map((group, gi) => (
+            <div
+              key={`section-${gi}`}
+              className={cx("space-y-1", group.footer && "mt-auto pt-2")}
+            >
+              {/* A hairline instead of a heading. It separates the three tiers without
+                  adding three more labels to read before you can navigate. */}
+              {group.rule && (
+                <div aria-hidden="true" className={cx("mx-2 mb-2 border-t", CONSOLE.divider)} />
+              )}
               {group.items.map(({ to, label, icon: Icon, end, badge }) => {
                 const count = badges[badge] || 0;
                 return (
@@ -242,7 +187,8 @@ export default function Sidebar({ open, onClose, state, collapsed = false, onTog
                     aria-label={collapsed ? label : undefined}
                     className={({ isActive }) =>
                       cx(
-                        "group relative flex items-center gap-2.5 rounded-lg px-3 py-[7px] text-[13px] font-medium",
+                        "group relative flex items-center rounded-lg font-medium",
+                        rowShape,
                         "transition-[background-color,color,box-shadow] duration-150 motion-reduce:transition-none",
                         focusRing,
                         collapsed && "lg:justify-center lg:px-0",
@@ -256,18 +202,19 @@ export default function Sidebar({ open, onClose, state, collapsed = false, onTog
                           aria-hidden="true"
                           className={cx(
                             "absolute -left-3 top-1/2 w-[3px] -translate-y-1/2 rounded-r transition-all duration-150 motion-reduce:transition-none",
-                            collapsed && "lg:hidden",
-                            isActive
-                              ? "h-5 bg-violet-500"
-                              : "h-2.5 bg-transparent group-hover:bg-slate-300 dark:group-hover:bg-neutral-600"
+                            // The soft pill IS the active marker now; a second rail-edge
+                            // bar alongside it just doubles the signal.
+                            "hidden",
+                            isActive ? "h-5 bg-violet-500" : "h-2.5 bg-transparent"
                           )}
                         />
                         <span className="relative shrink-0">
                           <Icon
                             className={cx(
-                              "shrink-0 text-[15px] transition-colors duration-150 motion-reduce:transition-none",
+                              "shrink-0 transition-colors duration-150 motion-reduce:transition-none",
+                              "text-[17px]",
                               isActive
-                                ? "text-white"
+                                ? "text-violet-600 dark:text-violet-300"
                                 : "text-slate-400 group-hover:text-slate-600 dark:text-neutral-500 dark:group-hover:text-neutral-200"
                             )}
                             aria-hidden="true"
@@ -292,9 +239,7 @@ export default function Sidebar({ open, onClose, state, collapsed = false, onTog
                           <span
                             className={cx(
                               "grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full px-1 text-[10px] font-bold",
-                              isActive
-                                ? "bg-white/20 text-white"
-                                : "bg-rose-500/15 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400",
+                              "bg-rose-500/15 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400",
                               collapsed && "lg:hidden"
                             )}
                           >
@@ -313,31 +258,6 @@ export default function Sidebar({ open, onClose, state, collapsed = false, onTog
             </div>
           ))}
         </nav>
-
-        {/* Collapse control — desktop only, since the mobile drawer opens and closes instead. */}
-        <div className={cx("hidden shrink-0 border-t px-3 py-2 lg:block", CONSOLE.divider)}>
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className={cx(
-              "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[12px] font-medium",
-              "transition-colors duration-150 motion-reduce:transition-none",
-              CONSOLE.muted,
-              "hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-white/[0.07] dark:hover:text-white",
-              focusRing,
-              collapsed && "lg:justify-center lg:px-0"
-            )}
-          >
-            {collapsed ? (
-              <FiChevronsRight className="shrink-0 text-[15px]" aria-hidden="true" />
-            ) : (
-              <FiChevronsLeft className="shrink-0 text-[15px]" aria-hidden="true" />
-            )}
-            <span className={cx(collapsed && "lg:hidden")}>Collapse</span>
-          </button>
-        </div>
 
         {/* Identity — the role label comes from the server, so it always matches what the
             API will actually authorize. */}

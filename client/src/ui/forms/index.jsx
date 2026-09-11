@@ -190,14 +190,18 @@ export function Field({ label, error, hint, variant = "auth", className = "", ..
   );
 }
 
-export function PasswordField({ label, error, hint, ...props }) {
+// `variant` defaults to "auth" so every existing caller (Login, ForgotPassword, invitation
+// and org creation) renders byte-identically; Settings -> Security passes "form" so the
+// change-password fields match the controls around them instead of importing the sign-in
+// card's roomier geometry into a settings panel.
+export function PasswordField({ label, error, hint, variant = "auth", ...props }) {
   const id = useId();
   const [show, setShow] = useState(false);
   return (
     <div>
-      <Label variant="auth" htmlFor={id}>{label}</Label>
+      <Label variant={variant} htmlFor={id}>{label}</Label>
       <div className="relative">
-        <Input id={id} variant="auth" type={show ? "text" : "password"} error={error} className="pr-12" {...props} />
+        <Input id={id} variant={variant} type={show ? "text" : "password"} error={error} className="pr-12" {...props} />
         <button
           type="button"
           onClick={() => setShow((s) => !s)}

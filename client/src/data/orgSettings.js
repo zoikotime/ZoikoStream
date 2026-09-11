@@ -87,5 +87,4 @@ export const integrationsSeed = [
   { key: "salesforce", name: "Salesforce", desc: "Sync attendee data to your CRM", connected: false },
   { key: "zapier", name: "Zapier", desc: "Automate workflows across apps", connected: true },
   { key: "ga", name: "Google Analytics", desc: "Track viewer traffic", connected: false },
-  { key: "webhooks", name: "Webhooks", desc: "Send events to your endpoint", connected: true },
 ];

@@ -61,9 +61,6 @@ const EMPTY = {
   end: "",
   timezone: "UTC",
   visibility: "public",
-  registration_required: false,
-  registration_limit: "",
-  expected_audience: "",
   chat_enabled: false,
   polls_enabled: false,
   qa_enabled: false,
@@ -156,10 +153,12 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         start_time,
         end_time,
         visibility: form.visibility,
-        registration_required: form.registration_required,
-        registration_limit: form.registration_required && form.registration_limit !== ""
-          ? Number(form.registration_limit) : null,
-        expected_audience: form.expected_audience !== "" ? Number(form.expected_audience) : null,
+        // registration_required / registration_limit / expected_audience are deliberately
+        // ABSENT rather than sent as hardcoded falsy values. schemas/event.EventCreate
+        // declares `registration_required: bool = False` and the other two as optional
+        // (`int | None = Field(None, ge=0)`), so omitting them lets the server's own
+        // defaults apply — which keeps this a UI change and leaves the API contract alone.
+        // All three remain settable through PATCH /events/{id} (EventUpdate accepts them).
         chat_enabled: form.chat_enabled,
         polls_enabled: form.polls_enabled,
         qa_enabled: form.qa_enabled,
@@ -289,39 +288,6 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
               never public or unlisted.
             </p>
           )}
-        </Section>
-
-        <Section title="Registration">
-          <div className="space-y-4">
-            <div>
-              <Label>Expected Audience (optional)</Label>
-              <Input
-                variant="console"
-                type="number"
-                min="0"
-                value={form.expected_audience}
-                onChange={(e) => set("expected_audience", e.target.value)}
-                placeholder="Peak concurrent viewers"
-              />
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Events expected above 500 concurrent viewers need capacity approval before they can arm.
-              </p>
-            </div>
-            <Switch accent="violet" checked={form.registration_required} onChange={(v) => set("registration_required", v)} label="Registration Required" />
-            {form.registration_required && (
-              <div>
-                <Label>Capacity limit (optional)</Label>
-                <Input
-                  variant="console"
-                  type="number"
-                  min="1"
-                  value={form.registration_limit}
-                  onChange={(e) => set("registration_limit", e.target.value)}
-                  placeholder="No limit"
-                />
-              </div>
-            )}
-          </div>
         </Section>
 
         <Section title="Features">

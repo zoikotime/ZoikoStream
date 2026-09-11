@@ -11,6 +11,7 @@ import Badge from "../../ui/Badge";
 import Skeleton from "../../ui/Skeleton";
 import Panel from "../../components/admin/Panel";
 import StatRow from "../../components/admin/StatRow";
+import FactGrid from "../../components/organization/FactGrid";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import OrganizationEmptyState from "../../components/organization/OrganizationEmptyState";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
@@ -157,12 +158,14 @@ export default function PlaybackAccess() {
           />
         </Panel>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
-          {/* Event picker — a list, not a dropdown: the access posture of each row is part of
-              the choice, so it has to be visible before selecting. */}
-          <Panel title="Events" flush className="self-start">
+        <>
+          {/* Event picker. Still a list rather than a dropdown — the access posture of each
+              option is part of the choice, so it has to be readable before selecting — but
+              laid out ACROSS the page instead of down a 280px column. The listbox semantics
+              are unchanged, so keyboard and screen-reader behaviour is what it was. */}
+          <Panel title="Events" description="Choose an event to see the gates a viewer passes.">
             <ul
-              className={cx("zk-scroll-thin max-h-[520px] divide-y overflow-y-auto", CONSOLE.divideY)}
+              className="zk-scroll-thin grid max-h-[280px] grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3"
               role="listbox"
               aria-label="Select an event"
             >
@@ -176,9 +179,11 @@ export default function PlaybackAccess() {
                       aria-selected={on}
                       onClick={() => setSelectedId(ev.id)}
                       className={cx(
-                        "w-full px-4 py-3 text-left transition-colors duration-150 motion-reduce:transition-none",
+                        "w-full rounded-lg border px-3.5 py-2.5 text-left transition-colors duration-150 motion-reduce:transition-none",
                         focusRing,
-                        on ? CONSOLE.navOn : CONSOLE.navOff
+                        on
+                          ? cx(CONSOLE.navOn, "border-transparent")
+                          : cx(CONSOLE.navOff, "border-slate-200 dark:border-white/[0.12]")
                       )}
                     >
                       <span className="flex items-center gap-2">
@@ -291,22 +296,15 @@ export default function PlaybackAccess() {
               <EventAccessLinks event={selected} canManage />
 
               <Panel title="Viewer-side measurement">
-                <StatRow
-                  label="Playback starts"
-                  value={null}
-                  reason="Client-side playback QoE is not ingested"
+                <FactGrid
+                  columns={3}
+                  facts={[
+                    { label: "Playback starts", value: null, reason: "Client-side playback QoE is not ingested" },
+                    { label: "Rebuffer ratio", value: null, reason: "Client-side playback QoE is not ingested" },
+                    { label: "Failures by reason", value: null, reason: "Client-side playback QoE is not ingested" },
+                  ]}
                 />
-                <StatRow
-                  label="Rebuffer ratio"
-                  value={null}
-                  reason="Client-side playback QoE is not ingested"
-                />
-                <StatRow
-                  label="Failures by reason"
-                  value={null}
-                  reason="Client-side playback QoE is not ingested"
-                />
-                <p className={cx("mt-3 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
+                <p className={cx("mt-4 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
                   Audience counts and engagement that <em>are</em> measured live on{" "}
                   <Link to="/organization/analytics" className={cx("font-semibold", CONSOLE.link)}>
                     Analytics
@@ -322,7 +320,7 @@ export default function PlaybackAccess() {
               </p>
             </div>
           )}
-        </div>
+        </>
       )}
     </div>
   );
