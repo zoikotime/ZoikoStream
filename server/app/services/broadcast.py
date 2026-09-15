@@ -1125,8 +1125,10 @@ async def _stage_mute_all(ctx, payload):
     frames = []
     failed = 0
     for p in targets:
-        enforced = await livekit.mute_participant(ctx.room, p["identity"], True)
-        if not enforced:
+        # MUTE_NO_TRACKS is not a failure for mute-all: somebody publishing nothing is
+        # already silent, which is exactly the state this action wants them in.
+        outcome = await livekit.mute_participant(ctx.room, p["identity"], True)
+        if outcome == livekit.MUTE_FAILED:
             failed += 1
             log.warning("mute_all: not enforced by LiveKit for %s on event %s", p["identity"], ctx.event_id)
             continue

@@ -1170,6 +1170,43 @@ def _revoke_event_role(db, event_id: uuid.UUID, user_id: uuid.UUID) -> None:
     ))
 
 
+async def _participant_request_unmute(ctx, payload):
+    """Ask a participant to turn their own microphone on.
+
+    This exists because the host CANNOT do it for them, and no amount of server authority
+    changes that: a browser only captures a microphone from an explicit gesture by the
+    person sitting in front of it. So the host's intent travels as a request, the participant
+    decides, and the console learns the answer from the LiveKit track webhook rather than
+    from having asked.
+
+    Deliberately NOT a presence patch. Nothing about the participant's state has changed yet
+    — inventing `muted: False` here is precisely the fake local state that made the old
+    Unmute button look like it worked.
+    """
+    identity = str(payload.get("identity") or "")
+    if not identity:
+        return []
+    rec = next((r for r in await bus.presence_all(ctx.event_id)
+                if r.get("identity") == identity), None)
+    if not rec:
+        return "That participant is no longer in this event"
+
+    asked_by = ctx.name or "The host"
+    act = await tx(lambda db: record(
+        db, ctx, "mod", f"{rec.get('name') or identity} was asked to unmute",
+        audit="live.participant.request_unmute",
+        target_type="participant", target_id=identity, meta={"requested_by": asked_by},
+    ))
+    return [
+        # Broadcast like everything else; routers/live.py delivers it and only the socket
+        # whose identity matches acts on it — the same targeting "session"/"removed" uses.
+        ("session", "unmute.requested", {"identity": identity, "asked_by": asked_by}),
+        ("activity", "activity.new", act),
+        ("moderator", "action.result",
+         {"op": "request_unmute", "identity": identity, "enforced": True}),
+    ]
+
+
 async def _participant_action(ctx, payload, op: str):
     identity = str(payload.get("identity") or "")
     if not identity:
@@ -1180,13 +1217,28 @@ async def _participant_action(ctx, payload, op: str):
 
     if op == "mute":
         muted = bool(payload.get("muted", True))
+        outcome = await livekit.mute_participant(ctx.room, identity, muted)
+
+        # Unmuting somebody who publishes nothing is not a quiet no-op — it is the bug this
+        # branch exists to stop. LiveKit mutes PER TRACK, so with no track there is nothing
+        # to act on; the old code still recorded muted=False and answered "enforced", so the
+        # console showed the person as live while the room stayed silent. A host cannot
+        # conjure audio out of a browser that is not sending any: the honest move is to
+        # refuse and say what will work instead.
+        if outcome == livekit.MUTE_NO_TRACKS and not muted:
+            return ("This participant isn't sending any audio, so there is nothing to "
+                    "unmute. Invite them to the stage, then ask them to turn their "
+                    "microphone on.")
+
         patch = {"muted": muted}
-        enforced = await livekit.mute_participant(ctx.room, identity, muted)
+        enforced = outcome == livekit.MUTE_OK
         text = "{name} was " + ("muted" if muted else "unmuted")
     elif op == "timeout":
         minutes = max(1, min(int(payload.get("minutes") or 5), 120))
         patch = {"muted": True, "muted_until": (now + timedelta(minutes=minutes)).isoformat()}
-        enforced = await livekit.mute_participant(ctx.room, identity, True)
+        # Muting somebody with no track is allowed and meaningful: the flag is a STANDING
+        # one, and routers/live.py re-applies it the moment a track does appear.
+        enforced = await livekit.mute_participant(ctx.room, identity, True) == livekit.MUTE_OK
         text = "{name} was muted for " + f"{minutes} min"
     elif op == "stage":
         on = bool(payload.get("on_stage", True))
@@ -1356,6 +1408,7 @@ ACTIONS: dict[str, callable] = {
     "participant.role": lambda c, p: _participant_action(c, p, "role"),
     "participant.ban": lambda c, p: _participant_action(c, p, "ban"),
     "participant.remove": lambda c, p: _participant_action(c, p, "remove"),
+    "participant.request_unmute": _participant_request_unmute,
     "reaction.add": _reaction_add,
     "feedback.submit": _feedback_submit,
 }

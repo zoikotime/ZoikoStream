@@ -9,6 +9,8 @@ import { Input, Textarea, Select, Label, Switch } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import MemberPicker from "./MemberPicker";
+import { useAuth } from "../../auth/AuthContext";
+import { EVENT_CONSOLES } from "../../auth/destination";
 
 // Must match crud.event.CATEGORY_MIN_RISK_TIER's key exactly — that's the server's own
 // canonical way of identifying a memorial-tier event (it drives the r2 risk floor, dual
@@ -83,7 +85,43 @@ const toISO = (date, time) => {
   return isNaN(d) ? null : d.toISOString();
 };
 
+// The host console's route, from the one place that defines it.
+const HOST_CONSOLE = EVENT_CONSOLES.find((c) => c.capability === "can_host").path;
+
+/**
+ * Claim a tab NOW, to be pointed somewhere once the server has answered.
+ *
+ * Chrome only honours window.open while the click that triggered it still holds transient
+ * activation. The event create and the host assignment below are both awaited, and by the
+ * time they resolve that activation is normally gone — so opening the console *after* them
+ * is silently blocked, intermittently, depending on how fast the network was. Claiming the
+ * tab inside the click and navigating it later is the only approach that behaves the same
+ * way every time.
+ *
+ * Deliberately NO "noopener" in the feature string: that flag makes window.open return null
+ * by design — withholding the handle is precisely what it does — which is incompatible with
+ * holding the reference this strategy depends on. The same protection is applied on the next
+ * line by severing `opener` on the new window directly, which is the property noopener would
+ * have suppressed. The destination is this same app on this same origin in any case.
+ *
+ * Returns null when the popup was blocked anyway, so the caller can say so rather than
+ * promising a tab that never appeared.
+ */
+function claimTab() {
+  try {
+    const tab = window.open("", "_blank");
+    if (tab) tab.opener = null;
+    return tab || null;
+  } catch {
+    return null;  // popups blocked outright, or window access denied
+  }
+}
+
 export default function CreateEventModal({ open, onClose, onCreated }) {
+  // The signed-in account id from GET /auth/me, which AuthContext is the only writer of.
+  // Compared by ID, never by email or name.
+  const { user } = useAuth();
+  const userId = user?.id;
   const [form, setForm] = useState(EMPTY);
   const [hostIds, setHostIds] = useState(() => new Set());
   const [saving, setSaving] = useState(null); // "draft" | "scheduled" | null
@@ -143,6 +181,13 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
     if (start_time && end_time && new Date(end_time) <= new Date(start_time)) {
       return notify.error("End time must be after start time");
     }
+    // Decided BEFORE any await, from the same state the click saw: scheduled (not a draft)
+    // and the signed-in account explicitly on the host list. Nothing else opens a tab.
+    const selfHosting = status === "scheduled" && !!userId && hostIds.has(userId);
+    // Claimed synchronously, while the click still carries activation. Closed again below
+    // if anything fails, so a blocked or abandoned attempt never leaves a blank tab behind.
+    const consoleTab = selfHosting ? claimTab() : null;
+
     setSaving(status);
     try {
       const { data } = await api.post("/events", {
@@ -170,10 +215,46 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
       if (hostIds.size) {
         await api.patch(`/events/${data.id}/hosts`, { user_ids: [...hostIds] });
       }
-      notify.success(status === "draft" ? "Draft saved" : `"${data.title}" scheduled`);
+      // Both awaits are behind us, so the event exists and the creator is really on it.
+      // The id comes from the CREATED EVENT in the response, never from local state.
+      //
+      // This opens a tab; it grants nothing. /host/dashboard resolves access on arrival
+      // through the backend (services/moderation.resolve_ctx), so a URL aimed at somebody
+      // else's event is refused there exactly as it is today.
+      let opened = false;
+      if (selfHosting) {
+        const hostUrl =
+          `${window.location.origin}${HOST_CONSOLE}?event=${encodeURIComponent(data.id)}`;
+        if (consoleTab) {
+          // replace(), not assignment: the blank entry never becomes a back-button target
+          // in the new tab.
+          consoleTab.location.replace(hostUrl);
+          opened = true;
+        } else {
+          // The pre-claim was blocked. One direct attempt, which can still succeed when the
+          // requests came back fast enough to remain inside the click's activation window.
+          // `noopener,noreferrer` is free here because no handle is needed.
+          opened = !!window.open(hostUrl, "_blank", "noopener,noreferrer");
+        }
+      }
+
+      notify.success(
+        status === "draft"
+          ? "Draft saved"
+          : selfHosting && opened
+            ? `"${data.title}" scheduled. Producer Console opened in a new tab.`
+            : selfHosting
+              // Never promise a tab that is not there.
+              ? `"${data.title}" scheduled. Allow pop-ups to open the Producer Console.`
+              : `"${data.title}" scheduled`
+      );
+      // The Organization tab stays where it is: list refreshed, modal closed, no navigation.
       onCreated?.();
       close();
     } catch (e) {
+      // Nothing was created, or the host assignment did not stick — so there is nothing to
+      // produce. Close the tab we claimed rather than stranding a blank one.
+      consoleTab?.close();
       notify.error(errMsg(e));
     } finally {
       setSaving(null);

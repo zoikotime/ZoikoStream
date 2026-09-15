@@ -3157,6 +3157,47 @@ def _assignment_html(name: str, event_title: str, role: str, org_name: str, even
     </div>""")
 
 
+def _self_host_html(name: str, event_title: str, org_name: str, start: datetime | None,
+                    event_url: str) -> str:
+    """The creator assigned THEMSELVES as host.
+
+    Deliberately not _assignment_html. That copy ("You've been assigned", "You've been added
+    as a Host") is written for someone being told about a decision made elsewhere; to the
+    person who just made the decision it reads like a notification about a stranger. This
+    says the same true thing in the first person and, crucially, asks for nothing: the
+    assignment row already exists and is already live when this is queued, so there is no
+    acceptance, no token and no activation step to describe.
+    """
+    safe_name = html.escape(name or "there")
+    safe_title = html.escape(event_title or "an event")
+    safe_org = html.escape(org_name or "your organization")
+    when = start.strftime("%d %b %Y, %I:%M %p") if start else "Not scheduled"
+    return _shell(f"""
+    {_header("You're hosting this event")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {safe_name},</p>
+      <p>You're confirmed as the <strong>Host</strong> of <strong>{safe_title}</strong>
+         on {safe_org}'s ZoikoStream account.</p>
+      <table style="width:100%;border-collapse:collapse;margin:24px 0;font-size:14px;">
+        <tr><td style="padding:10px 0;color:#888;">Event</td>
+            <td style="padding:10px 0;text-align:right;">{safe_title}</td></tr>
+        <tr><td style="padding:10px 0;color:#888;">Organization</td>
+            <td style="padding:10px 0;text-align:right;">{safe_org}</td></tr>
+        <tr><td style="padding:10px 0;color:#888;">Starts</td>
+            <td style="padding:10px 0;text-align:right;">{when}</td></tr>
+      </table>
+      <p>No action needed &mdash; your host access is already active. This is your
+         confirmation, and a way back to the console from your inbox.</p>
+      <p style="text-align:center;margin:32px 0;">
+        <a href="{event_url}" style="background:#7ac142;color:#fff;text-decoration:none;
+           padding:14px 28px;border-radius:4px;font-weight:bold;display:inline-block;">
+          Open Producer Console
+        </a>
+      </p>
+      <p style="margin-bottom:0;">Team ZoikoStream</p>
+    </div>""")
+
+
 def _contributor_invite_html(name: str, event_title: str, org_name: str, backstage_url: str,
                               join_window_start: datetime | None, join_window_end: datetime | None,
                               consent_notice: str | None) -> str:
@@ -3475,6 +3516,13 @@ def send_reset_otp_email(to: str, name: str, otp: str) -> None:
 def send_assignment_email(to: str, name: str, event_title: str, role: str, org_name: str, event_url: str) -> None:
     _send(to, f"You've been added as {role} for {event_title}",
           _assignment_html(name, event_title, role, org_name, event_url))
+
+
+def send_self_host_confirmation_email(to: str, name: str, event_title: str, org_name: str,
+                                      start_time: "datetime | None", event_url: str) -> None:
+    """Informational only. The host assignment is live before this is queued."""
+    _send(to, f"You're hosting {event_title} on ZoikoStream",
+          _self_host_html(name, event_title, org_name, start_time, event_url))
 
 
 def send_registration_confirmation_email(to: str, name: str, event_title: str, event_url: str) -> None:

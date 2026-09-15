@@ -126,6 +126,9 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
   const micStreamRef = useRef(null);
   const micPubRef = useRef(null);
   const [micOn, setMicOn] = useState(false);
+  // Whether a mic track is actually PUBLISHED. State, not a read of micPubRef during render:
+  // the prompt that hides itself once publishing begins only hides if this re-renders.
+  const [micLive, setMicLive] = useState(false);
   const [micError, setMicError] = useState(null);
 
   // Generation guard: identical purpose to useLiveKitPublish's. Any async continuation that
@@ -325,57 +328,66 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
   // the first one is still satisfying.
   const { hasVideo, hasAudio } = tracks;
 
-  // Publish/unpublish this participant's own mic as `canPublish` (the host's promote/
-  // demote) flips, for as long as the connection above is live. Runs independently of the
-  // connect effect so a mid-session promotion (no reconnect) picks it up immediately —
-  // exactly the case a stage invite is.
-  useEffect(() => {
+  // ── Publishing this participant's own microphone is EXPLICIT ──────────────────────────
+  //
+  // This used to call getUserMedia() the instant `canPublish` flipped, so a host promoting
+  // somebody reached straight into their browser and opened their microphone. On a site that
+  // had already been granted microphone permission there was no prompt at all: the first the
+  // person knew of it was their own voice in the room. A host can grant the RIGHT to speak;
+  // only the person in front of the microphone can turn it on.
+  //
+  // So promotion merely ARMS this. The page offers a prompt, and enableMic() runs from that
+  // click — which is also the only thing browsers reliably honour for a capture.
+  const enableMic = useCallback(async () => {
     const room = roomRef.current;
-    if (!room || !connected) return undefined;
+    if (!room || !connected) {
+      setMicError("You're not connected to the event yet. Try again in a moment.");
+      return false;
+    }
+    if (!canPublish) {
+      // Not a permission this client may grant itself: the publish right is the host's to
+      // give (services/moderation.py -> livekit.set_stage) and LiveKit enforces it anyway.
+      setMicError("You're not on stage yet — the host has to invite you first.");
+      return false;
+    }
+    if (micPubRef.current) return true;   // already publishing
 
-    let cancelled = false;
-
-    if (canPublish && !micPubRef.current) {
-      (async () => {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          if (cancelled) {
-            stream.getTracks().forEach((t) => t.stop());
-            return;
-          }
-          micStreamRef.current = stream;
-          const track = stream.getAudioTracks()[0];
-          micPubRef.current = await room.localParticipant.publishTrack(track, {
-            source: Track.Source.Microphone,
-          });
-          if (!cancelled) {
-            setMicOn(true);
-            setMicError(null);
-          }
-        } catch (e) {
-          if (!cancelled) {
-            // Most likely the browser mic permission prompt was denied — that's a normal,
-            // recoverable outcome (not a connection error), so it's surfaced separately
-            // from `error` above and the viewer can still watch/listen either way.
-            setMicError(e?.name === "NotAllowedError"
-              ? "Mic access was blocked — allow it in your browser to speak on stage."
-              : (e?.message || "Couldn't access your microphone"));
-          }
-        }
-      })();
-    } else if (!canPublish && micPubRef.current) {
-      const pub = micPubRef.current;
-      micPubRef.current = null;
-      room.localParticipant.unpublishTrack(pub.track, true).catch(() => {});
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const track = stream.getAudioTracks()[0];
+      micPubRef.current = await room.localParticipant.publishTrack(track, {
+        source: Track.Source.Microphone,
+      });
+      setMicLive(true);
+      setMicOn(true);
+      setMicError(null);
+      return true;
+    } catch (e) {
+      // A denied prompt is a normal, recoverable outcome rather than a connection error, so
+      // it is surfaced separately from `error` and the person can still watch and listen.
       micStreamRef.current?.getTracks().forEach((t) => t.stop());
       micStreamRef.current = null;
-      setMicOn(false);
-      setMicError(null);
+      setMicError(e?.name === "NotAllowedError"
+        ? "Microphone permission was denied. Allow microphone access in your browser and try again."
+        : (e?.message || "Couldn't access your microphone"));
+      return false;
     }
+  }, [canPublish, connected]);
 
-    return () => {
-      cancelled = true;
-    };
+  // Losing the right to publish DOES stop publishing, automatically and without asking.
+  // Consent governs turning a microphone on, never leaving it on after the grant is gone.
+  useEffect(() => {
+    const room = roomRef.current;
+    if (!room || canPublish || !micPubRef.current) return;
+    const pub = micPubRef.current;
+    micPubRef.current = null;
+    room.localParticipant.unpublishTrack(pub.track, true).catch(() => {});
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+    setMicLive(false);
+    setMicOn(false);
+    setMicError(null);
   }, [canPublish, connected]);
 
   // Mute/unmute without a full unpublish — cheaper, and mirrors the host console's own
@@ -390,6 +402,9 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
 
   return {
     mediaRef, connected, reconnecting, hasVideo, hasAudio, error,
-    micOn, micError, toggleMic,
+    // `micLive` is whether a track is actually published — distinct from micOn, which is
+    // whether that track is currently enabled. The console learns the same fact from
+    // LiveKit's own track webhook, so neither side is guessing.
+    micOn, micError, toggleMic, enableMic, micLive,
   };
 }

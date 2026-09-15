@@ -436,6 +436,9 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
         # so re-assert the enforcement on every fresh publish rather than only at the
         # moment an operator clicked mute.
         if kind == "track_published" and rec.get("muted"):
+            # Result intentionally discarded: the track was just announced by the webhook,
+            # so MUTE_NO_TRACKS here would only mean a race with LiveKit's own bookkeeping,
+            # and the next publish event re-applies it anyway.
             await livekit.mute_participant(evt.room.name, p.identity, True)
 
     elif kind in ("room_started", "room_finished"):

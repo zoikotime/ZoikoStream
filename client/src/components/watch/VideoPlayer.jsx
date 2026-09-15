@@ -60,7 +60,8 @@ const fmtTime = (secs) => {
     : `${m}:${String(r).padStart(2, "0")}`;
 };
 
-export default function VideoPlayer({ event, viewers, watch, onStage = false, children }) {
+export default function VideoPlayer({ event, viewers, watch, onStage = false,
+                                     unmuteRequest = null, onAnswerUnmute, children }) {
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
   // The TOKEN is the gate, not a status string. GET /events/:id/watch only issues
@@ -80,7 +81,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false, ch
 
   const {
     mediaRef, connected, reconnecting, hasVideo, hasAudio, error: streamError,
-    micOn, micError, toggleMic,
+    micOn, micError, toggleMic, enableMic, micLive,
   } = useLiveKitViewer({
     enabled: canStream,
     url: watch?.livekit_url,
@@ -104,6 +105,14 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false, ch
   // Muted autoplay is always allowed; unmuteButton's onClick is a real user gesture, so
   // unmuting from there is guaranteed to work. Same reasoning every major video site uses.
   const [muted, setMuted] = useState(true);
+  // "Not now" on the speak invitation. The dismissal is scoped to the ONE invitation it
+  // answered, rather than being a boolean that something has to remember to reset: a new
+  // stage grant, or the host asking again, produces a different key and so is not covered
+  // by it. Derived during render, so there is no effect and no stale flag to clear.
+  const [dismissedInvite, setDismissedInvite] = useState(null);
+  // Identifies THIS invitation: the stage grant, plus the timestamp of any explicit host
+  // request. A second request from the host changes it, so a prior "Not now" stops applying.
+  const inviteKey = `${onStage ? "stage" : "off"}:${unmuteRequest?.at || 0}`;
   const [volume, setVolume] = useState(80);
   const [fs, setFs] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -338,10 +347,50 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false, ch
         )}
       </div>
 
-      {/* On-stage indicator — only shown to the promoted viewer themselves (onStage is
-          this viewer's OWN status, from EventWatch.jsx), never to the rest of the
-          audience. Sits under the LIVE/viewer-count row so it never collides with it. */}
-      {canStream && onStage && (
+      {/* Stage state — only ever shown to the promoted viewer themselves (onStage is this
+          viewer's OWN status, from EventWatch.jsx), never to the rest of the audience.
+          Three distinct states, because collapsing them is what made the old console lie:
+
+            invited, mic not published  -> an INVITATION. Being allowed to speak is not the
+                                           same as speaking, and the badge used to claim
+                                           "the host and audience can hear you" while the
+                                           person was still silent.
+            host asked you to unmute    -> a REQUEST, answered by the person, never for them.
+            publishing                  -> the original badge, now actually true.
+
+          Nothing here captures a microphone on its own: every capture below runs from a
+          click, which is both the consent rule and what browsers reliably honour. */}
+      {canStream && onStage && !micLive && dismissedInvite !== inviteKey && (
+        <div className="absolute inset-x-0 top-11 z-10 flex justify-center px-3 sm:top-12">
+          <div className="pointer-events-auto max-w-sm rounded-xl bg-slate-900/95 px-3.5 py-3 text-white shadow-xl ring-1 ring-white/15 backdrop-blur-md">
+            <p className="text-sm font-semibold">
+              {unmuteRequest
+                ? `${unmuteRequest.askedBy} asked you to unmute`
+                : "You're invited to speak"}
+            </p>
+            <p className="mt-0.5 text-xs text-white/70">
+              Turn your microphone on when you&apos;re ready. Nobody can turn it on for you.
+            </p>
+            <div className="mt-2.5 flex gap-2">
+              <button
+                type="button"
+                onClick={() => { enableMic(); onAnswerUnmute?.(); }}
+                className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-400"
+              >
+                Enable microphone
+              </button>
+              <button
+                type="button"
+                onClick={() => { setDismissedInvite(inviteKey); onAnswerUnmute?.(); }}
+                className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/80 hover:bg-white/20"
+              >
+                Not now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {canStream && onStage && micLive && (
         <div className="pointer-events-none absolute inset-x-0 top-11 z-10 flex justify-center px-3 sm:top-12">
           <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-lg bg-emerald-600/90 px-2.5 py-1 text-xs font-semibold text-white shadow-lg ring-1 ring-white/20 backdrop-blur-md">
             <FiMic aria-hidden="true" />

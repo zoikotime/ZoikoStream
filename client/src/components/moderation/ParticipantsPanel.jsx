@@ -125,11 +125,43 @@ function ProfileDrawer({ p, open, onClose, canModerate, canHost, send }) {
       ) : (
         <div className="mt-5 space-y-2">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Actions</p>
-          <Action
-            icon={p.muted ? FiMic : FiMicOff}
-            label={p.muted ? "Unmute" : "Mute"}
-            onClick={() => act("participant.mute", { muted: !p.muted })}
-          />
+          {/* The microphone action depends on whether there is a microphone to act on.
+              LiveKit mutes PER TRACK, so "unmute" only means anything against a track that
+              already exists. The old single button offered "Unmute" to a viewer publishing
+              nothing: the server dutifully mutedNothing, answered success, and the console
+              showed them live while the room stayed silent. A host cannot turn on somebody
+              else's microphone — only ask for it — so each state now offers the action that
+              can actually succeed.
+
+                not on stage        -> Invite to speak     (a real publish grant)
+                on stage, no track  -> Request microphone  (a request; they decide)
+                publishing + muted  -> Request to unmute   (a request; they decide)
+                publishing + live   -> Mute                (a real server-side mute) */}
+          {!onStage ? (
+            <Action
+              icon={FiArrowUpCircle}
+              label="Invite to speak"
+              onClick={() => act("participant.stage", { on_stage: true })}
+            />
+          ) : !p.publishing ? (
+            <Action
+              icon={FiMic}
+              label="Request microphone"
+              onClick={() => act("participant.request_unmute")}
+            />
+          ) : p.muted ? (
+            <Action
+              icon={FiMic}
+              label="Request to unmute"
+              onClick={() => act("participant.request_unmute")}
+            />
+          ) : (
+            <Action
+              icon={FiMicOff}
+              label="Mute"
+              onClick={() => act("participant.mute", { muted: true })}
+            />
+          )}
 
           <div className="flex items-center gap-2">
             <Select variant="console" className="w-28" value={minutes} onChange={(e) => setMinutes(Number(e.target.value))} aria-label="Timeout length">
@@ -308,9 +340,19 @@ export default function ParticipantsPanel({ participants, canModerate, canHost, 
                     <span className="opacity-100 sm:opacity-0 sm:transition-opacity sm:group-focus-within:opacity-100 sm:group-hover:opacity-100 motion-reduce:sm:transition-none">
                       <ActionButton
                         icon={p.muted ? FiMic : FiMicOff}
-                        title={p.muted ? `Unmute ${p.name || p.identity}` : `Mute ${p.name || p.identity}`}
+                        title={!p.publishing
+                          ? `${p.name || p.identity} isn't sending audio`
+                          : p.muted
+                            ? `Ask ${p.name || p.identity} to unmute`
+                            : `Mute ${p.name || p.identity}`}
                         tone="amber"
-                        onClick={() => send("participant.mute", { identity: p.identity, muted: !p.muted })}
+                        // Same rule as the drawer: only a live track can be muted, and a
+                        // silent participant is asked rather than acted upon.
+                        onClick={() =>
+                          p.publishing && !p.muted
+                            ? send("participant.mute", { identity: p.identity, muted: true })
+                            : send("participant.request_unmute", { identity: p.identity })
+                        }
                       />
                     </span>
                     <ActionButton

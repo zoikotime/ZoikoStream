@@ -202,17 +202,41 @@ async def _with_room(fn):
         await lk.aclose()
 
 
-async def mute_participant(room: str, identity: str, muted: bool) -> bool:
-    """Mute/unmute every published track of a participant (LiveKit mutes per track)."""
+# mute_participant outcomes. A plain bool could not express the case that mattered: a
+# participant who publishes NOTHING has no track to mute or unmute, so the call does nothing
+# at all — and the old version still answered True, because _with_room reports "the request
+# did not raise". A host unmuting a viewer therefore got a success that produced no audio,
+# which is the entire reported bug.
+MUTE_OK = "ok"
+MUTE_NO_TRACKS = "no-tracks"
+MUTE_FAILED = "failed"
+
+
+async def mute_participant(room: str, identity: str, muted: bool) -> str:
+    """Mute/unmute every published track of a participant (LiveKit mutes per track).
+
+    Returns MUTE_OK when at least one track was actually changed, MUTE_NO_TRACKS when the
+    participant had none (nothing happened, and saying otherwise is a lie the console then
+    renders), or MUTE_FAILED when LiveKit is unconfigured or refused.
+
+    NOTE: all three values are non-empty strings and therefore TRUTHY. Callers must compare
+    against the constants — `if await mute_participant(...)` would read as success even for
+    MUTE_FAILED. Every call site does so explicitly.
+    """
+    touched = 0
 
     async def call(svc):
+        nonlocal touched
         info = await svc.get_participant(api.RoomParticipantIdentity(room=room, identity=identity))
         for track in info.tracks:
             await svc.mute_published_track(
                 api.MuteRoomTrackRequest(room=room, identity=identity, track_sid=track.sid, muted=muted)
             )
+            touched += 1
 
-    return await _with_room(call)
+    if not await _with_room(call):
+        return MUTE_FAILED
+    return MUTE_OK if touched else MUTE_NO_TRACKS
 
 
 async def remove_participant(room: str, identity: str) -> bool:
