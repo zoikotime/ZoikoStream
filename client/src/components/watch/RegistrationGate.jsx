@@ -14,6 +14,9 @@ const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
 export default function RegistrationGate({ eventId, eventTitle, onRegistered }) {
   const [form, setForm] = useState({ name: "", email: "" });
+  // Unticked by default: keeping a credential on the device past this visit is a choice the
+  // viewer makes, not one made for them.
+  const [remember, setRemember] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [full, setFull] = useState(false);
@@ -30,8 +33,13 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
         name: form.name.trim(),
         email: form.email.trim().toLowerCase(),
       });
-      localStorage.setItem(`zk_reg_${eventId}`, data.token);
-      onRegistered?.(data.token);
+      // Storage is EventWatch's job — it owns both the persistent and session-only stores
+      // and the Remember me choice decides which. Writing localStorage here as well meant a
+      // credential was persisted unconditionally, whatever the viewer chose.
+      //
+      // `data.token` is an opaque server-signed credential bound to this event. The name and
+      // email above are registration DATA; neither is ever sent back as proof of anything.
+      onRegistered?.(data.token, remember);
     } catch (err) {
       if (err?.response?.status === 409) setFull(true);
       else setError(errMsg(err, "Couldn't register — please try again."));
@@ -85,6 +93,21 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
                 />
               </div>
             </div>
+            {/* Directly below Email, above the button. */}
+            <label className="flex cursor-pointer items-start gap-2.5 text-left">
+              <input
+                type="checkbox"
+                checked={remember}
+                onChange={(e) => setRemember(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600 dark:bg-slate-800"
+              />
+              <span className="text-sm text-slate-700 dark:text-slate-300">
+                Remember me for this event
+                <span className="block text-xs text-slate-500 dark:text-slate-400">
+                  Skip this form next time on this device.
+                </span>
+              </span>
+            </label>
             {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
             <button
               type="submit"

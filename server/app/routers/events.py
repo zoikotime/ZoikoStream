@@ -26,6 +26,7 @@ from ..services import notifications as notif_svc
 from ..email import (
     send_assignment_email, send_contributor_invite_email, send_event_created_email,
     send_registration_confirmation_email, send_viewer_invite_email,
+    send_self_host_confirmation_email,
 )
 from ..models import (
     CONTRIBUTOR_ROLES,
@@ -217,6 +218,30 @@ def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: S
     return _get_event_or_404(db, user, event_id)
 
 
+def registration_gate_required(ev) -> bool:
+    """Whether a viewer must identify themselves before this event will hand out a stream.
+
+    ── WHY THIS IS NOT JUST `ev.registration_required` ──────────────────────────────────
+    That column defaults to False (models/event.py) and the Create Event form no longer
+    sends it, so every event created since has carried False — which made
+    `not ev.registration_required` short-circuit the whole gate and let a first-time,
+    never-seen visitor straight into a public event's stream. The column is not broken;
+    it simply has no way left to be turned on, so leaning on it alone means the gate is
+    permanently off.
+
+    The product rule instead: a LINK-SHAREABLE event (public or unlisted) asks who is
+    watching. That is a policy read at request time, deliberately not a migration — nobody's
+    stored row is rewritten, and an operator who later sets the column True for a private
+    event still gets exactly what they asked for.
+
+    Private events are excluded on purpose. They are already gated, and by something
+    stronger: an invite token, an access link, or org membership (the `visibility ==
+    "private"` refusal below). Adding a name/email form in front of that would ask an
+    already-authorized guest to re-identify with data nobody checks.
+    """
+    return bool(ev.registration_required) or ev.visibility in ("public", "unlisted")
+
+
 @router.get("/{event_id}/watch", response_model=WatchOut)
 def watch_event(
     event_id: uuid.UUID,
@@ -317,7 +342,7 @@ def watch_event(
     can_stream = (
         ev.status in ("live", "degraded") and livekit.configured()
         and not not_started and not expired
-        and (not ev.registration_required or registered)
+        and (not registration_gate_required(ev) or registered)
     )
     if can_stream:
         # This identity has to be the SAME string the live moderation socket uses as this
@@ -433,7 +458,11 @@ def watch_event(
         reactions_enabled=not crud.is_memorial_category(ev.category),
         raise_hand_enabled=False if crud.is_memorial_category(ev.category) else ev.raise_hand_enabled,
         category=ev.category, end_time=ev.end_time,
-        registration_required=ev.registration_required, registered=registered or not ev.registration_required,
+        # Both fields report the EFFECTIVE policy, so the client never has to re-derive it
+        # (and cannot drift from it): registration_required is what the viewer is actually
+        # subject to, and `registered` is this caller's verdict against it.
+        registration_required=registration_gate_required(ev),
+        registered=registered or not registration_gate_required(ev),
         not_started=not_started, expired=expired,
         livekit_url=url, livekit_token=token, room=room if token else None,
         recording_url=recording_url, recording_duration_seconds=recording_duration,
@@ -646,7 +675,20 @@ def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
     for u in assignees:
         if u.id in previous_ids:
             continue  # already held this role — don't re-notify on every save
-        background.add_task(send_assignment_email, u.email, u.full_name, ev.title, role, org_name, event_url)
+        # Self-assignment gets its own words. Identity is decided by the AUTHENTICATED user
+        # id and nothing else — not email, not display name, not platform role — because
+        # those are either forgeable or not unique.
+        #
+        # Only the COPY differs. The assignment row is written by crud.set_assignees above
+        # and is live the moment it exists for self and other alike: this platform has no
+        # pending/accepted state on EventAssignment and no acceptance step for anyone, so
+        # there is no second code path here to build or to bypass. The dedup guard above
+        # covers both branches equally, which is what keeps it to exactly one mail each.
+        if role == "host" and u.id == admin.id:
+            background.add_task(send_self_host_confirmation_email, u.email, u.full_name,
+                                ev.title, org_name, ev.start_time, event_url)
+        else:
+            background.add_task(send_assignment_email, u.email, u.full_name, ev.title, role, org_name, event_url)
 
     # ZST-EC-001 LVE-003. Safe to call after ANY assignment save: notify_team compares a
     # signature of (role, user_id) pairs, so a save that changes nobody - or a staff display

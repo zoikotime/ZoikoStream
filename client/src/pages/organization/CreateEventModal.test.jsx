@@ -19,6 +19,15 @@ vi.mock("../../ui/Toast", () => ({
   notify: { error: vi.fn(), success: vi.fn(), alert: vi.fn() },
 }));
 
+// The modal reads the signed-in account so it can tell whether the creator put THEMSELVES
+// on the host list (see CreateEventSelfHost.test.jsx). Mocked here rather than adding
+// AUTH_EXPIRED_EVENT to the api mock above: AuthContext re-exports that constant from api,
+// so an incomplete api mock breaks the import chain rather than this file's subject. No
+// host is selected in these cases, so nothing redirects and every assertion below stands.
+vi.mock("../../auth/AuthContext", () => ({
+  useAuth: () => ({ user: { id: "creator-1", full_name: "Vihari", role: "org_admin" }, logout: vi.fn() }),
+}));
+
 import api from "../../api";
 import { notify } from "../../ui/Toast";
 import { ThemeProvider } from "../../theme/ThemeContext";

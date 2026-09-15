@@ -24,6 +24,7 @@ from app.crud import event as crud
 from app.db import SessionLocal
 from app.models import Event, EventAssignment, Organization, User
 from app.security import hash_password
+import pytest
 
 PASSWORD = "correct-horse-battery"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36"
@@ -159,6 +160,20 @@ class World:
 
 
 RESULTS = []
+
+
+# ── how pytest gets a World ─────────────────────────────────────────────────────────────
+# Every test here takes `w`. The standalone runner below passes one in via run(); pytest
+# reads the same parameter as a fixture request, and none existed — so all twelve errored at
+# setup and this file's coverage of assignment + console access was not running at all.
+# Only the missing fixture is added; no assertion is touched.
+@pytest.fixture
+def w():
+    world = World()
+    try:
+        yield world
+    finally:
+        world.cleanup()
 
 
 def run(fn):

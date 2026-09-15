@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import pytest
 from jose import jwt
 from starlette.testclient import TestClient
 
@@ -134,6 +135,22 @@ def run(fn):
 
 def _auth(token):
     return {"Authorization": f"Bearer {token}"}
+
+
+# ── how pytest gets a World ─────────────────────────────────────────────────────────────
+# Every test below takes `w`. The standalone runner at the bottom of this file passes one in
+# via run(); pytest reads the SAME parameter as a fixture request, and no fixture named `w`
+# existed anywhere — so all twelve errored at setup with "fixture 'w' not found" and the
+# server-side session boundary went unverified while the file looked like it covered it.
+#
+# This is only that missing fixture. Not one assertion below is changed.
+@pytest.fixture
+def w():
+    world = World()
+    try:
+        yield world
+    finally:
+        world.cleanup()
 
 
 # ── the session endpoint the browser depends on ─────────────────────────────────────────

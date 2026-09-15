@@ -43,6 +43,12 @@ def _event(db, org, creator, **kw):
 
 
 def _cleanup(db, org, user, ev):
+    # Registrations reference the event, so they go first — a case that registers a viewer
+    # (the public gate now requires one to get a token) would otherwise fail teardown on
+    # event_registrations_event_id_fkey rather than on anything it asserts.
+    from app.models import EventRegistration
+    db.query(EventRegistration).filter(EventRegistration.event_id == ev.id).delete()
+    db.flush()
     db.delete(ev)
     db.delete(user)
     db.delete(org)
@@ -222,7 +228,18 @@ def test_a_viewers_room_is_the_producers_room_and_the_token_cannot_publish():
     ev = _event(db, org, user, start_time=None, end_time=None)
     db.commit()
     try:
-        body = client.get(f"/api/events/{ev.id}/watch").json()
+        # Registered first, deliberately. A public event now asks who is watching before it
+        # hands out a stream token (routers/events.registration_gate_required), so an
+        # anonymous fetch here would return livekit_token=None and this case would pass
+        # vacuously without ever inspecting the grants it exists to check. The subject is
+        # the ROOM NAME and the token's permissions, not the gate — so the caller is given
+        # a real registration through the real endpoint, and every assertion below still
+        # runs against a real token.
+        reg = client.post(f"/api/events/{ev.id}/register",
+                          json={"name": "Window Viewer", "email": "window-viewer@example.com"})
+        assert reg.status_code in (200, 201), reg.text
+        body = client.get(f"/api/events/{ev.id}/watch",
+                          params={"reg": reg.json()["token"]}).json()
         if not lk.configured():
             assert body["livekit_token"] is None, body
             return

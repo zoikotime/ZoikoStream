@@ -97,6 +97,11 @@ const LIVE_EMPTY = {
   // op remove/ban) names THIS identity. The server closes the socket right after sending
   // it, so this never clears itself — the viewer has actually been removed.
   removed: null,
+  // Set when the host asks THIS viewer to turn their microphone on (services/moderation.py
+  // _participant_request_unmute). A request, not a state change: nothing about this person
+  // is different until they act on it, so it carries no presence patch and clears itself
+  // the moment they answer.
+  unmuteRequest: null,
 };
 
 // Exported for the reaction regression tests only (see EventWatch.reactions.test.jsx) —
@@ -144,6 +149,15 @@ function liveReducer(state, env) {
         slowModeSeconds: data.slow_mode_seconds || null,
         you: data.you || null,
       };
+
+    case "session/unmute.requested":
+      // Broadcast to the whole event like every other session envelope; only the matching
+      // identity is being spoken to.
+      if (!state.you || data.identity !== state.you.identity) return state;
+      return { ...state, unmuteRequest: { askedBy: data.asked_by || "The host", at: Date.now() } };
+
+    case "session/unmute.answered":   // local-only, dispatched when the viewer answers
+      return { ...state, unmuteRequest: null };
 
     case "session/removed":
       // Broadcast to every connection on the event (see services/bus.py "session"
@@ -226,9 +240,36 @@ export default function EventWatch() {
   // on any other event — both call the same POST /events/:id/register). Lifted to state
   // (not read fresh from localStorage each render) so identifying mid-visit reconnects the
   // live socket with the new identity instead of waiting for a refresh.
-  const [regToken, setRegTokenState] = useState(() => localStorage.getItem(`zk_reg_${eventId}`));
-  const setRegToken = useCallback((token) => {
-    localStorage.setItem(`zk_reg_${eventId}`, token);
+  // ── Where the registration credential lives ────────────────────────────────────────
+  //
+  // The credential itself is unchanged: an opaque server-signed JWT from POST /register that
+  // carries the event id and is verified per request (security.decode_registration_payload),
+  // so it cannot be edited into a pass for a different event. Nothing here stores a name, an
+  // email, or a "registered: true" flag — none of those would be proof of anything.
+  //
+  // What changed is the DURATION, which is now the viewer's choice:
+  //   localStorage    "Remember me for this event" was ticked — survives a browser restart.
+  //   sessionStorage  it was not — this tab's visit only, gone when the tab closes.
+  //
+  // Both are read back, localStorage first, so a remembered visitor is recognised before a
+  // session-only one. The key is per-event (`zk_reg_<eventId>`), which is what keeps a
+  // credential for Event A from doing anything at all on Event B.
+  const [regToken, setRegTokenState] = useState(() => {
+    try {
+      return localStorage.getItem(`zk_reg_${eventId}`)
+        || sessionStorage.getItem(`zk_reg_${eventId}`);
+    } catch {
+      return null;   // private mode with storage blocked: no saved credential is the safe answer
+    }
+  });
+  const setRegToken = useCallback((token, remember = false) => {
+    try {
+      const store = remember ? localStorage : sessionStorage;
+      store.setItem(`zk_reg_${eventId}`, token);
+      // Never leave the same credential in both: an unticked re-registration must not keep
+      // a persistent copy left over from an earlier ticked one.
+      (remember ? sessionStorage : localStorage).removeItem(`zk_reg_${eventId}`);
+    } catch { /* storage unavailable; the credential still works for this page load */ }
     setRegTokenState(token);
   }, [eventId]);
   const [linkToken, setLinkTokenState] = useState(() => localStorage.getItem(`zk_link_${eventId}`));
@@ -498,6 +539,9 @@ export default function EventWatch() {
   // that point, so the modal's onSubmit can ride it) — the actual disconnect/token-clear/
   // redirect that used to fire immediately on click now happens in finishLeave, which the
   // modal calls via onDone whether the viewer submitted or skipped.
+  // Which event we have already discarded a rejected credential for, so the check above
+  // cannot loop.
+  const [clearedFor, setClearedFor] = useState(null);
   const [showLeaveFeedback, setShowLeaveFeedback] = useState(false);
   const handleLeaveEvent = useCallback(() => {
     setShowLeaveFeedback(true);
@@ -506,8 +550,14 @@ export default function EventWatch() {
     setShowLeaveFeedback(false);
     disconnectLive();
 
-    localStorage.removeItem(`zk_reg_${eventId}`);
-    localStorage.removeItem(`zk_link_${eventId}`);
+    // "Forget me on this device" for this event, and only this event. Both stores, because
+    // the credential lives in one or the other depending on the Remember me choice.
+    try {
+      localStorage.removeItem(`zk_reg_${eventId}`);
+      sessionStorage.removeItem(`zk_reg_${eventId}`);
+      localStorage.removeItem(`zk_link_${eventId}`);
+      sessionStorage.removeItem(`zk_link_${eventId}`);
+    } catch { /* storage unavailable */ }
     setRegTokenState(null);
     setLinkTokenState(null);
 
@@ -519,7 +569,38 @@ export default function EventWatch() {
   // host-controlled check (org membership, an invite's `reg` token, or an access `link`),
   // and register_for_event refuses self-serve registration on a private event outright
   // (doc-level anti-side-door rule), so routing them through this same gate would just 403.
-  const mustIdentify = Boolean(watch && watch.visibility !== "private" && !identified);
+  // Whether the form is needed is the SERVER's answer, not ours. `watch.registered` is
+  // computed by GET /events/{id}/watch from the credential it just verified (routers/
+  // events.py: `registered or not ev.registration_required`), so:
+  //
+  //   • a valid saved credential  -> registered true  -> straight in, no form
+  //   • an expired//tampered/wrong-event one -> registered FALSE -> the form comes back
+  //
+  // The old condition asked whether a token STRING existed in this browser, which meant a
+  // stale credential silently skipped the form and then stranded the viewer on a page that
+  // would never hand out a stream token. A saved value that the server rejects is not a
+  // registration, and it is now treated as none.
+  // Note there is NO `!user` here. Holding a ZoikoStream login is not a registration for
+  // this event: the server already admits the people for whom it genuinely is one (the
+  // event's own org members, an invited guest, a valid access link) by answering
+  // registered=true. Anyone else — including a signed-in member of some other organization —
+  // is asked, which is what "the backend confirms it for THIS event" has to mean.
+  const mustIdentify = Boolean(
+    watch && watch.visibility !== "private" && !watch.registered
+  );
+
+  // A credential the server did not accept is dead weight; drop it so the next visit starts
+  // clean rather than re-presenting something already known to be refused. Derived during
+  // render (this repo treats set-state-in-effect as an error) and guarded so it runs once.
+  const staleCredential = Boolean(regToken && watch && !watch.registered);
+  if (staleCredential && clearedFor !== eventId) {
+    setClearedFor(eventId);
+    try {
+      localStorage.removeItem(`zk_reg_${eventId}`);
+      sessionStorage.removeItem(`zk_reg_${eventId}`);
+    } catch { /* storage unavailable */ }
+    setRegTokenState(null);
+  }
   // watch.expired means "the scheduled window lapsed before the host ever went live" —
   // it does NOT mean "there's nothing left to show". Ending a broadcast backfills
   // Event.end_time to that moment (services/broadcast.py `ev.end_time = ev.end_time or
@@ -529,9 +610,19 @@ export default function EventWatch() {
   const timeGated = Boolean(mustIdentify || (watch?.expired && !ended) || watch?.not_started);
 
   if (loading) {
+    // The registration form cannot flash before validation: `watch` is null until the
+    // response lands and mustIdentify requires it. This only names what the wait is FOR
+    // when a saved credential is being checked, rather than showing a bare spinner.
     return (
       <div className="grid min-h-screen place-items-center bg-slate-50 dark:bg-slate-950">
-        <Spinner />
+        <div className="text-center">
+          <Spinner />
+          {regToken && (
+            <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+              Checking your registration…
+            </p>
+          )}
+        </div>
       </div>
     );
   }
@@ -637,7 +728,7 @@ export default function EventWatch() {
             {mustIdentify ? (
               <RegistrationGate
                 eventId={eventId} eventTitle={event.name}
-                onRegistered={(token) => { setRegToken(token); fetchWatch(); }}
+                onRegistered={(token, remember) => { setRegToken(token, remember); fetchWatch(); }}
               />
             ) : ended ? (
               <VideoPlayer event={event} viewers={viewers} watch={watch} />
@@ -646,7 +737,16 @@ export default function EventWatch() {
             ) : watch.not_started ? (
               <AccessWindowNotice variant="not_started" startTime={watch.start_time} />
             ) : (
-              <VideoPlayer event={event} viewers={viewers} watch={watch} onStage={isOnStage}>
+              <VideoPlayer
+                event={event}
+                viewers={viewers}
+                watch={watch}
+                onStage={isOnStage}
+                unmuteRequest={panel.unmuteRequest}
+                onAnswerUnmute={() =>
+                  dispatchPanel({ channel: "session", type: "unmute.answered", data: {} })
+                }
+              >
                 {watch.reactions_enabled && <ReactionOverlay channel={reactionChannel} className="z-30" />}
               </VideoPlayer>
             )}
@@ -678,7 +778,10 @@ export default function EventWatch() {
               send={sendPanel}
               identified={identified}
               eventId={eventId}
-              onIdentified={setRegToken}
+              // Chat/Q&A identification on a non-registration event. Persisted as it always
+              // was — the Remember me choice belongs to the registration form, and quietly
+              // downgrading this one to session-only would be an unrequested change.
+              onIdentified={(token) => setRegToken(token, true)}
               connected={liveStatus === "open"}
               alerts={alerts}
               onTabView={clearAlert}
