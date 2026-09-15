@@ -62,6 +62,58 @@ jobs:
         working-directory: client
         run: npm run build
 
+      # The SECOND build of the same source tree — the one that goes into the Android app
+      # (ZoikoStream-app/). It has to be here because it can break on its own: it selects a
+      # different route table (HAS_CONSOLES), runs an extra Rollup plugin that deletes chunks,
+      # and reads .env.mobile rather than the ambient environment. None of that is exercised
+      # by `npm run build`, so without this a change could pass CI, ship to the web, and then
+      # fail at the point someone tries to cut a store release.
+      #
+      # The two assertions afterwards are for the failures that are SILENT in a bundle —
+      # neither produces a build error, and both produce an app that installs and then does
+      # not work:
+      #
+      #   * a console route surviving into the store build means shipping screens that cannot
+      #     be operated on a phone, and a Play reviewer who opens one,
+      #   * a missing VITE_API_URL means the SPA falls back to window.location.origin, which
+      #     inside the WebView is the phone itself — so every request and the live WebSocket
+      #     aim at a server that does not exist, and nobody can sign in.
+      - name: Mobile build (Android app bundle)
+        working-directory: client
+        run: npm run build:mobile
+
+      - name: Mobile build carries no console routes and a real API origin
+        working-directory: client
+        run: |
+          # The bundle goes to a FILE and grep reads that, rather than being held in a shell
+          # variable and piped in. At ~1.7 MB the obvious version is broken:
+          # `printf '%s' "$bundle" | grep -qF needle` exits 141 (SIGPIPE, because grep stops
+          # reading the moment it matches while printf is still writing). Under -o pipefail —
+          # which the default shell here turns on — that is indistinguishable from "no match",
+          # so the console-route check would PASS on a bundle full of console routes.
+          # ZoikoStream-app/.github/workflows/android.yml documents the same discovery.
+          cat dist-mobile/assets/*.js > "$RUNNER_TEMP/mobile-bundle.js"
+          # Paths that can ONLY be route definitions. /admin/dashboard and
+          # /organization/dashboard are deliberately absent from this list: the mobile build
+          # legitimately contains both as the target of the "open in your browser" link in
+          # native/ConsoleOnWebNotice.jsx, so checking for them would fail on the very feature
+          # that exists because the routes were removed.
+          failed=0
+          for path in /admin/feature-flags /admin/audit /admin/governance /admin/live-events \
+                      /organization/recordings /organization/credentials \
+                      /organization/analytics /organization/billing; do
+            if grep -qF -- "$path" "$RUNNER_TEMP/mobile-bundle.js"; then
+              echo "::error::the mobile bundle still contains the console route $path"
+              failed=1
+            fi
+          done
+          [ "$failed" = 0 ] || exit 1
+          if ! grep -qF -- 'https://get.zoikostream.com' "$RUNNER_TEMP/mobile-bundle.js"; then
+            echo "::error::the mobile bundle has no API origin — VITE_API_URL was not applied"
+            exit 1
+          fi
+          echo "mobile bundle verified: no console routes, API origin present"
+
   backend:
     name: Backend — pytest and self-check suites
     runs-on: ubuntu-latest

@@ -23,6 +23,8 @@ import Badge from "../../ui/Badge";
 import { cx } from "../../ui/tokens";
 import { notify } from "../../ui/Toast";
 import { CONTRIBUTOR_STATE_TONE, CONTRIBUTOR_STATE_LABEL } from "../../data/host";
+import useKeepAwake from "../../hooks/useKeepAwake";
+import useBroadcastKeepAlive from "../../native/useBroadcastKeepAlive";
 
 const EMPTY = { ready: false, event: null, myState: null, publishToken: null, livekitUrl: null };
 
@@ -106,6 +108,17 @@ export default function Backstage() {
   const [camera, setCamera] = useState(true);
   const [mic, setMic] = useState(true);
   const media = useMediaPreview({ enabled: status === "open", camera, mic, settings: PREVIEW_SETTINGS });
+
+  // A contributor publishes exactly as a host does, so they are exposed to exactly the same
+  // two failures: the screen dimming out from under a live camera, and Android suspending
+  // the app (and revoking that camera) the moment it is backgrounded. Tied to the same
+  // condition that gates the capture above, so both protections last precisely as long as
+  // this page holds one. Both no-op on the web.
+  useKeepAwake(status === "open");
+  useBroadcastKeepAlive(status === "open", {
+    title: "You are on air",
+    text: "Your camera and microphone are live. Tap to return to backstage.",
+  });
   // Destructured so every binding below is plain (not `media.x`) — passing the whole media
   // bag around and reading properties off it in JSX trips the refs-during-render lint rule,
   // same reasoning as StudioStage.jsx's identical destructure.

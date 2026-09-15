@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
 import useInterval from "../../hooks/useInterval";
 import useEventStream from "../../hooks/useEventStream";
+import useKeepAwake from "../../hooks/useKeepAwake";
 import { controlPlaneNotice } from "./controlPlaneNotice";
 import { Link, useParams } from "react-router-dom";
 import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
@@ -492,6 +493,10 @@ export default function EventWatch() {
 
   const event = watch ? watchToMockEvent(watch) : null;
   const live = event?.status === "Live";
+  // Watching is 40 minutes of not touching the screen, which is 39 minutes past the point a
+  // phone dims and locks. Tied to `live` rather than to the page: an upcoming or completed
+  // event is a page to read, and holding a wake lock over one would just drain the battery.
+  useKeepAwake(live);
   const ended = event?.status === "Completed";
   const identified = !!(user || regToken || linkToken);
   // "Leave Event" opens the feedback modal first (the live socket is still connected at

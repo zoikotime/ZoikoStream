@@ -279,3 +279,74 @@ p { text-wrap: pretty; }
     animation-timing-function: linear;
   }
 }
+
+/* ═══ NATIVE SHELL (Android / Capacitor) ═════════════════════════════════════════════════
+   Scoped to `html.native`, a class the shell sets on itself at boot (native/bridge.js). The
+   web build never sets it, so none of these rules can reach a browser — which is why they
+   can be blunt about phone-specific problems instead of hiding behind a media query that
+   would also catch a narrow desktop window.
+
+   ── ON SAFE AREAS, AND WHY THERE ARE NO env() RULES HERE ────────────────────────────────
+   Because the status bar is NOT overlaid: bridge.js calls setOverlaysWebView({overlay:
+   false}), so Android lays the WebView out below the status bar and above the gesture bar,
+   and every inset resolves to zero. That is a deliberate trade. Overlaying would win the
+   watch page ~24px of edge-to-edge video, and would cost safe-area padding in every layout
+   that pins itself to 100dvh — the studio, the watch page, both shells — where `h-dvh` plus
+   body padding is an overflowing page, not an inset one. Paying a real layout regression
+   across the app for 24px on one screen is the wrong way round, and a status bar that stays
+   legible over a bright stream is arguably the better result anyway. */
+
+/* A WebView is not a browser and must not pretend to be one.
+
+   Text selection: long-pressing anything in a native app pops the system selection handles
+   and a Copy/Share bar, over a UI with no use for either. Restored explicitly where copying
+   IS the point — stream keys, RTMP URLs, API credentials, invite links — through
+   `.select-text`, a class Tailwind already emits and those screens already carry. */
+html.native, html.native body {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+html.native input,
+html.native textarea,
+html.native [contenteditable],
+html.native .select-text,
+html.native .select-text * {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+/* Tap highlight: Android paints a translucent box over every tapped element. The app already
+   has its own :active and focus-visible states, so the system one lands on top of them and
+   reads as a rendering glitch. */
+html.native * { -webkit-tap-highlight-color: transparent; }
+
+/* Overscroll: the rubber-band bounce past the end of a scroll container exposes the
+   WebView's own background behind the page, which on a dark screen flashes white. `none`
+   also stops a scroll that has hit its end from chaining into a pull-to-refresh the app has
+   no handler for. */
+html.native body { overscroll-behavior: none; }
+
+/* Minimum touch target. Several controls are sized for a mouse — a 28px icon button is
+   comfortable with a cursor and a coin flip with a thumb. 44px is the floor both Apple's and
+   Google's guidance name, and it is what a Play pre-launch report's accessibility scan
+   flags. min-height does not apply to non-replaced INLINE elements, so a link inside a
+   paragraph is untouched; this reaches the block/flex controls it is aimed at. */
+@media (pointer: coarse) {
+  html.native button,
+  html.native [role="button"],
+  html.native a[href],
+  html.native input[type="checkbox"],
+  html.native input[type="radio"] {
+    min-height: 44px;
+  }
+  /* Deliberately dense rows opt out — the studio's fourteen-key deck, tab rails, table row
+     actions. Forcing 44px on all fourteen is what would break that bar, not what would fix
+     it. */
+  html.native .native-dense,
+  html.native .native-dense button,
+  html.native .native-dense a[href] {
+    min-height: 0;
+  }
+}

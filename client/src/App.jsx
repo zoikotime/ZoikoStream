@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-route
 import { ThemeProvider } from "./theme/ThemeContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { roleHome } from "./auth/roleHome";
+import { HAS_CONSOLES, IS_NATIVE } from "./platform";
+import NativeShell from "./native/NativeShell";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { PageSpinner } from "./ui/Spinner";
 import RoleRoute from "./components/RoleRoute";
@@ -37,31 +39,41 @@ import Status from "./pages/Status";
 import Trust from "./pages/Trust";
 import SecurityReport from "./pages/SecurityReport";
 import EmailPreferences from "./pages/EmailPreferences";
+import PrivacyPolicy from "./pages/PrivacyPolicy";
+import PrivacyCenter from "./pages/organization/PrivacyCenter";
 
+// ── /* @__PURE__ */ on every lazy() below ───────────────────────────────────────────────
+// Without it these 29 declarations are top-level FUNCTION CALLS, which Rollup must assume
+// have side effects and therefore keeps — chunks and all — even in the mobile build, where
+// HAS_CONSOLES is the literal `false` and not one of them can ever render. The annotation
+// says the call has none, so when the JSX that referenced it is eliminated the declaration
+// goes too, and with it the dynamic import that would have emitted the chunk. Net effect:
+// the store build stops carrying ~38 console pages it cannot route to. On the web build
+// every one of them IS referenced, so the annotation changes nothing there.
 // Super Admin console — code-split as one area. Only super admins can reach /admin/*, so
 // shipping these 14 pages (plus their charts and tables) in the main bundle made every
 // visitor to the public homepage download them. Same pattern as Home above.
-const AdminDashboard = lazy(() => import("./pages/admin/Dashboard"));
-const Organizations = lazy(() => import("./pages/admin/Organizations"));
-const LiveEvents = lazy(() => import("./pages/admin/LiveEvents"));
-const AdminEventDetail = lazy(() => import("./pages/admin/EventDetail"));
-const AdminUsers = lazy(() => import("./pages/admin/Users"));
-const Subscriptions = lazy(() => import("./pages/admin/Subscriptions"));
-const Analytics = lazy(() => import("./pages/admin/Analytics"));
-const AuditLogs = lazy(() => import("./pages/admin/AuditLogs"));
-const PlatformSettings = lazy(() => import("./pages/admin/Settings"));
-const SystemStatus = lazy(() => import("./pages/admin/SystemStatus"));
-const FeatureFlags = lazy(() => import("./pages/admin/FeatureFlags"));
-const ReleaseCenter = lazy(() => import("./pages/admin/ReleaseCenter"));
-const Support = lazy(() => import("./pages/admin/Support"));
-const Roles = lazy(() => import("./pages/admin/Roles"));
-const Developers = lazy(() => import("./pages/admin/Developers"));
-const EventReadiness = lazy(() => import("./pages/admin/EventReadiness"));
-const AdminMedia = lazy(() => import("./pages/admin/Media"));
-const TrustSafety = lazy(() => import("./pages/admin/Security"));
-const AdminGovernance = lazy(() => import("./pages/admin/Governance"));
-const Commerce = lazy(() => import("./pages/admin/Commerce"));
-const Infrastructure = lazy(() => import("./pages/admin/Infrastructure"));
+const AdminDashboard = /* @__PURE__ */ lazy(() => import("./pages/admin/Dashboard"));
+const Organizations = /* @__PURE__ */ lazy(() => import("./pages/admin/Organizations"));
+const LiveEvents = /* @__PURE__ */ lazy(() => import("./pages/admin/LiveEvents"));
+const AdminEventDetail = /* @__PURE__ */ lazy(() => import("./pages/admin/EventDetail"));
+const AdminUsers = /* @__PURE__ */ lazy(() => import("./pages/admin/Users"));
+const Subscriptions = /* @__PURE__ */ lazy(() => import("./pages/admin/Subscriptions"));
+const Analytics = /* @__PURE__ */ lazy(() => import("./pages/admin/Analytics"));
+const AuditLogs = /* @__PURE__ */ lazy(() => import("./pages/admin/AuditLogs"));
+const PlatformSettings = /* @__PURE__ */ lazy(() => import("./pages/admin/Settings"));
+const SystemStatus = /* @__PURE__ */ lazy(() => import("./pages/admin/SystemStatus"));
+const FeatureFlags = /* @__PURE__ */ lazy(() => import("./pages/admin/FeatureFlags"));
+const ReleaseCenter = /* @__PURE__ */ lazy(() => import("./pages/admin/ReleaseCenter"));
+const Support = /* @__PURE__ */ lazy(() => import("./pages/admin/Support"));
+const Roles = /* @__PURE__ */ lazy(() => import("./pages/admin/Roles"));
+const Developers = /* @__PURE__ */ lazy(() => import("./pages/admin/Developers"));
+const EventReadiness = /* @__PURE__ */ lazy(() => import("./pages/admin/EventReadiness"));
+const AdminMedia = /* @__PURE__ */ lazy(() => import("./pages/admin/Media"));
+const TrustSafety = /* @__PURE__ */ lazy(() => import("./pages/admin/Security"));
+const AdminGovernance = /* @__PURE__ */ lazy(() => import("./pages/admin/Governance"));
+const Commerce = /* @__PURE__ */ lazy(() => import("./pages/admin/Commerce"));
+const Infrastructure = /* @__PURE__ */ lazy(() => import("./pages/admin/Infrastructure"));
 
 // Organization console — the eight Build/Operate/Manage pages, code-split for the same reason
 // as the admin console above: only org admins reach /organization/*, so shipping them in the
@@ -69,14 +81,14 @@ const Infrastructure = lazy(() => import("./pages/admin/Infrastructure"));
 // provides the Suspense boundary these render inside.
 // Organization & Workspaces is split too — it is the only screen carrying framer-motion,
 // and eagerly importing it put that library in the bundle every homepage visitor downloads.
-const OrganizationProfile = lazy(() => import("./pages/organization/Profile"));
-const DeveloperPlatform = lazy(() => import("./pages/organization/DeveloperPlatform"));
-const Credentials = lazy(() => import("./pages/organization/Credentials"));
-const LiveInputs = lazy(() => import("./pages/organization/LiveInputs"));
-const StreamingSessions = lazy(() => import("./pages/organization/StreamingSessions"));
-const PlaybackAccess = lazy(() => import("./pages/organization/PlaybackAccess"));
-const AudienceAccess = lazy(() => import("./pages/organization/AudienceAccess"));
-const SupportStatus = lazy(() => import("./pages/organization/SupportStatus"));
+const OrganizationProfile = /* @__PURE__ */ lazy(() => import("./pages/organization/Profile"));
+const DeveloperPlatform = /* @__PURE__ */ lazy(() => import("./pages/organization/DeveloperPlatform"));
+const Credentials = /* @__PURE__ */ lazy(() => import("./pages/organization/Credentials"));
+const LiveInputs = /* @__PURE__ */ lazy(() => import("./pages/organization/LiveInputs"));
+const StreamingSessions = /* @__PURE__ */ lazy(() => import("./pages/organization/StreamingSessions"));
+const PlaybackAccess = /* @__PURE__ */ lazy(() => import("./pages/organization/PlaybackAccess"));
+const AudienceAccess = /* @__PURE__ */ lazy(() => import("./pages/organization/AudienceAccess"));
+const SupportStatus = /* @__PURE__ */ lazy(() => import("./pages/organization/SupportStatus"));
 
 // ponytail: one placeholder for routes not built yet — replace each with a real page as it lands
 function Placeholder({ title }) {
@@ -140,6 +152,12 @@ export default function App() {
           <Routes> consumes auth, so the swap changes nothing else. */}
       <BrowserRouter>
         <AuthProvider>
+          {/* Android's hardware back and its App Links. Inside the router because it
+              navigates, inside AuthProvider because a deep link that lands on a guarded
+              route must be judged by that route's own guard rather than by a second copy of
+              the rule. Renders nothing. On the web build IS_NATIVE is the literal `false`,
+              so this branch and the import above it are both eliminated. */}
+          {IS_NATIVE && <NativeShell />}
           <Routes>
             {/* Public landing page */}
             <Route path="/" element={<LandingOrDashboard />} />
@@ -167,6 +185,22 @@ export default function App() {
             <Route path="/security/report/:reference" element={<SecurityReport />} />
             <Route path="/preferences" element={<EmailPreferences mode="preferences" />} />
             <Route path="/unsubscribe" element={<EmailPreferences mode="unsubscribe" />} />
+
+            {/* Privacy policy — public, and NOT behind LandingOrDashboard. Play requires
+                a privacy policy reachable without a login for every app that ships
+                (RELEASE.md §5), and a policy behind a sign-in is not one. */}
+            <Route path="/privacy" element={<PrivacyPolicy />} />
+
+            {/* The customer Privacy Center (PRV-001 -> PRV-004). Every privacy email
+                links here — the verify link, the status lookup, the export download and
+                the subprocessor list. Deliberately OUTSIDE the HAS_CONSOLES gate: a
+                requester frequently has no account at all, and a privacy right that
+                exists only for signed-in operators is not a right. Also deliberately
+                outside the org-state concern on the server side — see routers/privacy.py
+                and org_state.PRESERVED_PREFIXES. */}
+            <Route path="/organization/privacy" element={<PrivacyCenter />} />
+            <Route path="/organization/privacy/requests/:requestId/verify" element={<PrivacyCenter />} />
+            <Route path="/organization/privacy/exports/:exportId/download" element={<PrivacyCenter />} />
 
             {/* Authentication — one login for every role; brand panel shared via AuthLayout.
                 All dummy: no API calls. After login, roleHome() picks the dashboard. */}
@@ -246,76 +280,103 @@ export default function App() {
               </Route>
             </Route>
 
-            {/* Super admin (platform) area */}
-            <Route element={<RoleRoute allow={["super_admin"]} />}>
-              <Route element={<AdminLayout />}>
-                <Route path="/admin/dashboard" element={<AdminDashboard />} />
-                <Route path="/admin/organizations" element={<Organizations />} />
-                <Route path="/admin/live-events" element={<LiveEvents />} />
-                <Route path="/admin/live-events/:eventId" element={<AdminEventDetail />} />
-                <Route path="/admin/users" element={<AdminUsers />} />
-                <Route path="/admin/subscriptions" element={<Subscriptions />} />
-                <Route path="/admin/analytics" element={<Analytics />} />
-                <Route path="/admin/audit" element={<AuditLogs />} />
-                <Route path="/admin/settings" element={<PlatformSettings />} />
-                <Route path="/admin/status" element={<SystemStatus />} />
-                <Route path="/admin/feature-flags" element={<FeatureFlags />} />
-                <Route path="/admin/releases" element={<ReleaseCenter />} />
-                <Route path="/admin/support" element={<Support />} />
-                <Route path="/admin/roles" element={<Roles />} />
-                <Route path="/admin/developers" element={<Developers />} />
-                <Route path="/admin/event-readiness" element={<EventReadiness />} />
-                <Route path="/admin/media" element={<AdminMedia />} />
-                <Route path="/admin/security" element={<TrustSafety />} />
-                <Route path="/admin/governance" element={<AdminGovernance />} />
-                <Route path="/admin/commerce" element={<Commerce />} />
-                <Route path="/admin/infrastructure" element={<Infrastructure />} />
-                {adminStubs.map(([path, title]) => (
-                  <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
-                ))}
-              </Route>
-            </Route>
+            {/* ── THE CONSOLES, AND WHY THE STORE BUILD HAS NONE OF THEM ──────────────────
+                Everything inside this gate — the platform console (/admin/*, 21 pages) and
+                the organization console (/organization/*, 17) — ships to the WEB build only.
 
-            {/* The organization dashboard is open to ANY member of the organization, not
-                just admins — which is what stops the bounce loop that produced the reported
-                bug. When it was admin-only, a host/moderator/speaker/billing_admin/viewer
-                account that asked for it was rejected by RoleRoute and sent to its own
-                accountHome; with the host persona's home being an event console, that landed
-                them in a Producer Console for an event they were not assigned to.
+                Not a permission decision. A super admin is still a super admin on a phone,
+                and RoleRoute below would say so. It is that these are operator surfaces
+                built for a desk: multi-column dashboards, dense tables, stacked modal forms.
+                Rendering them at 390px would not produce a worse version of the console, it
+                would produce screens nobody can complete a task on — and a Play reviewer
+                opening one is a rejection. A route that is honestly absent beats a route
+                that renders something broken.
 
-                It is also what the BACKEND already allows: /organization/overview and
-                /console-state authorize with `get_my_org` (any member), not with
-                require_org_admin, so this closes a gap between the two rather than opening
-                one. Every genuinely admin-only page stays in the admin group below. */}
-            <Route element={<ProtectedRoute />}>
-              <Route element={<OrganizationLayout />}>
-                <Route path="/organization/dashboard" element={<OrganizationDashboard />} />
-              </Route>
-            </Route>
+                Billing is the second reason, and it applies to the organization group
+                specifically: the upgrade flow hands off to Stripe's hosted checkout, and an
+                Android app that sells a subscription through a third-party checkout is
+                precisely the shape Google Play's payments policy exists to reject.
 
-            {/* Organization admin area */}
-            <Route element={<RoleRoute allow={["org_admin"]} />}>
-              <Route element={<OrganizationLayout />}>
-                <Route path="/organization/events" element={<OrganizationEvents />} />
-                <Route path="/organization/recordings" element={<OrganizationRecordings />} />
-                <Route path="/organization/analytics" element={<OrganizationAnalytics />} />
-                <Route path="/organization/billing" element={<OrganizationBilling />} />
-                <Route path="/organization/settings" element={<OrganizationSettings />} />
-                <Route path="/organization/events/:id" element={<EventDetails />} />
-                <Route path="/organization/users" element={<InviteMembers />} />
-                <Route path="/organization/profile" element={<OrganizationProfile />} />
-                {/* Build */}
-                <Route path="/organization/developers" element={<DeveloperPlatform />} />
-                <Route path="/organization/credentials" element={<Credentials />} />
-                <Route path="/organization/live-inputs" element={<LiveInputs />} />
-                {/* Operate */}
-                <Route path="/organization/sessions" element={<StreamingSessions />} />
-                <Route path="/organization/playback" element={<PlaybackAccess />} />
-                <Route path="/organization/audience" element={<AudienceAccess />} />
-                {/* Manage */}
-                <Route path="/organization/support" element={<SupportStatus />} />
+                Nothing dead-ends. accountHome() (auth/destination.js) resolves to
+                /events/mine in a native build instead of to /organization/dashboard, so the
+                catch-all's RootRedirect never aims a console role at a path this build does
+                not define — which would otherwise be an infinite redirect loop, not a 404.
+                The consoles stay one tap away at WEB_APP_URL, offered by the mobile shell
+                rather than hidden. */}
+            {HAS_CONSOLES && (
+              <>
+              {/* Super admin (platform) area */}
+              <Route element={<RoleRoute allow={["super_admin"]} />}>
+                <Route element={<AdminLayout />}>
+                  <Route path="/admin/dashboard" element={<AdminDashboard />} />
+                  <Route path="/admin/organizations" element={<Organizations />} />
+                  <Route path="/admin/live-events" element={<LiveEvents />} />
+                  <Route path="/admin/live-events/:eventId" element={<AdminEventDetail />} />
+                  <Route path="/admin/users" element={<AdminUsers />} />
+                  <Route path="/admin/subscriptions" element={<Subscriptions />} />
+                  <Route path="/admin/analytics" element={<Analytics />} />
+                  <Route path="/admin/audit" element={<AuditLogs />} />
+                  <Route path="/admin/settings" element={<PlatformSettings />} />
+                  <Route path="/admin/status" element={<SystemStatus />} />
+                  <Route path="/admin/feature-flags" element={<FeatureFlags />} />
+                  <Route path="/admin/releases" element={<ReleaseCenter />} />
+                  <Route path="/admin/support" element={<Support />} />
+                  <Route path="/admin/roles" element={<Roles />} />
+                  <Route path="/admin/developers" element={<Developers />} />
+                  <Route path="/admin/event-readiness" element={<EventReadiness />} />
+                  <Route path="/admin/media" element={<AdminMedia />} />
+                  <Route path="/admin/security" element={<TrustSafety />} />
+                  <Route path="/admin/governance" element={<AdminGovernance />} />
+                  <Route path="/admin/commerce" element={<Commerce />} />
+                  <Route path="/admin/infrastructure" element={<Infrastructure />} />
+                  {adminStubs.map(([path, title]) => (
+                    <Route key={path} path={`/admin/${path}`} element={<Placeholder title={title} />} />
+                  ))}
+                </Route>
               </Route>
-            </Route>
+
+              {/* The organization dashboard is open to ANY member of the organization, not
+                  just admins — which is what stops the bounce loop that produced the reported
+                  bug. When it was admin-only, a host/moderator/speaker/billing_admin/viewer
+                  account that asked for it was rejected by RoleRoute and sent to its own
+                  accountHome; with the host persona's home being an event console, that landed
+                  them in a Producer Console for an event they were not assigned to.
+
+                  It is also what the BACKEND already allows: /organization/overview and
+                  /console-state authorize with `get_my_org` (any member), not with
+                  require_org_admin, so this closes a gap between the two rather than opening
+                  one. Every genuinely admin-only page stays in the admin group below. */}
+              <Route element={<ProtectedRoute />}>
+                <Route element={<OrganizationLayout />}>
+                  <Route path="/organization/dashboard" element={<OrganizationDashboard />} />
+                </Route>
+              </Route>
+
+              {/* Organization admin area */}
+              <Route element={<RoleRoute allow={["org_admin"]} />}>
+                <Route element={<OrganizationLayout />}>
+                  <Route path="/organization/events" element={<OrganizationEvents />} />
+                  <Route path="/organization/recordings" element={<OrganizationRecordings />} />
+                  <Route path="/organization/analytics" element={<OrganizationAnalytics />} />
+                  <Route path="/organization/billing" element={<OrganizationBilling />} />
+                  <Route path="/organization/settings" element={<OrganizationSettings />} />
+                  <Route path="/organization/events/:id" element={<EventDetails />} />
+                  <Route path="/organization/users" element={<InviteMembers />} />
+                  <Route path="/organization/profile" element={<OrganizationProfile />} />
+                  {/* Build */}
+                  <Route path="/organization/developers" element={<DeveloperPlatform />} />
+                  <Route path="/organization/credentials" element={<Credentials />} />
+                  <Route path="/organization/live-inputs" element={<LiveInputs />} />
+                  {/* Operate */}
+                  <Route path="/organization/sessions" element={<StreamingSessions />} />
+                  <Route path="/organization/playback" element={<PlaybackAccess />} />
+                  <Route path="/organization/audience" element={<AudienceAccess />} />
+                  {/* Manage */}
+                  <Route path="/organization/support" element={<SupportStatus />} />
+                </Route>
+              </Route>
+              </>
+            )}
 
             {/* Legacy generic dashboard for other roles (moved off "/" so the homepage can live there) */}
             {/* Where a host/moderator/speaker PERSONA lands after login. Their account role

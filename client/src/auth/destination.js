@@ -20,6 +20,7 @@
 // So a "host" account with no assignment has no console to open, and the honest destination
 // is the list of events they were actually put on.
 import api from "../api";
+import { HAS_CONSOLES } from "../platform";
 
 // The canonical post-login destination, per ACCOUNT role.
 //
@@ -43,7 +44,22 @@ const ACCOUNT_HOME = {
 
 const ORGANIZATION_HOME = "/organization/dashboard";
 
-export const accountHome = (role) => ACCOUNT_HOME[role] || ORGANIZATION_HOME;
+// ── THE MOBILE BUILD HAS NEITHER OF THOSE ROUTES ─────────────────────────────────────────
+// App.jsx ships the platform and organization consoles to the WEB build only (see the
+// HAS_CONSOLES gate there and the reasoning above it). So on Android both destinations above
+// name paths the router does not define — and the consequence is worse than a 404, because
+// the catch-all sends an unmatched path to RootRedirect, which asks this function where to
+// go, which answers with the same undefined path. That is an infinite redirect, and it would
+// have hit EVERY account on its first login: org_admin, viewer and super_admin alike.
+//
+// /events/mine is the honest answer for the store build rather than a placeholder: it is the
+// list of events this person is actually assigned to, it exists in both builds, and it is
+// what a phone is genuinely useful for — joining the broadcast you are on. The consoles are
+// not hidden; the mobile shell offers them at WEB_APP_URL, in a real browser.
+const NATIVE_HOME = "/events/mine";
+
+export const accountHome = (role) =>
+  (HAS_CONSOLES ? (ACCOUNT_HOME[role] || ORGANIZATION_HOME) : NATIVE_HOME);
 
 // Console routes that are meaningless without an event, and whose access depends on an
 // EventAssignment rather than on the account role. Each maps to the capability the backend
