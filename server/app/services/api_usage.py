@@ -55,7 +55,14 @@ _local: dict[str, tuple[int, float]] = {}
 _local_lock = threading.Lock()
 
 _redis_client = None
-_redis_failed = False
+# When the last connection attempt failed, as a monotonic timestamp. NOT a permanent latch:
+# a boolean "it failed once" meant a single blip at first use — a cold start during a
+# provider hiccup, say — dropped that Cloud Run instance to per-process counters for the
+# whole life of the instance, silently un-sharing the shared counter long after Redis came
+# back. A cooldown is also what keeps the retry from becoming a storm: one attempt per
+# window per process, not one per refused request.
+_redis_failed_at: float | None = None
+_REDIS_RETRY_COOLDOWN_SECONDS = 60.0
 
 
 def backend() -> str:
@@ -64,29 +71,46 @@ def backend() -> str:
 
 
 def _client():
-    """Lazy synchronous Redis client. None when unconfigured or unreachable.
+    """Lazy synchronous Redis client. None when unconfigured, or while unreachable.
 
     Synchronous on purpose: the rate limiter runs inside a FastAPI dependency, and the
     existing bus client is async. A failure disables the shared backend rather than raising
     into a request — a counter outage must never take the API down with it.
-    """
-    global _redis_client, _redis_failed
-    if _redis_failed or not settings.REDIS_URL:
-        return None
-    if _redis_client is None:
-        try:
-            import redis
 
-            _redis_client = redis.Redis.from_url(settings.REDIS_URL,
-                                                 socket_connect_timeout=2,
-                                                 socket_timeout=2,
-                                                 decode_responses=True)
-            _redis_client.ping()
-        except Exception:  # noqa: BLE001
-            log.warning("Rate-limit Redis unavailable; falling back to per-process counters",
-                        exc_info=True)
-            _redis_client, _redis_failed = None, True
-            return None
+    ONE client per process, like services/bus.py's, and bounded for the same reason: this is
+    the SECOND pool on every Cloud Run instance, so its ceiling counts against the provider's
+    concurrent-connection cap alongside the bus's. It needs far fewer connections than the
+    bus — one INCR per refused request, and refusals are rare by definition.
+    """
+    global _redis_client, _redis_failed_at
+    if not settings.REDIS_URL:
+        return None
+    if _redis_client is not None:
+        return _redis_client
+    if (_redis_failed_at is not None
+            and time.monotonic() - _redis_failed_at < _REDIS_RETRY_COOLDOWN_SECONDS):
+        return None
+    try:
+        import redis
+
+        _redis_client = redis.Redis.from_url(
+            settings.REDIS_URL,
+            max_connections=max(2, settings.REDIS_MAX_CONNECTIONS // 4),
+            socket_connect_timeout=settings.REDIS_CONNECT_TIMEOUT,
+            socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
+            socket_keepalive=True,
+            health_check_interval=30,
+            decode_responses=True)
+        _redis_client.ping()
+    except Exception as exc:  # noqa: BLE001 — this degrades the counter, never the request
+        # Exception TYPE only, with no traceback and no URL. This can fire on a per-request
+        # path during a provider outage, so the line has to stay cheap and repeatable — and
+        # REDIS_URL carries the password inline, so it must never reach the log.
+        log.warning("Rate-limit Redis unavailable (%s); using per-process counters, "
+                    "retrying in %ss", type(exc).__name__, int(_REDIS_RETRY_COOLDOWN_SECONDS))
+        _redis_client, _redis_failed_at = None, time.monotonic()
+        return None
+    _redis_failed_at = None
     return _redis_client
 
 

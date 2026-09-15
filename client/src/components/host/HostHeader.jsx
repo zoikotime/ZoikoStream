@@ -17,7 +17,7 @@ import { Link } from "react-router-dom";
 import {
   FiSun, FiMoon, FiLogOut, FiClock, FiEye, FiUsers, FiTrendingUp, FiMic,
   FiShield, FiVideo, FiActivity, FiWifi, FiWifiOff, FiRefreshCw, FiCpu,
-  FiHardDrive, FiMonitor, FiCheckCircle, FiAlertTriangle, FiAlertOctagon,
+  FiHardDrive, FiMonitor, FiCheckCircle, FiAlertTriangle, FiAlertOctagon, FiHelpCircle,
 } from "react-icons/fi";
 import useInterval from "../../hooks/useInterval";
 import useSystemStats from "../../hooks/useSystemStats";
@@ -49,7 +49,12 @@ const CONNECTION = {
 // next to the word "At risk", and a single glyph told an operator nothing the label didn't.
 // FiActivity is deliberately not reused here: it is already the UI-load readout below, and one
 // glyph meaning two things on the same bar is worse than no glyph.
-const HEALTH_ICON = { ok: FiCheckCircle, warn: FiAlertTriangle, down: FiAlertOctagon };
+// `unknown` gets FiHelpCircle, not the warning triangle the `||` fallback would supply:
+// "we cannot read the media signals" must not look like "something is wrong with your
+// broadcast" at a glance. See HEALTH_LABEL in data/host.js.
+const HEALTH_ICON = {
+  ok: FiCheckCircle, warn: FiAlertTriangle, down: FiAlertOctagon, unknown: FiHelpCircle,
+};
 
 const latencyTone = (ms) =>
   ms == null ? SIGNAL.neutral : ms < 200 ? SIGNAL.good : ms < 600 ? SIGNAL.warn : SIGNAL.bad;

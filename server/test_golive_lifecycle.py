@@ -30,7 +30,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 # app.main first — see test_moderator_retirement.py for the pre-existing circular import.
 import app.main as main_module
@@ -249,6 +249,106 @@ def test_a_non_host_cannot_end_the_broadcast(host_event):
 
     assert _db_state(host_event["event_id"])["event_status"] == "live", \
         "a viewer managed to end the broadcast"
+
+
+def _poll_db_state(event_id, settle=2.0, interval=0.1):
+    """_db_state after giving the server a moment to act on the action just sent.
+
+    Asserting the ABSENCE of a row needs a settle window, not a retry-until-true: returning
+    early on the first "still zero" read would pass simply by looking before the server got
+    there. This keeps reading for `settle` seconds and returns the state as soon as anything
+    appears (so the failing case is fast) or at the end of the window (so the passing case is
+    honest).
+    """
+    import time
+    deadline = time.monotonic() + settle
+    state = _db_state(event_id)
+    while time.monotonic() < deadline:
+        if state["open_sessions"] or state["event_status"] == "live":
+            return state
+        time.sleep(interval)
+        state = _db_state(event_id)
+    return state
+
+
+@pytest.mark.parametrize("pre_status", ["draft", "rehearsal", "ready_to_arm"])
+def test_go_live_from_a_non_publishable_status_is_refused_not_silently_half_live(
+        host_event, pre_status):
+    """The silent "host is live, every viewer is dark" desync.
+
+    services/broadcast.py::_golive's work() only writes `Event.status = "live"` when the
+    current status is in its own whitelist (published/scheduled/armed/degraded). For any
+    OTHER pre-live state it skipped that write while still creating a live BroadcastSession,
+    setting bus state to "live" and returning broadcast.update — so the host console showed
+    Live and the producer genuinely published media into the LiveKit room, while
+    routers/events.py::watch_event kept `can_stream` False (it requires live/degraded) and
+    handed every viewer a NULL livekit_token.
+
+    Nothing errored on either side, which is what made it so hard to see: the host has a
+    working camera and a "Live" badge, and viewers get a page with no video and no message.
+
+    The contract pinned here is twofold, and the second half is the one that matters:
+      1. the host gets a VISIBLE refusal (host/broadcast.error, rendered by
+         useLiveEvent.js's goLiveError), and
+      2. NO BroadcastSession is opened — a refused go-live must not leave a half-started
+         broadcast behind for the host to publish into.
+
+    Parametrised over the real reachable pre-live states rather than one example: rehearsal
+    and ready_to_arm are ordinary points on the v1.1 canonical chain (models/event.py
+    EVENT_STATUSES), so a host sitting on either is not an exotic case.
+    """
+    db = SessionLocal()
+    try:
+        db.execute(update(Event)
+                   .where(Event.id == host_event["event_id"])
+                   .values(status=pre_status))
+        db.commit()
+    finally:
+        db.close()
+
+    client = TestClient(main_module.app)
+    with client.websocket_connect(_url(host_event["event_id"], host_event["host_token"])) as ws:
+        snap = ws.receive_json()
+        assert (snap["channel"], snap["type"]) == ("moderator", "snapshot")
+
+        ws.send_json({"action": "broadcast.golive", "payload": {}})
+
+        # The DB check comes FIRST, and deliberately so. _drain_for blocks on receive_json()
+        # when the frame it wants never arrives, so leading with the frame assertion would
+        # make a REGRESSION hang until pytest-timeout kills it rather than say what broke.
+        # Under the bug the session row appears almost immediately, so polling for its
+        # ABSENCE fails fast and names the actual defect.
+        state = _poll_db_state(host_event["event_id"])
+        assert state["open_sessions"] == 0, (
+            "a BroadcastSession was opened for a REFUSED go-live — the host would publish "
+            "real media into a room no viewer can ever be issued a token for")
+        assert state["event_status"] == pre_status, \
+            f"Event.status moved off {pre_status!r} despite the go-live being refused"
+
+        err = _drain_for(ws, "host", "broadcast.error")
+        assert err is not None, (
+            f"go live from {pre_status!r} produced no visible refusal — the host would see "
+            "'Live' while every viewer is refused a stream token")
+        assert "go live" in err["data"]["error"].lower()
+
+
+def test_go_live_from_published_still_moves_the_event_status(host_event):
+    """The other side of the guard above: the ordinary path must be untouched.
+
+    Specifically that Event.status — not just the BroadcastSession — reaches "live", since
+    that column alone is what routers/events.py::watch_event gates the viewer's stream token
+    on. A green broadcast.update with a stale Event.status is the exact failure this pins.
+    """
+    client = TestClient(main_module.app)
+    with client.websocket_connect(_url(host_event["event_id"], host_event["host_token"])) as ws:
+        ws.receive_json()
+        ws.send_json({"action": "broadcast.golive", "payload": {}})
+        assert _drain_for(ws, "broadcast", "broadcast.update") is not None
+
+    state = _db_state(host_event["event_id"])
+    assert state["event_status"] == "live", \
+        "Event.status did not reach live — viewers would be refused a stream token"
+    assert state["open_sessions"] == 1
 
 
 if __name__ == "__main__":

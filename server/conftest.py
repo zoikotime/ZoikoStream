@@ -243,3 +243,62 @@ def _no_real_outbound_email():
         yield sent
     finally:
         email_mod.httpx.post = original_post
+
+
+# ── the `w` fixture: let pytest run the 12 modules that ship their own runner ─────────────
+#
+# Twelve test modules (test_auth_session, test_commerce_comms, test_contributor_access,
+# test_event_assignment, test_event_lifecycle, test_event_operations, test_marketing,
+# test_privacy_comms, test_security_comms, test_status_publication, test_support_comms,
+# test_trust_center) were written as STANDALONE SCRIPTS. Each defines its own `World` class
+# and its own runner:
+#
+#     def run(fn):
+#         world = World()
+#         try:
+#             fn(world)
+#             ...
+#         finally:
+#             world.cleanup()
+#
+# and a `if __name__ == "__main__":` block that calls run() for every test in the module. Run
+# that way they pass — verified: `python test_event_assignment.py` reports 12 passed, 0 failed.
+#
+# But their test functions take a single positional parameter named `w`, and their filenames
+# match pytest's collection pattern. So pytest collects all 328 of them and reads `w` as a
+# FIXTURE REQUEST, for which nothing was ever registered — every one errored with
+# "fixture 'w' not found". A git-wide search (`git log --all -S`) confirms no commit ever
+# defined it: the fixture is not lost, it never existed, because under the design these
+# modules were written for it was never needed.
+#
+# This fixture supplies exactly what each module's own run() supplies — that module's own
+# `World`, constructed with no arguments, cleaned up in a finally — so nothing about any
+# assertion's meaning changes. It deliberately reads `World` off the REQUESTING MODULE rather
+# than defining a shared one here: every World is different (different orgs, users, events,
+# quotes, contacts), and those setup choices are precisely what the modules' assertions are
+# written against. A single shared World would be inventing expected values, which is the one
+# thing a repair here must not do.
+#
+# Scoped narrowly on purpose: it only activates for a test that ASKS for `w`. The three
+# modules that instantiate World inline (test_media_governance, test_media_ops,
+# test_tenant_access — `w = World()`, sometimes `World(is_test=True)`) never request the
+# fixture and are untouched. `test_watermark.py`'s `w` is unrelated — it is a module alias
+# (`from app.services import watermark as w`).
+#
+# The modules remain runnable as scripts. Note when doing so that a bare `python
+# test_*.py` does NOT pass through the DATABASE_URL guard at the top of this file — that
+# guard only runs under pytest — so a script invocation reads .env's DATABASE_URL directly.
+# Override DATABASE_URL to a test database before running one that way.
+@pytest.fixture
+def w(request):
+    World = getattr(request.module, "World", None)
+    if World is None:
+        raise pytest.UsageError(
+            f"{request.module.__name__} requests the `w` fixture but defines no `World` "
+            "class. `w` is that module's own World instance — see conftest.py."
+        )
+    world = World()
+    try:
+        yield world
+    finally:
+        world.cleanup()

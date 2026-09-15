@@ -1,4 +1,7 @@
+import time
+
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from app.db import engine, Base
 
@@ -657,6 +660,30 @@ _BROADCAST_SESSION_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS health_recovered_notified_at TIMESTAMPTZ",
 ]
 
+# At most one OPEN BroadcastSession per event.
+#
+# This index is what makes services/broadcast.py::_golive's concurrency guard real: two
+# near-simultaneous Go Live clicks can each see "no open session" and both INSERT one, and
+# that handler's `except IntegrityError` retry only resolves the race because the DATABASE
+# rejects the loser. Without the index there is no rejection, both inserts commit, and the
+# event is left with two open sessions — after which _current_session() picks one while the
+# analytics sampler and _retire_stale_session may act on the other.
+#
+# It previously existed ONLY in migrate_broadcast_session_unique.py, a one-off script run by
+# hand against DATABASE_URL. The live database has it (that script was run); every database
+# bootstrapped from this file alone silently did not — the same "the updater was run and the
+# schema still does not match" gap that left subscriptions without its Stripe columns. Folded
+# in here so the canonical updater produces a complete schema, matching how every other index
+# in this file is applied. The one-off script stays valid and is now a no-op (IF NOT EXISTS).
+#
+# Partial, not a plain UNIQUE(event_id): session rows persist after a broadcast ends
+# (ended_at is set, never deleted), so a full unique constraint would reject every second-ever
+# broadcast of the same event.
+_BROADCAST_SESSION_STATEMENTS = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_broadcast_sessions_open "
+    "ON broadcast_sessions (event_id) WHERE ended_at IS NULL",
+]
+
 _MED_RECORDING_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS hold_category VARCHAR(40)",
     "ADD COLUMN IF NOT EXISTS hold_reference VARCHAR(80)",
@@ -719,12 +746,97 @@ _MKT_RELEASE_COLUMNS = [
 ]
 
 
+# ── statement application ────────────────────────────────────────────────────────────────
+#
+# How long to wait for a lock before giving the serving app its table back, and how many
+# times to come back for it. A DDL statement here is metadata-only (Postgres 11+ ADD COLUMN,
+# widening a VARCHAR), so it needs the lock for milliseconds — it just has to be granted.
+_LOCK_TIMEOUT = "5s"
+_ATTEMPTS = 5
+_BACKOFF = 2.0
+
+
+class _Applier:
+    """Runs ONE statement per transaction, with a bounded lock wait and retry on contention.
+
+    ensure_schema() used to run every statement inside a single `engine.begin()`
+    transaction. Against a live database that is two separate faults, both of which were
+    measured against the shared Supabase instance this app uses:
+
+      * All-or-nothing. One failing statement rolled back every other statement in the run.
+        A single contended ALTER therefore left the ENTIRE schema unmigrated while the
+        command still looked like it had been run — which is precisely how that database
+        ended up missing 63 tables and 60 columns that this file has had statements for all
+        along, including the subscriptions Stripe columns and events.approved_notified_at.
+      * Lock duration. The transaction held ACCESS EXCLUSIVE on ~40 tables for the whole run
+        (3.5 minutes measured) rather than per-statement, so the serving app blocked on
+        every one of them until the last statement finished.
+
+    Per-statement commits are safe here because every statement in this file is already
+    independently idempotent (ADD COLUMN IF NOT EXISTS, CREATE INDEX IF NOT EXISTS, the
+    guarded _relax_not_null DO block, and backfills written as no-op-on-second-run UPDATEs).
+    That is the same property the docstring's "safe to re-run" promise rests on, so a run
+    that stops halfway leaves a valid partial state that the next run completes.
+    """
+
+    def __init__(self, eng):
+        self._engine = eng
+        self.applied = 0
+        self.failed: list[tuple[str, str]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            return False
+        print(f"  applied {self.applied} statement(s), {len(self.failed)} failed")
+        if self.failed:
+            # Loudly, and as a non-zero exit. A schema updater that reports success while
+            # leaving columns missing is the failure mode this whole class exists to end.
+            for stmt, err in self.failed:
+                print(f"  FAILED: {stmt}\n          -> {err}")
+            raise RuntimeError(
+                f"{len(self.failed)} schema statement(s) failed — schema is NOT fully applied. "
+                "Every statement is idempotent, so re-running is the correct next step."
+            )
+        return False
+
+    def execute(self, clause):
+        stmt = str(clause)
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                with self._engine.begin() as conn:
+                    # Bounded so a busy table costs this run five seconds, not an open-ended
+                    # wait that also queues every query arriving behind our lock request.
+                    conn.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'"))
+                    conn.execute(clause)
+                self.applied += 1
+                return
+            except OperationalError as exc:
+                # Lock contention (lock_timeout) and deadlock are both transient and both
+                # mean "the app was using this table" — not that the statement is wrong.
+                text_ = str(exc.orig).lower()
+                transient = "deadlock" in text_ or "lock timeout" in text_ or "canceling statement" in text_
+                if not transient or attempt == _ATTEMPTS:
+                    self.failed.append((_summarise(stmt), str(exc.orig).splitlines()[0][:200]))
+                    return
+                time.sleep(_BACKOFF * attempt)
+            except Exception as exc:  # noqa: BLE001 - report and continue; see class docstring
+                self.failed.append((_summarise(stmt), str(exc).splitlines()[0][:200]))
+                return
+
+
+def _summarise(stmt: str) -> str:
+    return " ".join(stmt.split())[:120]
+
+
 def ensure_schema():
     """Create any missing tables and add any missing columns. Idempotent — safe to re-run."""
     print("Creating tables...")
     Base.metadata.create_all(bind=engine)
     print("Ensuring organization columns...")
-    with engine.begin() as conn:
+    with _Applier(engine) as conn:
         for clause in _ORG_COLUMNS:
             conn.execute(text(f"ALTER TABLE organizations {clause}"))
         for stmt in _ORG_INDEXES:
@@ -838,6 +950,8 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE live_ingress_endpoints {clause}"))
         for clause in _BROADCAST_SESSION_COLUMNS:
             conn.execute(text(f"ALTER TABLE broadcast_sessions {clause}"))
+        for stmt in _BROADCAST_SESSION_STATEMENTS:
+            conn.execute(text(stmt))
         for clause in _MED_RECORDING_COLUMNS:
             conn.execute(text(f"ALTER TABLE live_recordings {clause}"))
         for clause in _MED_REPLAY_COLUMNS:

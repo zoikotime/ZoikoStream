@@ -78,7 +78,30 @@ class Settings(BaseSettings):
 
     # Redis — ponytail: blank = single-process fan-out only (fine for dev and one uvicorn
     # worker). Set it to share live-event traffic + presence across workers/hosts.
+    # Production is Upstash over TLS, so the URL scheme is rediss:// — see
+    # services/bus.py::redis() and the "Redis (Upstash)" section of SETUP_GUIDE.md.
     REDIS_URL: str = ""
+
+    # Redis pool + timeout budget. These exist as settings rather than literals because the
+    # only way to survive a provider connection-cap breach is to lower the cap per instance,
+    # and that has to be doable from the Cloud Run console without a redeploy.
+    #
+    # REDIS_MAX_CONNECTIONS is PER PROCESS. redis-py defaults it to 100, which on Cloud Run
+    # means (max instances x 100) sockets against a provider that caps concurrent
+    # connections per plan — the arithmetic nobody does until connects start timing out.
+    # 24 x 100 instances still fits inside Upstash's 1000-connection pay-as-you-go cap with
+    # room for the rate limiter's own client (services/api_usage.py) on every instance.
+    REDIS_MAX_CONNECTIONS: int = 24
+    # Connect budget. redis-py's own default is 5s; a TLS handshake to Upstash from
+    # europe-west1 is tens of milliseconds when the instance actually has CPU, so 5s is not
+    # generosity, it is 5s of a ticker doing nothing before it learns it failed.
+    REDIS_CONNECT_TIMEOUT: float = 3.0
+    REDIS_SOCKET_TIMEOUT: float = 3.0
+    # Bounded retry INSIDE redis-py, on top of the caller's own handling. Three tries with
+    # exponential backoff covers a single dropped socket; it deliberately does not cover a
+    # provider outage, because retrying into one is how a client turns an outage into a
+    # retry storm that prolongs it.
+    REDIS_RETRIES: int = 3
 
     # GCS — recording storage. Blank = egress has no destination, so LiveKit Cloud rejects
     # the request outright (services/livekit.py surfaces that as an "unenforced" recording

@@ -84,13 +84,15 @@ def test_overview_only_reports_the_callers_org():
         ua, ub = _user(db, a), _user(db, b)
         ea, eb = _event(db, a, ua), _event(db, b, ub)
         _session(db, a, ea, status="live", started_at=NOW - timedelta(hours=1))
-        # B's three live sessions are on three DIFFERENT events, because
-        # uq_broadcast_sessions_open (migrate_broadcast_session_unique.py) permits at most
-        # one session per event with ended_at IS NULL. Three open ones on a single event is
-        # a state production cannot hold, so building it here was testing an impossibility —
-        # and it raised UniqueViolation the moment CI's schema gained the index. Three live
-        # events in one organization is the real shape, and the count under test is
-        # unchanged.
+        # B's three live sessions are on three DIFFERENT events. `uq_broadcast_sessions_open`
+        # (create_tables.py for a fresh schema, migrate_broadcast_session_unique.py for an
+        # existing one) permits at most one session per event with ended_at IS NULL — the
+        # invariant services/broadcast.py::_golive's IntegrityError retry depends on — so
+        # three OPEN sessions stacked on a single event is state the application cannot
+        # produce. Stacking them here only ever worked against a database missing that index,
+        # and raised UniqueViolation the moment CI's schema gained it. Three concurrent live
+        # events is what "tenant B has 3 live sessions" actually looks like, and the count
+        # and isolation assertions below are unchanged.
         for _ in range(3):
             _session(db, b, _event(db, b, ub), status="live",
                      started_at=NOW - timedelta(hours=1))

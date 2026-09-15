@@ -124,6 +124,13 @@ async def lifespan(_: FastAPI):
         log.warning("Live publishing is unaffected by this — hosts can still go live and "
                     "viewers can still watch. Only recording uploads are impacted.")
 
+    # One PING at boot, per process. The point is that a Cloud Run revision deployed with a
+    # stale, deleted or wrong-scheme REDIS_URL says so in its OWN startup logs, instead of
+    # being discovered ~15s later as a `Timeout connecting to server` traceback out of the
+    # analytics sampler. Never fatal and never blocking: bus.ping() swallows its own
+    # failures, and a degraded bus is a degraded feature set, not a dead API.
+    log.info("live bus startup check redis_status=%s", await bus.ping())
+
     supervisor = asyncio.create_task(_ticker_supervisor())
     try:
         yield
@@ -372,7 +379,31 @@ def db_unavailable(request: Request, exc: OperationalError):
 
 @app.get("/health")
 def health():
+    """Liveness. Deliberately checks NOTHING external — not the database and not Redis.
+
+    A probe that fails when a dependency is unreachable is a probe that tells the platform
+    to kill and restart every instance during someone else's outage, which is the opposite
+    of what should happen: this API serves most of its surface perfectly well with Redis
+    down (see /health/redis). Dependency state is reported there, separately, so that a
+    reader can distinguish "this container is broken" from "this container is fine and
+    Redis is not".
+    """
     return {"status": "ok"}
+
+
+@app.get("/health/redis")
+async def health_redis():
+    """Redis reachability, as one word from a fixed vocabulary:
+    available | timeout | unavailable | disabled.
+
+    Safe to expose: it carries no hostname, port, username, password, provider name or
+    topology — only whether a PING came back. "disabled" means REDIS_URL is unset, which is
+    a valid single-instance configuration and not a fault, so this returns 200 in every
+    case; the caller reads the field, not the status code. Separate from /health on purpose
+    (see above) and not called by the container probe, so a provider outage costs one
+    request's connect budget rather than the instance's life.
+    """
+    return {"redis_status": await bus.ping()}
 
 
 # Single-container deploy (see Dockerfile): the built SPA is served by this process, so the
