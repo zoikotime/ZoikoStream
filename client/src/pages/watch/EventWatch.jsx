@@ -542,6 +542,18 @@ export default function EventWatch() {
   // Which event we have already discarded a rejected credential for, so the check above
   // cannot loop.
   const [clearedFor, setClearedFor] = useState(null);
+  // participant.state is the existing action for a client reporting its OWN media state
+  // (services/moderation._participant_state), scoped server-side to ctx.identity — so this
+  // can only ever describe this viewer, never anyone else. It had no sender at all until
+  // now, which is why a speaker's self-mute never reached the host.
+  //
+  // useCallback, not an inline arrow: the hook keeps it in a dependency array, and a fresh
+  // function every render would re-run the demote effect that depends on it.
+  const reportMuted = useCallback(
+    (muted) => sendPanel("participant.state", { muted }),
+    [sendPanel]
+  );
+
   const [showLeaveFeedback, setShowLeaveFeedback] = useState(false);
   const handleLeaveEvent = useCallback(() => {
     setShowLeaveFeedback(true);
@@ -743,6 +755,12 @@ export default function EventWatch() {
                 watch={watch}
                 onStage={isOnStage}
                 unmuteRequest={panel.unmuteRequest}
+                // participant.state is the existing action for a client reporting its OWN
+                // media state (services/moderation._participant_state), scoped server-side
+                // to ctx.identity — so this can only ever describe this viewer, never
+                // anyone else. It had no sender until now, which is why a speaker's
+                // self-mute never reached the host.
+                onMuteChange={reportMuted}
                 onAnswerUnmute={() =>
                   dispatchPanel({ channel: "session", type: "unmute.answered", data: {} })
                 }

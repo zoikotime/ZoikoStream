@@ -61,7 +61,8 @@ const fmtTime = (secs) => {
 };
 
 export default function VideoPlayer({ event, viewers, watch, onStage = false,
-                                     unmuteRequest = null, onAnswerUnmute, children }) {
+                                     unmuteRequest = null, onAnswerUnmute, onMuteChange,
+                                     children }) {
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
   // The TOKEN is the gate, not a status string. GET /events/:id/watch only issues
@@ -90,6 +91,9 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
     // from the viewer's own presence record (participants[you.identity]). The hook does
     // the actual mic capture + publish; this component only needs to show the control.
     canPublish: canStream && onStage,
+    // Reports this speaker's OWN mute state to the server so the host renders presence
+    // rather than a guess. The host console never writes this for somebody else.
+    onMuteChange,
   });
 
   const replayRef = useRef(null);

@@ -16,6 +16,7 @@ pooler: a socket open for two hours must not pin a pooled connection for two hou
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 import uuid
@@ -1211,6 +1212,17 @@ async def _participant_action(ctx, payload, op: str):
     identity = str(payload.get("identity") or "")
     if not identity:
         return []
+
+    # The target must actually be in THIS event. `identity` is a free-form string from the
+    # console, and presence_upsert below is an UPSERT — so a typo (or a copied identity from
+    # another event) used to mint a brand-new roster row for somebody who was never here,
+    # which then sat in every console's participant list as a ghost.
+    #
+    # This is not the cross-event boundary — that is already held by ctx.room/ctx.event_id
+    # being derived from the caller's own socket, so a LiveKit call for a foreign identity
+    # simply fails. This is about not inventing local state for a stranger.
+    if not any(r.get("identity") == identity for r in await bus.presence_all(ctx.event_id)):
+        return "That participant is not in this event"
     now = datetime.now(timezone.utc)
     patch: dict = {}
     enforced = True
@@ -1232,6 +1244,30 @@ async def _participant_action(ctx, payload, op: str):
 
         patch = {"muted": muted}
         enforced = outcome == livekit.MUTE_OK
+
+        # Webhook staleness, caught with information we already have.
+        #
+        # `publishing` is written ONLY by the track_published/track_unpublished webhooks
+        # (routers/live.py). If LiveKit cannot reach us — misconfigured URL, a dropped
+        # delivery, local dev with no public callback — audio flows while the console insists
+        # "Publishing media: No", and there is no other producer to correct it.
+        #
+        # This is not a guess and not a frontend workaround: MUTE_OK means LiveKit just told
+        # us, in this request, that it muted at least one real published track. Presence
+        # saying otherwise is therefore demonstrably stale, and correcting it here is the
+        # reconciliation the webhook failed to deliver. Logged as well, because a silent
+        # correction would hide a broken webhook rather than surface it.
+        if outcome == livekit.MUTE_OK:
+            current = next((r for r in await bus.presence_all(ctx.event_id)
+                            if r.get("identity") == identity), None)
+            if current is not None and not current.get("publishing"):
+                logging.getLogger(__name__).warning(
+                    "presence.publishing was stale for %s in event %s - LiveKit reports a "
+                    "live track. Check that track_published webhooks are reaching "
+                    "/api/live/webhooks/livekit.", identity, ctx.event_id,
+                )
+                patch["publishing"] = True
+
         text = "{name} was " + ("muted" if muted else "unmuted")
     elif op == "timeout":
         minutes = max(1, min(int(payload.get("minutes") or 5), 120))

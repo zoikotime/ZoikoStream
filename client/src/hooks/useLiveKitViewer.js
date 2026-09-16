@@ -78,7 +78,8 @@ const logSubscription = (label, room, extra) => {
   }
 };
 
-export default function useLiveKitViewer({ enabled, url, token, canPublish = false }) {
+export default function useLiveKitViewer({ enabled, url, token, canPublish = false,
+                                          onMuteChange }) {
   const roomRef = useRef(null);
 
   // A callback ref that ALSO exposes `.current`, so consumers can keep doing both
@@ -362,6 +363,7 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       setMicLive(true);
       setMicOn(true);
       setMicError(null);
+      onMuteChange?.(false);   // publishing begins unmuted; the host should see that
       return true;
     } catch (e) {
       // A denied prompt is a normal, recoverable outcome rather than a connection error, so
@@ -373,7 +375,7 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
         : (e?.message || "Couldn't access your microphone"));
       return false;
     }
-  }, [canPublish, connected]);
+  }, [canPublish, connected, onMuteChange]);
 
   // Losing the right to publish DOES stop publishing, automatically and without asking.
   // Consent governs turning a microphone on, never leaving it on after the grant is gone.
@@ -388,17 +390,33 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
     setMicLive(false);
     setMicOn(false);
     setMicError(null);
-  }, [canPublish, connected]);
+    onMuteChange?.(true);   // no track any more — not "unmuted"
+  }, [canPublish, connected, onMuteChange]);
 
-  // Mute/unmute without a full unpublish — cheaper, and mirrors the host console's own
-  // mic toggle (useMediaPreview's `t.enabled = false`). Only meaningful while actually
-  // publishing (canPublish + a live mic track); a no-op otherwise.
-  const toggleMic = useCallback(() => {
-    const track = micStreamRef.current?.getAudioTracks()[0];
+  // Mute/unmute the PUBLISHED track, through LiveKit.
+  //
+  // This used to set `enabled = false` on the raw MediaStreamTrack. That silences the audio
+  // locally and nothing else: LiveKit never learns, so it emits no mute event, the track
+  // stays published and unmuted as far as the room is concerned, and the host console went
+  // on showing a live, unmuted speaker who was in fact silent. LocalAudioTrack.mute() is the
+  // supported call (livekit-client 2.x) and it signals — which is the whole point.
+  //
+  // The result is then REPORTED to the server (participant.state) rather than assumed by the
+  // host: presence is what the host renders, and nothing else may write it.
+  const toggleMic = useCallback(async () => {
+    const track = micPubRef.current?.track;
     if (!track) return;
-    track.enabled = !track.enabled;
-    setMicOn(track.enabled);
-  }, []);
+    const next = !micOn;
+    try {
+      if (next) await track.unmute();
+      else await track.mute();
+    } catch (e) {
+      setMicError(e?.message || "Couldn't change your microphone state");
+      return;   // state unchanged, and nothing is reported — the host sees the truth
+    }
+    setMicOn(next);
+    onMuteChange?.(!next);
+  }, [micOn, onMuteChange]);
 
   return {
     mediaRef, connected, reconnecting, hasVideo, hasAudio, error,

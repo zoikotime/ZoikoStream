@@ -25,10 +25,24 @@ import {
 const roleOf = (p) => p.role || "viewer";
 const QUALITY_RANK = { poor: 0, lost: 1, good: 2, excellent: 3 };
 
+// ── THE "SPEAKING" INDICATOR WAS REMOVED ────────────────────────────────────────────────
+// `presence.speaking` is initialised False and written by exactly one thing —
+// services/moderation._participant_state — which no client ever called. So the ring, the
+// badge, the Status line and the filter below could never be anything but "not speaking",
+// and a host reading "Listening" learned nothing about whether that person was talking.
+//
+// Deliberately NOT faked from `publishing`: a published microphone is somebody who CAN be
+// heard, not somebody who is currently talking, and conflating the two is exactly what this
+// audit asked not to do.
+//
+// Wiring it for real is possible and is the follow-up: livekit-client raises
+// RoomEvent.ActiveSpeakersChanged, so a speaker's own client could report it through the
+// participant.state action the self-mute fix now uses. It is left out here because it means
+// a socket message per speech burst per speaker, which is a traffic decision rather than a
+// bug fix.
 const MATCHES = {
   all: () => true,
   hand: (p) => p.hand,
-  speaking: (p) => p.speaking,
   muted: (p) => p.muted,
   stage: (p) => p.on_stage || ["host", "speaker"].includes(roleOf(p)),
 };
@@ -110,7 +124,9 @@ function ProfileDrawer({ p, open, onClose, canModerate, canHost, send }) {
       </div>
 
       <div className="mt-5">
-        <Row label="Status" value={p.speaking ? "Speaking" : p.muted ? "Muted" : "Listening"} />
+        {/* Muted vs not is real — presence.muted is written by the host's own mute and,
+            since the self-mute fix, by the speaker reporting their own state. */}
+        <Row label="Status" value={p.muted ? "Muted" : "Unmuted"} />
         <Row label="Network quality" value={<span className="inline-flex items-center gap-2"><QualityDot quality={p.quality} />{q.label}</span>} />
         <Row label="Publishing media" value={p.publishing ? "Yes" : "No"} />
         <Row label="On stage" value={onStage ? "Yes" : "No"} />
@@ -285,11 +301,6 @@ export default function ParticipantsPanel({ participants, canModerate, canHost, 
                   <span className={cx("grid h-8 w-8 place-items-center rounded-full text-[11px] font-semibold", ACCENT[accentFor(p.identity)].chip)}>
                     {initials(p.name)}
                   </span>
-                  {/* Speaking ring — the fastest read in a long roster. Green, not the
-                      remapped emerald, so "this person is talking" reads as a live state. */}
-                  {p.speaking && (
-                    <span className="absolute inset-0 rounded-full ring-2 ring-green-500 motion-safe:animate-pulse" aria-hidden="true" />
-                  )}
                 </span>
 
                 <button
@@ -327,7 +338,7 @@ export default function ParticipantsPanel({ participants, canModerate, canHost, 
                   <Badge tone={ROLE_TONE[role]} size="sm">{role}</Badge>
                 </span>
                 {p.muted && <Badge tone="danger" size="sm">Muted</Badge>}
-                {!p.muted && p.speaking && <Badge tone="success" size="sm">Speaking</Badge>}
+                {p.publishing && !p.muted && <Badge tone="success" size="sm">Live mic</Badge>}
 
                 {canModerate && (
                   <div className="flex shrink-0 items-center gap-0.5">

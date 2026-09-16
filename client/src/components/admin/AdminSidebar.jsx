@@ -4,7 +4,7 @@ import toast from "react-hot-toast";
 import {
   FiX, FiActivity, FiCheckSquare, FiGrid, FiFilm, FiShield, FiUser, FiCode,
   FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget, FiDollarSign,
-  FiTrendingUp, FiFlag, FiPackage, FiUsers, FiServer,
+  FiTrendingUp, FiFlag, FiPackage, FiUsers, FiServer, FiLock,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
@@ -18,6 +18,14 @@ import Logo from "../../ui/Logo";
 //   PLATFORM — the surfaces and controls underneath all of it
 // `badge` names a counter on /admin/console-state; only non-zero counts render, so a quiet
 // platform shows a quiet sidebar.
+// Active row treatment, copied deliberately from the org console's rail
+// (components/Dashboard/Sidebar.jsx) so the two consoles read as one product. NOT
+// CONSOLE.navOn: that shared token is the filled violet→indigo gradient and is still used
+// by PlaybackAccess's segmented control, so changing it there would repaint an unrelated
+// screen. The org rail defines its own for exactly the same reason.
+const NAV_ON = "bg-violet-50 text-violet-700 dark:bg-violet-500/[0.16] dark:text-violet-200";
+const NAV_ICON_ON = "text-violet-600 dark:text-violet-300";
+
 const GROUPS = [
   {
     label: "Operate",
@@ -73,41 +81,49 @@ function Elevation({ elevation, seconds, onEnd, onStart, busy, unknown }) {
   // we can't reach.
   if (unknown) {
     return (
-      <div className={cx("m-3 rounded-lg border border-dashed px-3 py-2.5", "border-slate-300 dark:border-white/15")}>
-        <p className={cx(type.caption, "font-semibold", CONSOLE.faint)}>Access state unknown</p>
-        <p className={cx("mt-0.5 text-[11px]", CONSOLE.faint)}>Platform API unreachable</p>
+      <div className="flex items-center gap-2 px-6 py-2">
+        <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
+        <p className={cx("truncate text-[11px]", CONSOLE.faint)}>
+          Access state unknown · API unreachable
+        </p>
       </div>
     );
   }
   if (!elevation) {
     return (
+      // Same action, same endpoint — a compact row instead of a dashed card, so the rail
+      // keeps the org console's uncluttered look without losing the one control that turns
+      // read-only standing access into the ability to act.
       <button
         onClick={onStart}
         disabled={busy}
+        title="Standing access — request elevation to act"
         className={cx(
-          "m-3 rounded-lg border border-dashed px-3 py-2.5 text-left disabled:opacity-60",
+          "mx-3 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg px-3 py-2 text-left disabled:opacity-60",
           "transition-colors duration-150 motion-reduce:transition-none",
           focusRing,
-          "border-slate-300 hover:border-violet-400 hover:bg-violet-50",
-          "dark:border-white/15 dark:hover:border-violet-500/60 dark:hover:bg-white/[0.08]"
+          "hover:bg-slate-100 dark:hover:bg-white/[0.08]"
         )}
       >
-        <p className={cx(type.caption, "font-semibold", CONSOLE.body)}>Standing access</p>
-        <p className={cx("mt-0.5 text-[11px]", CONSOLE.faint)}>Request elevation to act</p>
+        <FiLock className={cx("shrink-0 text-[15px]", CONSOLE.faint)} aria-hidden="true" />
+        <span className={cx("truncate text-[12px] font-medium", CONSOLE.body)}>Standing access</span>
+        <span className={cx("ml-auto shrink-0 text-[11px]", CONSOLE.faint)}>Elevate</span>
       </button>
     );
   }
   return (
-    <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 dark:border-amber-500/30 dark:bg-amber-500/[0.08]">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-[12px] font-semibold text-amber-800 dark:text-amber-300">
+    // Elevated is the one state that SHOULD be loud: it means destructive actions are
+    // currently possible. Tightened, not muted.
+    <div className="mx-3 rounded-lg bg-amber-50 px-3 py-2 dark:bg-amber-500/[0.10]">
+      <div className="flex items-center gap-2">
+        <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />
+        <p className="min-w-0 flex-1 truncate text-[12px] font-semibold text-amber-800 dark:text-amber-300">
           Elevated · {elevation.scope}
         </p>
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />
+        <p className={cx(type.mono, "shrink-0 text-[12px] text-amber-900 dark:text-amber-200")}>
+          {mmss(seconds)}
+        </p>
       </div>
-      <p className={cx("mt-1", type.mono, "text-[13px] text-amber-900 dark:text-amber-200")}>
-        {mmss(seconds)} remaining
-      </p>
       <div className="mt-1.5 flex items-center gap-3 text-[11px]">
         <button
           onClick={() => toast(elevation.scopes?.length ? elevation.scopes.join(", ") : elevation.scope)}
@@ -172,9 +188,11 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
         {/* Brand. Kept identical to the org console's rail (components/Dashboard/Sidebar) so
             the two consoles read as one product — see the note there for why the wordmark is
             centred and why the close button is positioned rather than a flex sibling. */}
-        <div className="relative flex shrink-0 flex-col items-center px-6 pb-4 pt-5">
+        <div className="relative flex shrink-0 flex-col items-center px-6 pb-3 pt-5">
           <Logo height="h-10" />
-          <p className={cx("mt-2 text-center text-[10px] font-semibold uppercase tracking-[0.14em]", CONSOLE.faint)}>
+          {/* Kept, because an operator should be able to tell which console they are in at a
+              glance — but demoted to a caption so it never outweighs the navigation. */}
+          <p className={cx("mt-1.5 text-center text-[9px] font-medium uppercase tracking-[0.12em]", CONSOLE.faint)}>
             Super Admin Console
           </p>
           <button
@@ -187,10 +205,16 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
         </div>
 
         {/* Grouped nav */}
-        <nav className="zk-scroll-thin flex-1 space-y-4 overflow-y-auto px-3 pb-4">
-          {GROUPS.map((group) => (
-            <div key={group.label} className="space-y-px">
-              <p className={cx("px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em]", CONSOLE.faint)}>
+        <nav className="zk-scroll-thin mt-1 flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-3 pb-4">
+          {GROUPS.map((group, gi) => (
+            <div key={group.label} className="space-y-1">
+              {/* A hairline above each group after the first, as the org rail does, so the
+                  three tiers separate without three more labels competing with the nav. The
+                  heading stays but is deliberately quieter than any row beneath it. */}
+              {gi > 0 && (
+                <div aria-hidden="true" className={cx("mx-2 mb-2 border-t", CONSOLE.divider)} />
+              )}
+              <p className={cx("px-3 pb-0.5 text-[10px] font-medium uppercase tracking-[0.1em]", CONSOLE.faint)}>
                 {group.label}
               </p>
               {group.items.map(({ to, label, icon: Icon, end, badge }) => {
@@ -203,28 +227,19 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
                     onClick={onClose}
                     className={({ isActive }) =>
                       cx(
-                        "group relative flex items-center gap-2.5 rounded-lg px-3 py-[7px] text-[13px] font-medium",
+                        // Same geometry as the org rail: ~44px rows, read as a product
+                        // menu rather than a dense tool palette.
+                        "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-[14px] font-medium",
                         "transition-colors duration-150 motion-reduce:transition-none",
                         focusRing,
-                        isActive ? CONSOLE.navOn : CONSOLE.navOff
+                        isActive ? NAV_ON : CONSOLE.navOff
                       )
                     }
                   >
                     {({ isActive }) => (
                       <>
-                        {/* Left rail marker: solid violet when active, a muted stub on hover
-                            so the row telegraphs that it is a target before you click. */}
-                        <span
-                          aria-hidden="true"
-                          className={cx(
-                            "absolute -left-3 top-1/2 w-[3px] -translate-y-1/2 rounded-r transition-all duration-150 motion-reduce:transition-none",
-                            isActive
-                              ? "h-5 bg-violet-500"
-                              : "h-2.5 bg-transparent group-hover:bg-slate-300 dark:group-hover:bg-neutral-600"
-                          )}
-                        />
                         <Icon
-                          className={cx("shrink-0 text-[15px]", isActive ? CONSOLE.navIconOn : CONSOLE.navIconOff)}
+                          className={cx("shrink-0 text-[17px]", isActive ? NAV_ICON_ON : CONSOLE.navIconOff)}
                           aria-hidden="true"
                         />
                         <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -270,7 +285,7 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
               )
             }
           />
-          <div className="flex items-center gap-2.5 px-6 pb-4">
+          <div className={cx("mt-1 flex items-center gap-2.5 border-t px-6 py-3.5", CONSOLE.divider)}>
             <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white", brand.chip)}>
               {initials(person.name)}
             </span>
