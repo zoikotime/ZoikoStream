@@ -529,3 +529,98 @@ repository that finds the provider can assume it.
 After deploying, the job polls `GET /health` (a real endpoint — `app/main.py` returns
 `{"status": "ok"}`) on the new revision's URL, retrying while it starts. A revision that never
 answers **fails the job** rather than reporting a green deploy.
+
+---
+
+## Redis (Upstash) and Cloud Run
+
+The live bus, presence, live session state, bans, the reaction tally and the durable
+rate-limit counters all sit behind one setting: `REDIS_URL`. Production uses **Upstash Redis
+over TLS**, reached over the public internet — not Memorystore, so there is **no VPC
+connector, no Serverless VPC Access and no Direct VPC egress** in this deployment, and none
+is needed. Adding one would not fix a Redis timeout here; it would add a hop.
+
+### The one setting
+
+```
+REDIS_URL=rediss://default:<password>@<endpoint>.upstash.io:6379
+```
+
+* **`rediss://`, not `redis://`.** Upstash requires TLS. A plain `redis://` URL does not
+  downgrade to cleartext — it fails to connect, and the first symptom is
+  `redis.exceptions.TimeoutError: Timeout connecting to server` out of whichever caller
+  touched Redis first (usually `services/broadcast.py::run_sampler`, about 15s into the
+  first broadcast).
+* **The password is inline**, so the whole value is a secret. Set it as a Cloud Run secret
+  or environment variable, never in a committed file, and never log it — `services/bus.py`
+  reports Redis state as a status word (`available` / `timeout` / `unavailable` /
+  `disabled`) precisely so that diagnosing it never requires printing the URL.
+* **Blank is legal** and means single-process, in-memory fan-out. `config.validate` warns
+  about it in production because presence and broadcast state then stop being shared between
+  instances — correct only for a genuinely single-instance deployment.
+
+### Checking a deployed revision
+
+```bash
+# Which Redis a revision actually has (prints the value — run it somewhere private):
+gcloud run services describe zoikostream-git --region europe-west1 \
+  --format='value(spec.template.spec.containers[0].env)'
+
+# Reachability from the running service, with no credential in the output:
+curl -s https://<service-url>/health/redis        # {"redis_status":"available"}
+```
+
+`/health/redis` is a diagnostic, **not** the container probe. `/health` deliberately checks
+nothing external: a probe that fails during a provider outage tells Cloud Run to restart
+every instance in the middle of it. Each process also logs
+`live bus startup check redis_status=…` once at boot, so a revision deployed with a stale,
+deleted or wrong-scheme endpoint says so in its own startup logs.
+
+### The connection-count arithmetic
+
+The container runs **one uvicorn worker** (see the Dockerfile — scale with instances, not
+workers), and each process holds **two** pools: the async bus client and the rate limiter's
+synchronous one in `services/api_usage.py`. The ceiling that matters is therefore
+
+```
+Cloud Run max instances  ×  (REDIS_MAX_CONNECTIONS + REDIS_MAX_CONNECTIONS/4)
+```
+
+against Upstash's **per-plan concurrent-connection cap**. Breaching it does not produce a
+legible "too many clients" — new connects simply stop completing, which arrives as
+`Timeout connecting to server`. redis-py's own default is 100 per pool, which is why
+`REDIS_MAX_CONNECTIONS` is pinned to 24 in `app/config.py`: lower it further before raising
+`--max-instances`, and do the multiplication first.
+
+### CPU allocation — the trap specific to background tickers
+
+`app/main.py` runs thirteen background tickers (analytics sampler, schedulers, sweepers) on
+the elected leader instance. By default Cloud Run allocates CPU **only during request
+processing**, so between requests those tickers are throttled to near-zero CPU. A TLS
+handshake to Upstash needs tens of milliseconds of real CPU; under throttling it can exceed
+the connect budget on wall-clock alone, and the sampler reports a timeout against a Redis
+that is perfectly healthy. Any service that runs work outside a request needs:
+
+```bash
+gcloud run services update zoikostream-git --region europe-west1 --no-cpu-throttling
+```
+
+This is also why `--min-instances=1` matters: at zero, the leader is torn down whenever
+traffic stops, and every ticker restarts cold (leader election recovers, but each restart
+pays a fresh round of connects).
+
+### What a Redis outage actually costs
+
+Redis-backed, and therefore degraded while it is unreachable: presence and the participant
+list, the live session state (chat/Q&A settings, countdown, peak), bans, the reaction tally
+used by engagement analytics, the analytics snapshot for that tick, cross-instance fan-out
+of every realtime channel (chat, Q&A, polls, hand-raise, announcements, activity, reactions
+— a single-instance deployment still fans these out in-process), and the shared rate-limit
+counter, which falls back to per-process counting and retries once a minute.
+
+**Not** Redis-backed: LiveKit audio and video. Media flows over LiveKit's own SFU and never
+consults Redis, so a Redis outage does not stop a broadcast — and the sampler must not claim
+it did. `health_of` reports `unknown` ("Live media state unavailable") rather than `down`
+when the signals it judges from could not be read, and reaches no verdict in either
+direction: it neither marks an event degraded nor marks one recovered. Auth, events, billing
+and every other Postgres-backed surface are unaffected.

@@ -69,7 +69,11 @@ test.describe.serial("Live streaming hardening", () => {
     captureConsole(hostPage, log.host);
     await loginAs(hostPage, fixtures.host.token);
     await hostPage.goto(`/host/dashboard?event=${fixtures.event_id}`);
-    await hostPage.getByRole("button", { name: "Start" }).click();
+    // dialog-scoped + exact at all three "Start" call sites in this file: a bare
+    // { name: "Start" } is a SUBSTRING match and also matched StudioStage's "Start preview"
+    // button sitting behind the modal overlay. Full explanation at the same call in
+    // live-streaming.spec.js.
+    await hostPage.getByRole("dialog").getByRole("button", { name: "Start", exact: true }).click();
 
     await waitFor(async () => {
       const st = await mediaElementState(hostPage, "video").catch(() => null);
@@ -236,7 +240,7 @@ test.describe.serial("Live streaming hardening", () => {
     const host2 = await hostCtx.newPage();
     captureConsole(host2, log.host2);
     await host2.goto(`/host/dashboard?event=${fixtures.event_id}`);
-    await host2.getByRole("button", { name: "Start" }).click().catch(() => {});
+    await host2.getByRole("dialog").getByRole("button", { name: "Start", exact: true }).click().catch(() => {});
 
     const evicted = await waitFor(async () => {
       const hit = [...log.host, ...log.host2].some((l) => /DUPLICATE_IDENTITY/.test(l));
@@ -304,7 +308,7 @@ test.describe.serial("Live streaming hardening", () => {
     // re-armed exactly as a real operator would after reloading mid-broadcast. Without this
     // the host stays on "Preview is off" and stops publishing — which the backend correctly
     // notices, flipping the event to "At risk".
-    await hostPage.getByRole("button", { name: "Start" }).click().catch(async () => {
+    await hostPage.getByRole("dialog").getByRole("button", { name: "Start", exact: true }).click().catch(async () => {
       await hostPage.getByRole("button", { name: /start preview/i }).click().catch(() => {});
     });
     await waitFor(async () => {

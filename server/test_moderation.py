@@ -178,12 +178,17 @@ def test_socket_loop():
 
     originals = (live_router._user_from_token, live_router.mod.resolve_ctx, live_router.mod.snapshot)
     live_router._user_from_token = lambda token, db: (
-        # `org_id=None` is a real, supported value and not a shortcut: routers/live.py's
-        # organization gate reads `user.org_id` and skips the lookup when it is unset, and
-        # org_state.blocked_reason(None, path) resolves to "active" — so a signed-in caller
-        # whose organization is not restricted passes through, which is the case this test is
-        # about. Without the attribute the socket path raised AttributeError before reaching
-        # the loop at all.
+        # org_id is not decoration: routers/live.py's ZST-EC-001 ORG-010 gate reads
+        # `user.org_id` on every signed-in connection. The stub predated that gate and
+        # omitted the attribute, so the loop raised AttributeError the moment a good token
+        # got that far — masked until now by the stale bad-token assertion below failing
+        # first.
+        #
+        # `None` is a real, supported value here and not a shortcut: the gate skips the
+        # lookup when org_id is unset, and org_state.blocked_reason(None, path) resolves to
+        # "active" — so a signed-in caller whose organization is not restricted passes
+        # through, which is the case this test is about. Passing ctx.org_id instead would
+        # send db.get() after a random UUID and make this socket test depend on the DB.
         types.SimpleNamespace(id=user_id, email="ava@example.com", is_active=True,
                               role="org_admin", full_name="Ava Chen", org_id=None)
         if token == "good" else None
@@ -195,24 +200,24 @@ def test_socket_loop():
         client = TestClient(app)
         url = f"/api/live/events/{event_id}/ws"
 
-        # An invalid token is refused with a POLICY VIOLATION and never sees an envelope.
+        # An invalid token is refused before any envelope — but the handshake IS completed
+        # first, then closed with 1008. That is deliberate (routers/live.py's own comment):
+        # the client distinguishes "do not retry" from "retry later" purely by close code
+        # (hooks/useEventStream.js FATAL_CODES), and a pre-accept close is reported to the
+        # browser as CloseEvent.code 1006 — which defeats that suppression and makes a client
+        # retry a permanently-invalid token forever. So live.py accepts in order to be able
+        # to send a code at all, then closes immediately. See _accept()/_connect_failed().
         #
-        # The transport handshake does complete first, and that is deliberate: the client
-        # distinguishes "do not retry" from "retry later" purely by close code
-        # (hooks/useEventStream.js FATAL_CODES), and a rejected handshake gives the browser no
-        # code at all — so routers/live.py accepts in order to be able to send one, then
-        # closes immediately. See _accept()/_connect_failed() there.
-        #
-        # This asserts the two things that actually matter, rather than the handshake result:
-        # nothing is ever delivered on the socket, and the close code is the fatal one.
-        with client.websocket_connect(f"{url}?token=bad") as ws:
-            try:
-                leaked = ws.receive_json()
-            except WebSocketDisconnect as exc:
-                assert exc.code == status.WS_1008_POLICY_VIOLATION, (
-                    f"a bad token must be closed as a policy violation, got {exc.code}")
-            else:
-                raise AssertionError(f"a bad token must not be sent an envelope: {leaked!r}")
+        # This used to assert the pre-accept shape (connect must raise) and so failed once
+        # live.py adopted accept-then-close. Asserting the real contract is strictly
+        # stronger: it pins BOTH that no application data is delivered AND that the close
+        # carries the specific fatal code and reason the client relies on.
+        with client.websocket_connect(f"{url}?token=bad") as bad_ws:
+            frame = bad_ws.receive()
+            assert frame["type"] == "websocket.close", \
+                f"unauthenticated socket received application data: {frame}"
+            assert frame["code"] == status.WS_1008_POLICY_VIOLATION
+            assert frame["reason"] == "Invalid or expired session"
 
         with client.websocket_connect(f"{url}?token=good") as ws:
             first = ws.receive_json()
