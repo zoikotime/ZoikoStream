@@ -174,7 +174,7 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       await disposeRoom();
       if (!current()) return;
 
-      const room = new Room();
+      const room = new Room({ adaptiveStream: true, dynacast: true });
       roomRef.current = room;
 
       const onSubscribed = (track) => {
