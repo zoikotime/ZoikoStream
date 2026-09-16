@@ -16,3 +16,12 @@ httpx
 livekit-api
 google-cloud-storage
 stripe>=15.3,<16
+
+# IANA timezone database. This is the file the Dockerfile installs from ("COPY
+# requirements.txt" + pip install at the image root); server/requirements.txt is never
+# installed by the image, so declaring tzdata only there left the DEPLOYED container without
+# one. python:3.12-slim ships no system tz database, so zoneinfo.ZoneInfo("Asia/Kolkata")
+# raises ZoneInfoNotFoundError in production and services/org_comms.py falls back to UTC
+# ("has unusable timezone ...; rendering UTC") — customer email still sends, but every
+# stated time is in the wrong zone. Keep this in sync with server/requirements.txt.
+tzdata

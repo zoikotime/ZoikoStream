@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 import time
 
 from ..config import settings
@@ -82,9 +83,44 @@ def _key(event_id) -> str:
     return f"live:{eid(event_id)}"
 
 
+_transient: tuple[type[BaseException], ...] | None = None
+
+
+def transient_errors() -> tuple[type[BaseException], ...]:
+    """Exception types that mean "Redis is unreachable right now", as opposed to "the caller
+    asked for something impossible".
+
+    Exposed so callers can degrade on a connectivity fault WITHOUT importing redis
+    themselves — which matters because this module is deliberately usable with redis absent
+    or unconfigured, and because a bare `except Exception` around a Redis call would also
+    swallow the JSON and type errors that are real defects.
+
+    Empty when redis is not installed: with no client there is nothing to catch, and an empty
+    tuple in an `except` clause is legal and matches nothing.
+    """
+    global _transient
+    if _transient is None:
+        try:
+            from redis import exceptions as rexc
+        except ImportError:  # pragma: no cover — redis is in requirements.txt
+            _transient = ()
+        else:
+            # ConnectionError covers the reset/refused/DNS family; TimeoutError covers both
+            # "Timeout connecting to server" (the production error) and a timed-out command.
+            # BusyLoadingError is a provider restart, which is transient by definition.
+            _transient = (rexc.ConnectionError, rexc.TimeoutError, rexc.BusyLoadingError)
+    return _transient
+
+
 async def redis():
     """Lazy shared client, per event loop. None when REDIS_URL is unset — every caller
     degrades to in-process behaviour rather than failing.
+
+    ONE client, and therefore one connection pool, per process. Never build a second per
+    request or per event: on Cloud Run the ceiling that matters is
+    (instances x pools x max_connections) against the provider's per-plan concurrent-connection
+    cap, and blowing through it does not surface as a clean "too many clients" — new connects
+    simply stop completing, which arrives here as `TimeoutError: Timeout connecting to server`.
 
     Cached PER LOOP, not just once. A redis-asyncio pool binds each connection — and the
     futures its parser awaits — to the loop that created it, so handing one client to a
@@ -113,17 +149,72 @@ async def redis():
         _pump_ready.clear()
 
     if _redis is None:
-        from redis import asyncio as aioredis  # imported lazily: unused without REDIS_URL
+        # Lazily imported: unused without REDIS_URL. Nothing is awaited between the None
+        # check and the assignment, so no two coroutines can race into building two pools.
+        from redis import asyncio as aioredis
+        from redis.backoff import ExponentialBackoff
+        from redis.retry import Retry
 
         # Upstash (and most managed Redis) closes idle TCP connections; without
         # retry_on_timeout + a health check, the pool keeps handing out a dead socket
         # until it hard-fails (WinError 10054 / TimeoutError) instead of replacing it.
+        #
+        # The timeouts are explicit rather than left to redis-py's defaults so that the
+        # budget is visible and tunable per deployment: a background ticker on a
+        # CPU-throttled Cloud Run instance is the one caller most likely to blow a connect
+        # budget, and it is also the one whose failure must stay cheap.
         _redis = aioredis.from_url(
             settings.REDIS_URL, decode_responses=True,
+            max_connections=settings.REDIS_MAX_CONNECTIONS,
+            socket_connect_timeout=settings.REDIS_CONNECT_TIMEOUT,
+            socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
+            socket_keepalive=True,
             retry_on_timeout=True, health_check_interval=30,
+            # Bounded and backed off. The default retry policy is 10 attempts starting at
+            # 10ms, which against an unreachable provider is a hot loop per caller; three
+            # attempts over ~0.1s fixes a dropped socket and gives up on an outage.
+            retry=Retry(ExponentialBackoff(cap=0.5, base=0.05), settings.REDIS_RETRIES),
         )
         _redis_loop = loop
     return _redis
+
+
+# Reported by the health/readiness path. Deliberately a fixed vocabulary and nothing else:
+# no hostname, no port, no username, no password, no provider name, no topology. Which
+# Redis this is, and where, is not something an unauthenticated caller needs to learn from
+# a status string, and REDIS_URL carries the credential inline.
+REDIS_AVAILABLE = "available"
+REDIS_TIMEOUT = "timeout"
+REDIS_UNAVAILABLE = "unavailable"
+REDIS_DISABLED = "disabled"
+
+
+def status_of(exc: BaseException) -> str:
+    """Classify an already-caught connectivity fault into the vocabulary above, for
+    structured logs. Takes the exception rather than the URL precisely so that a caller
+    logging "why did Redis fail" cannot accidentally log WHERE Redis is."""
+    from redis import exceptions as rexc
+    return REDIS_TIMEOUT if isinstance(exc, rexc.TimeoutError) else REDIS_UNAVAILABLE
+
+
+async def ping() -> str:
+    """One PING against the shared pool. Returns one of the REDIS_* constants above.
+
+    Never raises: this is the diagnostic a readiness probe and the sampler's structured logs
+    call, and a health check that can itself fail is not a health check. "disabled" is not a
+    fault — it is a correctly-configured single-instance deployment (see config.validate).
+    """
+    r = await redis()
+    if r is None:
+        return REDIS_DISABLED
+    try:
+        await r.ping()
+    except transient_errors() as exc:
+        return status_of(exc)
+    except Exception:  # noqa: BLE001 — a probe reports, it does not propagate
+        log.exception("redis health probe failed for a reason that is not a connection fault")
+        return REDIS_UNAVAILABLE
+    return REDIS_AVAILABLE
 
 
 # ── publish / subscribe ───────────────────────────────────────────────────────
@@ -154,29 +245,73 @@ async def publish(event_id, channel: str, type_: str, data: dict | None = None) 
     return env
 
 
-async def _pump(event_id: str, ready: asyncio.Event) -> None:
-    """Relay one event's Redis channel into this process's queues.
+# Backoff for a pump that lost its subscription. Capped and jittered: during a provider
+# outage EVERY event's pump on EVERY instance reconnects at once, and an unjittered retry
+# turns that into a thundering herd against the endpoint that is already struggling.
+PUMP_RETRY_MIN = 1.0
+PUMP_RETRY_MAX = 30.0
+
+
+async def _pump(event_id: str, ready: asyncio.Event | None = None) -> None:
+    """Relay one event's Redis channel into this process's queues, resubscribing for as long
+    as anybody is listening.
 
     `ready` is set once the SUBSCRIBE has actually taken effect — not when this task is
-    created. Callers wait on it; see subscribe().
+    created. Callers wait on it; see subscribe(). It is optional so the pump can also be
+    driven directly (tests do), and it is CLEARED again whenever the subscription drops, so
+    that a subscriber arriving mid-outage waits out the resubscribe instead of being told a
+    dead pump is live.
+
+    The loop is the fix for a silent, permanent failure: a dropped connection used to raise
+    straight out of this task, and because `_pumps` still held the (now dead) task,
+    subscribe() saw `event_id in _pumps` and never started a replacement. One momentary
+    Redis blip therefore cost that event its cross-worker fan-out — chat, Q&A, polls,
+    reactions, presence, every channel — until the LAST local subscriber disconnected, with
+    nothing in the logs after the initial error and no way for a host to recover but a
+    reload. The task is cancelled by subscribe() when the last subscriber leaves, which is
+    what still terminates it.
     """
-    r = await redis()
-    pubsub = r.pubsub()
-    await pubsub.subscribe(_key(event_id))
-    ready.set()
+    delay = PUMP_RETRY_MIN
     try:
-        async for msg in pubsub.listen():
-            if msg.get("type") == "message":
+        while True:
+            try:
+                r = await redis()
+                pubsub = r.pubsub()
+                await pubsub.subscribe(_key(event_id))
+                delay = PUMP_RETRY_MIN  # a successful (re)subscribe resets the backoff
+                if ready is not None:
+                    ready.set()
                 try:
-                    _fanout(event_id, json.loads(msg["data"]))
-                except (ValueError, TypeError):
-                    log.warning("live bus: undecodable payload on %s", _key(event_id))
+                    async for msg in pubsub.listen():
+                        if msg.get("type") == "message":
+                            try:
+                                _fanout(event_id, json.loads(msg["data"]))
+                            except (ValueError, TypeError):
+                                log.warning("live bus: undecodable payload on %s", _key(event_id))
+                finally:
+                    if ready is not None:
+                        ready.clear()  # this subscription is no longer live
+                    with contextlib.suppress(Exception):
+                        await pubsub.unsubscribe(_key(event_id))
+                        await pubsub.aclose()
+            except asyncio.CancelledError:
+                raise  # the last subscriber left, or the process is shutting down
+            except transient_errors() as exc:
+                log.warning("live bus: pump for %s lost its connection (redis_status=%s); "
+                            "resubscribing in ~%.0fs", _key(event_id), status_of(exc), delay)
+            except Exception:  # noqa: BLE001 — see below
+                # Logged with its traceback, not swallowed: an unexpected fault here is a
+                # defect and has to be visible. It still retries rather than leaving the event
+                # silently unbridged, and the capped backoff keeps a persistent one from
+                # spinning.
+                log.exception("live bus: pump for %s failed unexpectedly; resubscribing in ~%.0fs",
+                              _key(event_id), delay)
+            await asyncio.sleep(delay + random.uniform(0, delay / 2))
+            delay = min(delay * 2, PUMP_RETRY_MAX)
     finally:
-        if _pump_ready.get(event_id) is ready:
+        # Only on the way out for good — the retry loop above never reaches here.
+        if ready is not None and _pump_ready.get(event_id) is ready:
             _pump_ready.pop(event_id, None)
-        with contextlib.suppress(Exception):
-            await pubsub.unsubscribe(_key(event_id))
-            await pubsub.aclose()
 
 
 @contextlib.asynccontextmanager
@@ -253,7 +388,11 @@ async def shutdown() -> None:
         if task.get_loop() is loop:
             task.cancel()
     _pumps.clear()
+    _pump_ready.clear()
 
+    # Clear the cache as well as closing it: a process that starts a new event loop
+    # afterwards (tests do exactly this) must build a fresh pool rather than reuse one whose
+    # connections are bound to the loop that just died.
     client, client_loop = _redis, _redis_loop
     _redis = None
     _redis_loop = None

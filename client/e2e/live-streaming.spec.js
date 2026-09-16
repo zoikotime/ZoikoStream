@@ -49,7 +49,22 @@ test.describe.serial("Live streaming E2E", () => {
     await loginAs(hostPage, fixtures.host.token);
     await hostPage.goto(`/host/dashboard?event=${fixtures.event_id}`);
 
-    await hostPage.getByRole("button", { name: "Start" }).click();
+    // Scoped to the dialog AND exact. `{ name: "Start" }` alone is a SUBSTRING match, so it
+    // also matched StudioStage.jsx's "Start preview" button (line ~391) — which is rendered
+    // BEHIND the "Start the meeting?" modal overlay (fixed inset-0 z-[60]). Playwright
+    // resolved that one and then retried the click for the full 180s test timeout, reporting
+    // "<div class='...border-t...'> from <div class='fixed inset-0 z-[60]'> subtree intercepts
+    // pointer events" — the modal's own footer, sitting over the button it had picked.
+    //
+    // It was INTERMITTENT (observed 2 pass / 2 fail) because "Start preview" only renders in
+    // StudioStage's preview-off branch: if the click landed while StudioStage was still in its
+    // `acquiring` state that button did not exist, leaving the dialog's "Start" as the only
+    // match and the test passed. Same reason helpers.js already documents `exact: true` for
+    // "Stop", and why the Camera/Stop locators in this file already use it.
+    //
+    // This is strictly stronger than the original, not a workaround: it names the one button
+    // the step actually means, so the test can no longer pass by clicking something else.
+    await hostPage.getByRole("dialog").getByRole("button", { name: "Start", exact: true }).click();
 
     // Real getUserMedia (fake device) must actually produce a MediaStream on the preview
     // <video> — this is real, physically verified, not blocked by the network limitation
@@ -75,6 +90,14 @@ test.describe.serial("Live streaming E2E", () => {
     }, { timeout: 15_000, message: "BroadcastSession to become live" });
 
     let db = dbState(fixtures.event_id);
+    // Event.status, not just the BroadcastSession. This is the column
+    // routers/events.py::watch_event gates `can_stream` on, so it is the one that decides
+    // whether a viewer is issued a LiveKit token at all — a live session with a stale
+    // Event.status is precisely the "host is live and every viewer is dark" desync that
+    // services/broadcast.py::_golive_gate now refuses. Asserting the session alone would
+    // not have caught it.
+    expect(db.event_status, "Event.status did not transition to live — viewers are refused a stream token").toBe("live");
+    expect(db.open_broadcast_sessions, "expected exactly one open BroadcastSession").toBe(1);
     expect(db.active_recordings, "recording started immediately on Go Live").toBe(0);
     await hostPage.waitForTimeout(15_000); // Test B: wait 15s, recording must remain OFF
     db = dbState(fixtures.event_id);

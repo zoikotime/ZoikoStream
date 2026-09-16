@@ -22,8 +22,15 @@ export const BROADCAST_LABEL = {
   ended: "Ended",
 };
 
-export const HEALTH_TONE = { ok: "success", warn: "warning", down: "danger" };
-export const HEALTH_LABEL = { ok: "Healthy", warn: "Degraded", down: "At risk" };
+// `unknown` is not a severity between warn and down — it is the absence of a reading.
+// services/broadcast.py::health_of returns it when the presence store or the producer's
+// publication report could not be READ (a Redis outage blinds both), and it exists so the
+// console never tells a host their stream is at risk on the strength of a telemetry
+// failure. Neutral tone for the same reason: nothing is known to be wrong.
+export const HEALTH_TONE = { ok: "success", warn: "warning", down: "danger", unknown: "neutral" };
+export const HEALTH_LABEL = {
+  ok: "Healthy", warn: "Degraded", down: "At risk", unknown: "Media state unknown",
+};
 
 // ── contributor backstage (see services/contributor.py's CONTRIBUTOR_STATES) ──────────
 export const CONTRIBUTOR_STATE_TONE = {

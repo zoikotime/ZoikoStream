@@ -33,7 +33,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..crud import commercial as commercial_crud
 from ..crud.admin import get_feature_flag_by_key
-from ..crud.event import is_memorial_category
+from ..crud.event import is_memorial_category, status_transition_error
 from ..models import (
     SUBSCRIPTION_ENTITLED_STATES,
     AnalyticsSnapshot,
@@ -442,6 +442,29 @@ def _golive_gate(db, ctx) -> str | None:
         return "Event not found"
     if ev.status in ("live", "degraded"):
         return None
+
+    # The event's own LIFECYCLE, checked against the same authority the HTTP PATCH route
+    # uses (crud.event.status_transition_error) rather than a second opinion — the readiness
+    # call below is a commercial question and answers a different one.
+    #
+    # THE BUG THIS CLOSES: work() below only writes `ev.status = "live"` when the current
+    # status is in its own whitelist (published/scheduled/armed/degraded). For any other
+    # state — draft, rehearsal, ready_to_arm — it silently SKIPPED that write while still
+    # creating the BroadcastSession, setting bus state to "live", and returning
+    # broadcast.update. So the host console showed Live, the producer genuinely published
+    # media into the LiveKit room, and Event.status never moved — which left
+    # routers/events.py's watch_event computing `can_stream` False and handing every viewer
+    # a null livekit_token. The result is exactly "the host is live and nobody can watch",
+    # invisible on both sides: no error, no log, no failed request.
+    #
+    # Refusing here converts that silent desync into the visible refusal the console already
+    # knows how to render (the host/broadcast.error envelope, useLiveEvent.js's goLiveError).
+    # It also makes work()'s whitelist total rather than partial: past this point the status
+    # is necessarily one it handles.
+    transition = status_transition_error(ev.status, "live", ev.title)
+    if transition:
+        return transition
+
     evaluation = commercial_crud.golive_readiness(db, ev)
     commercial_crud.audit_golive_decision(
         db, ev, evaluation, actor=db.get(User, ctx.user_id), target_state="live",
@@ -494,6 +517,19 @@ async def _golive(ctx, payload):
         if ev is not None and ev.status in ("published", "scheduled", "armed", "degraded"):
             ev.status = "live"
             ev.start_time = ev.start_time or now
+        elif ev is not None and ev.status != "live":
+            # Unreachable via the socket path: _golive_gate above now refuses every status
+            # this branch does not handle. Kept — and loud — because reaching it means the
+            # gate and this whitelist have drifted apart, and the consequence is the silent
+            # failure described in _golive_gate: a live-looking console whose viewers all get
+            # a null token. A warning here is what makes that diagnosable instead of a
+            # support ticket that says "the stream just doesn't work".
+            log.warning(
+                "event %s: go-live left Event.status=%r unchanged — viewers will NOT be "
+                "issued a stream token (watch_event requires live/degraded). _golive_gate "
+                "and _golive's status whitelist have diverged.",
+                ctx.event_id, ev.status,
+            )
         act = mod.record(db, ctx, "system", "Host started the stream", audit="live.broadcast.golive",
                          target_type="broadcast_session", target_id=session.id,
                          meta={"enforced_in_livekit": enforced})
@@ -1334,10 +1370,29 @@ def _record_media_health(ctx, health: dict) -> dict:
     return health
 
 
+# The health level used when the signals health is derived FROM could not be read at all.
+# Distinct from "down" on purpose, and the distinction is the whole point: "down" is a claim
+# about the broadcast ("nothing is being published"), while this is a claim about our own
+# telemetry ("we cannot see"). Redis holding presence and the producer's publication report
+# means a Redis outage blinds both — and answering "the media stopped" because the store we
+# keep the evidence in is unreachable is a fabrication, not a conservative default. The
+# client renders it through HEALTH_LABEL in data/host.js as "Media state unknown".
+HEALTH_UNKNOWN = "unknown"
+MEDIA_STATE_UNKNOWN = "Live media state unavailable"
+
+
 def health_of(split: dict, status: str, recording_enforced: bool | None,
-              producer_publishing: bool | None = None) -> dict:
+              producer_publishing: bool | None = None,
+              evidence_available: bool = True) -> dict:
     """Live health from signals we actually have: is it live, is anybody publishing, how
     many connections report poor quality, did the recording attach.
+
+    `evidence_available=False` means one of the two media signals below could not be READ at
+    all — not that it reported nothing. It is deliberately one flag for "we are blind"
+    rather than a per-signal flag, because every caller that loses one of them loses the
+    ability to conclude "down", and the caller is the right place to decide that (each one
+    computes it explicitly rather than passing a condition through). It reports
+    HEALTH_UNKNOWN rather than reading an unread presence set as an empty room.
 
     `producer_publishing` is the PRODUCER's own verified report (see media_publishing_get /
     the broadcast.media_state action): the host's client checked
@@ -1355,6 +1410,12 @@ def health_of(split: dict, status: str, recording_enforced: bool | None,
 
     Media is treated as flowing when EITHER says so, and as down only when NEITHER does.
     """
+    # Before anything is derived from `split`: with no presence read there is no evidence
+    # either way, and every branch below would otherwise read "absent" as "zero".
+    if not evidence_available:
+        return {"level": HEALTH_UNKNOWN, "issues": [MEDIA_STATE_UNKNOWN],
+                "evidence_available": False}
+
     media_live = bool(split["publishing"]) or bool(producer_publishing)
     issues = []
     if status == "live" and not media_live:
@@ -1366,7 +1427,7 @@ def health_of(split: dict, status: str, recording_enforced: bool | None,
     if recording_enforced is False:
         issues.append("Recording is not being captured")
     level = "down" if status == "live" and not media_live else "warn" if issues else "ok"
-    return {"level": level, "issues": issues}
+    return {"level": level, "issues": issues, "evidence_available": True}
 
 
 # ── snapshot contribution ─────────────────────────────────────────────────────
@@ -1577,7 +1638,38 @@ async def _sample_once() -> list[tuple[str, dict]]:
             await _retire_stale_session(s["id"], event_id, "event_status_" + str(s["event_status"]))
             continue
 
-        people = await bus.presence_all(event_id)
+        # Presence is Redis-backed in production, and a connectivity fault reading it is not
+        # a fact about this broadcast — it is the absence of one. Caught per session, and
+        # narrowly (bus.transient_errors() is the connection/timeout family only, so a JSON
+        # or type error in a presence record still propagates as the defect it is).
+        #
+        # THE PRODUCTION FAILURE: this call raised `TimeoutError: Timeout connecting to
+        # server` straight past the loop into run_sampler's handler, so ONE unreachable read
+        # cost every remaining open session its tick — not just this one.
+        try:
+            people = await bus.presence_all(event_id)
+        except bus.transient_errors() as exc:
+            log.warning(
+                "analytics_sampler_presence_unavailable event_id=%s session_id=%s "
+                "redis_status=%s error=%s action=%s",
+                event_id, s["id"], bus.status_of(exc), type(exc).__name__,
+                "skip_snapshot_and_health")
+            # Deliberately NOT written: a snapshot row (a fabricated 0 is indistinguishable
+            # from a genuinely empty room in the retention graph forever), the peak, and —
+            # above all — a health verdict. See the mark_degraded branch below: an empty
+            # presence set with status=="live" scores "down" and would durably flip
+            # Event.status to "degraded" in Postgres for every live event on the platform,
+            # on no evidence beyond Redis being unreachable.
+            out.append((event_id, {
+                # No counter fields at all. useLiveEvent.js merges a tick into the previous
+                # analytics block, so omitting them leaves the console's last real numbers
+                # standing instead of overwriting them with invented zeros.
+                "presence_available": False,
+                "health": health_of(_split([]), s["status"], None, evidence_available=False),
+                "t": datetime.now(timezone.utc).isoformat(),
+            }))
+            continue
+
         # Nobody connected and never started: nothing worth a row.
         if not people and s["status"] == "preview":
             continue
@@ -1619,8 +1711,25 @@ async def _sample_once() -> list[tuple[str, dict]]:
             continue
 
         await bus.state_set(event_id, {"peak_viewers": peak})
-        health = health_of(split, s["status"], None,
-                           await media_publishing_get(event_id))
+
+        # The producer's own publication report lives in the same Redis-backed state, so it
+        # shares presence's failure mode. Losing it is not evidence of a dropped stream
+        # either, so the health verdict below is only trustworthy when we still hold at
+        # least one positive signal. Computed here, explicitly, rather than passed through
+        # as a condition: presence's webhook-driven `publishing` count is real evidence on
+        # its own, so an unreadable producer report only blinds us when that count is 0.
+        try:
+            producer_publishing = await media_publishing_get(event_id)
+            media_evidence = True
+        except bus.transient_errors() as exc:
+            log.warning("analytics_sampler_media_state_unavailable event_id=%s session_id=%s "
+                        "redis_status=%s error=%s", event_id, s["id"], bus.status_of(exc),
+                        type(exc).__name__)
+            producer_publishing = None
+            media_evidence = bool(split["publishing"])
+
+        health = health_of(split, s["status"], None, producer_publishing,
+                           evidence_available=media_evidence)
 
         # This IS the audit's "reconciliation" mechanism, not a separate ticker: every open
         # session gets its real, LiveKit-webhook-driven publishing state cross-checked
@@ -1628,7 +1737,12 @@ async def _sample_once() -> list[tuple[str, dict]]:
         # startup grace window keeps the normal post-Go-Live camera/mic warm-up from being
         # mistaken for a drop; health_of() itself already never reports "down" for a paused
         # session, so a manual pause can never trigger this.
-        if health["level"] == "down":
+        if health["level"] == HEALTH_UNKNOWN:
+            # No verdict in EITHER direction. mark_recovered is as much a claim as
+            # mark_degraded — reaching it here would flip a genuinely degraded event back to
+            # "live" in Postgres for the same bad reason, just with the sign reversed.
+            pass
+        elif health["level"] == "down":
             started = s["started_at"]
             past_grace = started is None or (
                 datetime.now(timezone.utc) - started).total_seconds() > DEGRADE_GRACE_SECONDS
@@ -1652,7 +1766,15 @@ async def run_sampler(interval: float = SAMPLE_SECONDS) -> None:
         await asyncio.sleep(interval)
         try:
             for event_id, tick in await _sample_once():
-                await bus.publish(event_id, "analytics", "analytics.tick", tick)
+                # Per event: publishing goes through the same Redis, so during an outage
+                # every one of these fails. One unreachable publish must not discard the
+                # ticks already computed for the other events in this pass.
+                try:
+                    await bus.publish(event_id, "analytics", "analytics.tick", tick)
+                except bus.transient_errors() as exc:
+                    log.warning("analytics_sampler_tick_undelivered event_id=%s "
+                                "redis_status=%s error=%s", event_id, bus.status_of(exc),
+                                type(exc).__name__)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a bad sample must not kill the sampler
