@@ -45,7 +45,7 @@ const ROLES = [
 
 describe("accountHome in the mobile build", () => {
   it.each(ROLES)("sends %s to a route this build actually defines", (role) => {
-    expect(accountHome(role)).toBe("/events/mine");
+    expect(accountHome(role)).toBe("/home");
   });
 
   it("never answers with a console path", () => {
@@ -62,8 +62,8 @@ describe("accountHome in the mobile build", () => {
   it("answers for an unknown role too", () => {
     // A role the backend adds later must not produce `undefined`, which RootRedirect would
     // hand to <Navigate to={undefined}>.
-    expect(accountHome("role_that_does_not_exist_yet")).toBe("/events/mine");
-    expect(accountHome(undefined)).toBe("/events/mine");
+    expect(accountHome("role_that_does_not_exist_yet")).toBe("/home");
+    expect(accountHome(undefined)).toBe("/home");
   });
 
   it("is what roleHome re-exports, so the dozen call sites agree", () => {
@@ -74,7 +74,7 @@ describe("accountHome in the mobile build", () => {
 describe("resolvePostLogin in the mobile build", () => {
   it("falls back to the mobile home when there is no saved destination", async () => {
     expect(await resolvePostLogin({ role: "org_admin" }, null))
-      .toEqual({ to: "/events/mine", reason: null });
+      .toEqual({ to: "/home", reason: null });
   });
 
   it("still honours an ordinary saved page", async () => {
@@ -93,6 +93,6 @@ describe("resolvePostLogin in the mobile build", () => {
     const saved = { pathname: "/host/dashboard", search: "" };
 
     expect(await resolvePostLogin({ role: "host" }, saved))
-      .toEqual({ to: "/events/mine", reason: null });
+      .toEqual({ to: "/home", reason: null });
   });
 });

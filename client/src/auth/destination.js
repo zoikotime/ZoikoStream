@@ -52,11 +52,17 @@ const ORGANIZATION_HOME = "/organization/dashboard";
 // go, which answers with the same undefined path. That is an infinite redirect, and it would
 // have hit EVERY account on its first login: org_admin, viewer and super_admin alike.
 //
-// /events/mine is the honest answer for the store build rather than a placeholder: it is the
-// list of events this person is actually assigned to, it exists in both builds, and it is
-// what a phone is genuinely useful for — joining the broadcast you are on. The consoles are
-// not hidden; the mobile shell offers them at WEB_APP_URL, in a real browser.
-const NATIVE_HOME = "/events/mine";
+// /home is the store build's own landing surface (pages/mobile/MobileHome.jsx, routed only
+// when HAS_CONSOLES is false): the organization's live pulse from /organization/overview —
+// which authorizes with get_my_org, so any member may call it — plus the browser handoff to
+// the full console and a link into the contributor's /events/mine. It replaced a bare
+// /events/mine as every role's landing, which for an org admin was mostly an apology: an
+// assignment list they were probably not on, above a notice explaining where their console
+// went. Contributors still reach /events/mine in one tap from there.
+//
+// It stays a route THIS build defines — never a console path — or the redirect loop this
+// section exists to prevent comes straight back.
+const NATIVE_HOME = "/home";
 
 export const accountHome = (role) =>
   (HAS_CONSOLES ? (ACCOUNT_HOME[role] || ORGANIZATION_HOME) : NATIVE_HOME);

@@ -34,6 +34,7 @@ import EventWatch from "./pages/watch/EventWatch";
 import SpeakerBackstage from "./pages/speaker/Backstage";
 import Landing from "./pages/Landing";
 import MyEvents from "./pages/MyEvents";
+import MobileHome from "./pages/mobile/MobileHome";
 import Contact from "./pages/Contact";
 import Status from "./pages/Status";
 import Trust from "./pages/Trust";
@@ -376,6 +377,24 @@ export default function App() {
                 </Route>
               </Route>
               </>
+            )}
+
+            {/* ── THE MOBILE HOME, AND WHY IT IS GATED INVERTED ──────────────────────────
+                Web: HAS_CONSOLES is true and no /home route exists — the web home for a
+                console role is the organization dashboard itself, and a second home would
+                only be a third name for it ("/", /organization/dashboard and /home all
+                meaning "start here" is two too many).
+
+                Mobile: the store build has no console to land in, so NATIVE_HOME is /home —
+                a read-only pulse (live sessions, next events from /organization/overview,
+                which authorizes with get_my_org for any member) plus the browser handoff to
+                the full console. NOT a console route: it must stay routable in this build or
+                RootRedirect loops, which is the failure auth/destination.js exists to
+                prevent. */}
+            {!HAS_CONSOLES && (
+              <Route element={<ProtectedRoute />}>
+                <Route path="/home" element={<MobileHome />} />
+              </Route>
             )}
 
             {/* Legacy generic dashboard for other roles (moved off "/" so the homepage can live there) */}
