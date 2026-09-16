@@ -726,16 +726,44 @@ def test_retention_exception_reuses_existing_authority(w):
 # ══ PRV-004 ═════════════════════════════════════════════════════════════════════════════
 
 def test_static_legal_page_is_not_a_lifecycle(w):
-    """1 - and there isn't even a static page to mistake for one."""
+    """1 - and no static page may stand in for the versioned notice.
+
+    ── WHY THIS STOPPED BEING A FILENAME BAN ────────────────────────────────────────────
+    This used to assert that no file under client/src had "privacy" or "legal" in its
+    name at all. That was a proxy for the real rule, and the proxy broke the moment the
+    platform needed a public policy page: Google Play will not accept an app without a
+    privacy policy reachable WITHOUT a login, and this platform ships one.
+
+    The rule being protected was never "no such page exists". It is that the privacy
+    notice is a VERSIONED LIFECYCLE - PrivacyNoticeVersion, with drafts, material-change
+    flags and consent - and that no hand-written page quietly becomes a second source of
+    truth that drifts from it. A page is fine. A page pretending to BE the notice is not.
+
+    So the check now reads the pages instead of their names: a privacy or legal page has
+    to point at the Privacy Center, where the authoritative versioned notice lives. A
+    page that links there is deferring to the lifecycle; one that does not is standing in
+    for it, which is the thing worth failing a build over.
+    """
     import pathlib
 
     client = pathlib.Path(__file__).resolve().parent.parent / "client" / "src"
     if client.exists():
-        matches = [p.name for p in client.rglob("*")
-                   if p.is_file() and ("legal" in p.name.lower()
-                                       or "privacy" in p.name.lower())]
-        assert not matches, f"a legal/privacy page appeared: {matches}"
-    # The lifecycle is a real versioned model instead.
+        # Pages only. A *.test.js(x) file with "privacy" in its name is a test ABOUT the
+        # surface, not a surface, and has no reason to link anywhere.
+        pages = [p for p in client.rglob("*.jsx")
+                 if p.is_file()
+                 and ".test." not in p.name
+                 and ("legal" in p.name.lower() or "privacy" in p.name.lower())]
+        for page in pages:
+            source = page.read_text(encoding="utf-8")
+            assert "/organization/privacy" in source, (
+                f"{page.name} is a legal/privacy page that never links to the Privacy "
+                f"Center, so it reads as the notice itself rather than as a pointer to "
+                f"the versioned one. Link to /organization/privacy, or move the content "
+                f"into PrivacyNoticeVersion where it can be versioned."
+            )
+
+    # The lifecycle is a real versioned model, and remains the source of truth.
     assert hasattr(PrivacyNoticeVersion, "status")
     assert hasattr(PrivacyNoticeVersion, "material_change")
     assert hasattr(PrivacyNoticeVersion, "consent_required")
