@@ -98,11 +98,25 @@ describe("the Organization page no longer owns Security", () => {
     expect(rails).toEqual([]);
   });
 
-  it("still points at the new home from the Security Score tile", async () => {
+  it("no longer carries an Organization Overview, Security Score tile included", async () => {
+    // This case used to assert the Security Score tile linked to Settings -> Security. The
+    // whole Organization Overview block — Members, Workspaces, API Credentials, Storage,
+    // Security Score, Billing Status and its Refresh — has since been removed from this
+    // page, so the tile it pointed at is gone. The surrounding intent still holds and is
+    // still asserted above (Security lives in Settings, not here); this now pins the
+    // removal rather than a link that no longer exists.
     renderAt(<Profile />);
     await screen.findByText(/recent activity/i);
-    const tile = screen.getByText(/security score/i).closest("a");
-    expect(tile).toHaveAttribute("href", "/organization/settings?tab=security");
+
+    expect(screen.queryByText(/organization overview/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/live figures for this workspace/i)).not.toBeInTheDocument();
+    for (const card of [/security score/i, /billing status/i, /storage used/i,
+                        /api credentials/i, /active workspaces/i]) {
+      expect(screen.queryByText(card)).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: /^refresh$/i })).not.toBeInTheDocument();
+    // …and what should still be here, is.
+    expect(screen.getByText(/personal information/i)).toBeInTheDocument();
   });
 });
 

@@ -409,10 +409,37 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
     identity = livekit.primary(p.identity) if p else None
 
     if kind == "participant_joined" and p:
-        rec = await bus.presence_upsert(event_id, identity, {
-            "name": p.name or identity, "role": "viewer", "muted": False,
-            "speaking": False, "hand": False, "quality": "excellent",
-        })
+        # A JOIN may be a first arrival or a RECONNECT, and the two need different defaults.
+        #
+        # This used to write role="viewer", muted=False unconditionally, so a promoted
+        # speaker who dropped for three seconds came back demoted in the roster while
+        # `on_stage` (untouched by the patch) stayed true — a participant who was
+        # simultaneously a viewer and on stage. The defaults below are therefore applied only
+        # to somebody we have never seen; an existing row keeps the state moderation gave it.
+        prior = next((r for r in await bus.presence_all(event_id)
+                      if r.get("identity") == identity), None)
+        patch = {"name": p.name or identity, "quality": "excellent"}
+        if prior is None:
+            patch.update({"role": "viewer", "on_stage": False, "muted": False,
+                          "speaking": False, "hand": False})
+        rec = await bus.presence_upsert(event_id, identity, patch)
+
+        # Re-apply the PUBLISH GRANT, not the microphone.
+        #
+        # livekit.set_stage works through UpdateParticipant, which applies to the live
+        # participant session. A reconnect is a new session whose permissions come from the
+        # TOKEN — and a viewer's token is minted can_publish=False (routers/events.py), so a
+        # speaker silently came back unable to publish while the console still showed them on
+        # stage. Restoring it here is what makes "still a speaker after a blip" true.
+        #
+        # Deliberately only the permission: no microphone is captured, and the browser still
+        # requires an explicit click before any track is published again.
+        if prior is not None and prior.get("on_stage") and evt.room:
+            restored = await livekit.set_stage(evt.room.name, p.identity, True)
+            if not restored:
+                log.warning("could not restore stage permission for %s in %s after rejoin",
+                            identity, evt.room.name)
+
         await bus.publish(event_id, "participants", "participant.join", rec)
         await mod.feed_activity(event_id, "join", f"{rec['name']} joined the event")
 

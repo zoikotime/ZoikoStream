@@ -36,7 +36,8 @@ export const ROLE_ORDER = { host: 0, speaker: 1, viewer: 2 };
 export const PARTICIPANT_FILTERS = [
   { key: "all", label: "All" },
   { key: "hand", label: "Raised hand" },
-  { key: "speaking", label: "Speaking" },
+  // "Speaking" removed — nothing produces presence.speaking, so the filter always matched
+  // nobody. See components/moderation/ParticipantsPanel.jsx for the full reasoning.
   { key: "muted", label: "Muted" },
   { key: "stage", label: "On stage" },
 ];
