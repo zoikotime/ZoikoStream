@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Room, RoomEvent, Track } from "livekit-client";
+import { Room, RoomEvent, Track, VideoPresets } from "livekit-client";
 import { fatalDisconnect } from "./livekitDisconnect";
 
 // Camera publish options, in one place so the three publish sites cannot drift.
@@ -265,7 +265,14 @@ export default function useLiveKitPublish({
       await disposeRoom();
       if (!current()) return;
 
-      const room = new Room({ stopLocalTrackOnUnpublish: false });
+      const room = new Room({
+        stopLocalTrackOnUnpublish: false,
+        dynacast: true,
+        publishDefaults: {
+          simulcast: true,
+          videoSimulcastLayers: [VideoPresets.h216, VideoPresets.h540, VideoPresets.h1080],
+        },
+      });
       roomRef.current = room;
 
       room.on(RoomEvent.Reconnecting, () => {
