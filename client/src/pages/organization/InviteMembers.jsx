@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
-import { FiUserPlus, FiSearch, FiRefreshCw, FiX, FiTrash2, FiUsers, FiMail, FiSend } from "react-icons/fi";
+import { FiUserPlus, FiSearch, FiRefreshCw, FiX, FiTrash2, FiUsers, FiMail, FiSend, FiLock } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { useAuth } from "../../auth/AuthContext";
+import { isOrgAdmin } from "../../auth/orgRole";
 import { notify } from "../../ui/Toast";
 import Modal from "../../ui/Modal";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
@@ -101,11 +102,22 @@ export default function OrganizationMembers() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [query, setQuery] = useState("");
 
+  // Both endpoints below are org_admin-only, and the sidebar deliberately shows Members to
+  // every role — so a host arriving here used to fire two requests, collect two 403s and get
+  // a page-wide red "org_admin access required". Deciding up front means no request is sent
+  // that is already known to be refused, and the page can say something useful instead.
+  //
+  // This is presentation only. The gate that matters is require_org_admin on the server,
+  // which is unchanged and still answers 403 to a direct call from a host or viewer.
+  const canManageMembers = isOrgAdmin(user);
+
   const { data, loading, error, reload } = useApi(() =>
-    Promise.all([
-      api.get("/organization/users", { params: { page_size: 100 } }).then((r) => r.data.items),
-      api.get("/organization/invitations", { params: { page_size: 100 } }).then((r) => r.data.items),
-    ]).then(([members, invites]) => ({ members, invites }))
+    !canManageMembers
+      ? Promise.resolve(null)
+      : Promise.all([
+          api.get("/organization/users", { params: { page_size: 100 } }).then((r) => r.data.items),
+          api.get("/organization/invitations", { params: { page_size: 100 } }).then((r) => r.data.items),
+        ]).then(([members, invites]) => ({ members, invites }))
   );
   const members = useMemo(() => data?.members || [], [data]);
   const invites = useMemo(() => data?.invites || [], [data]);
@@ -225,11 +237,37 @@ export default function OrganizationMembers() {
     <div className="space-y-6">
       <OrganizationPageHeader
         title="Members"
-        subtitle="Manage who has access to your organization and their roles"
-        actions={<Button size="sm" leftIcon={FiUserPlus} onClick={() => setInviteOpen(true)}>Invite member</Button>}
+        subtitle={
+          canManageMembers
+            ? "Manage who has access to your organization and their roles"
+            : "Who has access to your organization and their roles"
+        }
+        actions={
+          canManageMembers ? (
+            <Button size="sm" leftIcon={FiUserPlus} onClick={() => setInviteOpen(true)}>Invite member</Button>
+          ) : null
+        }
       />
 
-      {error ? (
+      {!canManageMembers ? (
+        /* Deliberately NOT an empty state. "No members found" would be a claim about the
+           organization — and a false one, since the organization plainly has members; this
+           reader simply may not see them. Nothing is counted, listed or zeroed here: the KPI
+           tiles, the member table and the invitation table are all absent rather than shown
+           holding zeros, because a fabricated zero is worse than an honest refusal. */
+        <SectionCard title="Members &amp; access" icon={FiLock}>
+          <div className="max-w-xl space-y-2 py-2">
+            <p className="text-sm font-medium text-slate-800 dark:text-slate-100">
+              Organization admin access is required to manage members.
+            </p>
+            <p className="text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">
+              Viewing the member list, sending invitations and changing roles are all
+              restricted to organization admins. Contact an organization admin if you need
+              access.
+            </p>
+          </div>
+        </SectionCard>
+      ) : error ? (
         <OrganizationErrorState error={error} onRetry={reload} title="Couldn't load members" />
       ) : (
         <>

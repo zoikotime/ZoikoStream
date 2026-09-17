@@ -7,7 +7,7 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   FiUser, FiImage, FiShield, FiBell, FiCode, FiAlertTriangle,
-  FiUploadCloud, FiGlobe, FiCheck, FiCopy, FiSave,
+  FiUploadCloud, FiGlobe, FiCheck, FiCopy, FiSave, FiLock,
   FiVideo, FiCloud,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
@@ -87,10 +87,26 @@ function SettingRow({ title, desc, children }) {
 // JSX below is untouched. Only profile / branding-color / security / notifications /
 // domain have a backend — permissions, API keys, integrations, domain-verify and the
 // danger zone stay local (no endpoint yet) and are marked at their call sites.
+// GET /organization/security is the one call on this page that requires org_admin; the other
+// five are readable by any member. Under a plain Promise.all a host's 403 rejected the whole
+// batch, so General, Branding, Notifications and Domain — all of which had returned 200 — were
+// thrown away and the page rendered one page-wide red "org_admin access required". 322 hosts
+// and 183 viewers on this deployment saw nothing else.
+//
+// Same `soft` idea as Profile.jsx, with one addition: WHY it failed is kept. A 403 is a
+// permission fact and the panel says so; anything else is a real fault and must not be
+// disguised as one. The backend gate is untouched.
+const softSecurity = (p) =>
+  p.then((r) => ({ data: r.data, access: "ok" })).catch((e) => ({
+    data: null,
+    access: e?.response?.status === 403 ? "forbidden" : "error",
+    error: e,
+  }));
+
 const loadSettings = async () => {
   const [profile, security, notifs, domainData, branding, notifCatalog] = await Promise.all([
     api.get("/organization/profile").then((r) => r.data),
-    api.get("/organization/security").then((r) => r.data),
+    softSecurity(api.get("/organization/security")),
     api.get("/organization/notifications").then((r) => r.data),
     api.get("/organization/domain").then((r) => r.data),
     api.get("/organization/branding").then((r) => r.data),
@@ -101,7 +117,15 @@ const loadSettings = async () => {
     // list above: an older API 404s here and the panel falls back to the static grouping.
     api.get("/organization/notifications/catalog").then((r) => r.data).catch(() => null),
   ]);
-  return { profile, security, notifs, domain: domainData, branding, notifCatalog };
+  return {
+    profile,
+    security: security.data,
+    securityAccess: security.access,
+    notifs,
+    domain: domainData,
+    branding,
+    notifCatalog,
+  };
 };
 
 // Slugs are constrained server-side (^[a-z0-9][a-z0-9-]*$, 3-140). Normalising as the user
@@ -139,7 +163,11 @@ const fieldErrors = (err) => {
   return Object.fromEntries(pairs);
 };
 
-const fromApi = ({ profile: p, security: s, notifs: n, domain: d, branding: b }) => ({
+// `s` is null when the caller may not read the security policy (see softSecurity). The form
+// state still needs a shape, so the fields fall back to the schema's own defaults — they are
+// never rendered in that case, and never submitted either (see `save`). No security value is
+// invented for display.
+const fromApi = ({ profile: p, security: s0, notifs: n, domain: d, branding: b }) => ({
   profile: {
     name: p.name ?? "", slug: p.slug ?? "", website: p.website ?? "",
     supportEmail: p.support_email ?? "", industry: p.industry ?? INDUSTRIES[0],
@@ -152,9 +180,13 @@ const fromApi = ({ profile: p, security: s, notifs: n, domain: d, branding: b })
   accent: ACCENTS.includes(b.primary_color) ? b.primary_color : "violet",
   logoUrl: b.logo_url ?? "",
   security: {
-    require2fa: s.require_2fa, enforceSSO: s.enforce_sso,
-    minPasswordLength: s.min_password_length, sessionTimeout: s.session_timeout,
-    allowedDomains: s.allowed_domains ?? "",
+    require2fa: s0?.require_2fa ?? false,
+    enforceSSO: s0?.enforce_sso ?? false,
+    // null, not 8: an unreadable policy is unknown, and ChangePasswordForm renders its
+    // generic hint for a non-number rather than asserting a minimum that may be wrong.
+    minPasswordLength: s0?.min_password_length ?? null,
+    sessionTimeout: s0?.session_timeout ?? null,
+    allowedDomains: s0?.allowed_domains ?? "",
   },
   notifs: {
     eventScheduled: n.event_scheduled, eventStarting: n.event_starting,
@@ -191,6 +223,11 @@ export default function OrganizationSettings() {
   // Server-described notification controls. null on an older API build, which the panel
   // falls back to handling.
   const catalog = data?.notifCatalog ?? null;
+  // "ok" only when GET /organization/security actually returned a policy. "forbidden" is a
+  // host or viewer; "error" is a real fault on an optional call. Derived from the response the
+  // backend already gave, not from a stored role.
+  const securityAccess = data?.securityAccess ?? "ok";
+  const canManageSecurity = securityAccess === "ok";
   // ?tab= IS the tab state — not a seed for it.
   //
   // It used to initialise a useState, which meant the URL was read exactly once, at mount.
@@ -275,7 +312,11 @@ export default function OrganizationSettings() {
     const sections = [
       ["Profile", "/organization/profile", body.profile],
       ["Branding", "/organization/branding", body.branding],
-      ["Security", "/organization/security", body.security],
+      // Only sent by someone who could READ the policy. A host PATCHing it gets the same 403
+      // the GET gave, which would report "Security couldn't be saved" for a panel they were
+      // never shown and never edited. Omitting it is not a permission decision — the server
+      // still refuses the call; it just stops the page inventing a failure.
+      ...(canManageSecurity ? [["Security", "/organization/security", body.security]] : []),
       ["Notifications", "/organization/notifications", body.notifs],
       ["Custom domain", "/organization/domain", body.domain],
     ];
@@ -533,29 +574,78 @@ export default function OrganizationSettings() {
                 <ChangePasswordForm minLength={settings.security.minPasswordLength} />
               </Panel>
 
-              <Panel title="Security Configuration" desc="Authentication and access policies for your organization">
-                <SettingRow title="Require two-factor authentication" desc="Every member must enable 2FA to sign in">
-                  <Switch checked={settings.security.require2fa} onChange={(v) => setSec("require2fa", v)} />
-                </SettingRow>
-                <SettingRow title="Enforce SSO (SAML)" desc="Restrict sign-in to your identity provider">
-                  <Switch checked={settings.security.enforceSSO} onChange={(v) => setSec("enforceSSO", v)} />
-                </SettingRow>
-                <SettingRow title="Minimum password length">
-                  <Select variant="form" className="w-28" value={settings.security.minPasswordLength} onChange={(e) => setSec("minPasswordLength", Number(e.target.value))}>
-                    {PASSWORD_LENGTHS.map((n) => <option key={n} value={n}>{n} chars</option>)}
-                  </Select>
-                </SettingRow>
-                <SettingRow title="Session timeout" desc="Automatically sign out inactive members">
-                  <Select variant="form" className="w-36" value={settings.security.sessionTimeout} onChange={(e) => setSec("sessionTimeout", e.target.value)}>
-                    {SESSION_TIMEOUTS.map((t) => <option key={t}>{t}</option>)}
-                  </Select>
-                </SettingRow>
-                <div className="pt-4">
-                  <Field label="Allowed email domains" hint="Comma-separated. Only these domains can be invited.">
-                    <Input variant="form" value={settings.security.allowedDomains} onChange={(e) => setSec("allowedDomains", e.target.value)} placeholder="acme.com, acme.io" />
-                  </Field>
-                </div>
-              </Panel>
+              {/* Org-wide policy, admin-only at GET and PATCH alike. A host or viewer never
+                  had it; what changed is that they now keep the rest of the page. The panel
+                  stays in place and says why it is empty rather than vanishing, so the
+                  absence is legible instead of looking like a missing feature. Account
+                  Security above is deliberately NOT gated — changing your own password is
+                  every member's business and runs through PATCH /api/auth/password, which
+                  has no org_admin gate. */}
+              {canManageSecurity && (
+                <Panel title="Security Configuration" desc="Authentication and access policies for your organization">
+                  <SettingRow title="Require two-factor authentication" desc="Every member must enable 2FA to sign in">
+                    <Switch checked={settings.security.require2fa} onChange={(v) => setSec("require2fa", v)} />
+                  </SettingRow>
+                  <SettingRow title="Enforce SSO (SAML)" desc="Restrict sign-in to your identity provider">
+                    <Switch checked={settings.security.enforceSSO} onChange={(v) => setSec("enforceSSO", v)} />
+                  </SettingRow>
+                  <SettingRow title="Minimum password length">
+                    <Select variant="form" className="w-28" value={settings.security.minPasswordLength} onChange={(e) => setSec("minPasswordLength", Number(e.target.value))}>
+                      {PASSWORD_LENGTHS.map((n) => <option key={n} value={n}>{n} chars</option>)}
+                    </Select>
+                  </SettingRow>
+                  <SettingRow title="Session timeout" desc="Automatically sign out inactive members">
+                    <Select variant="form" className="w-36" value={settings.security.sessionTimeout} onChange={(e) => setSec("sessionTimeout", e.target.value)}>
+                      {SESSION_TIMEOUTS.map((t) => <option key={t}>{t}</option>)}
+                    </Select>
+                  </SettingRow>
+                  <div className="pt-4">
+                    <Field label="Allowed email domains" hint="Comma-separated. Only these domains can be invited.">
+                      <Input variant="form" value={settings.security.allowedDomains} onChange={(e) => setSec("allowedDomains", e.target.value)} placeholder="acme.com, acme.io" />
+                    </Field>
+                  </div>
+                </Panel>
+              )}
+              {securityAccess === "forbidden" && (
+                <Panel
+                  title="Security Configuration"
+                  desc="Authentication and access policies for your organization"
+                >
+                  <div className="flex items-start gap-3 py-1">
+                    <span
+                      className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-500 dark:bg-white/[0.07] dark:text-neutral-400"
+                      aria-hidden="true"
+                    >
+                      <FiLock className="text-sm" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                        Organization admin access required.
+                      </p>
+                      <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                        Two-factor, SSO, password policy, session timeout and allowed email
+                        domains are managed by an organization admin. Contact one if you need
+                        these changed.
+                      </p>
+                    </div>
+                  </div>
+                </Panel>
+              )}
+              {securityAccess === "error" && (
+                <Panel
+                  title="Security Configuration"
+                  desc="Authentication and access policies for your organization"
+                >
+                  {/* NOT a permission problem — say so, and offer the retry. Showing the
+                      "admin access required" copy here would blame the reader for a fault. */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 py-1">
+                    <p className="text-sm text-slate-600 dark:text-slate-300">
+                      Couldn&apos;t load the security policy.
+                    </p>
+                    <Button variant="secondary" size="sm" onClick={reload}>Retry</Button>
+                  </div>
+                </Panel>
+              )}
 
               {/* Read-only on purpose. These capabilities are enforced in the API (role gates
                   like require_org_admin) and in the router's RoleRoute allow-lists — there is

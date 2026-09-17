@@ -1,7 +1,7 @@
 import { NavLink } from "react-router-dom";
 import {
   FiX, FiGrid, FiLayers, FiUsers,
-  FiActivity, FiFilm, FiPlayCircle, FiRadio, FiUserCheck, FiBarChart2,
+  FiActivity, FiFilm, FiRadio, FiUserCheck, FiBarChart2,
   FiCreditCard, FiLifeBuoy, FiSettings,
 } from "react-icons/fi";
 import { CONSOLE, brand, cx, focusRing, type } from "../../ui/tokens";
@@ -33,7 +33,12 @@ const NAV = [
       { to: "/organization/users", label: "Members", icon: FiUsers },
       { to: "/organization/recordings", label: "Recordings", icon: FiFilm },
       { to: "/organization/sessions", label: "Streaming Sessions", icon: FiActivity, badge: "streaming_sessions" },
-      { to: "/organization/playback", label: "Playback & Access", icon: FiPlayCircle },
+      // Playback & Access is deliberately absent from the rail. The ROUTE is unchanged and
+      // the page is still reached from the five places that already link to it — the event's
+      // own Audience page, Streaming Sessions, Settings, and Developer Platform — which is
+      // where the question "who may watch this?" actually comes up. It reads an event's
+      // existing gates rather than setting them, so it did not need permanent top-level
+      // space of its own.
     ],
   },
   {

@@ -99,6 +99,16 @@ class EventOut(BaseModel):
     updated_at: datetime | None = None
     deleted_at: datetime | None = None
 
+    # How many people have registered for this event. Populated ONLY by the list endpoint
+    # (routers/events.list_events), which resolves it for the whole page in one grouped
+    # query; every other route that returns an EventOut leaves it None.
+    #
+    # None and 0 are different answers and are rendered differently: 0 means "counted, and
+    # nobody registered", None means "this response did not carry the count". The Audience
+    # page had no source for this at all, so it printed an em dash for events that really did
+    # have registrations.
+    registered_count: int | None = None
+
     @computed_field
     @property
     def duration_minutes(self) -> int | None:

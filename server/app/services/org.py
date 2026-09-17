@@ -43,6 +43,7 @@ from ..models import (
     GovernanceRecord,
     Incident,
     Invitation,
+    LivePoll,
     LiveRecording,
     Organization,
     Plan,
@@ -345,8 +346,45 @@ def entitlements(db: Session, org: Organization) -> dict:
     }
 
 
-def _bucket_label(dt: datetime, range_key: str) -> str:
-    return dt.strftime("%b %Y") if range_key == "12m" else dt.strftime("%b %d")
+def _bucket_label(dt: datetime, range_key: str, zone=timezone.utc) -> str:
+    """Label the bucket in the ORGANIZATION's zone, not UTC.
+
+    Timestamps are stored UTC, and this used to strftime them directly — so an event at
+    02:00 in an IST organization (20:30 the previous day UTC) appeared on the chart a day
+    before the Events list said it happened. Converting first is the whole fix.
+    """
+    local = dt.astimezone(zone)
+    return local.strftime("%b %Y") if range_key == "12m" else local.strftime("%b %d")
+
+
+def _bucket_timeline(since: datetime, until: datetime, range_key: str, zone) -> list[str]:
+    """Every bucket label in the window, in order, whether or not anything happened in it.
+
+    Only days/months that contained an event used to appear, so two events three days apart
+    rendered as two isolated bars with nothing between them. A zero-filled bucket means "no
+    measured activity on this date" — which is a fact, not missing telemetry.
+    """
+    labels: list[str] = []
+    seen: set[str] = set()
+    if range_key == "12m":
+        cur = since.astimezone(zone).replace(day=1)
+        end = until.astimezone(zone)
+        while cur <= end:
+            label = cur.strftime("%b %Y")
+            if label not in seen:
+                seen.add(label)
+                labels.append(label)
+            cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return labels
+    cur = since.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = until.astimezone(zone)
+    while cur <= end:
+        label = cur.strftime("%b %d")
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+        cur += timedelta(days=1)
+    return labels
 
 
 def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
@@ -379,6 +417,16 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
         for snap in db.scalars(select(AnalyticsSnapshot).where(AnalyticsSnapshot.event_id.in_(event_ids))):
             snapshots_by_event.setdefault(snap.event_id, []).append(snap)
 
+    # Poll votes, from the rows that actually hold them. LivePoll.options is
+    # [{label, votes}] and is queryable per event, so the engagement formula can use a REAL
+    # figure instead of the hardcoded 0 it used to pass — no snapshot column and no
+    # migration needed.
+    poll_votes_by_event: dict = {}
+    if event_ids:
+        for p in db.scalars(select(LivePoll).where(LivePoll.event_id.in_(event_ids))):
+            poll_votes_by_event[p.event_id] = poll_votes_by_event.get(p.event_id, 0) + sum(
+                (o or {}).get("votes", 0) for o in (p.options or []) if isinstance(o, dict))
+
     # Concurrent viewers integrated over the sampler's 15s interval = a real watch-hours
     # measurement (area under the viewer-count curve), not a per-user estimate.
     SAMPLE_HOURS = 15 / 3600
@@ -390,21 +438,44 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
             "title": e.title,
             "start": _aware(e.start_time),
             "peak": peak,
-            "watch_hours": round(sum(s.viewers for s in snaps) * SAMPLE_HOURS, 1),
-            "messages": sum(s.messages for s in snaps),
-            "questions": sum(s.questions for s in snaps),
-            "reactions": sum(s.reactions for s in snaps),
+            # No snapshots means nothing was ever measured for this event — which is not the
+            # same as measuring zero, and must not be rendered as a figure.
+            "measured": bool(snaps),
+            # viewers is INSTANTANEOUS, so summing it across ticks and multiplying by the
+            # cadence is a genuine integral. Unrounded here; the caller decides precision.
+            "watch_hours": (sum(s.viewers for s in snaps) * SAMPLE_HOURS) if snaps else None,
+            # messages/questions/reactions are CUMULATIVE event totals — broadcast._counts
+            # recomputes the running total on every tick. Summing them counted one message
+            # once per 15-second tick, so a ten-minute event inflated engagement ~40x and
+            # pegged it at the formula's cap. The final (max) cumulative value IS the total.
+            "messages": max((s.messages for s in snaps), default=0),
+            "questions": max((s.questions for s in snaps), default=0),
+            "reactions": max((s.reactions for s in snaps), default=0),
+            "poll_votes": poll_votes_by_event.get(e.id, 0),
         }
 
-    buckets: dict[str, dict] = {}
-    bucket_order: list[str] = []
+    # Bucket in the organization's own zone, and across the WHOLE window so the chart is a
+    # continuous timeline rather than isolated points. event_zone is the existing resolver
+    # (Event -> Organization -> UTC); passing None asks it for the organization's zone,
+    # which is the right axis for a chart spanning many events.
+    #
+    # Deferred import, same cycle discipline as the engagement_score import below.
+    from .event_comms import event_zone
+    zone, _zone_name = event_zone(None, org)
+
+    bucket_order = _bucket_timeline(since, _now(), range_key, zone)
+    buckets: dict[str, dict] = {l: {"viewers": 0, "watch_hours": 0.0} for l in bucket_order}
     for e in events:
-        label = _bucket_label(per_event[e.id]["start"], range_key)
+        label = _bucket_label(per_event[e.id]["start"], range_key, zone)
         if label not in buckets:
+            # An event just outside the generated timeline (clock skew, or a start_time
+            # exactly on the boundary) still gets a bucket rather than being dropped.
             buckets[label] = {"viewers": 0, "watch_hours": 0.0}
             bucket_order.append(label)
         buckets[label]["viewers"] += per_event[e.id]["peak"]
-        buckets[label]["watch_hours"] += per_event[e.id]["watch_hours"]
+        # `or 0.0`: watch_hours is None for an event with no snapshots, and a bucket total
+        # is a sum of what WAS measured — `float += None` is a TypeError, not a metric.
+        buckets[label]["watch_hours"] += per_event[e.id]["watch_hours"] or 0.0
 
     # Imported here, not at module scope, because services/broadcast.py reaches this module
     # through webhooks -> webhook_lifecycle -> org_comms -> org, and `engagement_score` is
@@ -416,24 +487,39 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
     # neither direction of the cycle has a module-level edge any more.
     from .broadcast import engagement_score
 
-    def event_engagement(info: dict) -> int:
+    def event_engagement(info: dict):
         # `engagement_score` comes from the deferred import above — both sides of the merge
         # added the same lazy import independently, and one is enough for the closure.
+        #
+        # None when nothing was measured: a score of 0 asserts "we sampled and saw no
+        # interaction", which is a different claim from "this event was never sampled".
+        if not info["measured"] or info["peak"] <= 0:
+            return None
         return engagement_score(
             {"messages": info["messages"], "questions": info["questions"],
-             "poll_votes": 0, "reactions": info["reactions"]}, info["peak"])
+             "poll_votes": info["poll_votes"], "reactions": info["reactions"]}, info["peak"])
 
-    engaged = [event_engagement(i) for i in per_event.values() if i["peak"] > 0]
+    engaged = [v for v in (event_engagement(i) for i in per_event.values()) if v is not None]
+    measured = [i for i in per_event.values() if i["measured"]]
     ranked = sorted(per_event.items(), key=lambda kv: -kv[1]["peak"])
 
     return {
         "range": range_key,
         "since": since,
+        "timezone": _zone_name,
         "summary": {
-            "viewers": sum(i["peak"] for i in per_event.values()),
-            "watch_hours": round(sum(i["watch_hours"] for i in per_event.values()), 1),
+            # NOT unique viewers and not total joins: the sum of each event's PEAK
+            # concurrency. Named to match, because the console used to label this
+            # "Total Viewers" and the number cannot support that claim.
+            "peak_viewers_summed": sum(i["peak"] for i in per_event.values()),
+            # Unrounded hours so the client can render minutes for short sessions without
+            # the backend inventing precision the 15s cadence does not support.
+            "watch_hours": round(sum(i["watch_hours"] for i in measured), 4) if measured else None,
             "peak": max((i["peak"] for i in per_event.values()), default=0),
-            "engagement": round(sum(engaged) / len(engaged)) if engaged else 0,
+            # 0 means measured-and-idle; None means never sampled. The client renders the
+            # second as "—" rather than as a figure.
+            "engagement": round(sum(engaged) / len(engaged)) if engaged
+                          else (0 if measured else None),
         },
         "trends": {
             "viewership": [{"label": l, "value": buckets[l]["viewers"]} for l in bucket_order],
@@ -442,14 +528,69 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
         "top_events": [{"label": i["title"], "value": i["peak"]} for _, i in ranked[:5] if i["peak"] > 0],
         "reports": [
             {"id": str(eid), "event": i["title"],
-             "date": i["start"].date().isoformat() if i["start"] else None,
-             "viewers": i["peak"], "watch_hours": i["watch_hours"],
+             # The organization-local date, matching the chart's buckets and the Events list.
+             "date": i["start"].astimezone(zone).date().isoformat() if i["start"] else None,
+             "viewers": i["peak"],
+             "watch_hours": round(i["watch_hours"], 4) if i["watch_hours"] is not None else None,
              "engagement": event_engagement(i)}
             for eid, i in ranked
         ],
         "devices": None, "locations": None, "traffic_sources": None,
         "breakdowns_note": "Device, location and traffic-source breakdowns need a metering/"
                             "GeoIP pipeline that isn't integrated yet.",
+    }
+
+
+def audience_summary(db: Session, org: Organization, range_key: str = "30d") -> dict:
+    """Dataset-wide audience counters for /organization/audience's KPI row.
+
+    Separate from the paged event list on purpose. The page shows one page of events at a
+    time, so deriving these four figures from the rows on screen would describe the page
+    rather than the organization — "3 events" when the window holds thirty. Same reason
+    /admin/users has its own summary endpoint.
+
+    Every figure is counted in SQL over the org's own events inside the selected window:
+
+      events        COUNT of non-deleted events started in the window
+      gated         those with registration_required — the event's own flag, not a guess
+      registrations COUNT of EventRegistration rows against those events
+      at_capacity   events whose registration count has reached registration_limit
+
+    at_capacity counts only events that HAVE a limit. An uncapped event can never be at
+    capacity, so including it would be arithmetic on a number that does not exist.
+    """
+    since = _now() - ANALYTICS_RANGES.get(range_key, ANALYTICS_RANGES["30d"])
+
+    scoped = (
+        select(Event.id, Event.registration_required, Event.registration_limit)
+        .where(Event.org_id == org.id, Event.deleted_at.is_(None),
+               Event.start_time.isnot(None), Event.start_time >= since)
+    ).subquery()
+
+    counts = (
+        select(EventRegistration.event_id, func.count().label("n"))
+        .where(EventRegistration.event_id.in_(select(scoped.c.id)))
+        .group_by(EventRegistration.event_id)
+    ).subquery()
+
+    rows = db.execute(
+        select(scoped.c.id, scoped.c.registration_required, scoped.c.registration_limit,
+               func.coalesce(counts.c.n, 0))
+        .select_from(scoped.outerjoin(counts, counts.c.event_id == scoped.c.id))
+    ).all()
+
+    registrations = sum(r[3] for r in rows)
+    return {
+        "range": range_key,
+        "since": since,
+        "events": len(rows),
+        "registration_required": sum(1 for r in rows if r[1]),
+        # A real count of rows, so 0 means nobody registered — never "not measured".
+        "registrations": registrations,
+        "at_capacity": sum(1 for r in rows if r[2] and r[3] >= r[2]),
+        # Named so the client can say WHY at_capacity may be 0 rather than implying nothing
+        # is full: an org that caps nothing has no event that can reach capacity.
+        "events_with_capacity": sum(1 for r in rows if r[2]),
     }
 
 
@@ -493,24 +634,46 @@ def audience_attendance(db: Session, org: Organization, range_key: str = "30d") 
             if claimed_at is not None:
                 claimed_by_email[email] = claimed_by_email.get(email, 0) + 1
 
-    # Reuse, don't re-derive: analytics()'s summary.viewers is the same real peak-
-    # concurrency figure /organization/analytics already shows. It's the only audience
-    # signal available at all for an open public event (no EventRegistration row exists),
-    # so it's added on top of the real claimed-registration count rather than blended
-    # into it — a private event's real count is never diluted by a rough one.
+    # Reuse, don't re-derive: analytics()'s summary is the same real peak-concurrency figure
+    # /organization/analytics already shows. It's the only audience signal available at all for
+    # an open public event (no EventRegistration row exists), so it's added on top of the real
+    # claimed-registration count rather than blended into it — a private event's real count is
+    # never diluted by a rough one.
+    #
+    # The key is `peak_viewers_summed`, NOT `viewers`. analytics() renamed it precisely because
+    # the number is the sum of each event's peak concurrency and cannot support a "viewers"
+    # claim; this reader was missed in that rename and raised KeyError: 'viewers' on every
+    # request, for every organization and role. Read it under its accurate name.
     base = analytics(db, org, range_key)
-    peak_viewers_sum = base["summary"]["viewers"]
+    peak_viewers_sum = base["summary"]["peak_viewers_summed"]
     watch_hours = base["summary"]["watch_hours"]
 
-    unique_attendees = len(claimed_by_email) + peak_viewers_sum
+    attendees_estimated = len(claimed_by_email) + peak_viewers_sum
     returning = sum(1 for n in claimed_by_email.values() if n > 1)
-    avg_watch_minutes = round((watch_hours * 60) / unique_attendees, 1) if unique_attendees else None
+    # watch_hours is None when no AnalyticsSnapshot row exists for the window — nothing was
+    # measured, which is a different fact from "measured, and the answer was zero". A derived
+    # average inherits that: unavailable stays unavailable rather than becoming 0.0, and
+    # `None * 60` (a TypeError sitting directly behind the KeyError above) can no longer run.
+    # A measured 0.0 still divides normally and reports 0.0.
+    avg_watch_minutes = (
+        round((watch_hours * 60) / attendees_estimated, 1)
+        if watch_hours is not None and attendees_estimated
+        else None
+    )
     show_rate = round(100 * private_claimed / private_registered) if private_registered else None
 
     return {
         "range": range_key, "since": since,
-        "unique_attendees": unique_attendees, "unique_attendees_estimated": True,
+        # Wire name kept stable (one consumer, AudienceAccess.jsx) but it is NOT a count of
+        # distinct people: it is claimed private-registration emails plus the sum of each
+        # event's peak concurrency, so anyone who attended two events is counted twice. The
+        # `_estimated` flag beside it is what the UI keys its caveat off, and the UI label
+        # reads "Estimated attendees" rather than "Unique attendees" for the same reason
+        # analytics() renamed "Total Viewers" to peak_viewers_summed.
+        "unique_attendees": attendees_estimated, "unique_attendees_estimated": True,
+        # A real count: distinct claimed emails appearing at more than one event.
         "returning": returning,
+        # None = never sampled (UI renders "—"); 0.0 = sampled and idle.
         "avg_watch_minutes": avg_watch_minutes, "avg_watch_minutes_estimated": True,
         "show_rate": show_rate, "show_rate_basis": "private_invited_events_only",
     }

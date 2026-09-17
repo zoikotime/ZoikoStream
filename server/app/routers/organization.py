@@ -473,6 +473,18 @@ def analytics(
     return org_svc.analytics(db, org, range_key=range_)
 
 
+@router.get("/audience-summary")
+def audience_summary(
+    range_: str = Query("30d", alias="range", pattern="^(7d|30d|90d|12m)$"),
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """Dataset-wide counters for the Audience page's KPI row — counted over the whole window,
+    not over the page of events the browser happens to be showing. Org comes from the token
+    via get_my_org; no org_id is accepted from the caller."""
+    return org_svc.audience_summary(db, org, range_key=range_)
+
+
 @router.get("/audience-attendance")
 def audience_attendance(
     range_: str = Query("30d", alias="range", pattern="^(7d|30d|90d|12m)$"),

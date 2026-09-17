@@ -330,7 +330,17 @@ export default function OrganizationRecordings() {
     [list]
   );
 
-  const totalBytes = useMemo(() => list.reduce((s, r) => s + (r.size_bytes || 0), 0), [list]);
+  // A captured recording whose size never arrived (the egress_ended webhook carries it, and
+  // is the only place it exists) has size_bytes = null. `|| 0` made those files look like
+  // they occupied nothing, silently understating the org's storage — an unknown is not a
+  // zero. The known total is still shown, with the shortfall named rather than hidden.
+  const storage = useMemo(() => {
+    const known = list.filter((r) => typeof r.size_bytes === "number");
+    return {
+      bytes: known.reduce((sum, r) => sum + r.size_bytes, 0),
+      unknown: list.length - known.length,
+    };
+  }, [list]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -425,7 +435,17 @@ export default function OrganizationRecordings() {
       {/* Statistics cards — only what's real: no view/watch-time tracking exists yet */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <StatsCard title="Total Recordings" value={list.length} icon={FiFilm} accent="emerald" />
-        <StatsCard title="Total Storage" value={fmtTotalBytes(totalBytes)} icon={FiDatabase} accent="blue" />
+        <StatsCard
+          title="Total Storage"
+          // Nothing measured at all -> an em dash, not "0.0 GB": with every size unknown
+          // there is no total to report, only an absence of one.
+          value={storage.unknown === list.length && list.length > 0 ? "—" : fmtTotalBytes(storage.bytes)}
+          hint={storage.unknown > 0
+            ? `Excludes ${storage.unknown} recording${storage.unknown === 1 ? "" : "s"} of unknown size`
+            : undefined}
+          icon={FiDatabase}
+          accent="blue"
+        />
       </div>
 
       {/* Recording cards */}

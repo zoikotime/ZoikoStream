@@ -2,6 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
 import { fatalDisconnect } from "./livekitDisconnect";
 
+// Camera publish options, in one place so the three publish sites cannot drift.
+//
+// `simulcast: true` is ALREADY the livekit-client default, so this changes nothing today —
+// it is written down because the viewer's quality menu depends on it entirely: without
+// multiple encoded layers there is nothing for a viewer to choose between, and an inherited
+// default is a silent dependency. Layer sizes are deliberately NOT pinned: LiveKit derives
+// them from whatever the camera actually granted (hooks/useMediaPreview requests 1080p by
+// default but falls back), so a 720p webcam yields 720/360/180 and nobody is offered a
+// rendition that does not exist.
+//
+// Screen share is intentionally excluded — it has different encoding needs for text
+// legibility and is left exactly as it was.
+const CAMERA_PUBLISH = { source: Track.Source.Camera, simulcast: true };
+
 // Publishes the host's ALREADY-ACQUIRED camera/mic tracks (from useMediaPreview) into the
 // LiveKit room once the broadcast actually goes live. Deliberately does not call
 // getUserMedia itself — reusing the same tracks the preview already holds means muting
@@ -236,7 +250,7 @@ export default function useLiveKitPublish({
         }
       } else if (video && !published(Track.Source.Camera)) {
         cameraPubRef.current = await room.localParticipant.publishTrack(
-          video, { source: Track.Source.Camera },
+          video, CAMERA_PUBLISH,
         );
       }
       if (audio && !published(Track.Source.Microphone)) {
@@ -419,7 +433,7 @@ export default function useLiveKitPublish({
         }
         const video = streamRef.current?.getVideoTracks()[0];
         if (video && current()) {
-          cameraPubRef.current = await room.localParticipant.publishTrack(video, { source: Track.Source.Camera });
+          cameraPubRef.current = await room.localParticipant.publishTrack(video, CAMERA_PUBLISH);
         }
       }
     })().catch(() => {
@@ -456,7 +470,7 @@ export default function useLiveKitPublish({
       cameraPubRef.current = null;
       if (prevPub) await room.localParticipant.unpublishTrack(prevPub.track, false);
       if (current()) {
-        cameraPubRef.current = await room.localParticipant.publishTrack(videoTrack, { source: Track.Source.Camera });
+        cameraPubRef.current = await room.localParticipant.publishTrack(videoTrack, CAMERA_PUBLISH);
       }
     })().catch(() => {
       // Same reasoning as the screen-share swap above.

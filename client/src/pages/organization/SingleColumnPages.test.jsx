@@ -128,14 +128,17 @@ describe("no page-level right rail", () => {
 });
 
 describe("Audience keeps its content, in order, full width", () => {
-  it("still has the table, its search and the playback link", async () => {
+  it("still has the table, its search, refresh and export", async () => {
     renderPage(AudienceAccess);
     await screen.findByRole("heading", { level: 1, name: /audience access/i });
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/search events/i)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /playback gates/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /refresh/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /export/i })).toBeInTheDocument();
+    // The "Playback gates →" action used to be asserted here. It pointed at
+    // /organization/playback, which was deliberately removed from the Organization rail, so
+    // the page no longer offers a way back into it. The route and page are untouched.
+    expect(screen.queryByRole("link", { name: /playback gates/i })).not.toBeInTheDocument();
   });
 
   it("reads top to bottom: access by event, then attendance, then not measured, then controls", async () => {

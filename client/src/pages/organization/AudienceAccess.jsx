@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
-  FiUserCheck, FiRefreshCw, FiUsers, FiSlash, FiCalendar, FiTrendingUp, FiDownload,
+  FiUserCheck, FiRefreshCw, FiUsers, FiCalendar, FiTrendingUp, FiDownload,
 } from "react-icons/fi";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
@@ -23,8 +23,15 @@ import { downloadCsv } from "../../utils/export";
 // EVENT, so the page is organised that way: capacity and gating per event, with the attendee
 // analytics the analytics service does produce alongside it.
 //
-// The per-event registration counts on the left are REAL — they come from the events list
-// itself (registered_count is part of the dashboard enrichment).
+// The per-event registration counts come from GET /events, which now resolves them for the
+// whole page in one grouped query over event_registrations (crud/event.registration_counts).
+// The comment here used to claim that was already true; it was not — no `registered_count`
+// existed anywhere in the backend, so every event printed an em dash and the Registrations
+// KPI printed one too, for an organization that really did have registrations.
+//
+// The KPI row does NOT add up the rows on screen. It reads GET /organization/audience-summary,
+// which counts over the whole selected window in SQL — otherwise the cards would describe the
+// current page ("3 events") rather than the organization.
 //
 // The Attendance panel on the right reads GET /organization/audience-attendance
 // (services/org.py::audience_attendance). Not every figure there is a true measurement —
@@ -45,39 +52,110 @@ const fillTone = (pct) => {
   return "success";
 };
 
+// Days per range key, so the events list can be filtered by the SAME window the KPI row and
+// the attendance panel use. The range buttons used to reload only the attendance panel, which
+// left the table and the four cards showing every event regardless of the selection.
+const RANGE_DAYS = { "7d": 7, "30d": 30, "90d": 90 };
+const PAGE_SIZE = 20;               // inside the API's le=100 cap
+
+// DataTable names a column by the row field it renders; the API names sortable fields in its
+// own vocabulary (crud/event._EVENT_SORTS) and falls back to created_at for anything else.
+// Sending a column key straight through would silently sort by creation date while the header
+// claimed otherwise — so only mapped columns are marked sortable.
+const SORT_FIELD = {
+  title: "title",
+  visibility: "visibility",
+  registered: "registered",
+  pct: "registration_limit",
+};
+
 export default function AudienceAccess() {
   const [range, setRange] = useState("30d");
+  const [qInput, setQInput] = useState("");
+  const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
+  const [sort, setSort] = useState({ key: "start_time", dir: "desc" });
   const navigate = useNavigate();
 
+  // Debounced, so a request isn't fired per keystroke — same shape the Members and Identity
+  // & Access consoles use.
+  useEffect(() => {
+    const t = setTimeout(() => setQ(qInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [qInput]);
+
+  const sinceIso = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - (RANGE_DAYS[range] ?? 30));
+    return d.toISOString();
+  }, [range]);
+
+  // Server-side throughout: the window, the search and the page are all decided by the API,
+  // so the table is never a client-side slice of an unbounded fetch.
   const events = useApi(() =>
     api
-      .get("/events", { params: { page: 1, page_size: 100, sort_by: "start_time", order: "desc" } })
+      .get("/events", {
+        params: {
+          page,
+          page_size: PAGE_SIZE,
+          q: q || undefined,
+          date_from: sinceIso,
+          sort_by: (sort && SORT_FIELD[sort.key]) || "start_time",
+          order: sort?.dir || "desc",
+        },
+      })
       .then((r) => r.data)
+  );
+  // Dataset-wide counters for the KPI row, counted in SQL over the same window.
+  const summary = useApi(() =>
+    api.get("/organization/audience-summary", { params: { range } }).then((r) => r.data)
   );
   const attendance = useApi(() =>
     api.get("/organization/audience-attendance", { params: { range } }).then((r) => r.data)
   );
   const a = attendance.data || {};
 
+  // useApi fetches on mount and on reload() only, so every server-decided input refetches
+  // explicitly. Guarded-render refetch is this repo's idiom in place of an effect.
+  const inputs = `${range}|${q}|${page}|${sort?.key}|${sort?.dir}`;
+  const [lastInputs, setLastInputs] = useState(inputs);
+  if (inputs !== lastInputs) {
+    setLastInputs(inputs);
+    events.reload();
+    if (!lastInputs.startsWith(range)) { summary.reload(); attendance.reload(); }
+  }
+
+  // Narrowing the result must return to its first page.
+  const resetPage = (apply) => { setPage(1); apply(); };
+
   const rows = useMemo(() => {
     const list = Array.isArray(events.data) ? events.data : events.data?.items || [];
     return list.map((ev) => {
-      const registered = ev.registered_count ?? ev.registrations ?? null;
+      // ?? not ||: a counted 0 is a real answer and must not fall through to null. Only a
+      // response that omits the field entirely (an older API build) is "unknown".
+      const registered = ev.registered_count ?? null;
       const limit = ev.registration_limit ?? null;
       const pct = registered != null && limit ? Math.round((registered / limit) * 100) : null;
       return { ...ev, registered, limit, pct };
     });
   }, [events.data]);
 
-  const totals = useMemo(() => {
-    const withReg = rows.filter((r) => r.registered != null);
-    return {
-      events: rows.length,
-      gated: rows.filter((r) => r.registration_required).length,
-      registrations: withReg.length ? withReg.reduce((n, r) => n + r.registered, 0) : null,
-      atCapacity: rows.filter((r) => r.pct != null && r.pct >= 100).length,
-    };
-  }, [rows]);
+  const total = events.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  // Counted server-side over the whole window. `null` when the summary call failed — the
+  // cards then render an em dash rather than a zero, because a failed request is not a
+  // measurement of nothing.
+  const s = summary.data;
+  const totals = {
+    events: s ? s.events : null,
+    gated: s ? s.registration_required : null,
+    registrations: s ? s.registrations : null,
+    atCapacity: s ? s.at_capacity : null,
+    capped: s ? s.events_with_capacity : null,
+  };
+  const UNKNOWN = "—";
+  const kpi = (v) => (v == null ? UNKNOWN : v);
 
 
   const columns = [
@@ -103,6 +181,8 @@ export default function AudienceAccess() {
       render: (ev) => <Badge tone="brand">{visLabel(ev.visibility)}</Badge>,
     },
     {
+      // Not sortable: the API has no ordering for this flag, and a header that reordered
+      // nothing (or reordered by creation date) would be worse than no header control.
       key: "registration_required",
       header: "Registration",
       render: (ev) =>
@@ -132,10 +212,16 @@ export default function AudienceAccess() {
       sortable: true,
       sortValue: (ev) => ev.pct ?? -1,
       render: (ev) =>
-        ev.pct == null ? (
+        ev.limit == null ? (
+          // Genuinely uncapped: registration_limit is NULL on the event. Not a stand-in for
+          // a figure we failed to fetch — an event with a limit always shows the number.
           <span className={cx("text-[12px]", CONSOLE.faint)} title="No capacity limit set">
             Uncapped
           </span>
+        ) : ev.pct == null ? (
+          // Capped, but this response did not carry a registered count, so the fill is
+          // unknown. The configured capacity is still a fact and is still shown.
+          <span className={cx("text-[13px]", type.mono, CONSOLE.heading)}>{ev.limit}</span>
         ) : (
           <span className="inline-flex items-center gap-2">
             {/* Bar carries the same verdict as the number, for anyone scanning rather than
@@ -155,6 +241,9 @@ export default function AudienceAccess() {
             <Badge tone={fillTone(ev.pct)} size="sm">
               {ev.pct}%
             </Badge>
+            {/* The configured capacity itself, so the column answers "how many?" and not
+                only "how full?". */}
+            <span className={cx("text-[12px]", type.mono, CONSOLE.faint)}>of {ev.limit}</span>
           </span>
         ),
     },
@@ -186,7 +275,7 @@ export default function AudienceAccess() {
                 <button
                   key={value}
                   type="button"
-                  onClick={() => { setRange(value); attendance.reload(); }}
+                  onClick={() => resetPage(() => setRange(value))}
                   aria-pressed={range === value}
                   className={cx(
                     "rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors duration-150 motion-reduce:transition-none",
@@ -220,37 +309,65 @@ export default function AudienceAccess() {
         <OrganizationErrorState error={events.error} onRetry={events.reload} title="Couldn't load events" />
       )}
 
+      {summary.error && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
+          {/* A failed summary must not read as "zero registrations". */}
+          <span>Couldn&apos;t load the audience totals. The table below is unaffected.</span>
+          <ConsoleButton size="sm" variant="secondary" onClick={summary.reload}>Retry</ConsoleButton>
+        </div>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Events" value={totals.events} loading={events.loading} />
-        <StatCard label="Registration required" value={totals.gated} loading={events.loading} />
+        {/* All four are counted in SQL across the selected window — not summed from the page
+            of rows below, which would describe the page instead of the organization. */}
+        <StatCard label="Events" value={kpi(totals.events)} loading={summary.loading} />
+        <StatCard label="Registration required" value={kpi(totals.gated)} loading={summary.loading} />
+        <StatCard label="Registrations" value={kpi(totals.registrations)} loading={summary.loading} />
         <StatCard
-          label="Registrations"
-          value={totals.registrations ?? "—"}
-          loading={events.loading}
+          label="At capacity"
+          value={kpi(totals.atCapacity)}
+          loading={summary.loading}
+          // 0 of 0 capped events is a different fact from 0 of 12, and the card alone cannot
+          // tell them apart. Only shown once the count is actually known.
+          hint={totals.capped === 0 ? "No event has a capacity set" : undefined}
         />
-        <StatCard label="At capacity" value={totals.atCapacity} loading={events.loading} />
       </div>
 
+      {/* The "Playback gates →" action that sat here pointed at /organization/playback, which
+          was deliberately removed from the Organization rail. Leaving a link into a surface
+          the console no longer presents as its own would reintroduce it through a side door.
+          The ROUTE and the page are untouched — this is only the entry point. */}
       <Panel
           title="Access by event"
-          count={totals.atCapacity}
-          action={
-            <Link to="/organization/playback" className={cx("text-[12px] font-semibold", CONSOLE.link)}>
-              Playback gates →
-            </Link>
-          }
+          // No `count`: Panel renders it inline with the title, and the table's own
+          // "Showing 1–20 of N" footer already states the total — from the same number.
           flush
         >
+          <div className="px-4 pt-3">
+            <input
+              value={qInput}
+              onChange={(e) => resetPage(() => setQInput(e.target.value))}
+              placeholder="Search events…"
+              aria-label="Search events"
+              className={CONSOLE.search}
+            />
+          </div>
           <DataTable
             columns={columns}
             rows={rows}
             rowKey={(ev) => ev.id}
             loading={events.loading}
-            searchable
-            searchKeys={["title"]}
-            searchPlaceholder="Search events…"
-            pageSize={12}
             minWidth={760}
+            // Server-driven: DataTable's own search/sort/paging would only ever act on the
+            // page the API already returned, which is how "oldest" comes to mean "oldest of
+            // the twenty on screen".
+            pageSize={PAGE_SIZE}
+            serverSort={sort}
+            onSortChange={(next) => resetPage(() => setSort(next || { key: "start_time", dir: "desc" }))}
+            serverPage={page}
+            serverPageCount={pageCount}
+            serverTotal={total}
+            onPageChange={setPage}
             onRowClick={(ev) => navigate(`/organization/events/${ev.id}`)}
             empty={{
               icon: FiUserCheck,
@@ -271,7 +388,12 @@ export default function AudienceAccess() {
           columns={4}
           facts={[
             {
-              label: "Unique attendees",
+              // NOT "Unique attendees": the figure is claimed private-registration emails
+              // plus the sum of each event's PEAK concurrency, so one person at two events
+              // counts twice. The footnote below already said the method was estimated
+              // while the label still claimed uniqueness — this is the same correction
+              // analytics() made when "Total Viewers" became peak_viewers_summed.
+              label: "Estimated attendees",
               value: attendance.loading ? null : a.unique_attendees ?? null,
               reason: "Loading",
             },
@@ -326,7 +448,9 @@ export default function AudienceAccess() {
         <ul className="grid gap-1 sm:grid-cols-2">
           {[
             [FiUsers, "Members & Access", "/organization/users", "Who inside the organization can operate events."],
-            [FiSlash, "Playback & Access", "/organization/playback", "Visibility, passphrase and registration gates."],
+            // Playback & Access is not listed: it was removed from the Organization rail, and
+            // the gates it reads are SET on the event, which is where "Live Events" below
+            // already points. Its route and page are untouched.
             [FiCalendar, "Live Events", "/organization/events", "Capacity, schedule and the watch window."],
             [FiTrendingUp, "Analytics", "/organization/analytics", "Engagement once they are in the room."],
           ].map(([Icon, label, to, desc]) => (

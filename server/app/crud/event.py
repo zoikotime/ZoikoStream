@@ -13,12 +13,23 @@ from ..models import (
     EventRegistration, LiveIngressEndpoint, LiveRecording, User,
 )
 
+# Sortable columns for GET /events, as an explicit map. A whitelist rather than
+# getattr(Event, name): the value arrives from the browser, and a map can only ever yield a
+# column written down here. An unknown name falls back to created_at.
+#
+# "registered" is the one entry that is not a plain column — see the outer join in
+# list_events. It is here because the Audience page's whole subject is registration, and a
+# header that sorts only the rows already on screen answers a different question from the
+# one it appears to.
 _EVENT_SORTS = {
     "created_at": Event.created_at,
     "start_time": Event.start_time,
     "title": Event.title,
     "status": Event.status,
+    "visibility": Event.visibility,
+    "registration_limit": Event.registration_limit,
 }
+_SORT_REGISTERED = "registered"
 
 
 # ── Lifecycle validation (pure — unit-testable without a DB) ──────────────────
@@ -205,12 +216,46 @@ def list_events(db, org_id, q=None, status=None, host_id=None, date_from=None, d
     if date_to:
         stmt = stmt.where(Event.start_time <= date_to)
 
-    col = _EVENT_SORTS.get(sort_by, Event.created_at)
-    stmt = stmt.order_by(asc(col) if order == "asc" else desc(col))
+    if sort_by == _SORT_REGISTERED:
+        # Order by how many people registered. outerjoin + coalesce so an event with no
+        # registrations sorts as 0 rather than dropping out of the result entirely.
+        counts = (
+            select(EventRegistration.event_id.label("eid"), func.count().label("n"))
+            .group_by(EventRegistration.event_id)
+            .subquery()
+        )
+        stmt = stmt.outerjoin(counts, counts.c.eid == Event.id)
+        col = func.coalesce(counts.c.n, 0)
+    else:
+        col = _EVENT_SORTS.get(sort_by, Event.created_at)
+    # id breaks ties so paging is deterministic — without it two events sharing a sort value
+    # could swap between pages and hide a row.
+    stmt = stmt.order_by(asc(col) if order == "asc" else desc(col),
+                         asc(Event.id) if order == "asc" else desc(Event.id))
 
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
     return items, total
+
+
+def registration_counts(db, event_ids) -> dict:
+    """{event_id: registered} for the given events, in ONE grouped query.
+
+    Kept separate from list_events so the count is paid for only by callers that render it,
+    and so it stays a single round trip rather than a per-row subquery — the Audience page
+    lists up to a page of events at a time and an N+1 here would be a query per row.
+
+    An event with no registrations is absent from the result; callers map that to 0, which is
+    a real measurement ("nobody registered"), not missing data.
+    """
+    if not event_ids:
+        return {}
+    rows = db.execute(
+        select(EventRegistration.event_id, func.count())
+        .where(EventRegistration.event_id.in_(list(event_ids)))
+        .group_by(EventRegistration.event_id)
+    ).all()
+    return {eid: n for eid, n in rows}
 
 
 def get_event(db, org_id, event_id) -> Event | None:

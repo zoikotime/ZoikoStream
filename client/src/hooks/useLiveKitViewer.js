@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Room, RoomEvent, Track } from "livekit-client";
+import { Room, RoomEvent, Track, VideoQuality } from "livekit-client";
 import { fatalDisconnect } from "./livekitDisconnect";
 
 // Subscribes to whatever is being published in the room and attaches every remote track
@@ -46,6 +46,33 @@ import { fatalDisconnect } from "./livekitDisconnect";
 // Retries continue indefinitely at a capped, jittered cadence (matching
 // hooks/useEventStream.js's proven reconnect loop); past SLOW_ATTEMPTS_AFTER the message says
 // so honestly instead of claiming the stream is unrecoverable.
+// Label a simulcast layer by the height the publisher actually encoded, so the menu can
+// never advertise a rendition that does not exist. A 720p webcam yields 720p/360p/180p —
+// there is simply no 1080p entry to offer, and inventing one would be the "upscale and call
+// it 1080p" the brief rules out.
+export function describeLayers(publication) {
+  const layers = publication?.trackInfo?.layers;
+  if (!Array.isArray(layers) || layers.length < 2) return [];
+  return layers
+    .filter((l) => l?.height > 0)
+    .map((l) => ({ quality: l.quality, width: l.width, height: l.height, label: `${l.height}p` }))
+    .sort((a, b) => b.height - a.height);
+}
+
+/** Apply a preference to a publication. "auto" caps at HIGH, i.e. no cap at all, which is
+ *  what hands the choice back to LiveKit's adaptive/dynacast selection. */
+export function applyQuality(publication, preference) {
+  if (!publication?.setVideoQuality) return;
+  try {
+    publication.setVideoQuality(
+      preference === "auto" ? VideoQuality.HIGH : preference
+    );
+  } catch {
+    // A publication that is no longer subscribed refuses the call; the next subscribe
+    // re-applies the preference anyway.
+  }
+}
+
 const BASE_RECONNECT_DELAY_MS = 1500;
 const MAX_RECONNECT_DELAY_MS = 15000;
 const SLOW_ATTEMPTS_AFTER = 5;
@@ -126,6 +153,32 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
   // watching/listening to — micOn describes what this viewer is sending.
   const micStreamRef = useRef(null);
   const micPubRef = useRef(null);
+  // ── Manual video quality ────────────────────────────────────────────────────────────
+  //
+  // The publication is held so the quality menu can read the layers the publisher ACTUALLY
+  // sent (pub.trackInfo.layers) rather than offer a fixed list. LiveKit simulcast is three
+  // levels — VideoQuality LOW/MEDIUM/HIGH — so a hardcoded 1080p/720p/480p/360p menu could
+  // never have mapped onto it even if it had been wired up.
+  //
+  // `preferenceRef` is the viewer's own choice and is re-applied whenever the publication
+  // changes (host toggles camera, swaps device, switches to screen share, or the room
+  // reconnects), so the control never stays bound to a publication that is gone.
+  // The publication is held in a REF, and the derived layers in STATE.
+  //
+  // That split matters: RemoteTrackPublication.updateInfo() mutates the SAME object in
+  // place when the server sends layer metadata, and it emits no event. Deriving the menu
+  // from `useMemo([publication])` therefore never recomputed — layers that arrived after
+  // TrackSubscribed were invisible for the life of the track, and the menu said "single
+  // rendition" forever. Layers are now re-derived on every surrounding track event and
+  // stored by value.
+  const videoPubRef = useRef(null);
+  const [videoLayers, setVideoLayers] = useState([]);
+  // Distinct from "one layer": no publication at all, which is the Starting soon / PREVIEW
+  // state. Saying "single rendition" there would describe a stream that is not arriving.
+  const [hasVideoPublication, setHasVideoPublication] = useState(false);
+  const [quality, setQuality] = useState("auto");
+  const preferenceRef = useRef("auto");
+
   const [micOn, setMicOn] = useState(false);
   // Whether a mic track is actually PUBLISHED. State, not a read of micPubRef during render:
   // the prompt that hides itself once publishing begins only hides if this re-renders.
@@ -177,9 +230,35 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       const room = new Room();
       roomRef.current = room;
 
-      const onSubscribed = (track) => {
+      // Re-read the CURRENT publication and refresh the menu from it. Called on every event
+      // that can change layer metadata, because updateInfo() mutates in place and announces
+      // nothing — a single snapshot at subscribe time is not enough.
+      const refreshLayers = () => {
+        if (!current()) return;
+        const pub = videoPubRef.current;
+        const next = describeLayers(pub);
+        setHasVideoPublication(Boolean(pub));
+        // Compare by value: the publication object is stable, so identity tells us nothing,
+        // and setting a fresh array every event would re-render for no reason.
+        setVideoLayers((prev) =>
+          prev.length === next.length &&
+          prev.every((l, i) => l.quality === next[i].quality && l.height === next[i].height)
+            ? prev
+            : next
+        );
+      };
+
+      const onSubscribed = (track, publication) => {
         if (!current()) return;
         tracksRef.current.add(track);
+        if (track.kind === Track.Kind.Video && publication) {
+          videoPubRef.current = publication;
+          // Re-apply this viewer's standing preference to the NEW publication. Scoped to
+          // this browser's subscription only — it changes nothing for the publisher or for
+          // any other viewer.
+          applyQuality(publication, preferenceRef.current);
+          refreshLayers();
+        }
         // Attaching happens in the effect below — see this file's header for why doing it
         // here was unsafe.
         bumpTracks();
@@ -192,6 +271,10 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
           // Already detached.
         }
         tracksRef.current.delete(track);
+        if (track.kind === Track.Kind.Video) {
+          videoPubRef.current = null;
+          refreshLayers();      // clears the menu rather than leaving stale layers behind
+        }
         if (!current()) return;
         bumpTracks();
       };
@@ -203,7 +286,24 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       // join by itself) — but they ARE the signals that prove a viewer who joined BEFORE the
       // host will still get the track, so they're observed explicitly rather than assumed.
       room.on(RoomEvent.ParticipantConnected, (p) => logSubscription("participant connected", room, { who: p.identity }));
-      room.on(RoomEvent.TrackPublished, (pub, p) => logSubscription("remote track published", room, { who: p.identity, source: pub.source }));
+      room.on(RoomEvent.TrackPublished, (pub, p) => {
+        // Layer metadata usually lands HERE, before (or without) a subscribe. Adopting the
+        // publication at this point is what lets the menu populate on its own once the host
+        // actually goes live, with no page refresh.
+        if (pub?.kind === Track.Kind.Video) {
+          videoPubRef.current = pub;
+          refreshLayers();
+        }
+        logSubscription("remote track published", room, { who: p.identity, source: pub.source });
+      });
+      // Dynacast pausing/resuming a layer changes what is actually available.
+      room.on(RoomEvent.TrackStreamStateChanged, refreshLayers);
+      room.on(RoomEvent.TrackUnpublished, (pub) => {
+        if (pub?.kind === Track.Kind.Video && videoPubRef.current === pub) {
+          videoPubRef.current = null;
+          refreshLayers();
+        }
+      });
       room.on(RoomEvent.ParticipantDisconnected, (p) => {
         // Drop anything that participant was sending, so a host who leaves doesn't leave a
         // frozen last frame attached to the element.
@@ -418,8 +518,17 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
     onMuteChange?.(!next);
   }, [micOn, onMuteChange]);
 
+  const selectQuality = useCallback((preference) => {
+    preferenceRef.current = preference;
+    setQuality(preference);
+    applyQuality(videoPubRef.current, preference);
+  }, []);
+
   return {
     mediaRef, connected, reconnecting, hasVideo, hasAudio, error,
+    // Quality: the layers the publisher really sent, whether a video publication exists at
+    // all (distinct from "one layer"), this viewer's choice, and the setter.
+    videoLayers, hasVideoPublication, quality, selectQuality,
     // `micLive` is whether a track is actually published — distinct from micOn, which is
     // whether that track is currently enabled. The console learns the same fact from
     // LiveKit's own track webhook, so neither side is guessing.

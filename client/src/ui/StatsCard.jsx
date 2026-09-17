@@ -18,6 +18,10 @@ export default function StatsCard({
   up = true,
   live = false,
   liveLabel = "Live now",
+  // Optional one-line qualifier under the figure, for a metric whose NAME cannot carry its
+  // own definition (e.g. a summed peak, or a heuristic score). Additive: every existing
+  // caller omits it and renders exactly as before.
+  hint,
   className = "",
 }) {
   const isNumber = typeof value === "number";
@@ -34,6 +38,9 @@ export default function StatsCard({
           <p className="text-2xl font-bold text-slate-900 dark:text-white">
             {isNumber ? <Counter value={value} prefix={prefix} suffix={suffix} decimals={decimals} /> : value}
           </p>
+          {hint && (
+            <p className="mt-0.5 text-[11px] leading-4 text-slate-400 dark:text-slate-500">{hint}</p>
+          )}
         </div>
       </div>
 

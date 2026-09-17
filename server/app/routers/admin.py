@@ -240,6 +240,52 @@ def _support_out(req: SupportAccessRequest) -> dict:
     return payload
 
 
+@router.get("/support-access/state")
+def support_access_state(org_id: uuid.UUID, db: Session = Depends(get_db),
+                         admin: User = Depends(require_super_admin)):
+    """What support access this admin currently holds over one Organization.
+
+    A READ over the existing SupportAccessRequest rows — no new lifecycle, no second
+    workflow, and nothing here approves anything. It exists because the console had no way to
+    ASK: every protected action 403'd with "this Organization has not approved an active
+    support session" and the operator had no surface telling them what state they were in or
+    what to do next. Reported states are the model's own SUPPORT_* values, not UI inventions.
+
+    Scoped to the caller: `mine` is this admin's own latest request, because one engineer's
+    approved session is not another's authority to write.
+    """
+    live = support_svc.active_for(db, org_id)
+    mine = db.scalar(
+        select(SupportAccessRequest)
+        .where(SupportAccessRequest.org_id == org_id,
+               SupportAccessRequest.engineer_id == admin.id)
+        .order_by(SupportAccessRequest.requested_at.desc())
+    )
+
+    # Reuse the serializer the other support-access routes already return, so the console
+    # reads one shape everywhere, plus the one derived fact it cannot compute itself.
+    mine_shaped = None
+    if mine is not None:
+        mine_shaped = _support_out(mine)
+        mine_shaped["is_live"] = support_svc.session_is_live(db, mine)
+    # The single question the console actually needs answered: may THIS admin write to this
+    # tenant right now. Derived from the same predicates ctx.authorize uses, so the banner
+    # cannot claim an ability the gate would refuse.
+    can_write = bool(
+        live is not None
+        and live.engineer_id == admin.id
+        and tenant_access.CAP_MEMBERS_WRITE in support_svc.actions_list(live.allowed_actions)
+    )
+    return {
+        "org_id": str(org_id),
+        "can_write_members": can_write,
+        "mine": mine_shaped,
+        # Someone else may hold the live session; say so rather than showing "no access".
+        "other_engineer_active": bool(live is not None and live.engineer_id != admin.id),
+        "capability": tenant_access.CAP_MEMBERS_WRITE,
+    }
+
+
 @router.post("/support-access", status_code=status.HTTP_201_CREATED)
 def request_support_access(data: SupportAccessCreate, request: Request,
                           background: BackgroundTasks,
@@ -483,10 +529,16 @@ def list_users(
     is_active: bool | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    # Sorting is applied in SQL across the whole filtered set, not over the returned page.
+    # The pattern constrains the value before it reaches the query, and crud.USER_SORTS maps
+    # it to a column — the browser's string never becomes SQL.
+    sort_by: str | None = Query(None, pattern="^(name|email|role|joined|organization)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
     items, total = crud.list_users(db, q=q, role=role, org_id=org_id, is_active=is_active,
-                                   page=page, page_size=page_size)
+                                   page=page, page_size=page_size,
+                                   sort_by=sort_by, order=order)
     return Page(items=items, total=total, page=page, page_size=page_size)
 
 
@@ -496,6 +548,39 @@ def user_summary(db: Session = Depends(get_db)):
     filter is active — one query instead of the four page_size=1 round trips the page used
     to make just to total/active/inactive/super_admin counts."""
     return crud.user_stats(db)
+
+
+def _assert_super_admins_remain(db: Session, target: User, *, demoting_to=None,
+                                deactivating=False, deleting=False) -> None:
+    """Refuse an operation that would leave the platform with zero active super admins.
+
+    The existing guard beside this one is SELF-scoped — it stops an admin locking themselves
+    out, but not admin A removing the last remaining admin B. Nobody could then reach /admin
+    at all, and there is no route that mints a super admin, so recovery would mean editing the
+    database by hand.
+
+    Locked, not just counted. `SELECT ... FOR UPDATE` over the active super-admin rows makes
+    two concurrent removals serialise: the second transaction blocks until the first commits
+    and then re-counts against the post-commit state, so "A removes B while C removes A"
+    cannot pass both checks on the same stale count. Matches the with_for_update(skip_locked)
+    convention already used for capacity claims in crud/admin.py — without skip_locked here,
+    because a row another transaction is deleting is exactly the row this count must wait for.
+    """
+    if target.role != "super_admin" or not target.is_active:
+        return          # not currently part of the active super-admin set
+    removes = deleting or deactivating or (demoting_to is not None and demoting_to != "super_admin")
+    if not removes:
+        return
+    remaining = db.scalars(
+        select(User.id)
+        .where(User.role == "super_admin", User.is_active.is_(True), User.id != target.id)
+        .with_for_update()
+    ).all()
+    if not remaining:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "At least one active Super Admin must remain.",
+        )
 
 
 @router.patch("/users/{user_id}")
@@ -509,6 +594,11 @@ def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
     # Guard against self-lockout: can't deactivate or demote your own account.
     if user.id == admin.id and (data.is_active is False or (data.role and data.role != "super_admin")):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot deactivate or demote yourself")
+    # Same class of protection, one scope wider: the self-guard above covers the admin doing
+    # the editing, this covers the platform. Checked before the ORG-009 gate so a refusal on
+    # identity grounds does not get recorded as a consumed support action.
+    _assert_super_admins_remain(db, user, demoting_to=data.role,
+                                deactivating=data.is_active is False)
     # ORG-009 gate. Editing a tenant's member is support access to that tenant, so the
     # Organization must have approved it. Platform enforcement of the ORGANIZATION itself
     # (suspend/restrict/delete) is a separate, deliberately ungated path — see
@@ -560,6 +650,9 @@ def delete_user(user_id: uuid.UUID, request: Request, background: BackgroundTask
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if user.id == admin.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot delete your own account")
+    # A hard delete removes the account outright, so it empties the super-admin set the same
+    # way a demotion does — and irreversibly.
+    _assert_super_admins_remain(db, user, deleting=True)
     ctx.authorize(user.org_id, tenant_access.CAP_MEMBERS_WRITE,
                   resource="user", resource_id=user.id, summary="hard delete")
     email, org_id = user.email, user.org_id

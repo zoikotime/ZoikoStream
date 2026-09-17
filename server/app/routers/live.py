@@ -492,6 +492,20 @@ async def livekit_webhook(request: Request, authorization: str = Header(None)):
                 await bus.presence_clear(event_id)
                 await mod.feed_activity(event_id, "system", "Stream ended", persist=True)
 
+    elif kind == "egress_updated":
+        # Intermediate progress only. Deliberately NOT folded into the branch below: that
+        # one treats "not egress_started" as "ended" and calls record_egress_result, so
+        # adding this event there would let a mid-flight STARTING -> ACTIVE transition
+        # finalise the row and declare a recording complete while it is still running.
+        #
+        # Final authority stays with egress_ended (and, when that is never delivered, with
+        # broadcast.reconcile_stuck_recording asking LiveKit directly). Here we only relay
+        # the live status so the console can show real progress.
+        status = broadcast.egress_status_name(evt.egress_info) if evt.egress_info else None
+        await bus.publish(event_id, "recording", "recording.progress",
+                          {"egress_id": getattr(evt.egress_info, "egress_id", None),
+                           "status": status})
+
     elif kind in ("egress_started", "egress_ended"):
         recording = kind == "egress_started"
         await bus.publish(event_id, "moderator", "recording.status", {"recording": recording})

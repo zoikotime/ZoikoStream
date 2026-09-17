@@ -25,6 +25,7 @@ import { ROLE_PATH } from "./roleConfig";
 import ContributorInviteModal from "./ContributorInviteModal";
 import InviteViewersModal from "./InviteViewersModal";
 import EventCommercial from "../../components/organization/EventCommercial";
+import { copyViewerLink } from "../../utils/viewerLink";
 
 // No "Moderators" tab: the role is retired and GET/PATCH /events/{id}/moderators no longer
 // exist, so the tab could neither load nor save. Hosts now hold the audience-management
@@ -298,11 +299,14 @@ export default function EventDetails() {
   const { event, hosts, speakers, viewers, feedback } = data;
   const st = statusMeta(event.status);
 
-  const copyLink = () => {
-    // /e/:id is a separate, fully-mocked marketing page (fake demo data only) — the real,
-    // backend-wired viewer page is /events/:eventId/watch.
-    navigator.clipboard?.writeText(`${window.location.origin}/events/${event.id}/watch`);
-    notify.success("Event link copied");
+  // Copy only — the console never opens the attendee page, and never renders the URL.
+  // The link is built by utils/viewerLink so this screen, the events list and Playback &
+  // Access cannot drift from one another.
+  const copyLink = async () => {
+    if (await copyViewerLink(event.id)) notify.success("Viewer link copied");
+    // A clipboard that refuses (insecure origin, denied permission, older browser) used to
+    // fail silently and still claim success.
+    else notify.error("Unable to copy viewer link.");
   };
 
   const STATUS_TOAST = {
@@ -422,7 +426,7 @@ export default function EventDetails() {
           {canEnd && (
             <Button variant="danger" size="sm" leftIcon={FiPhoneOff} loading={busy} onClick={endEvent}>End Event</Button>
           )}
-          <Button variant="secondary" size="sm" leftIcon={FiLink} onClick={copyLink}>Copy Link</Button>
+          <Button variant="secondary" size="sm" leftIcon={FiLink} onClick={copyLink}>Copy Viewer Link</Button>
           <Button variant="danger" size="sm" leftIcon={FiTrash2} disabled={busy} onClick={del}>Delete</Button>
         </div>
       </div>
