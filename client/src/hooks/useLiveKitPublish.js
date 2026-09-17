@@ -291,6 +291,7 @@ export default function useLiveKitPublish({
       await disposeRoom();
       if (!current()) return;
 
+<<<<<<< HEAD
       let room;
       try {
         room = new Room(ROOM_OPTIONS);
@@ -304,6 +305,16 @@ export default function useLiveKitPublish({
         );
         throw Object.assign(e, { fatal: true });
       }
+=======
+      const room = new Room({
+        stopLocalTrackOnUnpublish: false,
+        dynacast: true,
+        publishDefaults: {
+          simulcast: true,
+          videoSimulcastLayers: [VideoPresets.h216, VideoPresets.h540, VideoPresets.h1080],
+        },
+      });
+>>>>>>> origin/naveen
       roomRef.current = room;
 
       room.on(RoomEvent.Reconnecting, () => {
