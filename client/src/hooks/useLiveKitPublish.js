@@ -1,6 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Room, RoomEvent, Track } from "livekit-client";
+import { Room, RoomEvent, Track, VideoPresets } from "livekit-client";
 import { fatalDisconnect } from "./livekitDisconnect";
+
+// Simulcast ladder for the camera, resolved once at module scope.
+//
+// LiveKit uses presets[0] as the low layer and presets[1] as the mid, then appends the
+// ORIGINAL capture resolution as the top layer — so the ladder a 1080p camera actually
+// encodes is 384x216 / 960x540 / capture, and h1080 here is redundant rather than wrong.
+//
+// filter(Boolean) because a future livekit-client that renames a preset would otherwise hand
+// LiveKit `[undefined, ...]`; dropping the entry falls back to the ladder LiveKit derives
+// from the capture resolution, which is what this did before the ladder was pinned.
+const SIMULCAST_LAYERS = [VideoPresets.h216, VideoPresets.h540, VideoPresets.h1080]
+  .filter(Boolean);
+
+// Room options, in one place so the construction site stays readable. dynacast pauses layers
+// nobody is subscribed to; simulcast is what gives the viewer's quality menu something to
+// choose between.
+const ROOM_OPTIONS = {
+  // The host's camera/mic tracks are OWNED by the preview (hooks/useMediaPreview), so LiveKit
+  // must never stop them — not on unpublish, and not on its own involuntary teardown path.
+  stopLocalTrackOnUnpublish: false,
+  dynacast: true,
+  publishDefaults: {
+    simulcast: true,
+    ...(SIMULCAST_LAYERS.length ? { videoSimulcastLayers: SIMULCAST_LAYERS } : {}),
+  },
+};
 
 // Camera publish options, in one place so the three publish sites cannot drift.
 //
@@ -265,7 +291,19 @@ export default function useLiveKitPublish({
       await disposeRoom();
       if (!current()) return;
 
-      const room = new Room({ stopLocalTrackOnUnpublish: false });
+      let room;
+      try {
+        room = new Room(ROOM_OPTIONS);
+      } catch (e) {
+        // Constructing a Room does no I/O: if it throws, the fault is in this build, not in
+        // the network, and retrying it forever would only hide that. Terminal, and says so.
+        setReconnecting(false);
+        setPublishError(
+          "Can't start the broadcaster on this build. Reload the page; if it keeps happening "
+          + "this needs a fix, not a retry."
+        );
+        throw Object.assign(e, { fatal: true });
+      }
       roomRef.current = room;
 
       room.on(RoomEvent.Reconnecting, () => {
@@ -358,7 +396,7 @@ export default function useLiveKitPublish({
       if (retryTimer) clearTimeout(retryTimer);
       retryTimer = setTimeout(() => {
         if (!current()) return;
-        connectOnce().catch(() => scheduleRetry());
+        connectOnce().catch((e) => { if (!e?.fatal) scheduleRetry(); });
       }, delay);
     };
 
@@ -370,11 +408,14 @@ export default function useLiveKitPublish({
       attempt = 0;
       setPublishError(null);
       setReconnecting(true);
-      connectOnce().catch(() => scheduleRetry());
+      connectOnce().catch((e) => { if (!e?.fatal) scheduleRetry(); });
     };
 
     connectOnce().catch((e) => {
       if (!current()) return;
+      // `fatal` marks a fault retrying cannot clear (see the Room construction guard above);
+      // it has already set its own message, and backing off would only bury it.
+      if (e?.fatal) return;
       setPublishError(e?.message || "Couldn't publish to the stream");
       scheduleRetry();
     });

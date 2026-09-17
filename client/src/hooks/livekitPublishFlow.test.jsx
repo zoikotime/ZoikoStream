@@ -156,6 +156,26 @@ class FakeRoom extends Emitter {
   }
 }
 
+// The double must mirror every export the hooks import. vi.mock factories are strict: merely
+// REFERENCING a name the factory omits throws at import time ("No VideoPresets export is
+// defined on the livekit-client mock"), which takes the whole file down before a single
+// assertion runs — it does not quietly yield undefined, so no amount of optional chaining in
+// the hook can survive it.
+//
+// Real shapes, not stand-ins: the hook passes these straight to LiveKit as
+// publishDefaults.videoSimulcastLayers, and a preset is {width, height, encoding}. Getting
+// the shape wrong here would let a genuinely malformed ladder pass the suite.
+const preset = (width, height, maxBitrate, maxFramerate) => ({
+  width, height, encoding: { maxBitrate, maxFramerate },
+});
+const VideoPresets = {
+  h216: preset(384, 216, 180_000, 20),
+  h360: preset(640, 360, 450_000, 20),
+  h540: preset(960, 540, 800_000, 25),
+  h720: preset(1280, 720, 1_700_000, 30),
+  h1080: preset(1920, 1080, 3_000_000, 30),
+};
+
 vi.mock("livekit-client", () => ({
   Room: class {
     constructor(options) {
@@ -165,6 +185,7 @@ vi.mock("livekit-client", () => ({
   RoomEvent,
   Track,
   DisconnectReason,
+  VideoPresets,
 }));
 
 const { default: useLiveKitPublish } = await import("./useLiveKitPublish");
