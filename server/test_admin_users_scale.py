@@ -28,7 +28,12 @@ from app.security import hash_password
 
 @pytest.fixture
 def world():
-    """One org, a handful of accounts with distinct names and creation order."""
+    """Seven accounts of its own, across two organizations.
+
+    Seven, not five, because the pagination test needs more rows than two pages of three —
+    and it must own all of them. Depending on whatever else is in the database made it pass
+    locally and fail on CI, where a freshly seeded database contributes exactly one row.
+    """
     db = SessionLocal()
     made = {"users": [], "orgs": []}
     try:
@@ -46,6 +51,29 @@ def world():
                      email=f"sc-{tag}-{i}@example.com", username=f"sc{tag}{i}",
                      password_hash=hash_password("x"), email_verified=True)
             db.add(u)
+            users.append(u)
+
+        # Two more accounts that exist ONLY so pagination has a boundary to cross.
+        #
+        # test_pages_do_not_overlap_or_skip asserts `total > 6` because two pages of three
+        # have to be genuinely distinct for the id-tiebreaker to be under test at all. It used
+        # to get that sixth-and-beyond row from whatever else happened to be in the database —
+        # which is true locally and false on a freshly seeded CI database, where the only
+        # other row is the seeded super admin and the total lands on exactly 6.
+        #
+        # Deliberately NOT tagged: every name, email and username here is uuid-derived and
+        # contains no `tag`, so test_search_is_case_insensitive_and_partial still matches
+        # exactly the five accounts above. They also belong to the PRIMARY org, so
+        # test_org_filter_is_applied_in_sql still finds exactly one account in `other`.
+        # Neither is a super_admin, so the last-admin guard tests are unaffected.
+        for role in ("viewer", "host"):
+            pad = uuid.uuid4().hex[:12]
+            u = User(org_id=org.id, full_name=f"Pagination Filler {pad}", role=role,
+                     is_active=True, email=f"pagination-{pad}@example.com",
+                     username=f"pagination{pad}",
+                     password_hash=hash_password("x"), email_verified=True)
+            db.add(u)
+            # Appended to the same list the cleanup already walks, so these are removed too.
             users.append(u)
         db.flush()
         made["users"] = [u.id for u in users]
