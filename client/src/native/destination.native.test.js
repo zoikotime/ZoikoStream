@@ -24,14 +24,17 @@ vi.mock("../api", () => ({
   errCode: () => null,
 }));
 
-// The flags exactly as `vite build --mode mobile` produces them. The organization console is
-// present, the platform console is not — mocking both rather than a single boolean is the
-// point, because the two moved apart and a test that still mocked one flag would be asserting
-// a build that no longer exists.
+// The flags exactly as `vite build --mode mobile` produces them. Both consoles now ship, so
+// the destinations match the web build; SUPPORTS_IN_APP_CHECKOUT is the one that still
+// differs, and it is a payments-policy decision rather than a routing one.
+//
+// Mocked literally rather than approximately. A test that keeps asserting a flag combination
+// the build no longer produces stays green while guarding nothing, which is worse than having
+// no test at all — it reports that a build was checked when it was not.
 vi.mock("../platform", () => ({
   IS_NATIVE: true,
   HAS_ORG_CONSOLE: true,
-  HAS_ADMIN_CONSOLE: false,
+  HAS_ADMIN_CONSOLE: true,
   HAS_CONSOLES: true,
   SUPPORTS_IN_APP_CHECKOUT: false,
   SUPPORTS_SCREEN_SHARE: false,
@@ -50,28 +53,36 @@ const ROLES = [
 ];
 
 describe("accountHome in the mobile build", () => {
-  it.each(ROLES)("sends %s to a route this build actually defines", (role) => {
-    // Including super_admin. They are still a super admin — RoleRoute decides that, not this
-    // function — but /admin/dashboard is not in this build, so the answer is the console that
-    // is. Landing an operator somewhere real beats landing them in a redirect loop.
-    expect(accountHome(role)).toBe("/organization/dashboard");
+  it.each(ROLES.filter((r) => r !== "super_admin"))(
+    "sends %s to a route this build actually defines", (role) => {
+      expect(accountHome(role)).toBe("/organization/dashboard");
+    });
+
+  it("sends super_admin to the platform console, which this build now carries", () => {
+    // The assertion that changed when /admin/* started shipping natively. It previously read
+    // /organization/dashboard, because the platform console was absent and sending an operator
+    // to a route the router could not match was an infinite redirect rather than a 404.
+    expect(accountHome("super_admin")).toBe("/admin/dashboard");
   });
 
-  it("never answers with a PLATFORM console path", () => {
-    // Stated as its own assertion because this is the loop condition, not a preference: a
-    // path the mobile router cannot match comes straight back to this function.
+  it("only ever answers with a route the native router defines", () => {
+    // The rule this file exists for, and the only form of it that survives both consoles
+    // shipping. It is stated as a whitelist rather than as a list of forbidden prefixes
+    // because the failure is "names something absent", and a blacklist can only ever rule out
+    // the absences somebody already thought of.
     //
-    // /organization/* is deliberately NOT asserted against any more — those routes ship here
-    // now, so forbidding them would be asserting the old build. /admin/* is the surface this
-    // build still lacks, so it is the one that can still cause the loop.
+    // App.jsx defines both of these natively now. If a build target ever drops one again,
+    // this is what should fail.
+    const ROUTABLE = new Set(["/admin/dashboard", "/organization/dashboard"]);
     for (const role of [...ROLES, undefined, null, "something_new"]) {
-      expect(accountHome(role).startsWith("/admin/")).toBe(false);
+      expect(ROUTABLE.has(accountHome(role))).toBe(true);
     }
   });
 
   it("answers for an unknown role too", () => {
     // A role the backend adds later must not produce `undefined`, which RootRedirect would
     // hand to <Navigate to={undefined}>.
+    // An unknown role is not a platform operator, so it falls to the organization console.
     expect(accountHome("role_that_does_not_exist_yet")).toBe("/organization/dashboard");
     expect(accountHome(undefined)).toBe("/organization/dashboard");
   });

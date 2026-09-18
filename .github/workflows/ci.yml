@@ -73,8 +73,9 @@ jobs:
       # neither produces a build error, and both produce an app that installs and then does
       # not work:
       #
-      #   * a console route surviving into the store build means shipping screens that cannot
-      #     be operated on a phone, and a Play reviewer who opens one,
+      #   * a console route going MISSING from the store build means the app silently loses
+      #     the surfaces it exists to carry - platform.js flags are build-time, so a
+      #     regression there produces a smaller bundle and no error whatsoever,
       #   * a missing VITE_API_URL means the SPA falls back to window.location.origin, which
       #     inside the WebView is the phone itself — so every request and the live WebSocket
       #     aim at a server that does not exist, and nobody can sign in.
@@ -82,7 +83,7 @@ jobs:
         working-directory: client
         run: npm run build:mobile
 
-      - name: Mobile build carries no console routes and a real API origin
+      - name: Mobile build carries both consoles and a real API origin
         working-directory: client
         run: |
           # The bundle goes to a FILE and grep reads that, rather than being held in a shell
@@ -93,17 +94,23 @@ jobs:
           # so the console-route check would PASS on a bundle full of console routes.
           # ZoikoStream-app/.github/workflows/android.yml documents the same discovery.
           cat dist-mobile/assets/*.js > "$RUNNER_TEMP/mobile-bundle.js"
-          # Paths that can ONLY be route definitions. /admin/dashboard and
-          # /organization/dashboard are deliberately absent from this list: the mobile build
-          # legitimately contains both as the target of the "open in your browser" link in
-          # native/ConsoleOnWebNotice.jsx, so checking for them would fail on the very feature
-          # that exists because the routes were removed.
+          # ── THIS CHECK USED TO ASSERT THE OPPOSITE ────────────────────────────────────
+          # It required these paths to be ABSENT, back when the store build deliberately
+          # shipped neither console. Both now ship (HAS_ORG_CONSOLE / HAS_ADMIN_CONSOLE in
+          # client/src/platform.js), so the same list guards the same risk from the other
+          # side: that a build-time flag quietly drops the surfaces the app exists to carry.
+          #
+          # That regression is invisible without this. The flags are statically replaced, so
+          # losing one removes whole route groups as dead code — no error, no warning, just a
+          # smaller bundle and an app that signs you in and has nothing in the menu.
+          #
+          # Paths that can ONLY be route definitions, one from each console area.
           failed=0
           for path in /admin/feature-flags /admin/audit /admin/governance /admin/live-events \
                       /organization/recordings /organization/credentials \
                       /organization/analytics /organization/billing; do
-            if grep -qF -- "$path" "$RUNNER_TEMP/mobile-bundle.js"; then
-              echo "::error::the mobile bundle still contains the console route $path"
+            if ! grep -qF -- "$path" "$RUNNER_TEMP/mobile-bundle.js"; then
+              echo "::error::the mobile bundle is missing the console route $path"
               failed=1
             fi
           done
@@ -112,7 +119,7 @@ jobs:
             echo "::error::the mobile bundle has no API origin — VITE_API_URL was not applied"
             exit 1
           fi
-          echo "mobile bundle verified: no console routes, API origin present"
+          echo "mobile bundle verified: both consoles present, API origin present"
 
   backend:
     name: Backend — pytest and self-check suites

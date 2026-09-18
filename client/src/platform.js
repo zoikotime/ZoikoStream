@@ -59,9 +59,20 @@ export const SUPPORTS_SCREEN_SHARE = !IS_NATIVE;
 // audience, sessions, analytics, settings. Ships everywhere.
 export const HAS_ORG_CONSOLE = true;
 
-// The platform console (/admin/*). Web only for now; this is a sequencing decision, not a
-// permission one — RoleRoute already answers "may this account use it".
-export const HAS_ADMIN_CONSOLE = !IS_NATIVE;
+// The platform console (/admin/*). Ships everywhere.
+//
+// This was web-only for one phase, on the assumption that 21 pages of operator tooling would
+// need a mobile design before they could be shipped. Measuring them instead of assuming:
+// AdminLayout already drives the same responsive AppShell drawer as the organization console,
+// there are three <table> elements in the whole area and the only one with a forced width is
+// already inside an overflow-x-auto, and every unprefixed grid is grid-cols-2 — a pair of
+// ~180px columns at phone width, which is tight rather than broken.
+//
+// So the work turned out to be the flag. Kept as a named constant rather than deleted because
+// it is still the honest thing for a caller to ask: "does this build carry /admin/*" is a
+// question with a real answer, and a future decision to drop it from a store build should be
+// one line rather than an archaeology exercise.
+export const HAS_ADMIN_CONSOLE = true;
 
 // Whether the billing surface may start a payment IN THIS BUILD.
 //
