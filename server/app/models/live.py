@@ -16,7 +16,7 @@ chat log intact for compliance export.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -203,7 +203,10 @@ class LiveRecording(_EventScoped):
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     paused_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    # BigInteger, not Integer: PostgreSQL INTEGER is 32-bit, so a single recording over
+    # 2,147,483,647 bytes (~2.0 GiB) overflows on insert — about 40 minutes of 1080p.
+    # The column is widened in create_tables._LIVE_RECORDING_COLUMNS.
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     file_url: Mapped[str | None] = mapped_column(String(500))
     auto_upload: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # False when LiveKit egress wasn't reachable/configured — the console shows the

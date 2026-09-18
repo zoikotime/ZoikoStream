@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { FiPlus, FiSearch, FiEye, FiTrash2, FiCalendar, FiChevronDown } from "react-icons/fi";
+import { FiPlus, FiSearch, FiEye, FiTrash2, FiCalendar, FiChevronDown, FiLink } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { notify } from "../../ui/Toast";
@@ -12,6 +12,7 @@ import Badge from "../../ui/Badge";
 import DataTable from "../../components/admin/DataTable";
 import { cx, focusRing } from "../../ui/tokens";
 import { EVENT_STATUS, statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
+import { copyViewerLink } from "../../utils/viewerLink";
 import CreateEventModal from "./CreateEventModal";
 
 const control = cx(
@@ -121,6 +122,35 @@ export default function OrganizationEvents() {
       sortable: true,
       sortValue: (r) => r.duration_minutes ?? 0,
       render: (r) => fmtDuration(r.duration_minutes),
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      align: "right",
+      // Icon-only: the rail is already six columns wide and the label lives in the tooltip
+      // and the accessible name. Copy ONLY — there is deliberately no affordance here that
+      // opens the attendee page, and the URL is never rendered.
+      render: (r) => (
+        <button
+          type="button"
+          title="Copy viewer link"
+          aria-label={`Copy viewer link for ${r.title || "this event"}`}
+          onClick={async (e) => {
+            // The row itself navigates to the event; copying must not also open it.
+            e.stopPropagation();
+            if (await copyViewerLink(r.id)) notify.success("Viewer link copied");
+            else notify.error("Unable to copy viewer link.");
+          }}
+          className={cx(
+            "inline-grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition-colors duration-150",
+            "hover:bg-slate-100 hover:text-violet-600 dark:hover:bg-white/[0.08] dark:hover:text-violet-300",
+            "motion-reduce:transition-none",
+            focusRing
+          )}
+        >
+          <FiLink aria-hidden="true" />
+        </button>
+      ),
     },
   ];
 

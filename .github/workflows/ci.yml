@@ -161,7 +161,13 @@ jobs:
       # Deterministic, throwaway, and NOT a production value. Present because app.config
       # requires it; it signs nothing that outlives the job.
       SECRET_KEY: ci-only-not-a-production-secret
-      SUPER_ADMIN_EMAIL: ci@example.invalid
+      # A resolvable-looking domain, NOT .invalid. AdminUserOut.email is a Pydantic EmailStr,
+      # and email-validator rejects the reserved .invalid TLD outright — so every admin route
+      # that serialises this account 500'd in CI while passing locally. The address is still
+      # throwaway and nothing is ever sent to it; only its SHAPE has to be valid.
+      # (APP_URL below stays .invalid on purpose — that is a URL, not an email, and nothing
+      # validates it against a TLD list.)
+      SUPER_ADMIN_EMAIL: ci@zoikostream.com
       SUPER_ADMIN_PASSWORD: ci-only-password
       # A canonical HTTPS origin, which is all the suite needs.
       #

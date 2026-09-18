@@ -83,6 +83,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   const {
     mediaRef, connected, reconnecting, hasVideo, hasAudio, error: streamError,
     micOn, micError, toggleMic, enableMic, micLive,
+    videoLayers, hasVideoPublication, quality, selectQuality,
   } = useLiveKitViewer({
     enabled: canStream,
     url: watch?.livekit_url,
@@ -671,30 +672,48 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                         <p className="font-semibold">Quality</p>
                       </div>
 
-                      {["Auto", "1080p", "720p", "480p", "360p"].map((quality) => (
-                        <button
-                          key={quality}
-                          type="button"
-                          disabled={quality !== "Auto"}
-                          onClick={() => {
-                            if (quality === "Auto") {
-                              setSettingsPage("main");
-                            }
-                          }}
-                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          <span>{quality}</span>
+                      {/* Built from the layers the publisher ACTUALLY sent
+                          (publication.trackInfo.layers), never a fixed list. LiveKit
+                          simulcast is three levels, and a 720p camera simply has no 1080p
+                          layer — so an option only appears when there is a real rendition
+                          behind it. Selecting one calls
+                          RemoteTrackPublication.setVideoQuality, which changes THIS viewer's
+                          subscription in-session: no reload, no reconnect, and no effect on
+                          the publisher or on anyone else watching. */}
+                      <button
+                        type="button"
+                        onClick={() => { selectQuality("auto"); setSettingsPage("main"); }}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                      >
+                        <span>Auto</span>
+                        {quality === "auto" && <FiCheck className="text-emerald-400" />}
+                      </button>
 
-                          {quality === "Auto" && (
-                            <FiCheck className="text-emerald-400" />
-                          )}
+                      {videoLayers.map((layer) => (
+                        <button
+                          key={layer.quality}
+                          type="button"
+                          onClick={() => { selectQuality(layer.quality); setSettingsPage("main"); }}
+                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                        >
+                          <span>{layer.label}</span>
+                          {quality === layer.quality && <FiCheck className="text-emerald-400" />}
                         </button>
                       ))}
 
-                      <p className="px-3 pb-2 pt-2 text-[11px] leading-4 text-white/40">
-                        Manual quality selection will be available when multiple
-                        video renditions are provided.
-                      </p>
+                      {videoLayers.length === 0 && (
+                        <p className="px-3 pb-2 pt-2 text-[11px] leading-4 text-white/40">
+                          {hasVideoPublication
+                            ? // A real publication carrying one layer — screen share, or a
+                              // publisher with simulcast off.
+                              "This stream is being sent as a single rendition, so only Auto is available."
+                            : // No remote video at all: Starting soon / PREVIEW, or the host
+                              // has their camera off. Calling that a "single rendition"
+                              // described a stream that was not arriving. The list fills in
+                              // by itself once the host goes live — no refresh needed.
+                              "Waiting for the host's video. Quality options appear once the stream starts."}
+                        </p>
+                      )}
                     </>
                   ) : (
                     <>

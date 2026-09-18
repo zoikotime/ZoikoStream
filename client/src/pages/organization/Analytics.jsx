@@ -31,6 +31,7 @@ import {
 import { ChartCard, ChartTooltip, PieChart } from "../../ui/charts";
 import DataTable from "../../components/admin/DataTable";
 import { fmtDate } from "../../data/events";
+import { formatEngagement, formatWatchTime } from "../../utils/analyticsFormat";
 
 const CHART = { violet: "#7c3aed", blue: "#3b82f6", emerald: "#10b981", amber: "#f59e0b", rose: "#f43f5e" };
 
@@ -48,7 +49,7 @@ const engTone = (v) =>
 // panel header and bar readouts stay correct without a second lookup table.
 const METRICS = [
   { value: "viewers", label: "Viewers", rankLabel: "peak viewers", format: (v) => v.toLocaleString() },
-  { value: "watch_hours", label: "Watch time", rankLabel: "hours watched", format: (v) => `${v.toLocaleString()} hrs` },
+  { value: "watch_hours", label: "Watch time", rankLabel: "hours watched", format: (v) => formatWatchTime(v) },
   { value: "engagement", label: "Engagement", rankLabel: "engagement score", format: (v) => `${v}%` },
 ];
 
@@ -59,7 +60,7 @@ const reportColumns = [
   { key: "event", header: "Event", sortable: true, className: "whitespace-nowrap", render: (r) => <span className="font-medium text-slate-800 dark:text-slate-100">{r.event}</span> },
   { key: "date", header: "Date", sortable: true, sortValue: (r) => (r.date ? new Date(r.date).getTime() : 0), className: "whitespace-nowrap", render: (r) => (r.date ? fmtDate(r.date) : "—") },
   { key: "viewers", header: "Peak Viewers", align: "right", sortable: true, className: "whitespace-nowrap", render: (r) => r.viewers.toLocaleString() },
-  { key: "watch_hours", header: "Watch Time", align: "right", sortable: true, className: "whitespace-nowrap", render: (r) => `${r.watch_hours.toLocaleString()} hrs` },
+  { key: "watch_hours", header: "Watch Time", align: "right", sortable: true, className: "whitespace-nowrap", render: (r) => formatWatchTime(r.watch_hours) },
   { key: "engagement", header: "Engagement", sortable: true, className: "whitespace-nowrap", render: (r) => (
     <div className="flex items-center gap-2">
       <div className="h-1.5 w-24 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
@@ -156,12 +157,27 @@ export default function OrganizationAnalytics() {
   const [chartType, setChartType] = useState("area");
 
   const kpis = useMemo(() => {
-    const s = data?.summary || { viewers: 0, watch_hours: 0, peak: 0, engagement: 0 };
+    // No `|| {0,0,0,0}` fallback: an absent payload must not manufacture measured zeros.
+    const s = data?.summary || {};
     return [
-      { title: "Total Viewers", value: s.viewers, icon: FiUsers, accent: "violet" },
-      { title: "Watch Time", value: s.watch_hours, suffix: " hrs", decimals: 1, icon: FiClock, accent: "blue" },
-      { title: "Peak Concurrent Viewers", value: s.peak, icon: FiTrendingUp, accent: "emerald" },
-      { title: "Avg. Engagement", value: s.engagement, suffix: "%", icon: FiActivity, accent: "amber" },
+      {
+        // Renamed from "Total Viewers", which the value could not support: it is the sum of
+        // each event's PEAK concurrency, so one person at three events counts three times.
+        title: "Event Peak Viewers",
+        value: s.peak_viewers_summed ?? 0,
+        hint: "Sum of peak concurrent viewers across events",
+        icon: FiUsers, accent: "violet",
+      },
+      { title: "Watch Time", value: formatWatchTime(s.watch_hours), icon: FiClock, accent: "blue" },
+      { title: "Peak Concurrent Viewers", value: s.peak ?? 0, icon: FiTrendingUp, accent: "emerald" },
+      {
+        // "Avg. Engagement" read as a measurement. The score is a documented heuristic
+        // (services/broadcast.engagement_score), so the name and hint say so.
+        title: "Engagement Score",
+        value: formatEngagement(s.engagement),
+        hint: "Derived from measured audience interactions",
+        icon: FiActivity, accent: "amber",
+      },
     ];
   }, [data]);
 
@@ -217,8 +233,17 @@ export default function OrganizationAnalytics() {
   );
 
   const exportReport = () => {
-    const head = ["Event", "Date", "Peak Viewers", "Watch Time (hrs)", "Engagement (%)"];
-    const body = reports.map((r) => [r.event, r.date, r.viewers, r.watch_hours, r.engagement]);
+    // Headers say what the numbers ARE. "Peak Viewers" was already accurate here even when
+    // the card above said "Total Viewers"; the engagement column now names itself a score.
+    // A figure that was never measured exports as text, not as a numeric 0 that a
+    // spreadsheet would happily average.
+    const head = ["Event", "Date", "Peak Viewers", "Watch Time (hrs)", "Engagement Score (%)"];
+    const notMeasured = (v) => (v == null ? "Not measured" : v);
+    const body = reports.map((r) => [
+      r.event, r.date, r.viewers,
+      notMeasured(r.watch_hours == null ? null : r.watch_hours.toFixed(2)),
+      notMeasured(r.engagement),
+    ]);
     const csv = [head, ...body]
       .map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(","))
       .join("\n");

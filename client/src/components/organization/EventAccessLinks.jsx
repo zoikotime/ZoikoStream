@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  FiCopy, FiKey, FiLink, FiPlus, FiRefreshCw, FiSlash, FiTrash2, FiExternalLink,
+  FiCopy, FiKey, FiLink, FiPlus, FiRefreshCw, FiSlash, FiTrash2,
 } from "react-icons/fi";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
@@ -17,6 +17,7 @@ import { Input, Label, Select } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import { cx } from "../../ui/tokens";
 import { fmtDateTime, visLabel, VISIBILITY_HELP } from "../../data/events";
+import { copyViewerLink } from "../../utils/viewerLink";
 
 // Viewer access links for one event.
 //
@@ -201,8 +202,6 @@ export default function EventAccessLinks({ event, canManage }) {
     if (ok) setConfirm(null);
   };
 
-  const watchUrl = `${window.location.origin}/events/${eventId}/watch`;
-
   return (
     <div className="space-y-4">
       {/* What this event's visibility ALREADY allows, before any link is issued. Stated
@@ -246,17 +245,25 @@ export default function EventAccessLinks({ event, canManage }) {
             </dd>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <dt className="text-slate-500 dark:text-slate-400">Watch page</dt>
+            <dt className="text-slate-500 dark:text-slate-400">Viewer link</dt>
             <dd className="flex min-w-0 items-center gap-2">
-              <code className="truncate font-mono text-xs text-slate-600 dark:text-slate-300">{watchUrl}</code>
+              {/* Copy only, and the URL is not rendered.
+                  This row used to print the full watch URL in a <code> block beside an
+                  external-link button labelled "Open the attendee watch page" — so the
+                  organizer console both displayed the link and walked its own operator into
+                  the attendee experience for their own event. The action the organizer
+                  actually needs is handing that link to somebody else. */}
               <Button
-                variant="ghost"
+                variant="secondary"
                 size="sm"
-                iconOnly
-                leftIcon={FiExternalLink}
-                href={`/events/${eventId}/watch`}
-                aria-label="Open the attendee watch page"
-              />
+                leftIcon={FiLink}
+                onClick={async () => {
+                  if (await copyViewerLink(eventId)) notify.success("Viewer link copied");
+                  else notify.error("Unable to copy viewer link.");
+                }}
+              >
+                Copy Viewer Link
+              </Button>
             </dd>
           </div>
         </dl>

@@ -100,6 +100,18 @@ export default function DataTable({
   selectable = false,
   onSelectionChange,
   bulkActions,
+  // ── server-driven mode (opt-in; every prop below defaults to the client behaviour) ──
+  // Identity & Access lists 1128 accounts, so sorting and paging the fetched page was
+  // answering a different question from the one the operator asked ("oldest account" meant
+  // "oldest of the newest 100"). Passing these hands both decisions to the caller, which
+  // forwards them to the API. Omit them and this component behaves exactly as before — that
+  // is what keeps the other admin tables untouched.
+  serverSort = null,          // { key, dir } | null — controlled sort; disables local sorting
+  onSortChange,               // (next) => void, next is { key, dir } | null
+  serverPage,                 // 1-based current page; disables local slicing
+  serverPageCount,            // total pages from the API's `total`
+  serverTotal,                // the API's `total`, so the count line names the dataset
+  onPageChange,               // (page) => void
 }) {
   const [sort, setSort] = useState(initialSort); // { key, dir } | null
   const [page, setPage] = useState(1);
@@ -146,7 +158,13 @@ export default function DataTable({
     setPage(1);
   }
 
+  const serverMode = typeof onSortChange === "function";
+  const activeSort = serverMode ? serverSort : sort;
+
   const sorted = useMemo(() => {
+    // Server-sorted rows arrive in order; re-sorting them locally would reorder only the
+    // current page and silently contradict the header the operator just clicked.
+    if (serverMode) return filtered;
     if (!sort) return filtered;
     const col = columns.find((c) => c.key === sort.key);
     if (!col) return filtered;
@@ -160,14 +178,24 @@ export default function DataTable({
       if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
       return String(av).localeCompare(String(bv)) * dir;
     });
-  }, [filtered, sort, columns]);
+  }, [filtered, sort, columns, serverMode]);
 
-  const pageCount = pageSize ? Math.max(1, Math.ceil(sorted.length / pageSize)) : 1;
-  const current = Math.min(page, pageCount);
-  const paged = pageSize ? sorted.slice((current - 1) * pageSize, current * pageSize) : sorted;
+  const serverPaged = typeof onPageChange === "function" && serverPageCount != null;
+  const pageCount = serverPaged
+    ? Math.max(1, serverPageCount)
+    : pageSize ? Math.max(1, Math.ceil(sorted.length / pageSize)) : 1;
+  const current = serverPaged ? Math.max(1, serverPage || 1) : Math.min(page, pageCount);
+  // The server already sent exactly this page; slicing it again would show a page of a page.
+  const paged = serverPaged
+    ? sorted
+    : pageSize ? sorted.slice((current - 1) * pageSize, current * pageSize) : sorted;
+  const goToPage = serverPaged ? onPageChange : setPage;
 
+  // Same three-state cycle either way (asc -> desc -> unsorted); only the destination differs.
+  const nextSort = (s, key) =>
+    s?.key === key ? (s.dir === "asc" ? { key, dir: "desc" } : null) : { key, dir: "asc" };
   const toggleSort = (key) =>
-    setSort((s) => (s?.key === key ? (s.dir === "asc" ? { key, dir: "desc" } : null) : { key, dir: "asc" }));
+    serverMode ? onSortChange(nextSort(serverSort, key)) : setSort((s) => nextSort(s, key));
 
   // Selection acts on the full filtered/sorted set (not just the current page).
   const allKeys = selectable ? sorted.map(rowKey) : [];
@@ -257,7 +285,7 @@ export default function DataTable({
                     alignCls(c.align),
                     c.headerClassName
                   )}
-                  aria-sort={sort?.key === c.key ? (sort.dir === "asc" ? "ascending" : "descending") : undefined}
+                  aria-sort={activeSort?.key === c.key ? (activeSort.dir === "asc" ? "ascending" : "descending") : undefined}
                 >
                   {c.sortable ? (
                     <button
@@ -405,21 +433,27 @@ export default function DataTable({
         </table>
       </div>
 
-      {pageSize && !loading && sorted.length > 0 && (
+      {pageSize && !loading && (serverPaged ? (serverTotal ?? 0) > 0 : sorted.length > 0) && (
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 dark:border-white/10">
           <p className="text-xs text-slate-500 dark:text-neutral-400">
-            Showing {(current - 1) * pageSize + 1}–{Math.min(current * pageSize, sorted.length)} of {sorted.length}
+            {/* In server mode `sorted` is only the current page, so its length would report
+                "of 100" for a 1128-account dataset — the exact misreading this page had. */}
+            Showing {(current - 1) * pageSize + 1}–
+            {serverPaged
+              ? Math.min(current * pageSize, serverTotal ?? sorted.length)
+              : Math.min(current * pageSize, sorted.length)}{" "}
+            of {serverPaged ? (serverTotal ?? sorted.length) : sorted.length}
           </p>
           <div className="flex items-center gap-1">
-            <PageBtn disabled={current === 1} onClick={() => setPage(current - 1)}>
+            <PageBtn disabled={current === 1} onClick={() => goToPage(current - 1)}>
               <FiChevronLeft />
             </PageBtn>
             {Array.from({ length: pageCount }, (_, i) => i + 1).map((p) => (
-              <PageBtn key={p} active={p === current} onClick={() => setPage(p)}>
+              <PageBtn key={p} active={p === current} onClick={() => goToPage(p)}>
                 {p}
               </PageBtn>
             ))}
-            <PageBtn disabled={current === pageCount} onClick={() => setPage(current + 1)}>
+            <PageBtn disabled={current === pageCount} onClick={() => goToPage(current + 1)}>
               <FiChevronRight />
             </PageBtn>
           </div>

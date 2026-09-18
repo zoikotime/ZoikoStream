@@ -171,7 +171,16 @@ def list_events(
     items, total = crud.list_events(db, user.org_id, q=q, status=status_, host_id=host,
                                     date_from=date_from, date_to=date_to,
                                     sort_by=sort_by, order=order, page=page, page_size=page_size)
-    return Page(items=[EventOut.model_validate(e) for e in items], total=total, page=page, page_size=page_size)
+    # One grouped query for the whole page, not a subquery per row. Scoped implicitly: the
+    # ids come from list_events, which already filtered on the caller's own org.
+    counts = crud.registration_counts(db, [e.id for e in items])
+    out = []
+    for e in items:
+        row = EventOut.model_validate(e)
+        # 0 for an event nobody registered for — a counted zero, not an absent figure.
+        row.registered_count = counts.get(e.id, 0)
+        out.append(row)
+    return Page(items=out, total=total, page=page, page_size=page_size)
 
 
 # ── console access (ZST post-login routing) ─────────────────────────────────────────────

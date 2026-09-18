@@ -41,7 +41,6 @@ const ROUTES = [
   ["/organization/users", "Members"],
   ["/organization/recordings", "Recordings"],
   ["/organization/sessions", "Streaming Sessions"],
-  ["/organization/playback", "Playback & Access"],
   ["/organization/profile", "Organization"],
   ["/organization/analytics", "Analytics"],
   ["/organization/billing", "Billing"],
@@ -66,6 +65,9 @@ function renderShell(at = "/organization/dashboard") {
               <Route key={path} path={path} element={<h1>{label} page</h1>} />
             ))}
             <Route path="/organization/events/:id" element={<h1>event detail page</h1>} />
+            {/* Reachable but not in the rail — stubbed explicitly for the same reason the
+                event-detail route is: ROUTES is the NAV list, and these two are not on it. */}
+            <Route path="/organization/playback" element={<h1>Playback &amp; Access page</h1>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -128,7 +130,7 @@ describe("management utilities sit at the bottom", () => {
     const labels = railLinks();
     expect(labels.slice(-4)).toEqual(["Analytics", "Billing", "Settings", "Support & Status"]);
     // …and specifically below the everyday event work, not mixed into it.
-    for (const workflow of ["Events", "Audience", "Recordings", "Streaming Sessions", "Playback & Access"]) {
+    for (const workflow of ["Events", "Audience", "Recordings", "Streaming Sessions"]) {
       expect(labels.indexOf(workflow)).toBeLessThan(labels.indexOf("Analytics"));
     }
   });
@@ -149,11 +151,26 @@ describe("management utilities sit at the bottom", () => {
   });
 });
 
+describe("Playback & Access is not in the rail", () => {
+  // Removed from the sidebar deliberately; the ROUTE is untouched. Five pages still link to
+  // it (Audience, Streaming Sessions, Settings, Developer Platform), which is where the
+  // question it answers actually comes up.
+  it("renders no Playback & Access nav item", async () => {
+    renderShell("/organization/dashboard");
+    await screen.findByRole("heading", { level: 1 });
+    expect(screen.queryByRole("link", { name: /playback & access/i })).not.toBeInTheDocument();
+  });
+
+  it("still renders the shell for /organization/playback, so the route keeps working", async () => {
+    renderShell("/organization/playback");
+    expect(await screen.findByRole("heading", { level: 1 })).toBeInTheDocument();
+  });
+});
+
 describe("active navigation", () => {
   it.each([
     ["/organization/dashboard", "Dashboard"],
     ["/organization/events", "Events"],
-    ["/organization/playback", "Playback & Access"],
     ["/organization/analytics", "Analytics"],
     ["/organization/billing", "Billing"],
     ["/organization/settings", "Settings"],
@@ -183,7 +200,7 @@ describe("navigating between routes", () => {
     await screen.findByText("Dashboard page");
     const before = railLinks();
 
-    for (const label of ["Events", "Playback & Access", "Analytics", "Billing", "Settings"]) {
+    for (const label of ["Events", "Recordings", "Analytics", "Billing", "Settings"]) {
       // Sequential on purpose: this asserts what happens ACROSS a real navigation path,
       // so each click has to land before the next one is made.
       await userEvent.click(within(rail()).getByRole("link", { name: label }));
@@ -284,12 +301,14 @@ describe("technical surfaces are not primary navigation", () => {
     }
   });
 
-  it("still shows the twelve destinations an organizer actually works in", async () => {
+  it("still shows the eleven destinations an organizer actually works in", async () => {
     renderShell();
     await screen.findByRole("heading", { level: 1 });
+    // Playback & Access was removed from the rail deliberately; its route is unchanged and
+    // Audience, Streaming Sessions, Settings and Developer Platform all still link to it.
     expect(railLinks()).toEqual([
       "Dashboard", "Events", "Audience", "Members", "Recordings",
-      "Streaming Sessions", "Playback & Access",
+      "Streaming Sessions",
       "Organization",
       "Analytics", "Billing", "Settings", "Support & Status",
     ]);

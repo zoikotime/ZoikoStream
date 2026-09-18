@@ -645,6 +645,32 @@ async def start_recording(room: str, quality: str, filepath: str) -> tuple[str |
         await lk.aclose()
 
 
+async def get_egress(egress_id: str):
+    """The current EgressInfo for one egress job, or None.
+
+    Exists for reconciliation: if the egress_ended webhook is never delivered, the
+    LiveRecording row sits at status="recording" forever and the recording is invisible in
+    the library (which lists only stopped+enforced rows). Asking LiveKit directly is the
+    only way to learn what really happened without guessing.
+
+    None means "could not determine" — LiveKit unconfigured, the job aged out of LiveKit's
+    retention, or the call failed. Callers must treat that as UNKNOWN and leave the row
+    alone, never as completion.
+    """
+    if not configured() or not egress_id:
+        return None
+    lk = api.LiveKitAPI(settings.LIVEKIT_URL, settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+    try:
+        res = await lk.egress.list_egress(api.ListEgressRequest(egress_id=egress_id))
+        items = list(getattr(res, "items", None) or [])
+        return items[0] if items else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("livekit egress lookup failed for %s: %s", egress_id, exc)
+        return None
+    finally:
+        await lk.aclose()
+
+
 async def stop_recording(egress_id: str) -> str | None:
     """Returns an error string, or None on success."""
     if not configured() or not egress_id:

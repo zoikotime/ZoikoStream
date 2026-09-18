@@ -298,7 +298,20 @@ def delete_organization(db, org: Organization) -> None:
 
 # ── Users ──────────────────────────────────────────────────────────────────
 
-def list_users(db, q=None, role=None, org_id=None, is_active=None, page=1, page_size=20):
+# Sortable columns for GET /admin/users, as an explicit map from the API's name to the
+# column. A whitelist rather than getattr(User, field): the value arrives from the browser,
+# and a map can only ever yield a column that is written down here.
+USER_SORTS = {
+    "name": User.full_name,
+    "email": User.email,
+    "role": User.role,
+    "joined": User.created_at,
+    "organization": None,        # needs the Organization join — resolved in list_users
+}
+
+
+def list_users(db, q=None, role=None, org_id=None, is_active=None, page=1, page_size=20,
+               sort_by=None, order="desc"):
     stmt = select(User)
     if q:
         like = f"%{q.lower()}%"
@@ -313,8 +326,27 @@ def list_users(db, q=None, role=None, org_id=None, is_active=None, page=1, page_
         stmt = stmt.where(User.is_active == is_active)
 
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+
+    # Sorting happens in SQL over the WHOLE filtered set. It used to be done in the browser
+    # over the fetched page, so "Joined, oldest first" returned the oldest of the newest 100
+    # rather than the oldest account on the platform.
+    descending = str(order).lower() != "asc"
+    if sort_by == "organization":
+        # outerjoin, not join: a user whose organization row is missing must still be listed.
+        stmt = stmt.outerjoin(Organization, User.org_id == Organization.id)
+        col = Organization.name
+    else:
+        col = USER_SORTS.get(sort_by)
+    if col is None:
+        col = User.created_at
+        descending = True if sort_by is None else descending
+    ordering = [col.desc() if descending else col.asc()]
+    # created_at alone is not unique enough to page deterministically — two accounts sharing a
+    # timestamp could swap between page 1 and page 2 and hide a row. id breaks every tie.
+    ordering.append(User.id.desc() if descending else User.id.asc())
+
     users = db.scalars(
-        stmt.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+        stmt.order_by(*ordering).offset((page - 1) * page_size).limit(page_size)
     ).all()
     return [_user_out(u) for u in users], total
 

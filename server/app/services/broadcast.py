@@ -192,6 +192,46 @@ def recording_out(r: LiveRecording) -> dict:
     }
 
 
+# LiveKit EgressStatus values that mean the job is over. Names, not numbers: the enum's
+# integer values are a protocol detail, and comparing by name survives a protobuf bump.
+_EGRESS_TERMINAL = {"EGRESS_COMPLETE", "EGRESS_FAILED", "EGRESS_ABORTED", "EGRESS_LIMIT_REACHED"}
+_EGRESS_ACTIVE = {"EGRESS_STARTING", "EGRESS_ACTIVE", "EGRESS_ENDING"}
+
+
+def egress_status_name(egress_info) -> str:
+    """The status as a NAME, however the SDK hands it over (enum, int, or already a str)."""
+    raw = getattr(egress_info, "status", None)
+    return getattr(raw, "name", None) or (raw if isinstance(raw, str) else str(raw))
+
+
+async def reconcile_stuck_recording(recording_id, egress_id: str) -> str:
+    """Ask LiveKit what became of one egress job whose webhook never arrived.
+
+    Returns what was decided, for logging:
+        "finalized"  - LiveKit says it ended; the row was written through the SAME path the
+                       webhook uses (record_egress_result), so there is one finaliser.
+        "active"     - still running. Left alone.
+        "unknown"    - LiveKit could not tell us. Left alone, deliberately: a recording that
+                       might still be running must never be marked failed on a guess, and a
+                       missing answer is not evidence of failure.
+    """
+    info = await livekit.get_egress(egress_id)
+    if info is None:
+        return "unknown"
+    status = egress_status_name(info)
+    if status in _EGRESS_ACTIVE:
+        return "active"
+    if status not in _EGRESS_TERMINAL:
+        return "unknown"
+    # Terminal: reuse the webhook's own writer so a reconciled row is indistinguishable
+    # from one finalised normally — same size accounting, same status mapping.
+    await asyncio.to_thread(record_egress_result, info)
+    log.warning("recording %s reconciled from LiveKit (%s) — the egress_ended webhook never "
+                "arrived; check webhook delivery to /api/live/webhooks/livekit",
+                recording_id, status)
+    return "finalized"
+
+
 def record_egress_result(egress_info) -> dict | None:
     """Called from the egress_ended webhook — no Ctx here, this is LiveKit talking to us
     server-to-server, not a signed-in operator. Finds the LiveRecording row by egress_id

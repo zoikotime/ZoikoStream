@@ -115,6 +115,10 @@ _LIVE_RECORDING_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS retention_policy_version VARCHAR(60)",
     "ADD COLUMN IF NOT EXISTS retention_expires_at TIMESTAMPTZ",
     "ADD COLUMN IF NOT EXISTS legal_hold BOOLEAN NOT NULL DEFAULT FALSE",
+    # 32-bit INTEGER tops out at 2,147,483,647 bytes (~2.0 GiB) — roughly 40 minutes of
+    # 1080p — and a longer recording would overflow when the egress_ended webhook writes
+    # the real size. Idempotent: re-running against an already-BIGINT column is a no-op.
+    "ALTER COLUMN size_bytes TYPE BIGINT",
 ]
 
 # Columns whose models gained fields after the table already existed. Without these the

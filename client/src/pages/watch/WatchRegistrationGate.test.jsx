@@ -44,6 +44,11 @@ vi.mock("../../hooks/useLiveKitViewer", () => ({
     micOn: false,
     micError: null,
     micLive: false,
+    // Quality controls: the player reads these, so the mock has to carry them or the
+    // settings menu would crash on videoLayers.map.
+    videoLayers: [],
+    quality: "auto",
+    selectQuality: vi.fn(),
     toggleMic: vi.fn(),
     // Async in the real hook, and a caller chains off it — a bare vi.fn() returns undefined
     // and the chain throws.

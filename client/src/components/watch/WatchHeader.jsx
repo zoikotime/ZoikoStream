@@ -96,44 +96,32 @@ export default function WatchHeader({ event, viewers }) {
       {/* Ambient light + a soft brand glow. Both are pointer-events-none decoration. */}
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.18),transparent_55%)]" />
       <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-fuchsia-500/25 blur-3xl" />
-      <RocketIllustration className="pointer-events-none absolute right-6 top-2 hidden h-32 w-32 opacity-70 sm:block lg:right-10 lg:h-40 lg:w-40" />
+      {/* Decorative only. Absolutely positioned, so it never contributed to the hero's
+          height — but at h-40 it visually demanded a tall banner. Shrunk and softened to sit
+          beside the compact header instead of defining it. */}
+      <RocketIllustration className="pointer-events-none absolute right-6 top-1/2 hidden h-20 w-20 -translate-y-1/2 opacity-60 sm:block lg:right-10" />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
 
-      <div className="relative mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <StatusPill status={event.status} />
-          {event.category && (
-            <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold text-white backdrop-blur">{event.category}</span>
-          )}
-          {viewers != null && (live || event.viewers != null) && (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-black/30 px-3 py-1 text-xs font-semibold text-white backdrop-blur">
-              <FiUsers aria-hidden /> <span className="zk-tnum">{viewers.toLocaleString()}</span> {live ? "watching" : "views"}
-            </span>
-          )}
-        </div>
-
-        <div className="mt-4 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+      {/* Compact two-row event header rather than a promotional banner. Row 1 carries the
+          badges + title on the left and the three actions on the right; row 2 is the
+          metadata line. Horizontal padding is unchanged so the header stays aligned with the
+          player and panel below. */}
+      <div className="relative mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between lg:gap-6">
           <div className="min-w-0">
-            <h1 className="max-w-3xl text-2xl font-bold tracking-tight text-white sm:text-4xl">{event.name}</h1>
-
-            <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-white/85">
-              <span className="inline-flex items-center gap-2">
-                Hosted by
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/20 text-xs font-semibold text-white ring-1 ring-white/25">
-                  {initials(event.host)}
-                </span>
-                <span className="font-semibold text-white">{event.host}</span>
-                <span className="rounded-full bg-white/15 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-white/90 backdrop-blur">Host</span>
-              </span>
-              {event.date && (
-                <span className="inline-flex items-center gap-2"><FiCalendar aria-hidden /> {fmtDate(event.date)}</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusPill status={event.status} />
+              {event.category && (
+                <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold text-white backdrop-blur">{event.category}</span>
               )}
-              {event.start && (
-                <span className="inline-flex items-center gap-2">
-                  <FiClock aria-hidden /> {event.start}{event.end && `–${event.end}`}
+              {viewers != null && (live || event.viewers != null) && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-black/30 px-3 py-1 text-xs font-semibold text-white backdrop-blur">
+                  <FiUsers aria-hidden /> <span className="zk-tnum">{viewers.toLocaleString()}</span> {live ? "watching" : "views"}
                 </span>
               )}
             </div>
+
+            <h1 className="mt-2 max-w-3xl text-2xl font-bold leading-[1.15] tracking-tight text-white sm:text-[30px]">{event.name}</h1>
           </div>
 
           {/* Actions — wrap on tablet, full-width touch targets on mobile. */}
@@ -160,6 +148,27 @@ export default function WatchHeader({ event, viewers }) {
               {following ? "Following" : "Follow"}
             </button>
           </div>
+        </div>
+
+        {/* Row 2 — the metadata line. Same fields, same sources, one row where it fits and
+            wrapping cleanly where it does not. */}
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-white/85">
+          <span className="inline-flex min-w-0 items-center gap-2">
+            Hosted by
+            <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-white/20 text-[11px] font-semibold text-white ring-1 ring-white/25">
+              {initials(event.host)}
+            </span>
+            <span className="truncate font-semibold text-white">{event.host}</span>
+            <span className="shrink-0 rounded-full bg-white/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/90 backdrop-blur">Host</span>
+          </span>
+          {event.date && (
+            <span className="inline-flex items-center gap-2"><FiCalendar aria-hidden /> {fmtDate(event.date)}</span>
+          )}
+          {event.start && (
+            <span className="inline-flex items-center gap-2">
+              <FiClock aria-hidden /> {event.start}{event.end && `–${event.end}`}
+            </span>
+          )}
         </div>
       </div>
     </div>

@@ -18,6 +18,11 @@ export default function StatCard({
   color = SERIES.brand,
   loading = false,
   className = "",
+  // Optional one-line qualifier under the figure, for a count whose meaning depends on
+  // context the number cannot carry — e.g. "0 at capacity" reads differently when no event
+  // has a capacity configured at all. Additive and guarded: every existing caller omits it
+  // and renders exactly as before. Mirrors the same prop on ui/StatsCard.
+  hint,
 }) {
   if (loading) {
     return (
@@ -51,6 +56,9 @@ export default function StatCard({
           </span>
         )}
       </div>
+      {hint && (
+        <p className="mt-1 text-[11px] leading-4 text-slate-400 dark:text-slate-500">{hint}</p>
+      )}
       {trend && (
         <div className="mt-2">
           <Sparkline data={trend} color={color} height={36} />
