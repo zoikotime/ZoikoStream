@@ -33,6 +33,8 @@ import Card from "../../ui/Card";
 import Badge from "../../ui/Badge";
 import Spinner from "../../ui/Spinner";
 import { fmtDate } from "../../data/events";
+import { SUPPORTS_IN_APP_CHECKOUT } from "../../platform";
+import { onAppResume, openExternal } from "../../native/bridge";
 
 const METER_ICON = { Storage: FiHardDrive, Members: FiUsers, "Streaming hours": FiClock };
 const METER_ACCENT = { Storage: "blue", Members: "emerald", "Streaming hours": "violet" };
@@ -81,6 +83,10 @@ export default function OrganizationBilling() {
 
   // ── Stripe-hosted subscription checkout (ZST-COM-PLAN-001 Section 13/18) ──────────────
   const [checkoutFor, setCheckoutFor] = useState(null);
+  // Native only: a checkout was handed to the device browser and this page is now waiting for
+  // the user to come back so it can re-read entitlements. Never set on the web, where the
+  // browser navigates away and the ?session_id flow below answers instead.
+  const [awaitingExternal, setAwaitingExternal] = useState(false);
   // The URL is readable at first render, so the initial outcome is derived synchronously here
   // rather than in an effect (which would cause a cascading render). The effect below only
   // performs the async backend read.
@@ -113,14 +119,51 @@ export default function OrganizationBilling() {
         plan_slug: planSlug,
         billing_interval: billingInterval,
       });
-      // Full-page navigation to Stripe-hosted Checkout — card details are entered on Stripe's
-      // domain and never touch this origin.
-      window.location.assign(data.checkout_url);
+
+      if (SUPPORTS_IN_APP_CHECKOUT) {
+        // Web: full-page navigation to Stripe-hosted Checkout — card details are entered on
+        // Stripe's domain and never touch this origin. Stripe returns the browser here with
+        // ?checkout=success&session_id=…, which the effect below reads back.
+        window.location.assign(data.checkout_url);
+        return;
+      }
+
+      // ── NATIVE: THE SAME PURCHASE, IN THE USER'S OWN BROWSER ──────────────────────────
+      // A Custom Tab rather than this WebView, because an Android app that takes a
+      // subscription payment through a third-party checkout is the shape Google Play's
+      // payments policy rejects — and the cost of getting that wrong is the whole app.
+      //
+      // The consequence worth understanding: THIS APP NEVER SEES THE RESULT. Stripe's return
+      // URL points at the web origin, so the success redirect lands in the browser, not here.
+      // There is no session_id to read back and the "returned" flow above cannot run.
+      //
+      // That is survivable because the redirect was never what granted the subscription. A
+      // signature-verified webhook binds it server-side (Section 18 forbids unlocking on the
+      // redirect precisely because it is forgeable), so the app's job is only to re-read its
+      // own state once the user comes back — which onAppResume does below. Until the webhook
+      // lands the plan simply reads as it did before, which is the safe direction.
+      await openExternal(data.checkout_url);
+      setCheckoutFor(null);
+      setAwaitingExternal(true);
     } catch (e) {
       setCheckoutFor(null);
       notify.error(errMsg(e));
     }
   };
+
+  // Native only, and a no-op everywhere else: onAppResume returns an unsubscribe that does
+  // nothing when there is no bridge. Refetches entitlements when the app comes back to the
+  // foreground after a checkout was sent out to the browser.
+  //
+  // Gated on `awaitingExternal` rather than firing on every resume: a user who switches apps
+  // while reading their invoices should not trigger a request each time they return.
+  useEffect(() => {
+    if (SUPPORTS_IN_APP_CHECKOUT || !awaitingExternal) return undefined;
+    return onAppResume(() => {
+      reloadOverview();
+      setAwaitingExternal(false);
+    });
+  }, [awaitingExternal, reloadOverview]);
 
   // Returning from Stripe. The redirect proves only that the browser came back: it is
   // forgeable and may arrive before the webhook. Section 18 forbids unlocking on it, so the

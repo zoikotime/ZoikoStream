@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 
 import { exitApp, launchUrl, onAppUrlOpen, onBackButton } from "./bridge";
 import { WEB_APP_URL } from "../platform";
+import { dismissTop } from "../ui/dismissStack";
 
 /**
  * The two Android behaviours a WebView does not get for free. Renders nothing; mounted once,
@@ -26,7 +27,19 @@ export default function NativeShell() {
   // it walks a signed-out user backwards into pages their session can no longer load. `idx`
   // is the position within THIS router's stack, so 0 means "this is where the app started"
   // — which is exactly when back should exit.
+  //
+  // ── OPEN LAYERS COME FIRST ────────────────────────────────────────────────────────────
+  // A menu, modal or drawer is React state, not a history entry, so navigating while one is
+  // open changes the page BEHIND it and leaves it standing. The user sees the thing they
+  // tried to close still there, over content that silently changed — which reads as the back
+  // button being broken rather than as a routing subtlety.
+  //
+  // dismissTop() closes the innermost layer and reports whether there was one, so a press is
+  // consumed only when it actually dismissed something. It became load-bearing when the
+  // organization console started shipping here: its sidebar is the most-used control in the
+  // app and is open exactly when someone is most likely to press Back.
   useEffect(() => onBackButton(() => {
+    if (dismissTop()) return;
     const idx = window.history.state?.idx;
     if (typeof idx === "number" && idx > 0) navigate(-1);
     else exitApp();

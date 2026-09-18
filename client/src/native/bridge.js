@@ -124,6 +124,38 @@ export function onAppUrlOpen(handler) {
   return () => remove();
 }
 
+/**
+ * Subscribe to the app returning to the FOREGROUND. Returns an unsubscribe function.
+ *
+ * Capacitor reports both directions on one event, so the handler here is called only on the
+ * way back in — a caller wanting "did we leave" would be a different subscription, and
+ * folding both into one callback has historically meant somebody refetching on the way out.
+ *
+ * ── WHAT THIS IS FOR ─────────────────────────────────────────────────────────────────────
+ * Work that finished somewhere this WebView cannot observe. The concrete case is Stripe
+ * checkout: it runs in a Custom Tab, and its success redirect goes to the WEB app's origin,
+ * not to this app. So the app is never told the purchase happened — it only knows the user
+ * came back. Re-reading server state at that moment is the difference between a plan that
+ * updates by itself and one that needs a manual reload nobody thinks to do.
+ *
+ * Deliberately NOT a general "poll while foregrounded": it fires once per return, so a
+ * caller can hang an idempotent refetch off it without inventing a timer.
+ */
+export function onAppResume(handler) {
+  const p = plugin("App");
+  if (!p) return () => {};
+  let remove = () => {};
+  try {
+    const handle = p.addListener("appStateChange", (state) => {
+      if (state?.isActive) handler();
+    });
+    Promise.resolve(handle).then((h) => { remove = () => h?.remove?.(); }).catch(() => {});
+  } catch {
+    return () => {};
+  }
+  return () => remove();
+}
+
 /** The link that COLD-STARTED the app, if any. Null when it was launched from the icon. */
 export async function launchUrl() {
   const res = await call("App", "getLaunchUrl");
@@ -133,12 +165,22 @@ export async function launchUrl() {
 /**
  * Open a URL OUTSIDE the app, in the device browser.
  *
- * This is the one that matters for store review as much as for usability. The mobile build
- * has no admin or organization console and no billing screens (App.jsx), so every link to
- * one has to leave. Opening them in the WebView instead would mean the app rendering the
- * very consoles that were removed from it — and, for billing, a third-party checkout inside
- * the app, which is what Google Play's payments policy prohibits. `Browser.open` hands off
- * to a Custom Tab; the `window.open` fallback is what the web build does anyway.
+ * This is the one that matters for store review as much as for usability. Two callers, and
+ * they leave for different reasons:
+ *
+ *   * The PLATFORM console (/admin/*), which this build does not carry. Rendering it in the
+ *     WebView would deliver the dense operator surfaces that were left out, in a frame with
+ *     no address bar to say where the user is.
+ *   * STRIPE CHECKOUT. Not a layout question: an Android app that takes a subscription
+ *     payment through a third-party checkout is what Google Play's payments policy exists to
+ *     reject. In a Custom Tab the purchase happens in the user's own browser, on the origin
+ *     that already serves it — a different act from selling inside the app.
+ *
+ * The organization console is NOT a caller any more; it ships here (HAS_ORG_CONSOLE), and
+ * sending someone to a browser for a page in their own nav would be a bug.
+ *
+ * `Browser.open` hands off to a Custom Tab; the `window.open` fallback is what the web build
+ * does anyway.
  */
 export async function openExternal(url) {
   const opened = await call("Browser", "open", { url, presentationStyle: "popover" });

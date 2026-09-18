@@ -1,6 +1,7 @@
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { Outlet } from "react-router-dom";
 import Spinner from "../ui/Spinner";
+import { register } from "../ui/dismissStack";
 
 // The one dashboard shell: sidebar + topbar + scrollable routed content, plus the
 // mobile-drawer open/close state that every dashboard layout used to duplicate.
@@ -17,6 +18,23 @@ export default function AppShell({
   mainClass = "p-4 sm:p-6 lg:p-8",
 }) {
   const [open, setOpen] = useState(false);
+
+  // The mobile drawer is a dismissable layer, and it is the ONE layer that does not go
+  // through ui/Overlay — Sidebar draws its own backdrop and slides itself, because on large
+  // screens the same element is the permanent rail rather than a drawer.
+  //
+  // Registering it here is what makes Android's Back close the menu instead of navigating
+  // the page behind it. Without this the console's most-used control is also the one that
+  // makes Back look broken: the route changes underneath while the menu stays open.
+  //
+  // Registered only while open, so an ordinary Back on a page with no menu showing falls
+  // straight through to history, which is what it should do.
+  useEffect(() => {
+    if (!open) return undefined;
+    const layer = register(() => setOpen(false));
+    return layer.release;
+  }, [open]);
+
   return (
     <div className={`flex ${fullHeight ? "h-screen overflow-hidden" : "min-h-screen"} ${surface}`}>
       {renderSidebar({ open, setOpen })}
