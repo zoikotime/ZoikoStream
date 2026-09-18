@@ -165,6 +165,17 @@ vi.mock("livekit-client", () => ({
   RoomEvent,
   Track,
   DisconnectReason,
+  // useLiveKitPublish reads VideoPresets.h216/h540/h1080 when it builds the Room's
+  // publishDefaults (simulcast layers). A mock that omits it leaves VideoPresets undefined, so
+  // the property access throws inside the hook, the Room is never constructed, and every test
+  // that needs a connected room fails on an assertion about publishing state rather than on
+  // the TypeError that actually caused it - which is what makes this worth stubbing rather
+  // than obvious.
+  //
+  // Opaque objects on purpose: the hook only forwards these into the Room options, and
+  // FakeRoom records the options it was given. Nothing asserts on their contents, so copying
+  // the real presets' dimensions here would be detail that can only go stale.
+  VideoPresets: { h216: {}, h540: {}, h1080: {} },
 }));
 
 const { default: useLiveKitPublish } = await import("./useLiveKitPublish");

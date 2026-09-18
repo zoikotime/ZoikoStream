@@ -70,6 +70,39 @@ class Settings(BaseSettings):
     # 5173 is Vite's default; 5174 is its fallback when 5173 is taken. 4173 = vite preview.
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:5174,http://localhost:4173"
     APP_URL: str = "http://localhost:5173"
+
+    # ── THE ANDROID APP ──────────────────────────────────────────────────────────────────
+    # Kept OUT of CORS_ORIGINS on purpose. The production guard below rejects any
+    # CORS_ORIGINS entry containing "localhost", and it is right to: combined with
+    # allow_credentials, a localhost origin on a live API lets any page served from a
+    # victim's own machine call it as them. That check must not be softened.
+    #
+    # But the Capacitor WebView's origin genuinely IS `https://localhost` (see
+    # capacitor.config.json's androidScheme), and it is not the same risk. It is not a
+    # listening port anything on the device can publish to — it is the app's own bundle,
+    # served from its private assets, reachable only by that app. Nothing else on the phone,
+    # and nothing on the network, can occupy it.
+    #
+    # So it is a SEPARATE setting rather than an exception inside the other one. The
+    # difference is that this list is a fixed set of known app origins, while CORS_ORIGINS is
+    # operator-supplied — an exemption carved into the guard would have applied to both.
+    #
+    # Blank disables the Android app's API access entirely, which is the right default for a
+    # deployment that does not have one.
+    MOBILE_APP_ORIGINS: str = ""
+
+    # Android App Links. With both set, GET /.well-known/assetlinks.json publishes the
+    # statement that lets Android open get.zoikostream.com links in the app instead of Chrome
+    # (routers/wellknown.py). Blank = no statement is published and links open in the browser,
+    # which is the correct behaviour for a deployment with no app.
+    #
+    # ANDROID_CERT_FINGERPRINTS is the SHA-256 of the signing certificate, colon-separated
+    # uppercase hex, comma-separated for more than one. Under Play App Signing the fingerprint
+    # that matters is GOOGLE's (Play Console -> Setup -> App signing), not the local upload
+    # keystore's — publishing the upload key's fingerprint is the single most common reason
+    # verification fails silently in production while working perfectly in a local build.
+    ANDROID_PACKAGE_NAME: str = ""
+    ANDROID_CERT_FINGERPRINTS: str = ""
     # LiveKit — ponytail: default "" so the app still boots without them; streaming
     # (services/livekit.py, /streams) needs real values, so set these in .env before using it.
     LIVEKIT_URL: str = ""
@@ -279,6 +312,19 @@ class InsecureProductionConfig(RuntimeError):
 
 _LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
+# The only origins MOBILE_APP_ORIGINS may name. Both are Capacitor's, and which one appears
+# depends on the shell's scheme setting:
+#
+#   https://localhost      androidScheme: "https" — what this app uses, and what
+#                          getUserMedia requires (a secure context; file:// is not one).
+#   capacitor://localhost  the iOS default, listed so an iOS build needs no change here.
+#
+# Neither is a network origin. They address the app's own bundle inside its WebView, served
+# from its private assets — no port is bound, and nothing else on the device or the network
+# can answer on them. That is the whole reason they are allowed to bypass the localhost rule
+# that CORS_ORIGINS is held to, and the reason this list is closed rather than open.
+KNOWN_MOBILE_APP_ORIGINS = frozenset({"https://localhost", "capacitor://localhost"})
+
 
 def _validate_production_config() -> None:
     """Fail closed on settings whose wrong value is silently exploitable or silently broken.
@@ -328,6 +374,25 @@ def _validate_production_config() -> None:
             f"ENVIRONMENT={settings.ENVIRONMENT!r}. Combined with credentialed requests, any page "
             "served from a user's own machine could call this API as them. Set CORS_ORIGINS to "
             "the real browser origin(s) only."
+        )
+
+    # MOBILE_APP_ORIGINS deliberately escapes the localhost rule above (see the setting's own
+    # note: the Capacitor WebView's origin really is https://localhost and no other process
+    # can occupy it). That escape is only safe while the list stays what it claims to be — a
+    # small set of KNOWN app origins — so it is checked against one here rather than accepted
+    # as free text. Without this, "MOBILE_APP_ORIGINS" would be a way to put any origin at
+    # all on a credentialed allowlist while bypassing the check that exists to stop exactly
+    # that.
+    unknown_mobile = [
+        o.strip() for o in settings.MOBILE_APP_ORIGINS.split(",")
+        if o.strip() and o.strip().lower() not in KNOWN_MOBILE_APP_ORIGINS
+    ]
+    if unknown_mobile:
+        raise InsecureProductionConfig(
+            f"MOBILE_APP_ORIGINS contains {unknown_mobile}, which are not recognised app "
+            f"origins, while ENVIRONMENT={settings.ENVIRONMENT!r}. This setting exists to "
+            "allow the Android WebView's own origin and nothing else; a browser origin "
+            "belongs in CORS_ORIGINS, where the localhost check applies to it."
         )
 
     app_url = settings.APP_URL.strip()

@@ -27,6 +27,8 @@ import ControlBar from "../../components/host/ControlBar";
 import HostPanel from "../../components/host/HostPanel";
 import FeatureModal from "../../components/host/FeatureModal";
 import StartMeetingPrompt from "../../components/host/StartMeetingPrompt";
+import useKeepAwake from "../../hooks/useKeepAwake";
+import useBroadcastKeepAlive from "../../native/useBroadcastKeepAlive";
 export default function HostDashboard() {
   const navigate = useNavigate();
   // `reactions` is the live reaction channel, not state: hooks/useLiveEvent.js emits every
@@ -80,6 +82,18 @@ export default function HostDashboard() {
 
   const canHost = state.canHost;
   const live = state.broadcast?.status === "live";
+  // From PREVIEW, not from air. A locked screen suspends the WebView, which tears down the
+  // camera capture — so a host who set up their shot and then waited two minutes for their
+  // slot would find the preview dead at the moment they needed to start. `previewOn ||
+  // live || paused` covers the whole time this console owns the camera; it stops at
+  // `ended`, when there is nothing left to keep awake for.
+  useKeepAwake(previewOn || live || state.broadcast?.status === "paused");
+  // The Android half of the same problem. useKeepAwake stops the SCREEN turning off, which
+  // only helps while the app is in front; this stops Android suspending the app when it is
+  // not — a locked phone or a switch to another app otherwise revokes the camera and takes
+  // the broadcast down with it. Driven from the identical condition so the foreground
+  // service exists exactly as long as this console holds a capture. No-op on the web.
+  useBroadcastKeepAlive(previewOn || live || state.broadcast?.status === "paused");
   const ended = state.broadcast?.status === "ended";
 
   // Idle -> pending -> (live | goLiveError). Owned by hooks/useLiveEvent's reducer (state.
