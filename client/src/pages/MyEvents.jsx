@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import api, { errMsg } from "../api";
 import { CalendarClock, Loader2, Mic, Radio, ShieldCheck, Users } from "lucide-react";
 import { Logo } from "../ui";
+import ConsoleOnWebNotice from "../native/ConsoleOnWebNotice";
 
 // MyEvents — "which events am I actually on?"
 //
@@ -99,6 +100,14 @@ export default function MyEvents() {
       </section>
 
       <div className="mx-auto max-w-4xl px-6 py-10">
+        {/* Mobile only, and only for an account whose work lives in a console this build does
+            not carry. On the web it renders nothing — HAS_CONSOLES is the literal `true`
+            there and the consoles are already in the nav. Placed above the list because for
+            an org admin it is the more relevant of the two things on this page: they are
+            likely assigned to no events at all, and without this the screen reads as a broken
+            app rather than as the wrong device for the job. */}
+        <ConsoleOnWebNotice />
+
         {loading && (
           <p className="flex items-center gap-2 text-[14px] text-slate-500">
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />

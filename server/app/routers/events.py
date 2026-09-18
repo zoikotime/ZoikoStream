@@ -79,6 +79,49 @@ from ..services import event_planning
 from ..services import moderation as mod
 from ..services import webhooks
 
+def claim_cookie_policy(request: Request) -> tuple[bool, str]:
+    """`(secure, samesite)` for the one-device claim cookie on this request.
+
+    Extracted from the route so the decision can be tested directly — it is security-relevant
+    in both directions (too loose and the cookie travels where it should not; too strict and
+    a genuine invitee is locked out of their own event), and it is not reachable through the
+    endpoint without a full private-event fixture.
+
+    ── SECURE ───────────────────────────────────────────────────────────────────────────────
+    Cloud Run terminates TLS and forwards to this container over plain HTTP, so
+    request.url.scheme alone reads "http" even in production — X-Forwarded-Proto is what
+    actually says the browser connection was HTTPS. Deriving it from settings.APP_URL instead
+    is a trap: this project's local .env often points APP_URL at the deployed prod URL even
+    while running against 127.0.0.1, which would mark the cookie Secure and make the browser
+    silently refuse to ever send it back over plain http — locking out the real invitee on
+    their own next visit.
+
+    ── SAMESITE: NONE OVER HTTPS, LAX OTHERWISE ─────────────────────────────────────────────
+    Lax everywhere was correct while the only client was the web SPA, which is same-site with
+    this API (one origin, one container — see the Dockerfile).
+
+    The Android app is not. Its WebView serves the bundle from https://localhost and calls
+    this API at the public origin, so every request from it is cross-site, and a Lax cookie is
+    one the browser accepts and then never sends back. The failure is quiet and lands in the
+    worst possible place: the claim would appear to be set, and the NEXT open of that private
+    invite link would find no cookie, read as a different device, and refuse the genuine
+    invitee entry to their own event.
+
+    None is safe for THIS cookie, and the reasoning deliberately does not generalise to
+    session cookies. It carries no authority: it is an opaque per-registration nonce that only
+    ever answers "is this the same device that first opened this invite", and sending it
+    cross-site is what it is for. There is no CSRF surface either — nothing is authorised by
+    its presence, and a request carrying it can do nothing a request without it cannot beyond
+    being recognised as the same device.
+
+    Tied to `secure` because browsers reject SameSite=None without Secure outright, which over
+    plain http would drop the cookie entirely rather than merely downgrade it — so local http
+    development keeps Lax and keeps working.
+    """
+    secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+    return secure, ("none" if secure else "lax")
+
+
 router = APIRouter(prefix="/events", tags=["events"])
 
 
@@ -315,10 +358,10 @@ def watch_event(
             # APP_URL at the deployed prod URL even while running against 127.0.0.1, which
             # would mark the cookie Secure and make the browser silently refuse to ever send
             # it back over plain http — locking out the real invitee on their own next visit.
-            is_https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+            secure, samesite = claim_cookie_policy(request)
             response.set_cookie(
-                f"zk_claim_{reg_row.id}", raw_claim, httponly=True, samesite="lax",
-                secure=is_https, max_age=60 * 60 * 24 * 90,
+                f"zk_claim_{reg_row.id}", raw_claim, httponly=True,
+                samesite=samesite, secure=secure, max_age=60 * 60 * 24 * 90,
             )
         elif not crud.claim_matches(reg_row, request.cookies.get(f"zk_claim_{reg_row.id}")):
             invited = False

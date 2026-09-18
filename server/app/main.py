@@ -23,6 +23,8 @@ from .routers.deliveries import router as deliveries_router
 from .routers.contact import router as contact_router
 from .routers.status import router as status_router
 from .routers.trust import router as trust_router
+from .routers.wellknown import router as wellknown_router
+from .routers.privacy import router as privacy_router
 from .security import ALGORITHM
 from .services import bus
 from .services import platform_settings
@@ -238,8 +240,23 @@ app = FastAPI(title="ZoikoStream API", lifespan=lifespan)
 # meaning any page served from the victim's own machine could make credentialed cross-origin
 # calls against the live API and read the responses. In production the configured
 # CORS_ORIGINS allowlist is the only thing honoured.
+#
+# MOBILE_APP_ORIGINS is unioned in rather than being folded into CORS_ORIGINS, and the split
+# is the point. The Android WebView's origin is literally `https://localhost` (Capacitor's
+# androidScheme — and `https` specifically because getUserMedia needs a secure context, which
+# file:// is not), so without it in this list every request the app makes is CORS-blocked and
+# the app cannot sign anyone in. But putting it in CORS_ORIGINS would mean either weakening
+# the production guard that rejects localhost entries there — the guard that stops any page on
+# a user's own machine calling a live API as them — or carving it an exception that would then
+# have applied to operator-supplied origins too. A separate setting, validated against a
+# closed set of known app origins (config.KNOWN_MOBILE_APP_ORIGINS), keeps the strict rule
+# strict for everything it was written for.
 _CORS_KWARGS = {
-    "allow_origins": [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+    "allow_origins": [
+        o.strip() for o in
+        f"{settings.CORS_ORIGINS},{settings.MOBILE_APP_ORIGINS}".split(",")
+        if o.strip()
+    ],
     "allow_credentials": True,
     "allow_methods": ["*"],
     "allow_headers": ["*"],
@@ -357,9 +374,29 @@ _ORG_STATE_GATE = [Depends(require_operational_org_access)]
 #
 # live_router's own reason is given above: playback and the LiveKit webhook must keep working
 # for a restricted tenant's audience and for LiveKit itself.
+#
+# privacy_router completes the same list on the API side: org_state.py's PRESERVED_PREFIXES
+# promises that privacy routes stay reachable for a restricted tenant, and the privacy
+# service's emails point accountless requesters at them. A requester exercising a data right
+# is frequently somebody with no session and possibly no account at all, so the router is
+# public and unauthenticated by design (per-route rate limits instead), and it is NOT
+# org-state gated — withholding a privacy right from a tenant we restricted would compound
+# the restriction rather than enforce it.
 for router in (auth_router, dashboard_router, admin_router, contact_router, live_router,
-               status_router, trust_router):
+               status_router, trust_router, privacy_router):
     app.include_router(router, prefix="/api")
+
+# NO /api prefix, and no org-state gate. Android fetches
+# https://<host>/.well-known/assetlinks.json at that exact path to decide whether this app may
+# open the domain's links; the location is fixed by the platform and cannot be namespaced.
+# Public and unauthenticated by necessity — the fetch happens at install time, from the OS,
+# with no session — and it carries nothing private: a package name and a certificate
+# fingerprint, both of which are already readable by anyone who downloads the APK.
+#
+# Registered here, ahead of the SPA catch-all at the bottom, so the path resolves to the
+# statement rather than to index.html. Served as HTML, the file is not merely wrong — Android
+# treats it as a verification failure, silently, and every link goes to Chrome instead.
+app.include_router(wellknown_router)
 for router in (organization_router, events_router, commercial_router,
                deliveries_router):
     app.include_router(router, prefix="/api", dependencies=_ORG_STATE_GATE)

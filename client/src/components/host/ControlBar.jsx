@@ -27,6 +27,7 @@ import {
 import { cx } from "../../ui/tokens";
 import { STUDIO, DECK, TRANSPORT, focus, t150, t200, press, disabled as disabledCls } from "./studio";
 import { COUNTDOWN_PRESETS } from "../../data/host";
+import { SUPPORTS_SCREEN_SHARE } from "../../platform";
 
 // A deck button: icon over an 11px label, identical dimensions in all three tool groups so
 // the deck reads as one instrument row rather than clusters of differently-sized keys.
@@ -199,16 +200,26 @@ export default function ControlBar({
                   : "Switch between available cameras"
           }
         />
-        <DeckButton
-          icon={FiMonitor}
-          label="Share"
-          active={screenShare}
-          onClick={onToggleScreen}
-          disabled={shareBlocked}
-          title={shareBlocked
-            ? "Screen sharing is disabled for this event"
-            : screenShare ? "Stop sharing your screen" : "Share your screen"}
-        />
+        {/* OMITTED, not disabled, where the platform has no screen capture at all — which
+            on the store build means Android, whose System WebView does not implement
+            getDisplayMedia (the call is absent from navigator.mediaDevices, so the handler
+            in host/Dashboard.jsx returns without doing anything). `shareBlocked` below is a
+            different question with a different answer: that is a host who COULD share but
+            whose event forbids it, and telling them so is useful, so it stays a disabled key
+            with a reason. A key that can never work on this device teaches nothing by being
+            present — it just costs one of fourteen slots on a 390px deck. */}
+        {SUPPORTS_SCREEN_SHARE && (
+          <DeckButton
+            icon={FiMonitor}
+            label="Share"
+            active={screenShare}
+            onClick={onToggleScreen}
+            disabled={shareBlocked}
+            title={shareBlocked
+              ? "Screen sharing is disabled for this event"
+              : screenShare ? "Stop sharing your screen" : "Share your screen"}
+          />
+        )}
 
 
         {/* ── engagement — opens a modal; changes nothing on air. ─────────────────
