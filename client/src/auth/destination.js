@@ -20,7 +20,7 @@
 // So a "host" account with no assignment has no console to open, and the honest destination
 // is the list of events they were actually put on.
 import api from "../api";
-import { HAS_CONSOLES } from "../platform";
+import { HAS_ADMIN_CONSOLE } from "../platform";
 
 // The canonical post-login destination, per ACCOUNT role.
 //
@@ -44,28 +44,26 @@ const ACCOUNT_HOME = {
 
 const ORGANIZATION_HOME = "/organization/dashboard";
 
-// ── THE MOBILE BUILD HAS NEITHER OF THOSE ROUTES ─────────────────────────────────────────
-// App.jsx ships the platform and organization consoles to the WEB build only (see the
-// HAS_CONSOLES gate there and the reasoning above it). So on Android both destinations above
-// name paths the router does not define — and the consequence is worse than a 404, because
-// the catch-all sends an unmatched path to RootRedirect, which asks this function where to
-// go, which answers with the same undefined path. That is an infinite redirect, and it would
-// have hit EVERY account on its first login: org_admin, viewer and super_admin alike.
+// ── THE ONE RULE HERE: NEVER NAME A ROUTE THIS BUILD DOES NOT DEFINE ─────────────────────
+// Getting this wrong is worse than a 404. The catch-all sends an unmatched path to
+// RootRedirect, which asks this function where to go, which answers with the same undefined
+// path — an infinite redirect rather than an error page. It once hit every account on its
+// first login, and the fix has to hold for every build target, not just the one in front of
+// you.
 //
-// /home is the store build's own landing surface (pages/mobile/MobileHome.jsx, routed only
-// when HAS_CONSOLES is false): the organization's live pulse from /organization/overview —
-// which authorizes with get_my_org, so any member may call it — plus the browser handoff to
-// the full console and a link into the contributor's /events/mine. It replaced a bare
-// /events/mine as every role's landing, which for an org admin was mostly an apology: an
-// assignment list they were probably not on, above a notice explaining where their console
-// went. Contributors still reach /events/mine in one tap from there.
+// The organization console now ships in BOTH builds, so ORGANIZATION_HOME is always a real
+// route and is the right answer nearly everywhere.
 //
-// It stays a route THIS build defines — never a console path — or the redirect loop this
-// section exists to prevent comes straight back.
-const NATIVE_HOME = "/home";
-
+// The platform console does not. /admin/dashboard exists only where HAS_ADMIN_CONSOLE is
+// true, so ACCOUNT_HOME is consulted only there; on native a super_admin falls through to
+// the organization dashboard, which that account can open perfectly well. They are still a
+// super admin — RoleRoute decides that, not this function — they simply land somewhere that
+// exists in the build they are running.
+//
+// Written as a fallthrough rather than a ternary on purpose: every branch ends at
+// ORGANIZATION_HOME, so there is no path through this expression that returns undefined.
 export const accountHome = (role) =>
-  (HAS_CONSOLES ? (ACCOUNT_HOME[role] || ORGANIZATION_HOME) : NATIVE_HOME);
+  (HAS_ADMIN_CONSOLE ? ACCOUNT_HOME[role] : undefined) || ORGANIZATION_HOME;
 
 // Console routes that are meaningless without an event, and whose access depends on an
 // EventAssignment rather than on the account role. Each maps to the capability the backend

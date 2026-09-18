@@ -36,11 +36,51 @@ export const HAS_BRIDGE = () =>
 // exists the honest thing is to not offer the control.
 export const SUPPORTS_SCREEN_SHARE = !IS_NATIVE;
 
-// Whether this build carries the platform (/admin/*) and organization (/organization/*)
-// consoles. It does not on mobile: those are dense operator surfaces — 21 and 17 pages of
-// tables, modals and multi-column dashboards — and shipping them to a phone would mean
-// shipping screens that cannot be operated on one. Admin work happens on the web app.
-export const HAS_CONSOLES = !IS_NATIVE;
+// ── WHY THIS IS THREE FLAGS AND NOT ONE ──────────────────────────────────────────────────
+// It used to be a single `HAS_CONSOLES = !IS_NATIVE`, which removed the platform console,
+// the organization console and the billing checkout together, because the first version of
+// this app was a viewer-and-studio companion and none of the three had a mobile design.
+//
+// That bundled three unrelated judgements into one boolean:
+//
+//   * the ORGANIZATION console is what an org owner opens the app FOR. It is dense, but its
+//     shell is already responsive (Sidebar has a drawer and breakpoints) and the rest is
+//     layout work, not an impossibility. It ships.
+//   * the PLATFORM console is super-admin operator tooling — the densest tables in the
+//     codebase, used by a handful of people who are at a desk when they use them. It is
+//     sequenced last rather than forbidden.
+//   * BILLING CHECKOUT is not a layout question at all. It is a Google Play payments policy
+//     question, and the answer does not change with screen size.
+//
+// Separating them means each can be decided on its own evidence. A single flag could only
+// ever be moved all at once.
+
+// The organization console (/organization/*) — dashboard, events, recordings, members,
+// audience, sessions, analytics, settings. Ships everywhere.
+export const HAS_ORG_CONSOLE = true;
+
+// The platform console (/admin/*). Web only for now; this is a sequencing decision, not a
+// permission one — RoleRoute already answers "may this account use it".
+export const HAS_ADMIN_CONSOLE = !IS_NATIVE;
+
+// Whether the billing surface may start a payment IN THIS BUILD.
+//
+// The billing PAGE ships everywhere — plan, usage, invoices, payment method are all readable
+// on a phone and an owner checking their plan on the train is a real thing. What this gates
+// is narrower: the hand-off to Stripe's hosted checkout.
+//
+// Google Play's payments policy is why. An Android app that takes a subscription payment
+// through a third-party checkout is the exact shape that policy exists to reject, and the
+// cost of getting it wrong is the whole app, not this screen. So on native the checkout
+// opens in the DEVICE BROWSER (native/bridge.js -> @capacitor/browser, a Custom Tab), which
+// is a different act: the purchase happens on the web, in the user's own browser, on the
+// origin that already serves it.
+export const SUPPORTS_IN_APP_CHECKOUT = !IS_NATIVE;
+
+// Kept as the union of the two console flags so existing call sites that mean "does this
+// build carry operator surfaces at all" keep reading correctly. New code should name the
+// console it actually means.
+export const HAS_CONSOLES = HAS_ORG_CONSOLE || HAS_ADMIN_CONSOLE;
 
 // The public site to send someone to when a mobile build cannot serve the page they want
 // (the admin/organization consoles above, and the billing flows that live inside them).

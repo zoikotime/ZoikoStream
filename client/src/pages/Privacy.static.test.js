@@ -65,16 +65,26 @@ describe("routes the privacy emails actually link to", () => {
     }
   });
 
-  it("the Privacy Center survives the mobile build too", () => {
-    // HAS_CONSOLES strips the /organization/* CONSOLE routes from the store build. The
-    // Privacy Center is not a console: emails point accountless requesters at it, and
-    // the app itself must be able to answer a data request. Asserted on the build-flag
-    // guard so moving the route inside the gate fails here.
-    const gate = APP.indexOf("HAS_CONSOLES && (");
+  it("the Privacy Center survives every build, because it is not a console", () => {
+    // /organization/privacy shares a URL prefix with the organization console and is not part
+    // of it. Emails point ACCOUNTLESS requesters at this page — someone exercising a data
+    // right may have no login and may never have had one — so it has to render wherever the
+    // app runs, under any combination of build flags.
+    //
+    // Asserted positionally, against every console gate rather than one named flag: the route
+    // must appear BEFORE the first gate opens, which is what "outside the gates" means in a
+    // single JSX tree. When HAS_CONSOLES was split into HAS_ADMIN_CONSOLE and
+    // HAS_ORG_CONSOLE this test was the only thing that noticed, which is the argument for
+    // checking all of them rather than whichever one exists today.
+    const gates = ["HAS_ADMIN_CONSOLE && (", "HAS_ORG_CONSOLE && ("]
+      .map((g) => APP.indexOf(g));
     const privacyIndex = APP.indexOf('path="/organization/privacy"');
-    expect(gate).toBeGreaterThan(-1);
+
     expect(privacyIndex).toBeGreaterThan(-1);
-    expect(privacyIndex).toBeLessThan(gate);
+    for (const gate of gates) {
+      expect(gate).toBeGreaterThan(-1);
+      expect(privacyIndex).toBeLessThan(gate);
+    }
   });
 });
 

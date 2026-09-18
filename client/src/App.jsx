@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-route
 import { ThemeProvider } from "./theme/ThemeContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { roleHome } from "./auth/roleHome";
-import { HAS_CONSOLES, IS_NATIVE } from "./platform";
+import { HAS_ADMIN_CONSOLE, HAS_ORG_CONSOLE, IS_NATIVE } from "./platform";
 import NativeShell from "./native/NativeShell";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { PageSpinner } from "./ui/Spinner";
@@ -304,7 +304,7 @@ export default function App() {
                 not define — which would otherwise be an infinite redirect loop, not a 404.
                 The consoles stay one tap away at WEB_APP_URL, offered by the mobile shell
                 rather than hidden. */}
-            {HAS_CONSOLES && (
+            {HAS_ADMIN_CONSOLE && (
               <>
               {/* Super admin (platform) area */}
               <Route element={<RoleRoute allow={["super_admin"]} />}>
@@ -335,7 +335,26 @@ export default function App() {
                   ))}
                 </Route>
               </Route>
+              </>
+            )}
 
+            {/* ── THE ORGANIZATION CONSOLE — SHIPS EVERYWHERE ──────────────────────────────
+                Gated separately from the platform console above because the two were only
+                ever bundled by accident of both being "operator surfaces". This one is what
+                an organization owner opens the app for: their events, recordings, members,
+                audience, sessions and analytics. Shipping it to the web alone meant an owner
+                on a phone got a read-only summary and a link out to a browser — which is
+                the platform they already have, one tap further away.
+
+                What made it possible rather than merely desirable: OrganizationLayout's
+                shell is already responsive — Sidebar carries a drawer and breakpoints — and
+                every endpoint these pages call already authorizes correctly. This is layout
+                work on a client that exists, not a second implementation of the console.
+
+                Billing is inside this group and ships with it. Only the CHECKOUT hand-off is
+                gated, by SUPPORTS_IN_APP_CHECKOUT — see platform.js. */}
+            {HAS_ORG_CONSOLE && (
+              <>
               {/* The organization dashboard is open to ANY member of the organization, not
                   just admins — which is what stops the bounce loop that produced the reported
                   bug. When it was admin-only, a host/moderator/speaker/billing_admin/viewer
@@ -379,19 +398,22 @@ export default function App() {
               </>
             )}
 
-            {/* ── THE MOBILE HOME, AND WHY IT IS GATED INVERTED ──────────────────────────
-                Web: HAS_CONSOLES is true and no /home route exists — the web home for a
-                console role is the organization dashboard itself, and a second home would
-                only be a third name for it ("/", /organization/dashboard and /home all
-                meaning "start here" is two too many).
+            {/* ── THE MOBILE HOME ────────────────────────────────────────────────────────
+                Native only, and no longer the landing page. It was built when the store
+                build had no console to land in: a read-only pulse over /organization/overview
+                (which authorizes with get_my_org, so any member may call it) plus a handoff
+                to the web.
 
-                Mobile: the store build has no console to land in, so NATIVE_HOME is /home —
-                a read-only pulse (live sessions, next events from /organization/overview,
-                which authorizes with get_my_org for any member) plus the browser handoff to
-                the full console. NOT a console route: it must stay routable in this build or
-                RootRedirect loops, which is the failure auth/destination.js exists to
-                prevent. */}
-            {!HAS_CONSOLES && (
+                The console now ships here, so accountHome() sends an org role to
+                /organization/dashboard exactly as it does on the web, and this stays as a
+                secondary glance-screen reachable from the nav. Kept rather than deleted
+                because it is the one surface in the app designed for a phone first — it
+                answers "are we live, what is next" in a single screen with no scrolling,
+                which the full dashboard does not.
+
+                Not gated on a console flag any more: it is a native affordance, so IS_NATIVE
+                is what it actually depends on. */}
+            {IS_NATIVE && (
               <Route element={<ProtectedRoute />}>
                 <Route path="/home" element={<MobileHome />} />
               </Route>
