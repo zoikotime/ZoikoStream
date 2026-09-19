@@ -51,6 +51,7 @@ vi.mock("../platform", () => ({
 }));
 
 import NativeShell from "./NativeShell";
+import { dismissTop, register } from "../ui/dismissStack";
 
 function Probe() {
   const location = useLocation();
@@ -230,5 +231,103 @@ describe("the back button", () => {
     listeners.backButton({ canGoBack: true });
 
     expect(exitApp).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the back button, with a layer open", () => {
+  // The sidebar, a modal and a confirm dialog are React state, not history entries. Nothing
+  // in Android or the router knows they exist, so Back navigates the page BEHIND them and
+  // leaves them on screen — the user sees the thing they tried to close still there, over
+  // content that silently changed. This is the most-reported way a WebView app feels broken,
+  // and it became reachable here the moment the organization console started shipping: its
+  // sidebar is the app's most-used control.
+  function Pusher() {
+    const navigate = useNavigate();
+    return <button type="button" onClick={() => navigate("/e/summit")}>go</button>;
+  }
+
+  const mountBrowser = () => {
+    window.history.replaceState(null, "", "/events/mine");
+    return render(
+      <BrowserRouter>
+        <NativeShell />
+        <Pusher />
+        <Routes>
+          <Route path="*" element={<Probe />} />
+        </Routes>
+      </BrowserRouter>,
+    );
+  };
+
+  // Layers are module state; anything a test leaves open is visible to the next one.
+  beforeEach(() => { while (dismissTop()) { /* drain */ } });
+
+  it("closes the layer instead of leaving the app", async () => {
+    mountBrowser();
+    await waitFor(() => expect(listeners.backButton).toBeTypeOf("function"));
+
+    const close = vi.fn();
+    register(close);
+
+    // At idx 0, so without a layer open this press would have quit the app. That is what
+    // makes it the right press to assert on: the layer has to win over the exit branch too,
+    // not just over navigation.
+    listeners.backButton({ canGoBack: false });
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(exitApp).not.toHaveBeenCalled();
+  });
+
+  it("does not navigate the page underneath", async () => {
+    const { getByText, getByTestId } = mountBrowser();
+    await waitFor(() => expect(listeners.backButton).toBeTypeOf("function"));
+    await act(async () => { getByText("go").click(); });
+    await waitFor(() => expect(getByTestId("path")).toHaveTextContent("/e/summit"));
+
+    const close = vi.fn();
+    register(close);
+
+    await act(async () => { listeners.backButton({ canGoBack: true }); });
+
+    // The route is unchanged: the press was spent on the layer.
+    expect(getByTestId("path")).toHaveTextContent("/e/summit");
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("goes back again once the layer has closed", async () => {
+    const { getByText, getByTestId } = mountBrowser();
+    await waitFor(() => expect(listeners.backButton).toBeTypeOf("function"));
+    await act(async () => { getByText("go").click(); });
+    await waitFor(() => expect(getByTestId("path")).toHaveTextContent("/e/summit"));
+
+    const layer = register(vi.fn());
+    layer.release();
+
+    await act(async () => { listeners.backButton({ canGoBack: true }); });
+
+    // A closed layer must not keep swallowing presses — the failure that would leave Back
+    // permanently dead after the first modal of the session.
+    await waitFor(() => expect(getByTestId("path")).toHaveTextContent("/events/mine"));
+  });
+
+  it("takes one press per layer, innermost first", async () => {
+    mountBrowser();
+    await waitFor(() => expect(listeners.backButton).toBeTypeOf("function"));
+
+    const drawer = vi.fn();
+    const dialog = vi.fn();
+    register(drawer);
+    const inner = register(dialog);
+
+    listeners.backButton({ canGoBack: false });
+    expect(dialog).toHaveBeenCalledTimes(1);
+    expect(drawer).not.toHaveBeenCalled();
+
+    // A real component closes on dismissal; the stack does not unregister for it.
+    inner.release();
+
+    listeners.backButton({ canGoBack: false });
+    expect(drawer).toHaveBeenCalledTimes(1);
+    expect(exitApp).not.toHaveBeenCalled();
   });
 });

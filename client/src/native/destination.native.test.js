@@ -1,10 +1,10 @@
 // Where a signed-in account lands in the MOBILE build.
 //
 // ── THE BUG THIS LOCKS OUT ───────────────────────────────────────────────────────────────
-// The store build ships no /admin/* and no /organization/* routes (the HAS_CONSOLES gate in
-// App.jsx). accountHome() previously answered "/organization/dashboard" for every non-platform
-// role and "/admin/dashboard" for super_admin — both of which are, in that build, paths the
-// router does not define.
+// accountHome() must never name a path the RUNNING BUILD does not define. Which paths those
+// are has changed — the organization console now ships natively (HAS_ORG_CONSOLE), while the
+// platform console still does not (HAS_ADMIN_CONSOLE) — but the rule has not, and it is the
+// rule rather than the path list that this file exists to hold.
 //
 // The consequence is worse than a 404 and is the reason this file exists. App.jsx sends an
 // unmatched path to RootRedirect, RootRedirect asks accountHome() where to go, accountHome()
@@ -14,7 +14,7 @@
 // it would have looked like.
 //
 // The web build is asserted in auth/destination.test.jsx and must not change; these are the
-// same functions under the other build flag.
+// same functions under the other build flags.
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../api", () => ({
@@ -24,10 +24,19 @@ vi.mock("../api", () => ({
   errCode: () => null,
 }));
 
-// The whole point of the file: HAS_CONSOLES false, as `vite build --mode mobile` produces.
+// The flags exactly as `vite build --mode mobile` produces them. Both consoles now ship, so
+// the destinations match the web build; SUPPORTS_IN_APP_CHECKOUT is the one that still
+// differs, and it is a payments-policy decision rather than a routing one.
+//
+// Mocked literally rather than approximately. A test that keeps asserting a flag combination
+// the build no longer produces stays green while guarding nothing, which is worse than having
+// no test at all — it reports that a build was checked when it was not.
 vi.mock("../platform", () => ({
   IS_NATIVE: true,
-  HAS_CONSOLES: false,
+  HAS_ORG_CONSOLE: true,
+  HAS_ADMIN_CONSOLE: true,
+  HAS_CONSOLES: true,
+  SUPPORTS_IN_APP_CHECKOUT: false,
   SUPPORTS_SCREEN_SHARE: false,
   HAS_BRIDGE: () => true,
   WEB_APP_URL: "https://get.zoikostream.com",
@@ -44,26 +53,38 @@ const ROLES = [
 ];
 
 describe("accountHome in the mobile build", () => {
-  it.each(ROLES)("sends %s to a route this build actually defines", (role) => {
-    expect(accountHome(role)).toBe("/home");
+  it.each(ROLES.filter((r) => r !== "super_admin"))(
+    "sends %s to a route this build actually defines", (role) => {
+      expect(accountHome(role)).toBe("/organization/dashboard");
+    });
+
+  it("sends super_admin to the platform console, which this build now carries", () => {
+    // The assertion that changed when /admin/* started shipping natively. It previously read
+    // /organization/dashboard, because the platform console was absent and sending an operator
+    // to a route the router could not match was an infinite redirect rather than a 404.
+    expect(accountHome("super_admin")).toBe("/admin/dashboard");
   });
 
-  it("never answers with a console path", () => {
-    // Stated as its own assertion because this is the loop condition, not a preference: a
-    // console path here is a path the mobile router cannot match, and an unmatched path comes
-    // straight back to this function.
+  it("only ever answers with a route the native router defines", () => {
+    // The rule this file exists for, and the only form of it that survives both consoles
+    // shipping. It is stated as a whitelist rather than as a list of forbidden prefixes
+    // because the failure is "names something absent", and a blacklist can only ever rule out
+    // the absences somebody already thought of.
+    //
+    // App.jsx defines both of these natively now. If a build target ever drops one again,
+    // this is what should fail.
+    const ROUTABLE = new Set(["/admin/dashboard", "/organization/dashboard"]);
     for (const role of [...ROLES, undefined, null, "something_new"]) {
-      const home = accountHome(role);
-      expect(home.startsWith("/admin/")).toBe(false);
-      expect(home.startsWith("/organization/")).toBe(false);
+      expect(ROUTABLE.has(accountHome(role))).toBe(true);
     }
   });
 
   it("answers for an unknown role too", () => {
     // A role the backend adds later must not produce `undefined`, which RootRedirect would
     // hand to <Navigate to={undefined}>.
-    expect(accountHome("role_that_does_not_exist_yet")).toBe("/home");
-    expect(accountHome(undefined)).toBe("/home");
+    // An unknown role is not a platform operator, so it falls to the organization console.
+    expect(accountHome("role_that_does_not_exist_yet")).toBe("/organization/dashboard");
+    expect(accountHome(undefined)).toBe("/organization/dashboard");
   });
 
   it("is what roleHome re-exports, so the dozen call sites agree", () => {
@@ -72,9 +93,9 @@ describe("accountHome in the mobile build", () => {
 });
 
 describe("resolvePostLogin in the mobile build", () => {
-  it("falls back to the mobile home when there is no saved destination", async () => {
+  it("falls back to the account's console when there is no saved destination", async () => {
     expect(await resolvePostLogin({ role: "org_admin" }, null))
-      .toEqual({ to: "/home", reason: null });
+      .toEqual({ to: "/organization/dashboard", reason: null });
   });
 
   it("still honours an ordinary saved page", async () => {
@@ -93,6 +114,6 @@ describe("resolvePostLogin in the mobile build", () => {
     const saved = { pathname: "/host/dashboard", search: "" };
 
     expect(await resolvePostLogin({ role: "host" }, saved))
-      .toEqual({ to: "/home", reason: null });
+      .toEqual({ to: "/organization/dashboard", reason: null });
   });
 });
