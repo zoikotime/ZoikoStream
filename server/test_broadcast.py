@@ -291,18 +291,39 @@ def test_seed_settings_respects_the_events_own_flags_for_a_normal_event():
     assert seeded["reactions_enabled"] is True  # untouched default for non-memorial
 
 
-def test_seed_settings_forces_interaction_off_for_memorial_events():
-    """doc Sec. 11.3/19, LE-AC-16 (non-waivable): no audience chat/comments/reactions/
-    guestbook surface for the memorial launch, even if the row's own columns say True
-    (e.g. an event whose category was switched to memorial after creation)."""
+def test_seed_settings_carries_a_memorials_saved_configuration_through_go_live():
+    """Inverted from the retired restriction. _seed_settings used to force chat/Q&A/polls/
+    raise-hand/reactions off for the memorial category regardless of the row's own columns;
+    Go Live now carries the organiser's saved configuration through, like any other category."""
     ev = _fake_event(category="Funeral / Memorial", chat_enabled=True, qa_enabled=True,
                      polls_enabled=True, raise_hand_enabled=True)
+    seeded = bc._seed_settings(ev)
+    assert seeded["chat_enabled"] is True
+    assert seeded["qa_enabled"] is True
+    assert seeded["polls_enabled"] is True
+    assert seeded["raise_hand_enabled"] is True
+    # reactions_enabled has no Event column, so it takes the plain default — no longer
+    # special-cased to False for this category.
+    assert seeded["reactions_enabled"] == bc.DEFAULT_SETTINGS["reactions_enabled"]
+
+
+def test_seed_settings_respects_a_memorial_that_turned_features_off():
+    """The other direction: not forced ON either — whatever the row says is what is seeded."""
+    ev = _fake_event(category="Funeral / Memorial", chat_enabled=False, qa_enabled=False,
+                     polls_enabled=False, raise_hand_enabled=False)
     seeded = bc._seed_settings(ev)
     assert seeded["chat_enabled"] is False
     assert seeded["qa_enabled"] is False
     assert seeded["polls_enabled"] is False
     assert seeded["raise_hand_enabled"] is False
-    assert seeded["reactions_enabled"] is False  # no Event column at all for this one
+
+
+def test_seed_settings_treats_memorial_and_other_categories_identically():
+    """The requirement, stated directly: same columns in, same settings out."""
+    cols = dict(chat_enabled=True, qa_enabled=True, polls_enabled=False, raise_hand_enabled=True)
+    memorial = bc._seed_settings(_fake_event(category="Funeral / Memorial", **cols))
+    webinar = bc._seed_settings(_fake_event(category="Webinar", **cols))
+    assert memorial == webinar
 
 
 def test_seed_settings_tolerates_no_event():

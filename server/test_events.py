@@ -200,87 +200,16 @@ def test_category_min_risk_tier_ignores_case_and_whitespace():
     assert crud.category_min_risk_tier("Webinar") == "r0"
 
 
-def test_enforce_memorial_features_forces_all_four_off():
-    fields = {"title": "x", "chat_enabled": True, "qa_enabled": True,
-              "polls_enabled": True, "raise_hand_enabled": True}
-    out, attempted = crud._enforce_memorial_features("Funeral / Memorial", dict(fields))
-    assert out["chat_enabled"] is False
-    assert out["qa_enabled"] is False
-    assert out["polls_enabled"] is False
-    assert out["raise_hand_enabled"] is False
-    assert out["title"] == "x"  # untouched fields pass through
-    # No visibility key in the input and no current_visibility passed — "attempted" is None,
-    # which is itself the value being forced away from, matching visibility="private" below.
-    assert attempted is None
-    assert out["visibility"] == "private"
+# ── Category classifies; it no longer configures ───────────────────────────────────────
+#
+# The ten tests that stood here proved the opposite: that _enforce_memorial_features() forced
+# chat/Q&A/polls/raise-hand off, rewrote visibility to "private", and staged an
+# `event.memorial_visibility_enforced` AuditLog. That helper is retired along with the
+# restriction, so the coverage is replaced rather than dropped — these assert that create_event
+# writes back what the caller submitted, for the category that used to be the exception.
 
-
-def test_enforce_memorial_features_injects_false_even_when_absent():
-    """A partial update patch that never mentions chat_enabled must still come out False —
-    this is what stops a category switch (Webinar -> Funeral / Memorial) from leaving a
-    stale chat_enabled=True on the row."""
-    out, _attempted = crud._enforce_memorial_features("Funeral / Memorial", {"category": "Funeral / Memorial"})
-    assert out["chat_enabled"] is False
-    assert out["raise_hand_enabled"] is False
-
-
-def test_enforce_memorial_features_is_a_noop_for_other_categories():
-    fields = {"chat_enabled": True, "qa_enabled": True}
-    out, attempted = crud._enforce_memorial_features("Webinar", dict(fields))
-    assert out == fields
-    assert attempted is None
-
-
-# ── P0.11 (audit 2026-08-27): memorial visibility is forced, not just displayed ───────────
-
-def test_enforce_memorial_features_forces_visibility_private():
-    out, attempted = crud._enforce_memorial_features("Funeral / Memorial", {"visibility": "public"})
-    assert out["visibility"] == "private"
-    assert attempted == "public"  # what was attempted, for the audit trail
-
-
-def test_enforce_memorial_features_reports_unlisted_as_attempted_too():
-    out, attempted = crud._enforce_memorial_features("Funeral / Memorial", {"visibility": "unlisted"})
-    assert out["visibility"] == "private"
-    assert attempted == "unlisted"
-
-
-def test_enforce_memorial_features_no_correction_reported_when_already_private():
-    out, attempted = crud._enforce_memorial_features("Funeral / Memorial", {"visibility": "private"})
-    assert out["visibility"] == "private"
-    assert attempted is None  # nothing to audit — the caller already sent the right value
-
-
-def test_enforce_memorial_features_uses_current_visibility_when_field_untouched():
-    """update_event's case: the caller's patch never mentions visibility at all. If the row is
-    already private, nothing to correct; if it somehow isn't, that counts as an attempt too."""
-    out, attempted = crud._enforce_memorial_features(
-        "Funeral / Memorial", {"title": "x"}, current_visibility="private")
-    assert out["visibility"] == "private"
-    assert attempted is None
-
-    out2, attempted2 = crud._enforce_memorial_features(
-        "Funeral / Memorial", {"title": "x"}, current_visibility="public")
-    assert out2["visibility"] == "private"
-    assert attempted2 == "public"
-
-
-def test_enforce_memorial_features_does_not_touch_visibility_for_other_categories():
-    out, attempted = crud._enforce_memorial_features("Webinar", {"visibility": "public"})
-    assert out["visibility"] == "public"
-    assert attempted is None
-
-
-def test_memorial_visibility_constant_is_a_valid_existing_enum_value():
-    """Guards against MEMORIAL_VISIBILITY drifting out of sync with the actual Visibility
-    enum — a typo here would silently write an invalid value to every memorial event."""
-    from app.models import EVENT_VISIBILITY
-    assert crud.MEMORIAL_VISIBILITY in EVENT_VISIBILITY
-
-
-def test_create_event_audits_an_attempted_public_memorial():
-    """create_event's audit call happens before the caller's own commit — a _StubSession-style
-    fake proves the AuditLog is staged with the right facts without needing a real database."""
+def test_create_event_keeps_a_public_memorial_public():
+    """The exact case the old clamp existed to prevent, now the expected outcome."""
     import uuid
     from types import SimpleNamespace
     from app.models import AuditLog, Event
@@ -303,74 +232,37 @@ def test_create_event_audits_an_attempted_public_memorial():
             pass
 
     data = SimpleNamespace(model_dump=lambda exclude=None: {
-        "title": "Grandmother's memorial", "category": "Funeral / Memorial", "visibility": "public",
+        "title": "Grandmother's memorial", "category": "Funeral / Memorial",
+        "visibility": "public", "chat_enabled": True, "qa_enabled": True,
+        "polls_enabled": True, "raise_hand_enabled": True,
     })
     actor = SimpleNamespace(id=uuid.uuid4(), email="host@t.test")
-    org_id = uuid.uuid4()
-    ev = crud.create_event(_Stub(), org_id, actor.id, data, "grandmothers-memorial", actor=actor)
+    ev = crud.create_event(_Stub(), uuid.uuid4(), actor.id, data, "grandmothers-memorial",
+                           actor=actor)
 
-    assert ev.visibility == "private"  # never the attempted "public"
-    entry = next(o for o in added if isinstance(o, AuditLog))
-    assert entry.action == "event.memorial_visibility_enforced"
-    assert entry.meta["attempted_visibility"] == "public"
-    assert entry.meta["enforced_visibility"] == "private"
-    assert entry.actor_id == actor.id
-
-
-def test_create_event_does_not_audit_when_already_private():
-    import uuid
-    from types import SimpleNamespace
-    from app.models import AuditLog
-
-    added = []
-
-    class _Stub:
-        def add(self, o):
-            added.append(o)
-
-        def flush(self):
-            pass
-
-        def commit(self):
-            pass
-
-        def refresh(self, o):
-            pass
-
-    data = SimpleNamespace(model_dump=lambda exclude=None: {
-        "title": "x", "category": "Funeral / Memorial", "visibility": "private",
-    })
-    actor = SimpleNamespace(id=uuid.uuid4(), email="host@t.test")
-    crud.create_event(_Stub(), uuid.uuid4(), actor.id, data, "x", actor=actor)
-    assert not any(isinstance(o, AuditLog) for o in added)
+    assert ev.visibility == "public"
+    assert (ev.chat_enabled, ev.qa_enabled) == (True, True)
+    assert (ev.polls_enabled, ev.raise_hand_enabled) == (True, True)
+    # No override happened, so nothing may be audited as one.
+    assert not [o for o in added if isinstance(o, AuditLog)]
 
 
-def test_create_event_non_memorial_is_never_audited_for_visibility():
-    import uuid
-    from types import SimpleNamespace
-    from app.models import AuditLog
+def test_the_forcing_helpers_are_gone():
+    """Named explicitly so a re-introduction is a deliberate act, not an accident."""
+    for gone in ("_enforce_memorial_features", "_audit_memorial_visibility_correction",
+                 "MEMORIAL_VISIBILITY", "_MEMORIAL_DISABLED_FEATURES"):
+        assert not hasattr(crud, gone), f"{gone} is back"
 
-    added = []
 
-    class _Stub:
-        def add(self, o):
-            added.append(o)
-
-        def flush(self):
-            pass
-
-        def commit(self):
-            pass
-
-        def refresh(self, o):
-            pass
-
-    data = SimpleNamespace(model_dump=lambda exclude=None: {
-        "title": "x", "category": "Webinar", "visibility": "public",
-    })
-    actor = SimpleNamespace(id=uuid.uuid4(), email="host@t.test")
-    crud.create_event(_Stub(), uuid.uuid4(), actor.id, data, "x", actor=actor)
-    assert not any(isinstance(o, AuditLog) for o in added)
+def test_the_commercial_risk_floor_survives():
+    """Kept deliberately: risk_tier drives service profiles, cancellation policies, order
+    pricing and readiness gates in crud/commercial.py. It never gated visibility or features,
+    so retiring the audience restriction must not lower it."""
+    assert crud.category_min_risk_tier("Funeral / Memorial") == "r2"
+    assert crud.elevated_risk_tier("Funeral / Memorial", "r0") == "r2"
+    # Still a floor, never a ceiling.
+    assert crud.elevated_risk_tier("Funeral / Memorial", "r3") == "r3"
+    assert crud.elevated_risk_tier("Webinar", "r0") == "r0"
 
 
 if __name__ == "__main__":
