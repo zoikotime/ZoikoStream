@@ -33,7 +33,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..crud import commercial as commercial_crud
 from ..crud.admin import get_feature_flag_by_key
-from ..crud.event import is_memorial_category, status_transition_error
+from ..crud.event import status_transition_error
 from ..models import (
     SUBSCRIPTION_ENTITLED_STATES,
     AnalyticsSnapshot,
@@ -405,22 +405,19 @@ def _seed_settings(ev: Event | None) -> dict:
     A missing row (deleted mid-session) falls back to defaults rather than raising — this
     runs on every socket accept, and one stale id must not refuse every connection.
 
-    Memorial events also force chat/qa/polls/raise_hand/reactions off here, independent of
-    the stored Event columns — crud.event.create_event/update_event already clamp those
-    columns, but this is the actual enforcement point the audience player reads from, so it
-    stays correct even if a row somehow predates that clamp (doc Sec. 11.3/19, LE-AC-16).
-    reactions_enabled has no Event-level column at all (it's session-only), so this is the
-    only place it can be defaulted off for a memorial event."""
+    Category no longer changes what is seeded. Funeral / Memorial used to force
+    chat/qa/polls/raise_hand/reactions off here regardless of the stored Event columns; that
+    restriction is retired by product decision, so going live now carries the organiser's
+    saved configuration through unchanged, exactly as it does for every other category."""
     if ev is None:
         return dict(DEFAULT_SETTINGS)
-    memorial = is_memorial_category(ev.category)
     seeded = {
         **DEFAULT_SETTINGS,
-        "chat_enabled": False if memorial else ev.chat_enabled,
-        "qa_enabled": False if memorial else ev.qa_enabled,
-        "polls_enabled": False if memorial else ev.polls_enabled,
+        "chat_enabled": ev.chat_enabled,
+        "qa_enabled": ev.qa_enabled,
+        "polls_enabled": ev.polls_enabled,
         "waiting_room": ev.waiting_room_enabled,
-        "raise_hand_enabled": False if memorial else ev.raise_hand_enabled,
+        "raise_hand_enabled": ev.raise_hand_enabled,
         "allow_screen_share": ev.allow_screen_share,
         # auto_upload (whether a captured file auto-uploads once recording stops) takes the
         # plain default — recording itself is always a deliberate host action (ACTIONS/
@@ -429,8 +426,6 @@ def _seed_settings(ev: Event | None) -> dict:
         # (it was dead: no code path read it to actually start anything, and no frontend
         # form ever exposed it).
     }
-    if memorial:
-        seeded["reactions_enabled"] = False
     return seeded
 
 
@@ -896,25 +891,14 @@ async def _countdown(ctx, payload):
     return [("broadcast", "broadcast.countdown", {"until": deadline.isoformat(), "seconds": seconds})]
 
 
-_MEMORIAL_LOCKED_SETTINGS = ("chat_enabled", "qa_enabled", "polls_enabled", "raise_hand_enabled", "reactions_enabled")
-
-
 async def _settings(ctx, payload):
     ceiling = await mod.tx(lambda db: platform_settings.max_bitrate_kbps(db))
     patch = clean_settings(payload.get("settings") or payload, max_bitrate_kbps=ceiling)
     if not patch:
         return "No recognised settings in that request"
-    # A host cannot toggle chat/Q&A/polls/raise-hand/reactions on mid-broadcast for a
-    # memorial event either — _seed_settings closes the initial state, this closes the
-    # runtime one (doc Sec. 11.3/19, LE-AC-16, non-waivable).
-    def _category(db):
-        ev = db.get(Event, ctx.event_id)
-        return ev.category if ev else None
-    memorial = is_memorial_category(await mod.tx(_category))
-    if memorial:
-        patch = {k: v for k, v in patch.items() if k not in _MEMORIAL_LOCKED_SETTINGS}
-        if not patch:
-            return "Chat, Q&A, polls, raise hand, and reactions cannot be enabled for a memorial event"
+    # No category gate here any more: a memorial host may toggle chat/Q&A/polls/raise-hand/
+    # reactions mid-broadcast exactly like any other host. _seed_settings likewise carries the
+    # saved configuration through instead of clamping it.
     merged = await _apply_settings(ctx, patch)
     changed = ", ".join(f"{k}={patch[k]}" for k in sorted(patch))
     act = await mod.tx(lambda db: mod.record(
