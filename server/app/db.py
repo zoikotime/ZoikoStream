@@ -18,8 +18,8 @@ log = logging.getLogger(__name__)
 # match, so a thread can never wait on a connection that structurally cannot exist.
 # ponytail: tuned for one uvicorn worker against the Supabase pooler. Multiply by the worker
 # count when scaling out and check it against the pooler's own limit before raising these.
-DB_POOL_SIZE = 20
-DB_MAX_OVERFLOW = 10
+DB_POOL_SIZE = 15
+DB_MAX_OVERFLOW = 5
 DB_MAX_CONNECTIONS = DB_POOL_SIZE + DB_MAX_OVERFLOW
 
 engine = create_engine(
