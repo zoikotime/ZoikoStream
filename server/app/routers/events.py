@@ -1049,7 +1049,7 @@ def reopen_event_intake(event_id: uuid.UUID, data: IntakeReopen, background: Bac
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No intake has been opened")
     if not event_planning.reopen(db, intake, sections=data.sections, reason=data.reason,
                                  actor_id=admin.id, due_at=data.due_at):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             f"Unknown sections. Expected any of {list(INTAKE_SECTIONS)}")
     event_planning.notify_reopened(db, background, intake)
     return {"status": intake.status, "outstanding_sections": intake.outstanding_sections}
@@ -1107,7 +1107,7 @@ def update_event_planning(event_id: uuid.UUID, category: str, data: PlanningUpda
                 f"directly. Change the underlying event configuration instead.")
         if not event_planning.attest(db, row, status=data.status,
                                      outstanding=data.outstanding):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown status")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown status")
     return {"category": row.category, "status": row.status, "blocking": row.blocking,
             "due_at": row.due_at, "outstanding": row.outstanding or []}
 
@@ -1225,7 +1225,7 @@ def open_event_incident(event_id: uuid.UUID, data: IncidentStateIn,
         summary=data.summary, next_update_at=data.next_update_at, actor_id=admin.id)
     if incident is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "state must be 'delayed' or 'temporary_hold' and reason_category must be one of "
             f"{list(INCIDENT_REASON_CATEGORIES)}")
     event_ops.notify_incident(db, background, ev, incident)
@@ -1332,7 +1332,7 @@ def invite_contributor(event_id: uuid.UUID, data: ContributorInvite,
         rehearsal_required=data.rehearsal_required)
     if grant is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"A valid email and a role from {list(CONTRIBUTOR_ROLES)} are required")
     contributor_access.notify_invited(db, background, grant, raw)
     return {"id": str(grant.id), "email": grant.email, "role": grant.role,
@@ -1455,7 +1455,7 @@ def submit_contributor_technical_check(event_id: uuid.UUID, grant_id: uuid.UUID,
                             "Accept the contributor invitation first")
     check = contributor_access.apply_preflight(db, grant, data.model_dump())
     if check is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "No results supplied")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "No results supplied")
     contributor_access.notify_technical_check(db, background, grant, check)
     return {"status": check.status,
             "failure_categories": check.failure_categories or [],

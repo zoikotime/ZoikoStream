@@ -527,7 +527,7 @@ def reset_password(data: ResetPasswordIn, background: BackgroundTasks,
     # the user to start recovery again - punishing them for a typo.
     violation = org_policy.password_violation(user.organization, data.password)
     if violation:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, violation)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, violation)
 
     # Spend the code BEFORE committing the credential: single-use must hold even if the
     # write below fails.
@@ -651,7 +651,7 @@ def step_up(data: StepUpIn, request: Request, db: Session = Depends(get_db),
     outcome, reference = stepup_svc.issue(db, user, password=data.password,
                                           purpose=data.purpose, ip=ip)
     if outcome == stepup_svc.UNKNOWN_PURPOSE:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             f"Unsupported purpose. Expected one of {list(STEP_UP_PURPOSES)}")
     if outcome != stepup_svc.OK:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, stepup_svc.describe(outcome))
@@ -688,14 +688,14 @@ def change_password(data: ChangePasswordIn, background: BackgroundTasks,
     # Rejected as a policy failure rather than silently succeeding: a "change" that changes
     # nothing still sends a credential-changed email, which trains people to ignore it.
     if verify_password(data.new_password, user.password_hash or ""):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "New password must be different from your current password")
 
     # The organization's floor, from the one place that defines it. Never re-implemented
     # here, and never weaker than the platform baseline (services/org_policy).
     violation = org_policy.password_violation(user.organization, data.new_password)
     if violation:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, violation)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, violation)
 
     user.password_hash = hash_password(data.new_password)
     db.commit()

@@ -154,7 +154,7 @@ def subscribe_to_status(data: StatusSubscribeIn, background: BackgroundTasks,
     subscriber, raw = sp.subscribe(db, email=data.email, components=data.components,
                                   regions=data.regions, notify_kinds=data.notify_kinds)
     if subscriber is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A valid email address is required")
     sp.notify_verify(db, background, subscriber, raw)
     return {"status": "pending_verification"}

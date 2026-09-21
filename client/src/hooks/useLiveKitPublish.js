@@ -251,12 +251,35 @@ export default function useLiveKitPublish({
       await disposeRoom();
       if (!current()) return;
 
+      // ── THE SIMULCAST LADDER, AND WHY IT IS ONLY TWO PRESETS ────────────────────────
+      // videoSimulcastLayers does NOT mean "publish exactly these". livekit-client's
+      // computeVideoEncodings takes presets[0] as the low layer and presets[1] as the mid
+      // layer, and ALWAYS uses the real capture resolution as the top layer — every entry
+      // past the second is read by nothing. The previous value listed three presets ending
+      // in h1080, which read like "we publish 1080p" but was dead config: h1080 was
+      // discarded, and the top layer was (and still is) whatever the camera actually
+      // granted. What that list really produced was 216p/540p/capture, so the only
+      // intermediate rendition a viewer could land on was 540p — the reason an adaptive
+      // viewer on a normal-sized player looked soft.
+      //
+      // h360 + h720 gives the ladder that matches how this is actually watched:
+      //   low  384x216 -> 640x360   @ 450 kbps / 20 fps   (VideoPresets.h360)
+      //   mid  960x540 -> 1280x720  @ 1.7 Mbps / 30 fps   (VideoPresets.h720)
+      //   top  capture resolution   @ ~3 Mbps / 30 fps    (1080p when the camera grants it)
+      // The mid layer is the one adaptive streaming lands on most often, so raising it from
+      // 540p/25fps to 720p/30fps is the single biggest visible win here. Bitrates are the
+      // stock preset values — deliberately not hand-tuned, since no runtime WebRTC
+      // measurements exist yet to justify departing from them.
+      //
+      // A camera that grants exactly 720p yields 360p/720p/720p (the mid preset and the
+      // capture resolution coincide); dynacast pauses whichever of the pair nobody watches,
+      // so the cost is a duplicated encode only while both are being consumed.
       const room = new Room({
         stopLocalTrackOnUnpublish: false,
         dynacast: true,
         publishDefaults: {
           simulcast: true,
-          videoSimulcastLayers: [VideoPresets.h216, VideoPresets.h540, VideoPresets.h1080],
+          videoSimulcastLayers: [VideoPresets.h360, VideoPresets.h720],
         },
       });
       roomRef.current = room;

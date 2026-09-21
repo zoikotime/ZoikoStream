@@ -343,7 +343,7 @@ def create_subscription_checkout(data: SubscriptionCheckoutCreate,
 
 
 _PLAN_CHANGE_STATUS = {
-    "invalid_interval": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "invalid_interval": status.HTTP_422_UNPROCESSABLE_CONTENT,
     "invalid_plan": status.HTTP_404_NOT_FOUND,
     "unpriced": status.HTTP_409_CONFLICT,
     "not_active": status.HTTP_409_CONFLICT,
@@ -604,7 +604,7 @@ def request_retention_extension(recording_id: uuid.UUID, data: RetentionExtensio
             db, background, rec, requester=admin,
             reason_category=data.reason_category, requested_until=data.requested_until)
     except ValueError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     admin_crud.create_audit_log(db, actor=admin, action="retention.extension_request",
                                 target_type="live_recording", target_id=rec.id,
                                 org_id=org.id,
@@ -1079,7 +1079,7 @@ def request_developer_export(data: DeveloperExportCreate, background: Background
     large export never blocks the request.
     """
     if data.export_type not in EXPORT_TYPES:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             f"Unsupported export type. Expected one of {list(EXPORT_TYPES)}")
     export = developer_export.request_export(db, org=org, requester=admin,
                                              export_type=data.export_type)
@@ -1159,7 +1159,7 @@ def create_developer_webhook(
     try:
         webhook_security.validate_webhook_url(data.url)
     except webhook_security.UnsafeWebhookUrl as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     ep = crud.create_webhook_endpoint(db, org.id, data.url, data.label, data.events, admin.id)
     # The endpoint starts PENDING_VERIFICATION and receives no production events until it
     # proves control of the URL.
@@ -1185,7 +1185,7 @@ def update_developer_webhook(
         try:
             webhook_security.validate_webhook_url(data.url)
         except webhook_security.UnsafeWebhookUrl as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     ep = crud.update_webhook_endpoint(db, ep, url=data.url, label=data.label,
                                       events=data.events, enabled=data.enabled)
     admin_crud.create_audit_log(db, actor=admin, action="webhook.update", target_type="webhook_endpoint",
@@ -1424,7 +1424,7 @@ def update_org_user(user_id: uuid.UUID, data: UserUpdate, background: Background
     if u.role == "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot modify a super admin")
     if data.role is not None and data.role not in ORG_ASSIGNABLE_ROLES:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid role")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid role")
     # Self-lockout guard: an admin can't demote or deactivate their own account.
     if u.id == admin.id and (data.is_active is False or (data.role and data.role != admin.role)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot demote or deactivate yourself")
@@ -1762,9 +1762,9 @@ def decide_review_assignment(review_id: uuid.UUID, assignment_id: uuid.UUID,
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Assignment not found")
 
     if data.decision not in ("approved", "change_required", "remove", "exception"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown decision")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown decision")
     if data.decision == "exception" and not (data.reason or "").strip():
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "An exception requires a recorded reason")
 
     governance.record_decision(db, assignment, decision=data.decision, decided_by=admin,
@@ -1838,13 +1838,13 @@ def create_invitation(data: InvitationCreate, background: BackgroundTasks,
                       db: Session = Depends(get_db)):
     email = data.email.lower()
     if data.role not in ORG_ASSIGNABLE_ROLES:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid role")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid role")
     # ZST-EC-001 Phase 10. organizations.security.allowed_domains was inert; it now gates
     # who may be invited. Deliberately not applied to sign-in - locking out an existing
     # member whose address predates the policy is a support incident, not a security win.
     domain_issue = org_policy.domain_violation(org, email)
     if domain_issue:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, domain_issue)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, domain_issue)
     if crud.user_email_taken(db, email):
         raise HTTPException(status.HTTP_409_CONFLICT, "A user with that email already exists")
     if crud.pending_invite_exists(db, admin.org_id, email):
@@ -1981,7 +1981,7 @@ def accept_invitation(data: InvitationAccept, background: BackgroundTasks,
         raise HTTPException(status.HTTP_409_CONFLICT, "Username already taken")
     violation = org_policy.password_violation(inv.organization, data.password)
     if violation:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, violation)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, violation)
     username = (data.username or crud.unique_username(db, inv.email.split("@")[0])).lower()
     user = crud.accept_invitation(db, inv, data.full_name, username, hash_password(data.password))
     # ORG-002. accept_invitation committed both the membership and the accepted status, so
@@ -2029,7 +2029,7 @@ def open_support_case(data: SupportCaseCreate, background: BackgroundTasks,
         category=data.category, priority=data.priority, sensitivity=data.sensitivity)
     if ticket is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"category must be one of {list(CASE_CATEGORIES)}, sensitivity one of "
             f"{list(CASE_SENSITIVITIES)}, and priority a valid support priority")
     admin_crud.create_audit_log(db, actor=admin, action="support_case.open",
@@ -2110,7 +2110,7 @@ def add_support_case_participant(ticket_id: uuid.UUID, data: SupportParticipantA
                                         display_name=data.display_name,
                                         added_by=admin.id)
     if row is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A valid email is required")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A valid email is required")
     return {"email": row.email, "role": row.role}
 
 
@@ -2171,7 +2171,7 @@ def nominate_security_contact(data: SecurityContactCreate, background: Backgroun
     contact, raw = security_comms.nominate_contact(
         db, org, email=data.email, display_name=data.display_name, created_by=admin.id)
     if contact is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A valid email is required")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A valid email is required")
     admin_crud.create_audit_log(db, actor=admin, action="security_contact.nominate",
                                 target_type="security_contact", target_id=contact.id,
                                 org_id=org.id, meta={"email": contact.email})
@@ -2247,7 +2247,7 @@ def file_abuse_report(data: AbuseReportCreate, background: BackgroundTasks,
         reporter_name=user.full_name, org_id=data.org_id)
     if report is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"category must be one of {list(ABUSE_CATEGORIES)} and subject_type one of "
             f"{list(ABUSE_SUBJECT_TYPES)}")
     security_comms.notify_report_received(db, background, report)

@@ -770,7 +770,14 @@ export default function EventWatch() {
                   dispatchPanel({ channel: "session", type: "unmute.answered", data: {} })
                 }
               >
-                {watch.reactions_enabled && <ReactionOverlay channel={reactionChannel} className="z-30" />}
+                {/* lane="left" is the approved viewer treatment: reactions rise out of the
+                    lower-left corner in a narrow stream instead of scattering across the
+                    frame, so they never sit over whoever is speaking. Visual only — the
+                    channel, the envelope and the reaction bar below are untouched, and the
+                    Producer Console keeps its full-width scatter (StudioStage.jsx). */}
+                {watch.reactions_enabled && (
+                  <ReactionOverlay channel={reactionChannel} lane="left" className="z-30" />
+                )}
               </VideoPlayer>
             )}
             {/* reactions_enabled is False only for a memorial-category event (doc Sec.

@@ -52,8 +52,9 @@ describe("the menu is built from layers that exist", () => {
   });
 
   it("does not invent 1080p for a 720p camera", () => {
-    // A 720p webcam yields 720/360/180. The old fixed list would have shown 1080p and 480p
-    // with nothing behind either — exactly the "upscale and call it 1080p" failure.
+    // Whatever ladder the publisher runs, a 720p camera tops out at 720p. The old fixed list
+    // would have shown 1080p and 480p with nothing behind either — exactly the "upscale and
+    // call it 1080p" failure.
     const labels = describeLayers(pubWith([
       { quality: HIGH, width: 1280, height: 720 },
       { quality: MEDIUM, width: 640, height: 360 },
@@ -63,6 +64,30 @@ describe("the menu is built from layers that exist", () => {
     expect(labels).toEqual(["720p", "360p", "180p"]);
     expect(labels).not.toContain("1080p");
     expect(labels).not.toContain("480p");
+  });
+
+  // The publisher's mid simulcast preset is h720 while the top layer is always the real
+  // capture resolution, so a camera granting exactly 720p encodes 720p twice. Both layers
+  // are real, but two rows reading "720p" is a choice with no visible difference.
+  it("collapses layers that share a height, keeping the highest quality at that size", () => {
+    const out = describeLayers(pubWith([
+      { quality: HIGH, width: 1280, height: 720 },
+      { quality: MEDIUM, width: 1280, height: 720 },
+      { quality: LOW, width: 640, height: 360 },
+    ]));
+
+    expect(out.map((l) => l.label)).toEqual(["720p", "360p"]);
+    // HIGH, not MEDIUM: at equal size, the layer with the bandwidth headroom behind it.
+    expect(out[0].quality).toBe(HIGH);
+  });
+
+  it("offers nothing manual when every layer collapses to one height", () => {
+    // Degenerate but reachable: a capture resolution that exactly matches the mid preset
+    // with no low layer. One distinct rendition is what Auto already does.
+    expect(describeLayers(pubWith([
+      { quality: HIGH, width: 1280, height: 720 },
+      { quality: MEDIUM, width: 1280, height: 720 },
+    ]))).toEqual([]);
   });
 
   it("sorts highest first and drops layers with no height", () => {
