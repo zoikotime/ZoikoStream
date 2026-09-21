@@ -33,4 +33,4 @@ WORKDIR /app/server
 # ponytail: one worker. main.py's lifespan starts the scheduler/sampler tickers per process,
 # so N workers write N copies of every analytics snapshot and fire scheduled polls N times.
 # Scale with Cloud Run instances, not workers. Cloud Run injects $PORT.
-CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}
+CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 4
