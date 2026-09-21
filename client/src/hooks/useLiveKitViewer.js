@@ -47,20 +47,50 @@ import { fatalDisconnect } from "./livekitDisconnect";
 // hooks/useEventStream.js's proven reconnect loop); past SLOW_ATTEMPTS_AFTER the message says
 // so honestly instead of claiming the stream is unrecoverable.
 // Label a simulcast layer by the height the publisher actually encoded, so the menu can
-// never advertise a rendition that does not exist. A 720p webcam yields 720p/360p/180p —
-// there is simply no 1080p entry to offer, and inventing one would be the "upscale and call
-// it 1080p" the brief rules out.
+// never advertise a rendition that does not exist. Against the publisher's h360/h720 ladder
+// a 720p webcam yields 720p/360p — there is simply no 1080p entry to offer, and inventing
+// one would be the "upscale and call it 1080p" the brief rules out.
 export function describeLayers(publication) {
   const layers = publication?.trackInfo?.layers;
   if (!Array.isArray(layers) || layers.length < 2) return [];
-  return layers
+  // Two layers can share a height. The publisher's mid preset is h720 while the top layer is
+  // always the real capture resolution, so a camera that grants exactly 720p encodes 720p
+  // twice (see useLiveKitPublish's ladder note). Both are genuine layers, but listing "720p"
+  // twice offers a choice with no visible difference, so collapse by height and keep the
+  // highest VideoQuality at each — that is the layer with the bandwidth headroom behind it.
+  const byHeight = new Map();
+  layers
     .filter((l) => l?.height > 0)
-    .map((l) => ({ quality: l.quality, width: l.width, height: l.height, label: `${l.height}p` }))
-    .sort((a, b) => b.height - a.height);
+    .forEach((l) => {
+      const seen = byHeight.get(l.height);
+      if (!seen || l.quality > seen.quality) {
+        byHeight.set(l.height, { quality: l.quality, width: l.width, height: l.height, label: `${l.height}p` });
+      }
+    });
+  const distinct = [...byHeight.values()].sort((a, b) => b.height - a.height);
+  // Re-applied after collapsing: one distinct rendition is what Auto already does, so
+  // offering it as a manual option would be a menu entry that changes nothing.
+  return distinct.length < 2 ? [] : distinct;
 }
 
 /** Apply a preference to a publication. "auto" caps at HIGH, i.e. no cap at all, which is
- *  what hands the choice back to LiveKit's adaptive/dynacast selection. */
+ *  what hands the choice back to LiveKit's adaptive/dynacast selection.
+ *
+ *  setVideoQuality sets requestedMaxQuality, and that is a CEILING, not a pin. With adaptive
+ *  streaming on, RemoteTrackPublication.emitTrackUpdate takes the SMALLER of the adaptive
+ *  dimensions and the requested layer (livekit-client 2.x), so:
+ *
+ *    * picking a rendition BELOW what adaptive would choose is honoured exactly — this is
+ *      the case that matters, a viewer on a metered or congested link choosing 360p;
+ *    * picking the TOP rendition asks for the ceiling to be lifted, but the layer that
+ *      actually arrives is still bounded by the player's rendered size x pixelDensity.
+ *      A small player therefore keeps receiving the layer that fits it.
+ *
+ *  That bound is deliberate — it is what stops 1080p being pushed into a 400px box — and it
+ *  cannot be lifted per-track in this SDK version; setVideoDimensions is clamped the same
+ *  way. Reaching the top layer is a matter of the player being large enough to warrant it
+ *  (fullscreen, a wide viewport, or a HiDPI screen now that pixelDensity is "screen"), not
+ *  of asking harder here. */
 export function applyQuality(publication, preference) {
   if (!publication?.setVideoQuality) return;
   try {
@@ -227,7 +257,21 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       await disposeRoom();
       if (!current()) return;
 
-      const room = new Room({ adaptiveStream: true, dynacast: true });
+      // `adaptiveStream: true` is shorthand for `{}`, and an unset pixelDensity means
+      // livekit-client sizes the subscription in CSS pixels: it uses 1 on every display
+      // whose devicePixelRatio is <= 2 (getPixelDensity, livekit-client 2.x). On a HiDPI
+      // screen that asks the SFU for roughly half the pixels the panel is physically
+      // painting, and the layer chosen to satisfy it is then upscaled by the browser —
+      // soft video on exactly the displays best able to show a sharp picture.
+      //
+      // "screen" uses the device's real devicePixelRatio, so the requested dimensions
+      // describe physical pixels. This does not force a high layer on anyone: adaptive
+      // streaming still derives its request from the player's rendered size, and the SFU
+      // still drops layers under congestion. It only stops the request being understated.
+      const room = new Room({
+        adaptiveStream: { pixelDensity: "screen" },
+        dynacast: true,
+      });
       roomRef.current = room;
 
       // Re-read the CURRENT publication and refresh the menu from it. Called on every event

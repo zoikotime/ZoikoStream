@@ -9,10 +9,13 @@
 //
 // Driven through createReactionChannel — the same seam the pages use — so no socket, no
 // LiveKit and no page render is involved.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, render } from "@testing-library/react";
 
-import ReactionOverlay, { REACTION_DURATION_MS } from "./ReactionOverlay";
+import ReactionOverlay, { REACTION_DURATION_MS, REACTION_MAX_LIFETIME_MS } from "./ReactionOverlay";
 import { createReactionChannel } from "../../hooks/useReactionChannel";
 import { REACTIONS, REACTION_EMOJI } from "../../data/reactions";
 
@@ -41,8 +44,10 @@ const overlay = (props = {}) => {
   };
 };
 
-/** Let every float finish and be swept, without waiting in real time. */
-const settle = () => act(() => vi.advanceTimersByTime(REACTION_DURATION_MS + 1000));
+/** Let every float finish and be swept, without waiting in real time. Driven by the
+ *  overlay's own worst case (the slowest float, started at the largest delay) rather than a
+ *  hard-coded figure, because the viewer's lane gives each item its own duration. */
+const settle = () => act(() => vi.advanceTimersByTime(REACTION_MAX_LIFETIME_MS + 400));
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -245,6 +250,241 @@ describe("ReactionOverlay — nothing is replayed, nothing is remembered", () =>
 
     expect(layer.querySelectorAll("[data-reaction]")).toHaveLength(0);
     expect(layer.className).toContain("pointer-events-none");
+  });
+});
+
+describe("ReactionOverlay — the viewer's left-hand stream (lane=\"left\")", () => {
+  // The approved viewer treatment (pages/watch/EventWatch.jsx): reactions rise out of the
+  // lower-left corner in a controlled column instead of scattering over the whole frame.
+  // Everything asserted here is presentation — the payload, the channel and the item's
+  // lifetime are the same ones covered above, and the Producer Console does NOT opt in.
+  const left = (props = {}) => overlay({ lane: "left", ...props });
+  /** A per-item custom property, as the keyframes in index.css read it. */
+  const cssVar = (el, name) => el.style.getPropertyValue(name).trim();
+
+  it("spawns every reaction inside the left-hand lane, never across the video", () => {
+    const { items, send } = left();
+    send(...Array(24).fill("heart"));
+
+    for (const el of items()) {
+      const x = parseFloat(el.style.left);
+      // The lane is 3%-19% of the player, plus at most 1.2% of jitter either side.
+      expect(x).toBeGreaterThanOrEqual(1.8);
+      expect(x).toBeLessThanOrEqual(20.2);
+    }
+  });
+
+  it("spawns near the bottom of the player, so the emoji has the frame to climb", () => {
+    const { items, send } = left();
+    send(...Array(16).fill("fire"));
+
+    for (const el of items()) {
+      const y = parseFloat(el.style.bottom);
+      expect(y).toBeGreaterThanOrEqual(3);
+      expect(y).toBeLessThanOrEqual(12);
+    }
+  });
+
+  it("puts consecutive reactions well apart, so a burst cannot stack in one place", () => {
+    // Ten viewers tapping at once is the case this exists for: each one has to be its own
+    // visible emoji, not ten drawn on top of each other. The golden-ratio step guarantees
+    // it for EVERY adjacent pair, not just on average.
+    const { items, send } = left();
+    send(...Array(8).fill("clap"));
+    const lefts = items().map((el) => parseFloat(el.style.left));
+
+    for (let i = 1; i < lefts.length; i += 1) expect(lefts[i]).not.toBe(lefts[i - 1]);
+    expect(new Set(lefts).size).toBeGreaterThanOrEqual(4);
+  });
+
+  it("never cycles back through a small fixed set of spawn points", () => {
+    // What the old `column % 4` rotation did: spread a burst evenly, then repeat the same
+    // four positions forever, which is visible as a pattern past the fourth reaction. An
+    // irrational step has no cycle to fall into.
+    //
+    // The bound is loose on purpose. Positions are rounded to 0.1%, so across a ~14%-wide
+    // lane a handful of coincidental repeats in 20 draws is expected and means nothing;
+    // what this has to catch is a spawn point that is one of a FEW slots, which would put
+    // this number at or near 4 however many reactions arrive.
+    const { items, send } = left();
+    send(...Array(20).fill("heart"));
+    const lefts = items().map((el) => parseFloat(el.style.left));
+
+    expect(new Set(lefts).size).toBeGreaterThan(12);
+    // And no one spot is a magnet.
+    const busiest = Math.max(...lefts.map((x) => lefts.filter((y) => y === x).length));
+    expect(busiest).toBeLessThanOrEqual(3);
+  });
+
+  it("spreads the burst across the lane instead of clumping at one end", () => {
+    // Controlled randomness, not raw randomness: 24 reactions should touch the near edge,
+    // the far edge and the middle of the lane rather than piling into one third of it.
+    const { items, send } = left();
+    send(...Array(24).fill("party"));
+    const lefts = items().map((el) => parseFloat(el.style.left));
+
+    expect(Math.min(...lefts)).toBeLessThan(7);
+    expect(Math.max(...lefts)).toBeGreaterThan(15);
+  });
+
+  it("varies each item's path, timing, size and tilt so the stream is not a rigid line", () => {
+    const { items, send } = left();
+    send(...Array(12).fill("party"));
+
+    for (const key of [
+      "--zk-reaction-drift", "--zk-reaction-sway", "--zk-reaction-scale",
+      "--zk-reaction-rot", "--zk-reaction-travel",
+    ]) {
+      expect(new Set(items().map((el) => cssVar(el, key))).size).toBeGreaterThan(1);
+    }
+    expect(new Set(items().map((el) => el.style.animationDelay)).size).toBeGreaterThan(1);
+  });
+
+  it("gives each emoji its own climb speed, so a burst never moves in lockstep", () => {
+    // The single biggest difference between "a crowd reacting" and "one animation played
+    // twelve times": at a flat duration every emoji rises at exactly the same rate.
+    const { items, send } = left();
+    send(...Array(12).fill("like"));
+    const durations = items().map((el) => parseFloat(el.style.animationDuration));
+
+    expect(new Set(durations).size).toBeGreaterThan(1);
+    // Bounded, and inside the 2.5s-4s band a reaction should live for.
+    for (const d of durations) {
+      expect(d).toBeGreaterThanOrEqual(2500);
+      expect(d).toBeLessThanOrEqual(4000);
+    }
+  });
+
+  it("sends some reactions almost straight up, some left and some right", () => {
+    // The reference stream is a mix of personalities, not a uniform spray — a symmetric
+    // random range alone averages every emoji into the same gentle wobble.
+    const { items, send } = left();
+    send(...Array(28).fill("heart"));
+    const drifts = items().map((el) => parseFloat(cssVar(el, "--zk-reaction-drift")));
+
+    expect(drifts.some((d) => Math.abs(d) <= 4)).toBe(true);    // near-vertical
+    expect(drifts.some((d) => d <= -9)).toBe(true);             // leans left
+    expect(drifts.some((d) => d >= 9)).toBe(true);              // leans right
+  });
+
+  it("keeps the sideways wander small, so a reaction stays in its lane all the way up", () => {
+    // The net displacement at the top is px, on top of a lane that is already only ~19%
+    // of the player wide: an emoji must never finish over the middle of the picture.
+    const { items, send } = left();
+    send(...Array(24).fill("like"));
+
+    for (const el of items()) {
+      expect(Math.abs(parseFloat(cssVar(el, "--zk-reaction-drift")))).toBeLessThanOrEqual(22);
+      expect(Math.abs(parseFloat(cssVar(el, "--zk-reaction-sway")))).toBeLessThanOrEqual(14);
+    }
+  });
+
+  it("keeps the tilt, scale and travel inside their bounds, so nothing tumbles or looms", () => {
+    const { items, send } = left();
+    send(...Array(24).fill("fire"));
+
+    for (const el of items()) {
+      expect(Math.abs(parseFloat(cssVar(el, "--zk-reaction-rot")))).toBeLessThanOrEqual(9);
+      const scale = parseFloat(cssVar(el, "--zk-reaction-scale"));
+      expect(scale).toBeGreaterThanOrEqual(0.85);
+      expect(scale).toBeLessThanOrEqual(1.15);
+      const travel = parseFloat(cssVar(el, "--zk-reaction-travel"));
+      expect(travel).toBeGreaterThanOrEqual(0.82);
+      expect(travel).toBeLessThanOrEqual(1.16);
+    }
+  });
+
+  it("drives the stream keyframes, on the same clock as the node's removal", () => {
+    const { items, send } = left();
+    send("heart");
+
+    expect(items()[0].className).toContain("zk-reaction-stream");
+    expect(items()[0].className).not.toContain("zk-reaction-float");
+    // Its own duration, not the nominal one — but still timed by the same constant, so the
+    // fade and the node's removal cannot drift apart.
+    const ms = parseFloat(items()[0].style.animationDuration);
+    expect(ms).toBeGreaterThan(0);
+    expect(ms).toBeLessThanOrEqual(REACTION_MAX_LIFETIME_MS);
+    settle();
+    expect(items()).toHaveLength(0);           // and it still leaves the DOM on its own
+  });
+
+  it("lets a slow float finish its fade before the sweep takes its node", () => {
+    // The trap in giving every item its own duration: a single shared expiry would sweep
+    // the slowest emoji away mid-climb. Nothing may disappear before its own animation ends.
+    const { items, send } = left();
+    send(...Array(16).fill("clap"));
+    const slowest = Math.max(...items().map((el) => parseFloat(el.style.animationDuration)));
+
+    // One tick short of the slowest float: that emoji must still be on screen.
+    act(() => vi.advanceTimersByTime(slowest - 100));
+    expect(items().length).toBeGreaterThan(0);
+
+    settle();
+    expect(items()).toHaveLength(0);
+  });
+
+  it("marks the layer as the size container the rise is measured against", () => {
+    // index.css sizes the climb in cqh off this class, which is what makes the stream
+    // scale with the PLAYER rather than the browser window — resize, breakpoint or
+    // fullscreen alike.
+    const { layer } = left();
+    expect(layer.className).toContain("zk-reaction-lane");
+    expect(layer).toHaveAttribute("data-lane", "left");
+  });
+
+  it("leaves the Producer Console's full-width scatter alone", () => {
+    // The host's monitor does not pass `lane`, and must keep the behaviour it had. The
+    // reference this enhancement follows is a VIEWER frame, so none of it reaches here.
+    const { layer, items, send } = overlay();
+    send(...Array(20).fill("heart"));
+
+    expect(layer.className).not.toContain("zk-reaction-lane");
+    expect(layer).toHaveAttribute("data-lane", "spread");
+    expect(items()[0].className).toContain("zk-reaction-float");
+    // Spread across the frame, not confined to the left-hand lane.
+    expect(Math.max(...items().map((el) => parseFloat(el.style.left)))).toBeGreaterThan(17.6);
+    // One shared clock, and none of the viewer-lane per-item properties.
+    const durations = new Set(items().map((el) => el.style.animationDuration));
+    expect([...durations]).toEqual([`${REACTION_DURATION_MS}ms`]);
+    for (const el of items()) {
+      expect(el.style.getPropertyValue("--zk-reaction-rot").trim()).toBe("0deg");
+      expect(el.style.getPropertyValue("--zk-reaction-sway").trim()).toBe("0px");
+    }
+  });
+});
+
+describe("ReactionOverlay — reduced motion", () => {
+  // The float itself is CSS, and jsdom applies no stylesheet, so the behaviour is asserted
+  // against the rule that implements it. It is worth the unusual coupling: the failure this
+  // guards is silent (a reaction that keeps flying for someone who asked their OS for less
+  // animation), and the a11y override is easy to forget when the keyframes are edited.
+  const css = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+  const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+
+  it("swaps both reaction animations onto the opacity-only keyframes", () => {
+    expect(reduced).toMatch(/\.zk-reaction-float,\s*\n\s*\.zk-reaction-stream\s*\{[^}]*animation-name:\s*zk-reaction-hold/);
+  });
+
+  it("keeps the emoji on screen long enough to recognise, rather than hiding it", () => {
+    // zk-reaction-hold holds full opacity across the middle of the item's life. The
+    // reaction is information — the host has no other view of it — so "animation: none"
+    // (what every other animated class gets) would be the wrong answer here.
+    const hold = css.match(/@keyframes zk-reaction-hold\s*\{([^}]*\}[^}]*)\}/)[1];
+    expect(hold).toContain("opacity: 1");
+    expect(hold).toMatch(/0%,\s*100%\s*\{\s*opacity:\s*0/);
+    // Opacity only: nothing that travels, tilts or scales.
+    expect(hold).not.toContain("transform");
+  });
+
+  it("still renders and still removes the reaction, so the feature is not switched off", () => {
+    // The component is motion-agnostic: it sets up the same node and the same expiry, and
+    // the media query decides only how that node moves.
+    const { items, send } = overlay({ lane: "left" });
+    send("heart");
+    expect(items()).toHaveLength(1);
+    settle();
+    expect(items()).toHaveLength(0);
   });
 });
 

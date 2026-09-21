@@ -182,6 +182,139 @@ p { text-wrap: pretty; }
   animation: zk-reaction-float 3s cubic-bezier(0.25, 0.9, 0.3, 1) both;
 }
 
+/* ── the viewer's left-hand reaction stream ────────────────────────────────────────────
+   The same emoji and the same envelope as zk-reaction-float above, on a deliberately
+   narrower path and on a per-item clock (~2.5-3.8s, set inline): the viewer's player
+   (ReactionOverlay `lane="left"`) spawns
+   every reaction in a column at the lower-left, and this carries it straight up that
+   column with a gentle S-shaped wander before it fades. A busy audience then reads as a
+   stream rising beside the picture, instead of emoji crossing the speaker's face.
+
+   Identical performance contract: `transform` and `opacity` only, nothing that can touch
+   layout, so a screenful stays on the compositor over live video.
+
+   The path has three phases, and they are what the keyframe stops below are grouped into:
+     SPAWN  (0-11%)   pops up from under its birth point to full size — quick, never abrupt
+     FLOAT  (11-70%)  climbs at a steady rate, weaving across the vertical it was born on
+     EXIT   (70-100%) keeps climbing while it thins out, so it never blinks off
+
+   Per-item custom properties, all set inline by the overlay:
+     --zk-reaction-drift   px of NET sideways displacement by the top (small, so the emoji
+                           finishes in the same left-hand zone it started in)
+     --zk-reaction-sway    px of side-to-side wander on the way up, sign chosen per item
+     --zk-reaction-scale   per-item size multiplier, so a burst isn't one emoji five times
+     --zk-reaction-rot     deg of tilt; the weave leans into each change of direction and
+                           lands back at 0, which is what makes the climb read as drifting
+                           rather than sliding along a track
+     --zk-reaction-travel  per-item multiplier on the rise, so they don't all stop dead at
+                           the same altitude
+     --zk-reaction-rise    how far up it travels — see the @supports block below.
+   The overlay also sets `animation-duration` per item, so no two emoji climb in lockstep.
+
+   The weave alternates the sign of the sway term at every stop (+ - + - +): that is the
+   S-shape, and because `sway` already carries a random sign per item, two emoji born in the
+   same spot start their S in opposite directions and never trace the same line. */
+@keyframes zk-reaction-stream {
+  /* ── spawn ── */
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0) scale(calc(0.42 * var(--zk-reaction-scale))) rotate(0deg);
+  }
+  11% {
+    opacity: 1;
+    transform:
+      translate3d(calc(var(--zk-reaction-sway) * 0.4), calc(var(--zk-reaction-climb) * -0.1), 0)
+      scale(calc(1.08 * var(--zk-reaction-scale)))
+      rotate(calc(var(--zk-reaction-rot) * 0.35));
+  }
+  /* ── float ── */
+  28% {
+    opacity: 1;
+    transform:
+      translate3d(
+        calc(var(--zk-reaction-drift) * 0.22 - var(--zk-reaction-sway) * 0.5),
+        calc(var(--zk-reaction-climb) * -0.29), 0)
+      scale(var(--zk-reaction-scale))
+      rotate(calc(var(--zk-reaction-rot) * -0.5));
+  }
+  48% {
+    opacity: 1;
+    transform:
+      translate3d(
+        calc(var(--zk-reaction-drift) * 0.47 + var(--zk-reaction-sway) * 0.52),
+        calc(var(--zk-reaction-climb) * -0.5), 0)
+      scale(calc(0.99 * var(--zk-reaction-scale)))
+      rotate(calc(var(--zk-reaction-rot) * 0.8));
+  }
+  /* ── exit: the fade starts here and runs to the end, so the emoji thins out as it climbs
+     rather than blinking off at the top of its travel. ── */
+  70% {
+    opacity: 0.88;
+    transform:
+      translate3d(
+        calc(var(--zk-reaction-drift) * 0.71 - var(--zk-reaction-sway) * 0.38),
+        calc(var(--zk-reaction-climb) * -0.71), 0)
+      scale(calc(0.95 * var(--zk-reaction-scale)))
+      rotate(calc(var(--zk-reaction-rot) * -0.45));
+  }
+  87% {
+    opacity: 0.45;
+    transform:
+      translate3d(
+        calc(var(--zk-reaction-drift) * 0.89 + var(--zk-reaction-sway) * 0.18),
+        calc(var(--zk-reaction-climb) * -0.88), 0)
+      scale(calc(0.9 * var(--zk-reaction-scale)))
+      rotate(calc(var(--zk-reaction-rot) * 0.25));
+  }
+  100% {
+    opacity: 0;
+    transform:
+      translate3d(var(--zk-reaction-drift), calc(var(--zk-reaction-climb) * -1), 0)
+      scale(calc(0.82 * var(--zk-reaction-scale)))
+      rotate(0deg);
+  }
+}
+.zk-reaction-stream {
+  /* Viewport-based fallback, for engines without container query units. */
+  --zk-reaction-rise: clamp(96px, 32vh, 260px);
+  --zk-reaction-drift: 0px;
+  --zk-reaction-sway: 0px;
+  --zk-reaction-scale: 1;
+  --zk-reaction-rot: 0deg;
+  --zk-reaction-travel: 1;
+  /* What the keyframes actually climb: the rise the player's height earns, times this
+     item's share of it. Resolved per element at computed-value time, so it picks up
+     whichever --zk-reaction-rise won the cascade — including the cqh one the @supports
+     block below substitutes in. */
+  --zk-reaction-climb: calc(var(--zk-reaction-rise) * var(--zk-reaction-travel));
+  /* Duration is re-set inline PER ITEM from the overlay (a band around REACTION_DURATION_MS
+     — see STREAM_SPEED), and the same value times that item's removal from the DOM. The
+     curve is a soft ease-out over keyframe positions that are already near-linear, which is
+     what makes the climb read as steady with a gentle settle instead of a launch. */
+  animation: zk-reaction-stream 3s cubic-bezier(0.22, 0.65, 0.3, 1) both;
+}
+/* The overlay layer itself, when it is running the stream: a size container, so the rise
+   above can be a share of the PLAYER's height rather than the browser window's. The layer
+   is `absolute inset-0` inside the video frame on both surfaces, and it is inside the
+   element that goes fullscreen, so one rule covers resize, fullscreen and every breakpoint
+   — a phone-sized player and a 4K fullscreen one get proportionally the same stream.
+   Fenced behind @supports (a real feature query, unlike a custom property, which would
+   happily accept `cqh` and then fail at use time and kill the transform outright). */
+@supports (height: 1cqh) {
+  .zk-reaction-lane { container-type: size; }
+  .zk-reaction-lane .zk-reaction-stream {
+    --zk-reaction-rise: clamp(96px, 62cqh, 480px);
+    /* The glyph scales with the player too, for the same reason: at a fixed 30px a phone
+       player's emoji is a quarter of its width, which widens the lane exactly where there
+       is least room for it. The bounds keep it readable on a phone and sane in fullscreen,
+       and 5.6cqh lands on the same ~30px it has always been at desktop player size.
+       The floor is what a phone-sized player actually gets (5.6cqh is ~11px on a 360px-wide
+       16:9 frame, so it always clamps): it has to leave the lane room for a burst at the
+       concurrency cap without the emoji merging into one mass. */
+    font-size: clamp(16px, 5.6cqh, 34px);
+  }
+}
+
 .zk-flow-dot { animation: zk-flow 2.4s linear infinite; }
 .zk-float { animation: zk-float 6s ease-in-out infinite; }
 .zk-pulse-ring { animation: zk-pulse-ring 2s ease-out infinite; }
@@ -272,9 +405,12 @@ p { text-wrap: pretty; }
   .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow, .zk-pop,
   .zk-pop-in, .zk-tip-in { animation: none; }
   /* Reactions are the exception to "animation: none": they are information, not decoration
-     (the host has no other view of audience reactions), so the emoji still fades in and out
-     on the same 3s clock — it just no longer travels or scales. See zk-reaction-hold. */
-  .zk-reaction-float {
+     (the host has no other view of audience reactions), so the emoji still fades in, holds
+     long enough to read, and fades out on its own clock — it just no longer travels, tilts
+     or scales, and the per-item drift/sway/rotate/travel properties go unread. See
+     zk-reaction-hold, which is opacity-only for exactly this reason. */
+  .zk-reaction-float,
+  .zk-reaction-stream {
     animation-name: zk-reaction-hold;
     animation-timing-function: linear;
   }

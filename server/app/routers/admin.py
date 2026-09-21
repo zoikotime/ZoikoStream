@@ -296,11 +296,11 @@ def request_support_access(data: SupportAccessCreate, request: Request,
     if org is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
     if data.reason_category not in SUPPORT_REASONS:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown reason category")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown reason category")
     if data.emergency and not (data.emergency_reason or "").strip():
         # Emergency access without a declared reason is exactly the disguise the canonical
         # controls forbid, so the domain refuses it rather than recording a blank.
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "Emergency access requires a declared reason")
 
     # Capabilities must come from the enforced vocabulary. Free text could not be checked at
@@ -309,7 +309,7 @@ def request_support_access(data: SupportAccessCreate, request: Request,
     capabilities = tenant_access.normalize_capabilities(data.allowed_actions)
     if not capabilities:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"allowed_actions must name known capabilities: "
             f"{sorted(tenant_access.CAPABILITIES)}")
 
@@ -1055,7 +1055,7 @@ def place_recording_legal_hold(recording_id: uuid.UUID, data: LegalHoldIn,
                                    category=data.category,
                                    hold_reference=data.hold_reference)
     except ValueError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     svc.create_audit_log(db, actor=admin, action="media.legal_hold_place",
                          target_type="live_recording", target_id=rec.id,
                          org_id=rec.org_id, meta={"category": data.category})
@@ -1217,7 +1217,7 @@ def post_support_case_update(ticket_id: uuid.UUID, data: SupportCaseUpdateIn,
     if not support_comms.post_update(db, ticket, customer_update=data.customer_update,
                                      status=data.status,
                                      next_update_at=data.next_update_at):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "customer_update must not be empty")
     _audit(db, admin, request, "support_ticket.customer_update",
            target_type="support_ticket", target_id=ticket_id, org_id=ticket.org_id)
@@ -1236,7 +1236,7 @@ def request_support_case_action(ticket_id: uuid.UUID, data: SupportActionRequest
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
     if not support_comms.request_customer_action(db, ticket, action=data.action,
                                                  due_at=data.due_at):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "action must not be empty")
     _audit(db, admin, request, "support_ticket.request_action",
            target_type="support_ticket", target_id=ticket_id, org_id=ticket.org_id)
@@ -1262,7 +1262,7 @@ def escalate_support_case(ticket_id: uuid.UUID, data: SupportEscalateIn, request
         escalated_by=admin.id)
     if escalation is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"level must be 1-3 and reason_category one of {list(ESCALATION_REASONS)}")
     _audit(db, admin, request, "support_ticket.escalate", target_type="support_ticket",
            target_id=ticket_id, org_id=ticket.org_id,
@@ -1388,7 +1388,7 @@ def draft_advisory(data: AdvisoryDraftIn, request: Request,
         created_by=admin.id)
     if advisory is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "An advisory needs an approved severity, a summary, at least one known "
             "affected component, and a workaround summary if a workaround is claimed")
     _audit(db, admin, request, "trust.advisory.draft", target_type="security_advisory",
@@ -1415,7 +1415,7 @@ def record_advisory_impact(advisory_id: uuid.UUID, data: AdvisoryImpactIn,
         evidence_note=data.evidence_note, affected_versions=data.affected_versions,
         recorded_by=admin.id)
     if impact is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A known organization and a recorded impact basis are required")
     _audit(db, admin, request, "trust.advisory.impact", target_type="security_advisory",
            target_id=advisory_id, org_id=data.org_id, meta={"basis": data.basis})
@@ -1531,7 +1531,7 @@ def register_trust_document(data: TrustDocumentIn, request: Request,
         content_type=data.content_type, expires_at=data.expires_at, created_by=admin.id)
     if doc is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "A document needs a known type, a classification, and at least one allowed "
             "purpose and scope")
     _audit(db, admin, request, "trust.document.register",
@@ -1592,7 +1592,7 @@ def deny_evidence_request(request_id: uuid.UUID, data: EvidenceDecisionIn,
     if evidence_request is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
     if not data.decision_note:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A denial needs a customer-safe reason")
     if not trust_center.deny_request(db, evidence_request, denied_by=admin.id,
                                      decision_note=data.decision_note):
@@ -1732,7 +1732,7 @@ def remediate_vulnerability_report(report_id: uuid.UUID, data: VulnLifecycleIn,
     if report is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found")
     if not data.safe_update:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A remediation update needs a researcher-safe statement")
     if not vuln_disclosure.mark_remediated(db, report, safe_update=data.safe_update,
                                            advisory_id=data.advisory_id):
@@ -1788,7 +1788,7 @@ def approve_release_for_customers(release_id: uuid.UUID, data: ReleaseApprovalIn
             db, release, customer_summary=data.customer_summary, approved_by=admin.id,
             documentation_path=data.documentation_path,
             rollout_status=data.rollout_status):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A customer-facing summary is required")
     _audit(db, admin, request, "marketing.release.approve", target_type="release",
            target_id=release_id)
@@ -1805,7 +1805,7 @@ def draft_release_digest(data: DigestDraftIn, request: Request,
         period_end=data.period_end, release_ids=data.release_ids, summary=data.summary)
     if digest is None:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "A digest needs a valid period and at least one approved, customer-visible "
             "release")
     _audit(db, admin, request, "marketing.digest.draft", target_type="release_digest",
@@ -1857,7 +1857,7 @@ def set_feature_availability(data: FeatureAvailabilityIn, request: Request,
         rollout_percentage=data.rollout_percentage,
         documentation_path=data.documentation_path, effective_at=data.effective_at)
     if availability is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A known lifecycle value is required")
     _audit(db, admin, request, "marketing.feature.availability",
            target_type="feature_availability", target_id=availability.id,
@@ -1896,7 +1896,7 @@ def draft_feature_announcement(availability_id: uuid.UUID, data: AnnouncementDra
     announcement = marketing.create_announcement(
         db, availability, body=data.body, headline=data.headline)
     if announcement is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A body is required")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A body is required")
     _audit(db, admin, request, "marketing.announcement.draft",
            target_type="feature_announcement", target_id=announcement.id)
     return {"id": str(announcement.id), "lifecycle": announcement.lifecycle,
@@ -1932,7 +1932,7 @@ def create_webinar(data: WebinarIn, request: Request, db: Session = Depends(get_
         description=data.description, duration_minutes=data.duration_minutes,
         join_path=data.join_path)
     if webinar is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A start time is required")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A start time is required")
     _audit(db, admin, request, "marketing.webinar.create",
            target_type="marketing_webinar", target_id=webinar.id)
     return {"id": str(webinar.id), "reference": webinar.reference,

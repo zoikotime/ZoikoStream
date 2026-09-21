@@ -195,7 +195,7 @@ def request_evidence(data: EvidenceRequestIn, background: BackgroundTasks,
         claimed_basis=data.qualification_basis)
     if request is None:
         raise HTTPException(
-            http.HTTP_422_UNPROCESSABLE_ENTITY,
+            http.HTTP_422_UNPROCESSABLE_CONTENT,
             "This document cannot be requested for that purpose and scope")
     tc.notify_request_received(db, background, request)
     return {"reference": request.reference, "status": request.status}
@@ -252,7 +252,7 @@ def submit_vulnerability_report(data: VulnerabilityReportIn, background: Backgro
         # Refuse rather than store. We never need a credential to reproduce an issue, and
         # accepting one would put it in our register and our backups.
         raise HTTPException(
-            http.HTTP_422_UNPROCESSABLE_ENTITY,
+            http.HTTP_422_UNPROCESSABLE_CONTENT,
             "Please remove any passwords, API keys or private keys from your report - we "
             "never need them to reproduce an issue.")
 
@@ -262,7 +262,7 @@ def submit_vulnerability_report(data: VulnerabilityReportIn, background: Backgro
         affected_service=data.affected_service, reporter_name=data.reporter_name,
         identity_visibility=data.identity_visibility, evidence=data.evidence)
     if report is None:
-        raise HTTPException(http.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(http.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A valid report requires a title, category and description")
     vd.notify_received(db, background, report, token)
     return {"reference": report.reference, "status": report.status,
@@ -308,7 +308,7 @@ def subscribe_to_marketing(data: MarketingSubscribeIn, background: BackgroundTas
         consent_ip=client_ip(request),
         consent_user_agent=request.headers.get("user-agent"))
     if subscription is None:
-        raise HTTPException(http.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(http.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A valid address and at least one topic are required")
     if token:
         background.add_task(
@@ -414,7 +414,7 @@ def request_guide(data: GuideRequestIn, background: BackgroundTasks, request: Re
         marketing_opt_in=data.marketing_opt_in, consent_ip=client_ip(request),
         consent_user_agent=request.headers.get("user-agent"))
     if guide_request is None:
-        raise HTTPException(http.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(http.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A valid address and a known guide are required")
     mkt.notify_guide(db, background, guide_request)
     if token:
@@ -454,7 +454,7 @@ def register_for_webinar(reference: str, data: WebinarRegistrationIn,
         raise HTTPException(http.HTTP_404_NOT_FOUND, "Session not found")
     registration = mkt.register_for_webinar(db, webinar, email=data.email, name=data.name)
     if registration is None:
-        raise HTTPException(http.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(http.HTTP_422_UNPROCESSABLE_CONTENT,
                             "A valid email address is required")
     mkt.notify_webinar(db, background, webinar, variant="confirmation")
     return {"reference": webinar.reference, "status": registration.status,
