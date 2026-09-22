@@ -627,6 +627,30 @@ def list_org_ingress_endpoints(db, org_id) -> list[tuple[LiveIngressEndpoint, Ev
     return list(rows)
 
 
+def list_event_recordings(db, org_id, event_id, limit: int = 50) -> list[LiveRecording]:
+    """EVERY recording attempt for one event, newest first — including the ones that captured
+    nothing.
+
+    Deliberately different from list_org_recordings below, which is the playable LIBRARY and
+    so filters to status=stopped + enforced=True. An event's own Recording tab has the
+    opposite job: it must explain what happened. A run that never reached LiveKit egress (bad
+    GCS credential, egress unavailable) leaves a row with enforced=False and a real `error`,
+    and hiding it is what made a failed capture indistinguishable from never having pressed
+    Record.
+
+    Org-scoped through Event.org_id, not LiveRecording.org_id, so a stale org_id copied onto
+    the recording row can never leak another tenant's capture — same rule as every other
+    isolation check in this module.
+    """
+    return list(db.scalars(
+        select(LiveRecording)
+        .join(Event, Event.id == LiveRecording.event_id)
+        .where(Event.org_id == org_id, LiveRecording.event_id == event_id)
+        .order_by(LiveRecording.started_at.desc())
+        .limit(limit)
+    ).all())
+
+
 def list_org_recordings(db, org_id, limit: int = 100) -> list[tuple[LiveRecording, Event]]:
     """Every captured recording across the org, newest first — the org-wide Recordings
     library. Joined to Event for title/category; org-scoped via Event.org_id (matches every

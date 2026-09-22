@@ -80,6 +80,20 @@ class LiveQuestion(_EventScoped):
     assigned_name: Mapped[str | None] = mapped_column(String(120))       # speaker it's routed to
     flags: Mapped[list | None] = mapped_column(JSON, default=list)
 
+    # ── the host's written answer ──────────────────────────────────────────────────────
+    # DELIBERATELY SEPARATE FROM `status`. status="answered" only ever meant "a moderator
+    # pressed the Answered button" — it was, and still is, reachable with no response text
+    # at all (moderation._QA_OPS["answer"]), which is why the console and the watch page
+    # must not read it as "there is an answer to show". `answer_text` is the only field
+    # that means a real reply exists; everything that renders one keys off it, not status.
+    answer_text: Mapped[str | None] = mapped_column(Text)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Bare UUID like every other user_id in this module — no FK to `users`, because a
+    # question can be answered by an assigned speaker resolved from a registration or an
+    # access link, the same identity concept moderation.resolve_ctx* produces.
+    answered_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    answered_by_name: Mapped[str | None] = mapped_column(String(120))
+
 
 class LiveQuestionVote(_EventScoped):
     """One row per (question, voter) — the ledger moderation._qa_vote checks so a page

@@ -121,6 +121,17 @@ _LIVE_RECORDING_COLUMNS = [
     "ALTER COLUMN size_bytes TYPE BIGINT",
 ]
 
+# The host's written Q&A answer. Until these existed, `status = 'answered'` was the ONLY
+# record that a question had been dealt with, and it carried no reply text — so there was
+# nothing for the console or the watch page to display, and no way to tell a question that
+# was actually answered from one a moderator had merely ticked off.
+_LIVE_QUESTION_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS answer_text TEXT",
+    "ADD COLUMN IF NOT EXISTS answered_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS answered_by UUID",
+    "ADD COLUMN IF NOT EXISTS answered_by_name VARCHAR(120)",
+]
+
 # Columns whose models gained fields after the table already existed. Without these the
 # SELECT that lists them fails outright ("column does not exist") — /admin/feature-flags
 # and /admin/support-tickets were both returning 500s because of this drift.
@@ -867,6 +878,8 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE events {clause}"))
         for clause in _LIVE_RECORDING_COLUMNS:
             conn.execute(text(f"ALTER TABLE live_recordings {clause}"))
+        for clause in _LIVE_QUESTION_COLUMNS:
+            conn.execute(text(f"ALTER TABLE live_questions {clause}"))
         for clause in _FEATURE_FLAG_COLUMNS:
             conn.execute(text(f"ALTER TABLE feature_flags {clause}"))
         for clause in _SUPPORT_TICKET_COLUMNS:

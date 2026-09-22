@@ -293,10 +293,20 @@ def message_out(m: LiveMessage, actor_role: str | None = None) -> dict:
 
 
 def question_out(q: LiveQuestion, actor_role: str | None = None) -> dict:
+    """`answer` is the field that means a reply exists — NOT `status`.
+
+    status == "answered" is set by the console's Answered tick (_QA_OPS below), which has
+    always been reachable with no response text: a moderator marking a question as dealt
+    with after reading it aloud. Both clients therefore render the answer body from
+    `answer`, and only the badge from `status`, so a ticked-but-unanswered question never
+    shows an empty reply."""
     return {
         "id": str(q.id), "name": q.author_name, "text": q.text, "votes": q.votes,
         "status": q.status, "pinned": q.pinned, "assigned_name": q.assigned_name,
         "flags": q.flags or [], "created_at": _iso(q.created_at), "actor_role": actor_role,
+        "answer": q.answer_text or None,
+        "answered_at": _iso(q.answered_at),
+        "answered_by_name": q.answered_by_name,
     }
 
 
@@ -514,6 +524,11 @@ async def snapshot(ctx: Ctx) -> dict:
 VIEWER_ACTIONS = frozenset({
     "chat.send", "chat.typing", "chat.react", "qa.ask", "qa.vote", "poll.vote",
     "participant.hand", "participant.state", "reaction.add", "feedback.submit",
+    # NOT a viewer action. Listed here only to bypass the dispatcher's blanket
+    # can_moderate gate so that an assigned SPEAKER can answer a question routed to them;
+    # _qa_respond's own first line refuses anyone who is neither a moderator nor a
+    # contributor. Same arrangement as services/contributor.py's speaker actions.
+    "qa.respond",
 })
 
 # The viewer reaction bar under the player (components/watch/ReactionBar.jsx) — one
@@ -825,6 +840,71 @@ async def _qa_moderate(ctx, payload, op: str):
     data, act, deleted = out
     return [("qa", "question.delete" if deleted else "question.update", data),
             ("activity", "activity.new", act)]
+
+
+# Longer than a chat message on purpose — this is a written reply to a question, often the
+# only record of what the host said. The column is TEXT; the cap is here so one socket
+# frame cannot carry an unbounded blob.
+ANSWER_LIMIT = 4000
+
+
+async def _qa_respond(ctx, payload):
+    """Write a real answer to a question and mark it answered — as ONE transaction.
+
+    THE GAP THIS FILLS: the console could approve, pin, assign, dismiss, delete and tick
+    "Answered", but there was nowhere to type the reply. `qa.answer` sets status and
+    nothing else, so a question could read "answered" with no answer anywhere in the
+    system and nothing for the asker to see.
+
+    status is set HERE, beside the text, and never before it: if the write fails the whole
+    transaction rolls back, so a question is never left marked answered with no answer. An
+    empty body is rejected outright rather than silently flipping the status — pressing
+    send on a blank box must not become a second, sneakier "mark answered".
+
+    PERMISSIONS. This action is in VIEWER_ACTIONS purely so it reaches this function (the
+    dispatcher's blanket gate is can_moderate, which would turn away an assigned speaker),
+    and the guard below is therefore the ONLY thing standing in front of it — exactly the
+    arrangement services/contributor.py uses for its speaker self-service actions. Keep the
+    guard first. It admits hosts, org admins, super admins and legacy moderators
+    (can_moderate) plus the event's assigned speakers (can_contribute), and nobody else: a
+    plain attendee, a registration-token guest or an access-link visitor is refused.
+
+    Re-sending edits the answer in place, for the same set of people. That is what the
+    existing permission model supports — there is no per-author ownership concept on a
+    live event — so an answer is editable by anyone who could have written it, and
+    answered_by/answered_at move to whoever last changed it rather than pretending the
+    first author still owns the text.
+    """
+    if not (ctx.can_moderate or ctx.can_contribute):
+        return "You are not authorized to answer questions in this event"
+
+    answer = _text(payload, "answer", ANSWER_LIMIT)
+    if not answer:
+        return "An answer needs some text."
+
+    now = datetime.now(timezone.utc)
+
+    def work(db):
+        q = _row(db, LiveQuestion, ctx, payload.get("id"))
+        if not q:
+            return None
+        edited = bool(q.answer_text)
+        q.answer_text = answer
+        q.answered_at = now
+        q.answered_by = ctx.user_id
+        q.answered_by_name = ctx.name
+        # Beside the text, in the same transaction — see the docstring.
+        q.status = "answered"
+        verb = "Edited the answer to" if edited else "Answered"
+        act = record(db, ctx, "qa", f"{verb} a question from {q.author_name}",
+                     audit="live.question.respond", target_type="live_question", target_id=q.id)
+        return question_out(q, actor_role=_actor_role(ctx)), act
+
+    out = await tx(work)
+    if not out:
+        return "That question no longer exists."
+    data, act = out
+    return [("qa", "question.update", data), ("activity", "activity.new", act)]
 
 
 # polls -----------------------------------------------------------------------
@@ -1427,7 +1507,10 @@ ACTIONS: dict[str, callable] = {
     "qa.ask": _qa_ask,
     "qa.vote": _qa_vote,
     "qa.approve": lambda c, p: _qa_moderate(c, p, "approve"),
+    # Marks status only, with no reply text — kept exactly as it was. `qa.respond` is the
+    # one that writes an actual answer.
     "qa.answer": lambda c, p: _qa_moderate(c, p, "answer"),
+    "qa.respond": _qa_respond,
     "qa.dismiss": lambda c, p: _qa_moderate(c, p, "dismiss"),
     "qa.pin": lambda c, p: _qa_moderate(c, p, "pin"),
     "qa.assign": lambda c, p: _qa_moderate(c, p, "assign"),

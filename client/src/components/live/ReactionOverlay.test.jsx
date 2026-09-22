@@ -17,7 +17,12 @@ import { act, render } from "@testing-library/react";
 
 import ReactionOverlay, { REACTION_DURATION_MS, REACTION_MAX_LIFETIME_MS } from "./ReactionOverlay";
 import { createReactionChannel } from "../../hooks/useReactionChannel";
-import { REACTIONS, REACTION_EMOJI } from "../../data/reactions";
+import { REACTIONS, REACTION_BY_KEY } from "../../data/reactions";
+
+// The floating item renders artwork, so identity is read off the asset rather than the
+// character. `src` is the bundled URL Vite hands data/reactions.js — the same value the
+// picker uses, which is what "picker and float are the same visual" means concretely.
+const glyphSrc = (node) => node.querySelector("[data-reaction-glyph]")?.getAttribute("src");
 
 // The exact payload the server publishes (server/app/services/moderation.py::_reaction_add):
 // an emoji key, the event id, a per-instance id and a timestamp. No identity, deliberately.
@@ -70,7 +75,7 @@ describe("ReactionOverlay — a reaction appears over the video", () => {
 
     expect(items()).toHaveLength(1);
     expect(items()[0]).toHaveAttribute("data-reaction", "heart");
-    expect(items()[0].textContent).toBe(REACTION_EMOJI.heart);
+    expect(glyphSrc(items()[0])).toBe(REACTION_BY_KEY.heart.asset);
   });
 
   it("renders the right glyph for every reaction the bar can send", () => {
@@ -79,7 +84,7 @@ describe("ReactionOverlay — a reaction appears over the video", () => {
     for (const r of REACTIONS) {
       const { items, send, unmount } = overlay();
       send(r.key);
-      expect(items()[0].textContent).toBe(r.emoji);
+      expect(glyphSrc(items()[0])).toBe(r.asset);
       unmount();
     }
   });
@@ -528,7 +533,10 @@ describe("ReactionOverlay — it must not get in the way", () => {
     }));
 
     const layer = view.getByTestId("reaction-overlay");
-    expect(layer.textContent).toBe(REACTION_EMOJI.heart);
+    expect(glyphSrc(layer)).toBe(REACTION_BY_KEY.heart.asset);
+    // Still no text of any kind on the layer — the privacy assertion below is what this
+    // test is really for, and an empty textContent makes it airtight.
+    expect(layer.textContent).toBe("");
     for (const secret of ["Ada", "ada@example.com", "user-42", "tok-secret"]) {
       expect(layer.textContent).not.toContain(secret);
     }

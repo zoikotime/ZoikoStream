@@ -106,6 +106,7 @@ from ..schemas.organization import (
     OrgProfileUpdate,
     OrgSecurity,
     RecordingExportEligibility,
+    EventRecordingOut,
     RecordingOut,
     WebhookDeliveryOut,
     WebhookEndpointCreate,
@@ -495,6 +496,53 @@ def audience_attendance(
     org_svc.audience_attendance's docstring for exactly which figures are real counts vs.
     labeled estimates. Readable by any member, same posture as /analytics."""
     return org_svc.audience_attendance(db, org, range_key=range_)
+
+
+@router.get("/events/{event_id}/recordings", response_model=list[EventRecordingOut])
+def list_event_recordings(
+    event_id: uuid.UUID,
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """Every recording attempt for ONE event — what the event's Recording tab reads.
+
+    Unlike /organization/recordings (the playable library, which filters to captured files),
+    this returns failed and unenforced attempts too, with their real `error`. That is the
+    whole point: a run where LiveKit egress never started used to be indistinguishable from
+    never having pressed Record, because the tab had no data source at all and rendered a
+    hardcoded "No recording available".
+
+    `url` is signed per request and is only ever set when a file genuinely exists — a row
+    with enforced=False or no file_url returns None, so the client cannot offer playback for
+    something that was never written.
+
+    Org comes from the token via get_my_org, and the query joins through Event.org_id, so one
+    organization can never read another's captures. 404 rather than an empty list for an
+    event that is not this org's, so a probe cannot use it to test event existence.
+    """
+    ev = event_crud.get_event(db, org.id, event_id)
+    if ev is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+
+    rows = event_crud.list_event_recordings(db, org.id, event_id)
+    held = admin_crud.legal_hold_event_ids(db, {event_id})
+    out = []
+    for rec in rows:
+        duration = None
+        if rec.started_at and rec.stopped_at:
+            duration = int((rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000)
+        # A link only where a file was actually produced. enforced=False means egress never
+        # accepted the job; file_url may still hold the intended path, which is not a file.
+        url = livekit.signed_url(rec.file_url) if (rec.enforced and rec.file_url) else None
+        out.append(EventRecordingOut(
+            id=rec.id, event_id=event_id, status=rec.status, enforced=rec.enforced,
+            error=rec.error, quality=rec.quality, role=rec.role,
+            started_at=rec.started_at, stopped_at=rec.stopped_at,
+            duration_seconds=duration, size_bytes=rec.size_bytes, url=url,
+            legal_hold=rec.legal_hold or event_id in held,
+            validation_status=rec.validation_status,
+        ))
+    return out
 
 
 @router.get("/recordings", response_model=list[RecordingOut])

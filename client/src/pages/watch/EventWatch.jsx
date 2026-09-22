@@ -280,6 +280,9 @@ export default function EventWatch() {
   }, [eventId]);
 
   const [watch, setWatch] = useState(null);
+  // The registration credential the CURRENT `watch` payload was fetched with, or null if it
+  // was fetched anonymously. Only meaningful to the stale-credential check further down.
+  const [watchedReg, setWatchedReg] = useState(null);
   const [notFound, setNotFound] = useState(false);
   const [blockedReason, setBlockedReason] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -299,7 +302,14 @@ export default function EventWatch() {
     setLoading(true);
   }
 
-  const fetchWatch = useCallback(() => {
+  // `override` carries a credential the caller has IN HAND but that has not reached state
+  // yet. That is the whole of the one-click registration fix: RegistrationGate hands back a
+  // token and this function used to read `regToken` out of its closure, which React had not
+  // updated (a setState is not synchronous), so the very request meant to prove the
+  // registration went out with no credential at all. The server answered "not registered",
+  // the form stayed up, and a second click — a second POST, a second attendee row — was the
+  // only way in. Passing the token explicitly removes the dependency on a committed render.
+  const fetchWatch = useCallback((override = {}) => {
     // A host-invited or self-registered link carries the access token in the URL
     // (?reg=... or ?link=...) — save it locally so a refresh (or a later visit with no
     // query string) keeps working without the visitor needing to click the shared link again.
@@ -308,23 +318,29 @@ export default function EventWatch() {
     const urlLink = params.get("link");
     if (urlReg) setRegToken(urlReg);
     if (urlLink) setLinkToken(urlLink);
-    const reg = urlReg || regToken;
-    const link = urlLink || linkToken;
+    const reg = override.reg || urlReg || regToken;
+    const link = override.link || urlLink || linkToken;
     const accessParams = { ...(reg ? { reg } : {}), ...(link ? { link } : {}) };
     api
       .get(`/events/${eventId}/watch`, { params: Object.keys(accessParams).length ? accessParams : undefined })
-      .then(({ data }) => setWatch((prev) => {
-        // create_stream_token() mints a FRESH JWT on every call, so a naive setWatch(data)
-        // handed useLiveKitViewer a brand-new `token` on every poll — and that hook keys its
-        // connect effect on the token, so the viewer tore down and rebuilt its LiveKit room
-        // every POLL_MS. Keep the token we already hold for the same room: it is still valid
-        // (services/livekit.py's PLAYBACK_TOKEN_TTL), and everything else in the payload
-        // (status, media_status, recording_url) still refreshes normally.
-        if (prev?.livekit_token && data?.livekit_token && prev.room && prev.room === data.room) {
-          return { ...data, livekit_token: prev.livekit_token, livekit_url: prev.livekit_url };
-        }
-        return data;
-      }))
+      .then(({ data }) => {
+        // Which credential this payload was actually judged against — read by the
+        // stale-credential check below, which must never condemn a token the server was
+        // not shown.
+        setWatchedReg(reg || null);
+        setWatch((prev) => {
+          // create_stream_token() mints a FRESH JWT on every call, so a naive setWatch(data)
+          // handed useLiveKitViewer a brand-new `token` on every poll — and that hook keys
+          // its connect effect on the token, so the viewer tore down and rebuilt its LiveKit
+          // room every POLL_MS. Keep the token we already hold for the same room: it is
+          // still valid (services/livekit.py's PLAYBACK_TOKEN_TTL), and everything else in
+          // the payload (status, media_status, recording_url) still refreshes normally.
+          if (prev?.livekit_token && data?.livekit_token && prev.room && prev.room === data.room) {
+            return { ...data, livekit_token: prev.livekit_token, livekit_url: prev.livekit_url };
+          }
+          return data;
+        });
+      })
       .catch((e) => {
         // A 403 here means the visitor was recognized but refused (private event, or an
         // invite link already claimed by another device) — worth a real reason, not the
@@ -609,7 +625,17 @@ export default function EventWatch() {
   // A credential the server did not accept is dead weight; drop it so the next visit starts
   // clean rather than re-presenting something already known to be refused. Derived during
   // render (this repo treats set-state-in-effect as an error) and guarded so it runs once.
-  const staleCredential = Boolean(regToken && watch && !watch.registered);
+  //
+  // `watchedReg === regToken` is the half that was missing, and it is why registering once
+  // did not merely fail to admit the viewer — it THREW THE NEW TOKEN AWAY. On the render
+  // right after registering, `regToken` is the token just issued while `watch` is still the
+  // anonymous payload from before it existed, carrying registered=false. Judged on that
+  // pairing the fresh credential looked refused, so it was deleted from storage and from
+  // state, and the viewer had to register a second time to get in. A credential is only
+  // stale if the server was actually SHOWN it and still said no.
+  const staleCredential = Boolean(
+    regToken && watch && !watch.registered && watchedReg === regToken
+  );
   if (staleCredential && clearedFor !== eventId) {
     setClearedFor(eventId);
     try {
@@ -745,7 +771,10 @@ export default function EventWatch() {
             {mustIdentify ? (
               <RegistrationGate
                 eventId={eventId} eventTitle={event.name}
-                onRegistered={(token, remember) => { setRegToken(token, remember); fetchWatch(); }}
+                // The token is handed straight to fetchWatch rather than being read back out
+                // of state on the next render — that round trip is what cost the viewer a
+                // second click, and a second attendee record with it.
+                onRegistered={(token, remember) => { setRegToken(token, remember); fetchWatch({ reg: token }); }}
               />
             ) : ended ? (
               <VideoPlayer event={event} viewers={viewers} watch={watch} />

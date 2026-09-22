@@ -23,7 +23,9 @@
 // overlay and nothing else — see that file for why that matters on the host console.
 import { useEffect, useRef, useState } from "react";
 import useInterval from "../../hooks/useInterval";
-import { REACTION_EMOJI } from "../../data/reactions";
+import { REACTION_BY_KEY } from "../../data/reactions";
+import { preloadReactionAssets } from "../../data/reactionAssets";
+import ReactionGlyph from "./ReactionGlyph";
 import { cx } from "../../ui/tokens";
 
 // Must match the `zk-reaction-float` / `zk-reaction-stream` animations in index.css: the
@@ -179,15 +181,34 @@ export default function ReactionOverlay({
   // ref, not state: it moves on every single reaction and must never be a reason to
   // re-render. Seeded at random so two viewers watching the same event don't get identical
   // streams, and so a remount doesn't always restart from the same edge of the lane.
-  const spot = useRef(Math.random());
+  // Seeded through useState's LAZY INITIALIZER rather than `useRef(Math.random())`.
+  //
+  // Same behaviour — one random start per mounted overlay — but React actually guarantees
+  // it here: the initializer runs exactly once, where the old form re-rolled Math.random()
+  // on every single render and threw the result away (useRef ignores its argument after
+  // mount). It was wasted work that merely LOOKED like a fresh value each time.
+  //
+  // It is also the only form that satisfies react-hooks/purity. Assigning lazily in the
+  // render body instead — `useRef(null)` plus `if (spot.current === null) …` — still calls
+  // an impure function during render and is still flagged; I checked both before choosing.
+  const [spotSeed] = useState(() => Math.random());
+  const spot = useRef(spotSeed);
+
+  // The host console has an overlay and no reaction bar, so this surface has to warm the
+  // artwork itself — otherwise the producer's first incoming reaction is the one that
+  // pays for the fetch. Idempotent, so the viewer page asking twice costs nothing.
+  useEffect(preloadReactionAssets, []);
 
   useEffect(() => {
     if (!channel?.subscribe) return undefined;
     return channel.subscribe((payload) => {
       // An unknown key (a newer server, a malformed frame) is dropped rather than
       // rendered — `undefined` painted over the video would be worse than nothing.
-      const emoji = REACTION_EMOJI[payload?.reaction];
-      if (!emoji) return;
+      //
+      // The WHOLE row, not just the character: a floating reaction needs the artwork and
+      // the fallback character together (see ReactionGlyph below).
+      const spec = REACTION_BY_KEY[payload?.reaction];
+      if (!spec) return;
       spot.current = (spot.current + GOLDEN_STEP) % 1;
       const geometry = spawnGeometry(lane, spot.current, durationMs);
       const delay = Math.round(rand(0, MAX_DELAY_MS));   // so a simultaneous batch staggers
@@ -199,7 +220,8 @@ export default function ReactionOverlay({
           // even if a server ever repeated an id, and the fallback covers a frame that
           // arrived without one.
           id: `${payload.id || "r"}-${Math.random().toString(36).slice(2, 8)}`,
-          emoji,
+          emoji: spec.emoji,
+          asset: spec.asset,
           reaction: payload.reaction,
           ...geometry,
           delay,
@@ -275,7 +297,15 @@ export default function ReactionOverlay({
             "--zk-reaction-travel": item.travel,
           }}
         >
-          {item.emoji}
+          {/* Same component the picker uses, so the artwork a viewer taps is the artwork
+              that floats. 38px against the picker's 26px — a reaction over video reads
+              smaller than it measures. */}
+          <ReactionGlyph
+            reactionKey={item.reaction}
+            emoji={item.emoji}
+            asset={item.asset}
+            size={38}
+          />
         </span>
       ))}
     </div>

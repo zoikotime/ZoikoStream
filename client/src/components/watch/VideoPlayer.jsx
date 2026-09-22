@@ -6,7 +6,7 @@
 // signed_url) plays back through a plain <video>, with the scrubber driven by its real
 // currentTime/duration. No recording_url (never captured, or LiveKit egress unavailable) ->
 // honest "no recording available" placeholder, never a fake scrubber.
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FiPlay,
   FiPause,
@@ -16,6 +16,7 @@ import {
   FiMaximize,
   FiMinimize,
   FiSettings,
+  FiX,
   FiRotateCcw,
   FiChevronRight,
   FiCheck,
@@ -26,6 +27,8 @@ import {
 import { cx } from "../../ui/tokens";
 import { initials } from "../../data/watch";
 import useLiveKitViewer from "../../hooks/useLiveKitViewer";
+import useMediaQuery from "../../hooks/useMediaQuery";
+import Overlay from "../../ui/Overlay";
 import Logo from "../../ui/Logo";
 
 const STAGE = {
@@ -122,6 +125,15 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   const [fs, setFs] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsPage, setSettingsPage] = useState("main");
+  // Phones get a bottom sheet instead of the in-player popover. A media query, not a `sm:`
+  // class, because the two presentations render in DIFFERENT PLACES in the DOM — the sheet
+  // is portalled to <body> so it escapes the player's `overflow-hidden` — and rendering
+  // both would duplicate every control in the accessibility tree.
+  const isPhone = useMediaQuery("(max-width: 639.98px)");
+  const closeSettings = useCallback(() => {
+    setShowSettings(false);
+    setSettingsPage("main");
+  }, []);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
   const progress =
@@ -297,6 +309,175 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   // hasAudio alongside hasVideo for the same reason as showPlaceholder above.
   const showUnmutePrompt = muted && !showPlaceholder
     && ((canStream && (hasVideo || hasAudio)) || (canReplay && replayStarted));
+
+  // ONE definition of the three settings pages, rendered by BOTH presentations below —
+  // the desktop popover and the phone sheet. Written as JSX rather than a component so it
+  // closes over the state and handlers it needs instead of drilling ten props, and so the
+  // two surfaces cannot drift apart: a new option appears in both or in neither.
+  const settingsBody = showSettings ? (
+    <>
+                  {settingsPage === "main" ? (
+                    <>
+                      {/* The popover has no chrome of its own, so it needs this title.
+                          The phone sheet already has a header carrying the title and the
+                          close button, and rendering both put "Settings" on screen twice. */}
+                      {!isPhone && (
+                        <div className="border-b border-white/10 px-3 py-2">
+                          <p className="font-semibold">Settings</p>
+                        </div>
+                      )}
+
+                      {/* Quality */}
+                      <button
+                        type="button"
+                        onClick={() => setSettingsPage("quality")}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10"
+                      >
+                        <div className="flex items-center gap-3">
+                          <FiMonitor className="text-base text-white/80" />
+                          <div>
+                            <p className="font-medium">Quality</p>
+                            <p className="text-xs text-white/50">Auto</p>
+                          </div>
+                        </div>
+
+                        <FiChevronRight className="text-white/50" />
+                      </button>
+
+                      {/* Playback speed */}
+                      <button
+                        type="button"
+                        onClick={() => setSettingsPage("speed")}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10"
+                      >
+                        <div>
+                          <p className="font-medium">Playback speed</p>
+                          <p className="text-xs text-white/50">
+                            {playbackSpeed === 1 ? "Normal" : `${playbackSpeed}x`}
+                          </p>
+                        </div>
+
+                        <FiChevronRight className="text-white/50" />
+                      </button>
+
+                      {/* Picture in Picture */}
+                      <button
+                        type="button"
+                        onClick={togglePictureInPicture}
+                        // Same condition that mounts <video ref={mediaRef}>/<video
+                        // ref={replayRef}> below — refs can't be read during render (React
+                        // doesn't know to re-render when a ref's .current changes, so a
+                        // disabled-state derived from it can go stale), and this is the
+                        // render-safe equivalent: the ref is populated exactly when one of
+                        // these is true. togglePictureInPicture itself still no-ops safely
+                        // on a null ref for the brief window before the element mounts.
+                        disabled={!(canStream || canReplay)}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <div>
+                          <p className="font-medium">Picture-in-Picture</p>
+                          <p className="text-xs text-white/50">
+                            Watch while using other apps
+                          </p>
+                        </div>
+                      </button>
+                    </>
+                  ) : settingsPage === "quality" ? (
+                    <>
+                      {/* Quality page */}
+                      <div className="flex items-center gap-2 border-b border-white/10 px-2 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setSettingsPage("main")}
+                          className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10 hover:text-white"
+                          aria-label="Back to settings"
+                        >
+                          ←
+                        </button>
+
+                        <p className="font-semibold">Quality</p>
+                      </div>
+
+                      {/* Built from the layers the publisher ACTUALLY sent
+                          (publication.trackInfo.layers), never a fixed list. LiveKit
+                          simulcast is three levels, and a 720p camera simply has no 1080p
+                          layer — so an option only appears when there is a real rendition
+                          behind it. Selecting one calls
+                          RemoteTrackPublication.setVideoQuality, which changes THIS viewer's
+                          subscription in-session: no reload, no reconnect, and no effect on
+                          the publisher or on anyone else watching. */}
+                      <button
+                        type="button"
+                        onClick={() => { selectQuality("auto"); setSettingsPage("main"); }}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                      >
+                        <span>Auto</span>
+                        {quality === "auto" && <FiCheck className="text-emerald-400" />}
+                      </button>
+
+                      {videoLayers.map((layer) => (
+                        <button
+                          key={layer.quality}
+                          type="button"
+                          onClick={() => { selectQuality(layer.quality); setSettingsPage("main"); }}
+                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                        >
+                          <span>{layer.label}</span>
+                          {quality === layer.quality && <FiCheck className="text-emerald-400" />}
+                        </button>
+                      ))}
+
+                      {videoLayers.length === 0 && (
+                        <p className="px-3 pb-2 pt-2 text-[11px] leading-4 text-white/40">
+                          {hasVideoPublication
+                            ? // A real publication carrying one layer — screen share, or a
+                              // publisher with simulcast off.
+                              "This stream is being sent as a single rendition, so only Auto is available."
+                            : // No remote video at all: Starting soon / PREVIEW, or the host
+                              // has their camera off. Calling that a "single rendition"
+                              // described a stream that was not arriving. The list fills in
+                              // by itself once the host goes live — no refresh needed.
+                              "Waiting for the host's video. Quality options appear once the stream starts."}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {/* Playback speed page */}
+                      <div className="flex items-center gap-2 border-b border-white/10 px-2 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setSettingsPage("main")}
+                          className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10 hover:text-white"
+                          aria-label="Back to settings"
+                        >
+                          ←
+                        </button>
+
+                        <p className="font-semibold">Playback speed</p>
+                      </div>
+
+                      {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                        <button
+                          key={speed}
+                          type="button"
+                          onClick={() => {
+                            setPlaybackSpeed(speed);
+                            setSettingsPage("main");
+                          }}
+                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                        >
+                          <span>{speed === 1 ? "Normal" : `${speed}x`}</span>
+
+                          {playbackSpeed === speed && (
+                            <FiCheck className="text-emerald-400" />
+                          )}
+                        </button>
+                      ))}
+                    </>
+                  )}
+    </>
+  ) : null;
 
   return (
     <div
@@ -592,166 +773,60 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                 <FiSettings className="text-lg" />
               </button>
 
-              {showSettings && (
+              {/* DESKTOP: the popover, exactly as it was. Anchored to the gear, inside
+                  the player, closed by clicking the gear again. Untouched. */}
+              {showSettings && !isPhone && (
                 <div className="absolute bottom-12 right-0 z-50 w-56 overflow-hidden rounded-xl bg-slate-900 p-2 text-sm text-white shadow-2xl ring-1 ring-white/10">
-                  {settingsPage === "main" ? (
-                    <>
-                      {/* Settings header */}
-                      <div className="border-b border-white/10 px-3 py-2">
-                        <p className="font-semibold">Settings</p>
-                      </div>
-
-                      {/* Quality */}
-                      <button
-                        type="button"
-                        onClick={() => setSettingsPage("quality")}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10"
-                      >
-                        <div className="flex items-center gap-3">
-                          <FiMonitor className="text-base text-white/80" />
-                          <div>
-                            <p className="font-medium">Quality</p>
-                            <p className="text-xs text-white/50">Auto</p>
-                          </div>
-                        </div>
-
-                        <FiChevronRight className="text-white/50" />
-                      </button>
-
-                      {/* Playback speed */}
-                      <button
-                        type="button"
-                        onClick={() => setSettingsPage("speed")}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10"
-                      >
-                        <div>
-                          <p className="font-medium">Playback speed</p>
-                          <p className="text-xs text-white/50">
-                            {playbackSpeed === 1 ? "Normal" : `${playbackSpeed}x`}
-                          </p>
-                        </div>
-
-                        <FiChevronRight className="text-white/50" />
-                      </button>
-
-                      {/* Picture in Picture */}
-                      <button
-                        type="button"
-                        onClick={togglePictureInPicture}
-                        // Same condition that mounts <video ref={mediaRef}>/<video
-                        // ref={replayRef}> below — refs can't be read during render (React
-                        // doesn't know to re-render when a ref's .current changes, so a
-                        // disabled-state derived from it can go stale), and this is the
-                        // render-safe equivalent: the ref is populated exactly when one of
-                        // these is true. togglePictureInPicture itself still no-ops safely
-                        // on a null ref for the brief window before the element mounts.
-                        disabled={!(canStream || canReplay)}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        <div>
-                          <p className="font-medium">Picture-in-Picture</p>
-                          <p className="text-xs text-white/50">
-                            Watch while using other apps
-                          </p>
-                        </div>
-                      </button>
-                    </>
-                  ) : settingsPage === "quality" ? (
-                    <>
-                      {/* Quality page */}
-                      <div className="flex items-center gap-2 border-b border-white/10 px-2 py-2">
-                        <button
-                          type="button"
-                          onClick={() => setSettingsPage("main")}
-                          className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10 hover:text-white"
-                          aria-label="Back to settings"
-                        >
-                          ←
-                        </button>
-
-                        <p className="font-semibold">Quality</p>
-                      </div>
-
-                      {/* Built from the layers the publisher ACTUALLY sent
-                          (publication.trackInfo.layers), never a fixed list. LiveKit
-                          simulcast is three levels, and a 720p camera simply has no 1080p
-                          layer — so an option only appears when there is a real rendition
-                          behind it. Selecting one calls
-                          RemoteTrackPublication.setVideoQuality, which changes THIS viewer's
-                          subscription in-session: no reload, no reconnect, and no effect on
-                          the publisher or on anyone else watching. */}
-                      <button
-                        type="button"
-                        onClick={() => { selectQuality("auto"); setSettingsPage("main"); }}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
-                      >
-                        <span>Auto</span>
-                        {quality === "auto" && <FiCheck className="text-emerald-400" />}
-                      </button>
-
-                      {videoLayers.map((layer) => (
-                        <button
-                          key={layer.quality}
-                          type="button"
-                          onClick={() => { selectQuality(layer.quality); setSettingsPage("main"); }}
-                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
-                        >
-                          <span>{layer.label}</span>
-                          {quality === layer.quality && <FiCheck className="text-emerald-400" />}
-                        </button>
-                      ))}
-
-                      {videoLayers.length === 0 && (
-                        <p className="px-3 pb-2 pt-2 text-[11px] leading-4 text-white/40">
-                          {hasVideoPublication
-                            ? // A real publication carrying one layer — screen share, or a
-                              // publisher with simulcast off.
-                              "This stream is being sent as a single rendition, so only Auto is available."
-                            : // No remote video at all: Starting soon / PREVIEW, or the host
-                              // has their camera off. Calling that a "single rendition"
-                              // described a stream that was not arriving. The list fills in
-                              // by itself once the host goes live — no refresh needed.
-                              "Waiting for the host's video. Quality options appear once the stream starts."}
-                        </p>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      {/* Playback speed page */}
-                      <div className="flex items-center gap-2 border-b border-white/10 px-2 py-2">
-                        <button
-                          type="button"
-                          onClick={() => setSettingsPage("main")}
-                          className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10 hover:text-white"
-                          aria-label="Back to settings"
-                        >
-                          ←
-                        </button>
-
-                        <p className="font-semibold">Playback speed</p>
-                      </div>
-
-                      {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
-                        <button
-                          key={speed}
-                          type="button"
-                          onClick={() => {
-                            setPlaybackSpeed(speed);
-                            setSettingsPage("main");
-                          }}
-                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
-                        >
-                          <span>{speed === 1 ? "Normal" : `${speed}x`}</span>
-
-                          {playbackSpeed === speed && (
-                            <FiCheck className="text-emerald-400" />
-                          )}
-                        </button>
-                      ))}
-                    </>
-                  )}
+                  {settingsBody}
                 </div>
               )}
+
+              {/* PHONE: a bottom sheet instead. The popover above is positioned inside the
+                  player, which on a phone means a 224px menu over a ~200px-tall video —
+                  cramped, and clipped by the player's own overflow.
+                  <Overlay> portals to <body>, so the sheet is not inside the video element
+                  at all: it cannot be clipped by it, and the <video> is never unmounted or
+                  moved, so playback is untouched by opening this. Overlay also supplies the
+                  backdrop click, Escape (via ui/dismissStack, so it closes only the top
+                  layer) and the body scroll lock. */}
+              <Overlay open={showSettings && isPhone} onClose={closeSettings}>
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Video settings"
+                  // The backdrop's own onClick sits on the layer behind this, so a tap
+                  // inside the sheet must not bubble out and dismiss it.
+                  onClick={(e) => e.stopPropagation()}
+                  className={cx(
+                    "absolute inset-x-0 bottom-0 flex flex-col rounded-t-2xl bg-slate-900 text-sm text-white",
+                    "shadow-2xl ring-1 ring-white/10 motion-safe:animate-[zk-slide-up_.3s]",
+                    // svh, not vh: iOS Safari's vh includes the retracted URL bar, so a
+                    // vh-capped sheet is taller than the visible viewport and its last row
+                    // sits under the browser chrome.
+                    "max-h-[80svh]"
+                  )}
+                  // Clears the iOS home indicator / Android gesture bar without a
+                  // Tailwind arbitrary value that would need a config entry.
+                  style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+                >
+                  <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-4 py-3">
+                    <p className="font-semibold">Settings</p>
+                    <button
+                      type="button"
+                      onClick={closeSettings}
+                      aria-label="Close settings"
+                      className="grid h-9 w-9 place-items-center rounded-lg text-white/70 transition hover:bg-white/10 hover:text-white"
+                    >
+                      <FiX className="text-lg" />
+                    </button>
+                  </div>
+                  {/* Scrolls internally when the quality list is long; overscroll-contain
+                      stops that scroll chaining to the page behind the sheet. */}
+                  <div className="zk-scroll-thin min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
+                    {settingsBody}
+                  </div>
+                </div>
+              </Overlay>
             </div>
             <button onClick={toggleFs} aria-label={fs ? "Exit fullscreen" : "Fullscreen"} title={fs ? "Exit fullscreen" : "Fullscreen"} className={CTRL}>
               {fs ? <FiMinimize className="text-lg" /> : <FiMaximize className="text-lg" />}

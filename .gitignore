@@ -17,6 +17,12 @@ node_modules/
 client/dist/
 client/node_modules/
 
+# Generated at runtime by the server, never source. GDPR data-subject exports, developer
+# CSV exports, trust-centre evidence bundles and vulnerability evidence — the app writes
+# these per request, and the test suite writes them too. In production this directory holds
+# real personal data, so it must never be stageable.
+server/private_exports/
+
 # Editor / OS
 .DS_Store
 .vscode/

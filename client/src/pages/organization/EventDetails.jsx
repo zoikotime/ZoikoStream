@@ -12,6 +12,7 @@ import { notify } from "../../ui/Toast";
 import { PageSpinner } from "../../ui/Spinner";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import OrganizationEmptyState from "../../components/organization/OrganizationEmptyState";
+import RecordingPanel from "../../components/organization/RecordingPanel";
 import SectionCard from "../../components/admin/SectionCard";
 import StatCard from "../../components/admin/StatCard";
 import { ConsoleButton as Button } from "../../ui/Button";
@@ -279,8 +280,14 @@ export default function EventDetails() {
       // same average-rating rollup the host's own console shows (components/host/
       // HostPanel's Feedback tab).
       api.get(`/events/${id}/feedback`, { params: { role: "viewer" } }).then((r) => r.data),
-    ]).then(([event, hosts, speakers, viewers, feedback]) => ({
-      event, hosts, speakers, viewers, feedback,
+      // Every recording ATTEMPT for this event, failures included. The Recording tab used to
+      // be hardcoded markup with no data source at all — it printed "No recording available"
+      // for every event forever, whether or not a file existed. `.catch` keeps an older API
+      // build (or a 404) from taking the whole page down: the tab then says it could not
+      // read the recordings rather than claiming there are none.
+      api.get(`/organization/events/${id}/recordings`).then((r) => r.data).catch(() => null),
+    ]).then(([event, hosts, speakers, viewers, feedback, recordings]) => ({
+      event, hosts, speakers, viewers, feedback, recordings,
     }))
   );
 
@@ -296,7 +303,7 @@ export default function EventDetails() {
   if (loading) return <div className="space-y-4">{back}<PageSpinner label="Loading event…" /></div>;
   if (error) return <div className="space-y-4">{back}<OrganizationErrorState error={error} onRetry={reload} title="Couldn't load this event" /></div>;
 
-  const { event, hosts, speakers, viewers, feedback } = data;
+  const { event, hosts, speakers, viewers, feedback, recordings } = data;
   const st = statusMeta(event.status);
 
   // Copy only — the console never opens the attendee page, and never renders the URL.
@@ -586,11 +593,7 @@ export default function EventDetails() {
 
       {tab === "Recording" && (
         <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50">
-          <OrganizationEmptyState
-            icon={FiVideo}
-            title="No recording available"
-            description={event.recording_enabled ? "The recording will appear here after the event ends." : "Recording is disabled for this event."}
-          />
+          <RecordingPanel event={event} recordings={recordings} />
         </div>
       )}
 
