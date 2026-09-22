@@ -34,7 +34,15 @@ describe("ReactionBar — tap targets, no counters", () => {
     expect(container.textContent).not.toMatch(/\d/);
     for (const r of REACTIONS) {
       const button = screen.getByRole("button", { name: r.label });
-      expect(button.textContent).toBe(r.emoji);   // the emoji alone, nothing appended
+      // The glyph is artwork now (components/live/ReactionGlyph.jsx), so the button holds
+      // no text at all — which is a STRONGER form of the original assertion: there is no
+      // character for a count to be appended to. What must still be true is that the
+      // button carries exactly one glyph, and that it is this reaction's.
+      expect(button.textContent).toBe("");
+      const glyph = button.querySelector("[data-reaction-glyph]");
+      expect(glyph).toBeInTheDocument();
+      expect(glyph.tagName).toBe("IMG");
+      expect(glyph.getAttribute("src")).toBe(r.asset);
     }
   });
 

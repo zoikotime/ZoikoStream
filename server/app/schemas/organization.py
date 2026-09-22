@@ -296,6 +296,32 @@ class InvitationPreview(BaseModel):
 
 # ── Recordings ───────────────────────────────────────────────────────────────
 
+class EventRecordingOut(BaseModel):
+    """One recording ATTEMPT for a single event (GET /organization/events/{id}/recordings).
+
+    Distinct from RecordingOut below, which describes a playable library entry. This one has
+    to be able to say "it failed, and here is why": `status`, `enforced` and `error` are the
+    point, and `url` is None whenever there is no file behind the row. Nothing here invents a
+    link — a caller that sees url=None must not offer playback.
+    """
+    id: uuid.UUID
+    event_id: uuid.UUID
+    status: str                       # recording | paused | stopped | failed
+    # False when LiveKit egress never accepted the job, so no file was ever produced.
+    enforced: bool
+    error: str | None = None
+    quality: str | None = None
+    role: str | None = None           # primary|secondary on dual-recorded events, else None
+    started_at: datetime | None = None
+    stopped_at: datetime | None = None
+    duration_seconds: int | None = None
+    size_bytes: int | None = None
+    # Signed, time-limited, generated per request. None unless a real file exists.
+    url: str | None = None
+    legal_hold: bool = False
+    validation_status: str | None = None
+
+
 class RecordingOut(BaseModel):
     """One captured recording, org-wide (GET /organization/recordings). `url` is a
     time-limited signed link generated per-request — never persisted, so it can't go

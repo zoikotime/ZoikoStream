@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { FiPlus, FiSearch, FiEye, FiTrash2, FiCalendar, FiChevronDown, FiLink } from "react-icons/fi";
 import api, { errMsg } from "../../api";
@@ -27,22 +27,41 @@ export default function OrganizationEvents() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  // `?create=true` is a one-shot deep link (the dashboard CTA and the empty-state button).
-  // Whether the dialog starts open is knowable on the first render, so it is INITIAL state
-  // rather than a setState fired from an effect.
-  const [createOpen, setCreateOpen] = useState(() => searchParams.get("create") === "true");
+  // `?create=true` is how everything outside this page asks for the dialog: the topbar's
+  // "Request live event" button (OrganizationLayout renders it for every /organization/*
+  // route), the dashboard CTA, and the empty-state button below.
+  //
+  // THE BUG THIS REPLACES: the parameter was read ONCE, in a useState initializer, and an
+  // initializer runs only when the route mounts. From any other page that was fine —
+  // clicking "Request live event" navigates here, /organization/events mounts, the
+  // initializer sees create=true. On /organization/events itself there is no mount: the
+  // topbar lives in the layout, so the click changes nothing but the query string and React
+  // Router re-renders the same mounted element. The initializer never ran again and the
+  // button did nothing at all, on that one route.
+  //
+  // So the request is now READ ON EVERY RENDER instead of once per mount, which is what
+  // makes it work with or without a mount behind it. It is derived, not copied into state:
+  // mirroring it with a setState would be a cascading render, and `set-state-in-effect` /
+  // `set-state-in-render` both reject that here for good reason.
+  const requestedViaUrl = searchParams.get("create") === "true";
+  // Separate flag for the page's own "Create event" button, which opens the dialog directly
+  // and must not touch the URL — its behaviour is exactly what it was.
+  const [createOpen, setCreateOpen] = useState(false);
+  const showCreate = createOpen || requestedViaUrl;
 
-  // Stripping the parameter stays in an effect because it is a real external-system
-  // synchronization — the browser URL — and not a state update: left in place, a refresh or a
-  // back-navigation would reopen the dialog after the user had dismissed it. Building a new
-  // URLSearchParams rather than mutating the one React Router handed us keeps that object
-  // immutable, as the router expects.
-  useEffect(() => {
-    if (searchParams.get("create") !== "true") return;
+  // Clearing the parameter on close (not on open) is the same external-system
+  // synchronization it always was: left in the URL, a refresh or a back-navigation would
+  // reopen a dialog the reader had dismissed. Doing it here rather than in an effect also
+  // makes a SECOND click work — the URL is back to /organization/events by then, so the
+  // next navigate() is a real location change instead of a no-op to an identical one.
+  // A new URLSearchParams keeps the router's own object immutable, as it expects.
+  const closeCreate = () => {
+    setCreateOpen(false);
+    if (!requestedViaUrl) return;
     const next = new URLSearchParams(searchParams);
     next.delete("create");
     setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams]);
+  };
 
   const { data, loading, error, reload } = useApi(() =>
     api.get("/events", { params: { page_size: 100 } }).then((r) => r.data.items)
@@ -251,7 +270,7 @@ export default function OrganizationEvents() {
         </>
       )}
 
-      <CreateEventModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={reload} />
+      <CreateEventModal open={showCreate} onClose={closeCreate} onCreated={reload} />
     </div>
   );
 }

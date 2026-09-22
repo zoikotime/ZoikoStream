@@ -16,7 +16,7 @@ import { act, render, screen } from "@testing-library/react";
 import StudioStage from "./StudioStage";
 import { reducer, INITIAL_LIVE_STATE } from "../../hooks/useLiveEvent";
 import { createReactionChannel } from "../../hooks/useReactionChannel";
-import { REACTION_EMOJI } from "../../data/reactions";
+import { REACTION_BY_KEY } from "../../data/reactions";
 
 // The exact payload server/app/services/moderation.py::_reaction_add publishes.
 let seq = 0;
@@ -73,7 +73,11 @@ describe("Producer Console — the host sees viewer reactions", () => {
     react("heart");
 
     expect(items()).toHaveLength(1);
-    expect(items()[0].textContent).toBe(REACTION_EMOJI.heart);
+    // The console renders the same bundled artwork the viewer's picker does
+    // (components/live/ReactionGlyph.jsx), so identity is read off the file rather than a
+    // character. What this test is for is unchanged: the producer must SEE the reaction.
+    expect(items()[0].querySelector("[data-reaction-glyph]").getAttribute("src"))
+      .toBe(REACTION_BY_KEY.heart.asset);
   });
 
   it("shows every reaction from a mixed audience, each on its own", () => {

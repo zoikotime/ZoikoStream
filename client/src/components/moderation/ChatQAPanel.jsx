@@ -12,7 +12,7 @@ import {
 import { cx, focusRing } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
 import Skeleton from "../../ui/Skeleton";
-import { Input, Select } from "../../ui/forms";
+import { Input, Select, Textarea } from "../../ui/forms";
 import EmptyState from "../organization/OrganizationEmptyState";
 import { ActionButton } from "./Panel";
 import { PANEL, PANEL_PRIMARY } from "./panelTokens";
@@ -421,6 +421,132 @@ export function ChatTab({ messages, typing, canModerate, send }) {
 
 // ── Q&A ──────────────────────────────────────────────────────────────────────
 
+// Writing an actual answer, which the console previously had no way to do: it could
+// approve, pin, route, dismiss, delete and tick "Answered", but there was no text box
+// anywhere, so "answered" was a label with nothing behind it.
+//
+// Confirmation is derived, never assumed. The socket is fire-and-forget (useEventStream's
+// send returns only whether the frame reached an OPEN socket, not whether the server
+// accepted it), so this does NOT congratulate itself on submit. It records what it sent
+// and waits for the server's own question.update echo to come back carrying that text —
+// which is the same broadcast every other console and every viewer receives. Until then
+// the button reads "Sending…" and is disabled, which is also the duplicate guard.
+//
+// `open` is DERIVED (rawOpen && !confirmed) rather than closed by an effect, so there is
+// no setState in render or in an effect — both are lint errors in this repo, and both
+// would be the wrong shape here anyway.
+function AnswerControl({ question, canModerate, send }) {
+  const [rawOpen, setRawOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [sent, setSent] = useState(null);      // the text we are waiting to see echoed
+  const [error, setError] = useState(null);
+
+  const saved = question.answer || null;
+  const confirmed = sent !== null && saved === sent;
+  const busy = sent !== null && !confirmed;
+  const open = rawOpen && !confirmed;
+
+  const start = () => {
+    setRawOpen(true);
+    setSent(null);
+    setError(null);
+    setDraft(saved || "");
+  };
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (busy) return;                          // a second click while in flight is dropped
+    const text = draft.trim();
+    if (!text) return;                         // an empty box must never mark it answered
+    // False means the socket is not open. Nothing was sent, so nothing was answered —
+    // keep the draft and say so, rather than closing and losing the host's words.
+    if (send("qa.respond", { id: question.id, answer: text }) === false) {
+      setError("Not connected — your answer was not sent. Try again.");
+      return;
+    }
+    setError(null);
+    setSent(text);
+  };
+
+  return (
+    <>
+      {/* The saved answer, shown from `answer` and never from `status` — see the
+          status !== answer note below. */}
+      {saved && !open && (
+        <div className="mt-2 rounded-lg border-l-2 border-blue-400 bg-blue-50/60 px-2.5 py-1.5 dark:border-blue-500/50 dark:bg-blue-500/10">
+          <p className={cx("text-[10px] font-semibold uppercase tracking-wide", PANEL.faint)}>
+            {question.answered_by_name ? `Answered by ${question.answered_by_name}` : "Answer"}
+          </p>
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-[13px] text-slate-700 dark:text-slate-200">
+            {saved}
+          </p>
+        </div>
+      )}
+
+      {/* A question ticked "Answered" with no reply text is NOT an answered question, and
+          saying so here is the whole point of keeping the two concepts apart. */}
+      {!saved && question.status === "answered" && (
+        <p className={cx("mt-2 text-[11px] italic", PANEL.faint)}>
+          Marked answered — no written response was sent to the audience.
+        </p>
+      )}
+
+      {open && canModerate && (
+        <form onSubmit={submit} className="mt-2 space-y-1.5">
+          <Textarea
+            variant="console"
+            rows={3}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            disabled={busy}
+            placeholder="Type your answer to the audience…"
+            aria-label={`Answer the question from ${question.name}`}
+            className="text-[13px]"
+          />
+          {error && <p className="text-[11px] text-rose-600 dark:text-rose-400">{error}</p>}
+          <div className="flex items-center gap-1.5">
+            <button
+              type="submit"
+              disabled={busy || !draft.trim()}
+              className={cx(
+                "inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] font-semibold text-white",
+                "bg-violet-600 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-45",
+                PANEL.t150, focusRing
+              )}
+            >
+              <FiSend className="text-sm" aria-hidden="true" />
+              {busy ? "Sending…" : "Send Answer"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setRawOpen(false)}
+              disabled={busy}
+              className={cx(
+                "inline-flex h-7 items-center rounded-lg px-2 text-[11px] font-medium",
+                "text-slate-500 hover:bg-slate-100 disabled:opacity-45 dark:text-slate-400 dark:hover:bg-slate-800",
+                PANEL.t150, focusRing
+              )}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {!open && canModerate && (
+        <div className="mt-2">
+          <ActionButton
+            icon={FiCornerUpLeft}
+            label={saved ? "Edit answer" : "Answer"}
+            tone="violet"
+            onClick={start}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
 export function QATab({ questions, speakers, canModerate, send }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
@@ -539,6 +665,10 @@ export function QATab({ questions, speakers, canModerate, send }) {
                   <ActionButton icon={FiTrash2} label="Delete" tone="rose" onClick={() => send("qa.delete", { id: q.id })} />
                 </div>
               )}
+
+              {/* Below the icon row rather than inside it: this is the one Q&A action that
+                  needs room to type, and the saved answer is content, not a control. */}
+              <AnswerControl question={q} canModerate={canModerate} send={send} />
             </div>
           </div>
         ))}

@@ -16,6 +16,8 @@
 import { useEffect, useState } from "react";
 import { cx } from "../../ui/tokens";
 import { REACTIONS } from "../../data/reactions";
+import ReactionGlyph from "../live/ReactionGlyph";
+import { preloadReactionAssets } from "../../data/reactionAssets";
 
 // How long a tapped emoji stays highlighted. Purely a local "you just did that" flash: it
 // confirms the tap landed without waiting for the round trip, and it is NOT a "your
@@ -41,6 +43,11 @@ export default function ReactionBar({
   // per-key map this replaced needed a timer per key, and a viewer can only tap one thing
   // at a time anyway.
   const [lastTap, setLastTap] = useState(null);
+
+  // Warm the artwork the moment the bar exists, so the first tap of a session floats a
+  // picture rather than the fallback character for a frame. Idempotent; the overlay asks
+  // for the same thing, because it can be mounted (on the host console) without a bar.
+  useEffect(preloadReactionAssets, []);
 
   // Clears itself, so the highlight is always transient and no timer outlives the bar.
   // Re-armed by each tap (the effect re-runs on a new `lastTap` object), which is what
@@ -77,7 +84,7 @@ export default function ReactionBar({
           aria-label={r.label}
           title={r.label}
           className={cx(
-            "inline-flex h-11 w-11 items-center justify-center rounded-xl border text-xl transition duration-150 active:scale-90 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
+            "inline-flex h-11 w-11 items-center justify-center rounded-xl border transition duration-150 active:scale-90 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
             flashing
               ? "border-emerald-400 bg-emerald-50 dark:border-emerald-500/50 dark:bg-emerald-500/15"
               : "border-slate-200 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:hover:border-slate-700 dark:hover:bg-slate-800/60"
@@ -85,7 +92,9 @@ export default function ReactionBar({
         >
           {/* Keyed on the tap counter so React remounts the span and the pop animation
               replays — including when the SAME emoji is tapped twice in a row. */}
-          <span key={flashing ? lastTap.n : 0} className="zk-pop leading-none" aria-hidden>{r.emoji}</span>
+          <span key={flashing ? lastTap.n : 0} className="zk-pop inline-flex leading-none" aria-hidden>
+            <ReactionGlyph reactionKey={r.key} emoji={r.emoji} asset={r.asset} size={26} />
+          </span>
         </button>
         );
       })}

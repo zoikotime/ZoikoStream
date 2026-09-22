@@ -266,6 +266,23 @@ const QA = memo(function QA({ questions = [], send, connected }) {
                   </span>
                 )}
               </div>
+              {/* The host's written reply. Keyed off `answer`, NOT off status: the console's
+                  Answered tick sets status with no text behind it (a host who answered out
+                  loud), and rendering an empty box for that would tell the asker there is a
+                  written reply to read when there is none. Arrives over the same socket as
+                  everything else — the qa/question.update envelope EventWatch already
+                  reduces — and comes back in the reconnect snapshot, so a refresh shows it
+                  too. */}
+              {q.answer && (
+                <div className="mt-2 rounded-lg border-l-2 border-emerald-500 bg-emerald-50/70 px-3 py-2 dark:border-emerald-500/60 dark:bg-emerald-500/10">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
+                    {q.answered_by_name ? `${q.answered_by_name} answered` : "Host answered"}
+                  </p>
+                  <p className="mt-0.5 whitespace-pre-wrap break-words text-sm text-slate-700 dark:text-slate-200">
+                    {q.answer}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         ))}

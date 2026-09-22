@@ -2,10 +2,24 @@
 // Shown in place of the video player when an event has registration_required=true and
 // the visitor hasn't registered yet. Anonymous (no login) — POSTs name+email, stores the
 // returned access token, and hands control back to EventWatch to refetch /watch.
+//
+// ── TWO DIFFERENT THINGS, KEPT APART ────────────────────────────────────────────────────
+// A viewer who ticked "Remember me" on an earlier event is greeted with "Continue as
+// Naveen" instead of an empty form. That shortcut saves them TYPING and nothing else:
+//
+//   remembered profile   name + email, one key for the whole browser (utils/viewerProfile).
+//                        Grants no access at all. It only fills in the form.
+//   event credential     `zk_reg_<eventId>` in EventWatch — an opaque server-signed token
+//                        bound to ONE event. This is what grants access.
+//
+// So Continue still POSTs a real registration for the CURRENT event and waits for the
+// server's answer. Nobody is counted as registered for an event they have not registered
+// for, and a token minted for event A is never presented to event B.
 import { useState } from "react";
 import { FiCheckCircle, FiLock, FiMail, FiUser } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { cx } from "../../ui/tokens";
+import { clearViewerProfile, readViewerProfile, saveViewerProfile } from "../../utils/viewerProfile";
 
 const field =
   "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
@@ -13,29 +27,63 @@ const labelCls = "mb-1.5 block text-sm font-medium text-slate-700 dark:text-slat
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
 export default function RegistrationGate({ eventId, eventTitle, onRegistered }) {
-  const [form, setForm] = useState({ name: "", email: "" });
+  // Read once per mount, and the gate mounts fresh for each event. Null in a private window,
+  // on a new device, or for anyone who never ticked Remember me — all of which land on the
+  // ordinary empty form below.
+  const [saved, setSaved] = useState(readViewerProfile);
+  const [form, setForm] = useState(() => saved || { name: "", email: "" });
   // Unticked by default: keeping a credential on the device past this visit is a choice the
-  // viewer makes, not one made for them.
-  const [remember, setRemember] = useState(false);
+  // viewer makes, not one made for them. A returning viewer has already made it — a saved
+  // profile only exists because they ticked this — so it starts on for them, and unticking
+  // it is how they withdraw the consent.
+  const [remember, setRemember] = useState(Boolean(saved));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [full, setFull] = useState(false);
+  // "Not you? Change details" — reveals the editable form with the saved values in it.
+  const [editing, setEditing] = useState(false);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const valid = form.name.trim() && isEmail(form.email);
+  // The one-tap path: a profile we trust, and the viewer has not asked to edit it.
+  const greeting = saved && !editing ? saved : null;
 
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!valid || submitting) return;
+  const changeDetails = () => {
+    setEditing(true);
+    setError(null);
+    // The remembered details are cleared the moment they say "not you", so an abandoned
+    // visit does not leave someone else's name on this device. Registering again below
+    // writes a fresh profile if Remember me is still ticked.
+    clearViewerProfile();
+    setSaved(null);
+  };
+
+  // `identity` is passed explicitly rather than read from state: the Continue path submits
+  // the SAVED values, and the edit path submits the typed ones.
+  const register = async (identity) => {
+    if (submitting) return;
+    const name = identity.name.trim();
+    const email = identity.email.trim().toLowerCase();
+    // Validated on both paths — a corrupt or hand-edited stored profile must not be able to
+    // post something the typed form would have rejected.
+    if (!name || !isEmail(email)) {
+      changeDetails();
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
-      const { data } = await api.post(`/events/${eventId}/register`, {
-        name: form.name.trim(),
-        email: form.email.trim().toLowerCase(),
-      });
-      // Storage is EventWatch's job — it owns both the persistent and session-only stores
-      // and the Remember me choice decides which. Writing localStorage here as well meant a
-      // credential was persisted unconditionally, whatever the viewer chose.
+      // ALWAYS a real registration for THIS event, even on Continue. The remembered profile
+      // is name and email, never a token, so there is nothing here that could carry access
+      // over from an event the viewer registered for previously.
+      const { data } = await api.post(`/events/${eventId}/register`, { name, email });
+      // Only after the server accepted it, and only with consent. A rejected or abandoned
+      // attempt leaves the remembered profile exactly as it was.
+      if (remember) saveViewerProfile({ name, email });
+      else clearViewerProfile();
+      // Storage of the CREDENTIAL is EventWatch's job — it owns both the persistent and
+      // session-only stores and the Remember me choice decides which. Writing localStorage
+      // here as well meant a credential was persisted unconditionally, whatever the viewer
+      // chose.
       //
       // `data.token` is an opaque server-signed credential bound to this event. The name and
       // email above are registration DATA; neither is ever sent back as proof of anything.
@@ -46,6 +94,12 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!valid) return;
+    register(form);
   };
 
   return (
@@ -63,8 +117,43 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
           <FiLock className="mx-auto mb-3 text-2xl text-emerald-500" />
           <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Registration required</h2>
           <p className="mb-6 mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Register with your name and email to watch {eventTitle || "this event"}.
+            {greeting
+              ? `Confirm your details to watch ${eventTitle || "this event"}.`
+              : `Register with your name and email to watch ${eventTitle || "this event"}.`}
           </p>
+
+          {greeting ? (
+            // One tap for a returning viewer. Still a full registration for this event —
+            // the button says Continue because they have nothing left to type, not because
+            // anything is being skipped.
+            <div className="space-y-4 text-left">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-700 dark:bg-slate-800/60">
+                <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                  Continue as {greeting.name}
+                </p>
+                <p className="mt-0.5 break-all text-sm text-slate-500 dark:text-slate-400">
+                  {greeting.email}
+                </p>
+              </div>
+              {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
+              <button
+                type="button"
+                onClick={() => register(greeting)}
+                disabled={submitting}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <FiCheckCircle /> {submitting ? "Registering…" : "Continue"}
+              </button>
+              <button
+                type="button"
+                onClick={changeDetails}
+                disabled={submitting}
+                className="w-full text-center text-sm text-slate-500 underline-offset-2 transition hover:text-slate-700 hover:underline disabled:opacity-50 dark:text-slate-400 dark:hover:text-slate-200"
+              >
+                Not you? Change details
+              </button>
+            </div>
+          ) : (
           <form onSubmit={submit} className="space-y-4 text-left">
             <div>
               <label className={labelCls}>Full name</label>
@@ -117,6 +206,7 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
               <FiCheckCircle /> {submitting ? "Registering…" : "Register"}
             </button>
           </form>
+          )}
         </div>
       )}
     </div>

@@ -3,8 +3,10 @@
 // The credential itself is unchanged: POST /register returns an opaque server-signed token
 // bound to this event (server/test_remembered_registration.py pins that half). All the
 // checkbox decides is how long this browser KEEPS it — localStorage when ticked, sessionStorage
-// when not. What is never stored either way is the name or the email: those are registration
-// DATA, and treating them as proof is the failure this design exists to avoid.
+// when not. What is never stored either way is the name or the email AS PROOF: those are
+// registration DATA, and treating them as evidence of access is the failure this design
+// exists to avoid. They are kept, with consent, as a typing convenience — see
+// utils/viewerProfile.js and pages/watch/ViewerProfile.test.jsx.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -112,7 +114,17 @@ describe("registering", () => {
     expect(sessionStorage.getItem(`zk_reg_${EVENT_ID}`)).toBeNull();
   });
 
-  it("never writes the name or the email anywhere as proof", async () => {
+  it("never writes the name or the email as PROOF of anything", async () => {
+    // Narrowed, not relaxed. This used to assert that the name and email appeared in no
+    // store at all, which was a fair proxy while nothing remembered the viewer. The device
+    // profile (utils/viewerProfile) now deliberately keeps exactly those two fields to save
+    // a returning viewer from retyping them — a convenience that grants nothing.
+    //
+    // The invariant underneath is unchanged and is what is asserted here: identity is never
+    // stored as evidence. No store may carry a "registered" flag, the CREDENTIAL keys hold
+    // the opaque token and nothing else, and the profile holds a name and an email and
+    // nothing else — in particular never the token, which is what would turn a convenience
+    // into a second way in.
     const user = userEvent.setup();
     renderGate();
     await fillForm(user);
@@ -120,14 +132,36 @@ describe("registering", () => {
     await register(user);
 
     await waitFor(() => expect(onRegistered).toHaveBeenCalled());
+
     for (const store of [localStorage, sessionStorage]) {
       const dump = JSON.stringify(Object.entries({ ...store }));
-      expect(dump).not.toContain(EMAIL);
-      expect(dump).not.toContain(NAME);
       expect(dump.toLowerCase()).not.toContain("registered");
     }
+    // The credential keys carry the token alone — no identity smuggled in beside it.
+    for (const store of [localStorage, sessionStorage]) {
+      const credential = store.getItem(`zk_reg_${EVENT_ID}`);
+      if (credential !== null) {
+        expect(credential).not.toContain(NAME);
+        expect(credential).not.toContain(EMAIL);
+      }
+    }
+    // The profile carries identity alone — and no credential.
+    const profile = JSON.parse(localStorage.getItem("zk_viewer_profile"));
+    expect(Object.keys(profile).sort()).toEqual(["email", "name"]);
+    expect(JSON.stringify(profile)).not.toContain(TOKEN);
+
     // What DOES travel onward is the opaque credential, and nothing else.
     expect(onRegistered.mock.calls[0][0]).toBe(TOKEN);
+  });
+
+  it("remembers the viewer only when the box is ticked", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await fillForm(user);
+    await register(user);
+
+    await waitFor(() => expect(onRegistered).toHaveBeenCalled());
+    expect(localStorage.getItem("zk_viewer_profile")).toBeNull();
   });
 
   it("does not report a registration that failed", async () => {
