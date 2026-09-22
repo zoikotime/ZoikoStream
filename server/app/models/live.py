@@ -93,7 +93,7 @@ class LiveQuestionVote(_EventScoped):
     __tablename__ = "live_question_votes"
     __table_args__ = (UniqueConstraint("question_id", "user_id", name="uq_live_question_vote"),)
 
-    question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("live_questions.id"), nullable=False, index=True)
+    question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("live_questions.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
 
 

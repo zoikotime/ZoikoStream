@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from ..crud.admin import create_audit_log
 from ..db import SessionLocal
@@ -340,6 +340,10 @@ def activity_out(a: LiveActivity) -> dict:
 def _run(fn):
     db = SessionLocal()
     try:
+        # Fail fast instead of hanging indefinitely on a blocked row lock — a stuck
+        # transaction was seen holding a worker thread + DB connection for 3+ minutes
+        # under real concurrent Q&A voting load, which is what this bounds.
+        db.execute(text("SET LOCAL lock_timeout = '5s'"))
         out = fn(db)
         db.commit()
         return out
