@@ -27,3 +27,4 @@ server/private_exports/
 .DS_Store
 .vscode/
 .idea/
+gcs-key.json
