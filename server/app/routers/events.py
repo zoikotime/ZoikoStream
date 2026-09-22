@@ -507,8 +507,25 @@ def watch_event(
         visibility=ev.visibility, start_time=ev.start_time,
         organization_name=org_name, host_name=hosts[0].full_name if hosts else org_name,
         chat_enabled=ev.chat_enabled, qa_enabled=ev.qa_enabled, polls_enabled=ev.polls_enabled,
-        reactions_enabled=not crud.is_memorial_category(ev.category),
-        raise_hand_enabled=False if crud.is_memorial_category(ev.category) else ev.raise_hand_enabled,
+        # Category no longer decides either of these. The Funeral / Memorial restriction was
+        # retired by product decision and removed from crud.event (create/update) and from
+        # services/broadcast._seed_settings (go-live) — but these two lines survived, so a
+        # memorial event still reported both OFF to every viewer. That was the last place the
+        # retired rule was still enforced, and it was enforced on the ONE surface that
+        # decides whether the controls render at all.
+        #
+        # It was also already inconsistent with the server's own enforcement: _seed_settings
+        # seeds reactions_enabled from DEFAULT_SETTINGS regardless of category, so
+        # moderation._reaction_add would have ACCEPTED a reaction the client had hidden the
+        # button for.
+        #
+        # reactions_enabled has no Event column — it is a live-session setting the host
+        # toggles from the console (services/broadcast.DEFAULT_SETTINGS), and the bus value is
+        # what moderation._reaction_add actually enforces per reaction. True here matches that
+        # default; the host turning it off mid-event is enforced server-side, not by hiding
+        # this flag at page load.
+        reactions_enabled=True,
+        raise_hand_enabled=ev.raise_hand_enabled,
         category=ev.category, end_time=ev.end_time,
         # Both fields report the EFFECTIVE policy, so the client never has to re-derive it
         # (and cannot drift from it): registration_required is what the viewer is actually

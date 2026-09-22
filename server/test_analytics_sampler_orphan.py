@@ -385,8 +385,17 @@ def test_tx_rolls_back_and_closes_on_failure(monkeypatch):
     transaction state — and because tx() opens a SHORT-LIVED session per call, a failure
     cannot leak into the next one either."""
     events = []
+    # SQL the session was asked to run, kept in its OWN list. Deliberately not appended to
+    # `events`: that sequence is the transaction CLEANUP contract (rollback/close,
+    # commit/close), and folding a setup statement into it would blur what those two
+    # assertions pin. Two lists, two separate claims.
+    executed = []
 
     class FakeSession:
+        def execute(self, statement, *args, **kwargs):
+            executed.append(str(statement))
+            return None
+
         def commit(self):
             events.append("commit")
 
@@ -398,16 +407,34 @@ def test_tx_rolls_back_and_closes_on_failure(monkeypatch):
 
     monkeypatch.setattr(m, "SessionLocal", lambda: FakeSession())
 
+    # Records what the timeout looked like AT THE MOMENT the callback ran — the ordering
+    # check below turns on this, and it can only be observed from inside the callback.
+    seen_by_callback = []
+
     def boom(db):
+        seen_by_callback.append(list(executed))
         raise IntegrityError("INSERT ...", {}, _PgError("23503", "analytics_snapshots_event_id_fkey"))
 
     with pytest.raises(IntegrityError):
         m._run(boom)
     assert events == ["rollback", "close"], events
 
+    # ── the lock timeout ───────────────────────────────────────────────────────────────
+    # A blocked row lock was seen holding a worker thread and a DB connection for 3+ minutes
+    # under real concurrent Q&A voting, which is what `SET LOCAL lock_timeout` bounds. It is
+    # one line in moderation._run() with nothing else asserting it, so deleting it would
+    # otherwise leave the whole suite green and reintroduce the hang under load.
+    assert executed == ["SET LOCAL lock_timeout = '5s'"], executed
+    # SET LOCAL is scoped to the surrounding transaction, so it has to be issued on the same
+    # session, and BEFORE the work it protects — a timeout set afterwards bounds nothing.
+    assert seen_by_callback == [["SET LOCAL lock_timeout = '5s'"]], seen_by_callback
+
     events.clear()
+    executed.clear()
     assert m._run(lambda db: "ok") == "ok"
     assert events == ["commit", "close"], events
+    # Set on the success path too: every transaction is bounded, not just the ones that fail.
+    assert executed == ["SET LOCAL lock_timeout = '5s'"], executed
 
 
 # ── database invariants (these need the real schema) ──────────────────────────

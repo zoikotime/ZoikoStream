@@ -809,13 +809,16 @@ export default function EventWatch() {
                 )}
               </VideoPlayer>
             )}
-            {/* reactions_enabled is False only for a memorial-category event (doc Sec.
-                11.3/19, non-waivable LE-AC-16) — computed server-side in routers/events.py's
-                watch_event, since reactions have no persisted Event column of their own. */}
-            {!timeGated && watch.reactions_enabled && (
+            {/* TWO independent features, each on its own flag.
+                Raise Hand lives inside ReactionBar, and the whole bar used to be gated on
+                `reactions_enabled` alone — so an event with reactions off lost its Raise
+                Hand button too, however its own `raise_hand_enabled` was set. The bar now
+                renders when EITHER is on, and each control checks its own flag. */}
+            {!timeGated && (watch.reactions_enabled || watch.raise_hand_enabled) && (
               <ReactionBar
                 onReact={(key) => sendLive("reaction.add", { key })}
                 disabled={liveStatus !== "open"}
+                reactionsVisible={Boolean(watch.reactions_enabled)}
                 handRaised={handRaised}
                 onToggleHand={toggleHand}
                 raiseHandVisible={Boolean(watch.raise_hand_enabled)}
