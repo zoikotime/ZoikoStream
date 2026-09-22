@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { FiShield, FiGlobe, FiFileText, FiAlertOctagon } from "react-icons/fi";
+import { FiShield, FiGlobe, FiFileText, FiAlertOctagon, FiHeadphones, FiRefreshCw } from "react-icons/fi";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
@@ -10,6 +10,7 @@ import Skeleton from "../../ui/Skeleton";
 import Panel from "../../components/admin/Panel";
 import HealthDot from "../../components/admin/HealthDot";
 import LifecycleRail from "../../components/admin/sections/LifecycleRail";
+import { activeIncidents, incidentFreeCell, monitoredServices } from "../../data/supportStatus";
 
 // Support & Status — this organization's view of platform availability.
 //
@@ -98,10 +99,6 @@ export default function SupportStatus() {
   useInterval(reload, REFRESH_MS);
 
   const stages = useMemo(() => data?.lifecycle || [], [data]);
-  const openIncidents = useMemo(
-    () => stages.reduce((n, s) => n + (s.open_incidents || 0), 0),
-    [stages]
-  );
   // The stage carrying an incident, worst first — the page shows the one that matters.
   const incident = useMemo(
     () =>
@@ -128,6 +125,10 @@ export default function SupportStatus() {
       </div>
     );
   }
+
+  const monitored = monitoredServices(stages);
+  // `0` only when the feed actually answered — see data/supportStatus.activeIncidents.
+  const incidents = activeIncidents(stages, Boolean(data));
 
   const health = data?.service_health || {};
   const verdict = VERDICT[health.status] || VERDICT.not_configured;
@@ -158,6 +159,20 @@ export default function SupportStatus() {
               {localTime} · {utcTime} · updated every 60 seconds
             </p>
           )}
+
+          {/* Getting help is the reason most people open this page, and it used to be a
+              12px word in the bottom-right footer, below three screens of telemetry. The
+              footer link stays as secondary navigation; this is the one you can find. */}
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {/* ui/Button turns an internal href into a react-router <Link>, so this is a
+                real navigation to the EXISTING /contact page — no second contact system. */}
+            <ConsoleButton href="/contact" size="sm" leftIcon={FiHeadphones}>
+              Contact Support
+            </ConsoleButton>
+            <ConsoleButton variant="secondary" size="sm" leftIcon={FiRefreshCw} onClick={reload}>
+              Refresh
+            </ConsoleButton>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -167,17 +182,29 @@ export default function SupportStatus() {
             tone={CONSOLE.faint}
             title="The availability probe retains 30 days at most — no 90-day window to report"
           />
-          <StatTile label="Monitored services" value={stages.length} tone="text-violet-600 dark:text-violet-400" />
+          <StatTile
+            label="Monitored services"
+            value={monitored.text}
+            tone="text-violet-600 dark:text-violet-400"
+            title={monitored.title}
+          />
           <StatTile
             label="Active incidents"
-            value={openIncidents}
-            tone={openIncidents ? "text-amber-600 dark:text-amber-400" : CONSOLE.heading}
+            value={incidents.text}
+            tone={incidents.count ? "text-amber-600 dark:text-amber-400" : CONSOLE.heading}
+            title={incidents.title}
           />
         </div>
       </div>
 
       {/* ── Delivery footprint ─────────────────────────────────────────────── */}
-      <Panel eyebrow="Global delivery regions" title={`${region} · updated every 60 seconds`}>
+      {/* `region` is Organization.region — free text the org configured, not something any
+          probe confirmed. Titled as configuration so it cannot be read as a measured
+          delivery footprint. */}
+      <Panel
+        eyebrow="Global delivery regions"
+        title={region === "Global" ? "No region configured" : `Configured region · ${region}`}
+      >
         <div className={cx("grid place-items-center rounded-lg px-4 py-10 text-center", CONSOLE.inset)}>
           <p className={cx("text-[13px]", CONSOLE.muted)}>No regional delivery telemetry yet</p>
           <p className={cx("mt-1 max-w-md text-[12px]", CONSOLE.faint)}>
@@ -203,15 +230,25 @@ export default function SupportStatus() {
 
         <Panel flush>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px]">
+            <table className="w-full min-w-[420px]">
               <thead>
                 <tr className={cx("border-b", CONSOLE.divider)}>
                   <th scope="col" className={cx(th, CONSOLE.faint)}>Service</th>
-                  <th scope="col" className={cx(th, CONSOLE.faint)}>Region</th>
                   <th scope="col" className={cx(th, CONSOLE.faint)}>Status</th>
-                  {/* Labelled for what it measures: `availability` is the 24h window the
-                      probe covers, not the design's 90 days — no 90-day series exists. */}
-                  <th scope="col" className={cx(th, "text-right", CONSOLE.faint)}>Uptime (24 h)</th>
+                  {/* Labelled for what the number IS. services/ops.availability() computes
+                      100 − (recorded incident minutes ÷ window), so with an empty incident
+                      log every row reads 100.00%. Under the old heading "Uptime (24 h)" that
+                      claimed a measurement nothing in this deployment takes. The Region
+                      column went with it: it repeated the ORGANISATION's configured region
+                      on all eight rows, which implied per-service regional telemetry that
+                      does not exist. The region is stated once, above. */}
+                  <th
+                    scope="col"
+                    className={cx(th, "text-right", CONSOLE.faint)}
+                    title="Share of the last 24 hours with no recorded incident. From the incident log, not an uptime probe."
+                  >
+                    Incident-free (24 h)
+                  </th>
                 </tr>
               </thead>
               <tbody className={cx("divide-y", CONSOLE.divideY)}>
@@ -220,12 +257,18 @@ export default function SupportStatus() {
                     <td className={cx(td, "font-medium", CONSOLE.heading)}>
                       {SERVICE_NAME[s.stage] || s.label}
                     </td>
-                    <td className={cx(td, CONSOLE.muted)}>{region}</td>
                     <td className={td}>
                       <HealthDot status={s.status} />
                     </td>
-                    <td className={cx(td, "text-right", type.mono, CONSOLE.body)}>
-                      {s.availability == null ? "—" : `${s.availability.toFixed(2)}%`}
+                    <td className={cx(td, "text-right", type.mono)}>
+                      {(() => {
+                        const cell = incidentFreeCell(s);
+                        return (
+                          <span className={cell.measured ? CONSOLE.body : CONSOLE.faint} title={cell.title}>
+                            {cell.text}
+                          </span>
+                        );
+                      })()}
                     </td>
                   </tr>
                 ))}
@@ -288,9 +331,17 @@ export default function SupportStatus() {
               </span>
             </div>
           ) : (
-            <p className={cx("py-6 text-center text-[13px]", CONSOLE.muted)} title="Needs a maintenance calendar (not integrated)">
-              No maintenance scheduled.
-            </p>
+            // `security_support.maintenance_window` is hardcoded None in services/org.py —
+            // "No findings scanner, review scheduler or maintenance calendar in this stack."
+            // So nothing here can confirm an absence, and "No maintenance scheduled" claimed
+            // a fact nobody checked.
+            <div className="py-6 text-center">
+              <p className={cx("text-[13px]", CONSOLE.muted)}>No maintenance calendar is connected.</p>
+              <p className={cx("mx-auto mt-1 max-w-xs text-[12px]", CONSOLE.faint)}>
+                This deployment has no maintenance scheduler, so planned work cannot be listed
+                here. It does not mean none is planned.
+              </p>
+            </div>
           )}
         </Panel>
       </div>
@@ -320,7 +371,16 @@ export default function SupportStatus() {
                 {body}
               </Link>
             ) : (
-              <div key={title} className={cls}>{body}</div>
+              // No destination exists for these two. They already rendered as inert divs,
+              // but looked exactly like the two beside them that DO navigate — so they read
+              // as dead buttons. Dimmed and labelled, so the difference is visible rather
+              // than discovered by clicking.
+              <div key={title} className={cx(cls, "opacity-60")}>
+                {body}
+                <span className={cx("ml-auto shrink-0 self-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider", CONSOLE.inset, CONSOLE.faint)}>
+                  On request
+                </span>
+              </div>
             );
           })}
         </div>

@@ -36,6 +36,11 @@ const PULSE_MS = 700;
  */
 export default function ReactionBar({
   onReact, disabled = false, className = "",
+  // Each control is governed by its OWN event setting. They used to share one gate in
+  // EventWatch, which meant an event with reactions off also lost Raise Hand — two
+  // independent features, one switch. Defaults to true so every existing caller is
+  // unchanged.
+  reactionsVisible = true,
   handRaised = false, onToggleHand, raiseHandVisible = false,
 }) {
   // The most recent tap: which emoji, and a monotonic counter so a REPEAT tap on the same
@@ -71,7 +76,7 @@ export default function ReactionBar({
         className
       )}
     >
-      {REACTIONS.map((r) => {
+      {reactionsVisible && REACTIONS.map((r) => {
         const flashing = lastTap?.key === r.key;
         return (
         <button
@@ -108,7 +113,9 @@ export default function ReactionBar({
           aria-label={handRaised ? "Lower your hand" : "Raise your hand"}
           title={handRaised ? "Lower your hand" : "Raise your hand"}
           className={cx(
-            "ml-auto inline-flex min-h-11 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
+            // Pushed right only when there are emoji on its left to push away from.
+            reactionsVisible && "ml-auto",
+            "inline-flex min-h-11 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
             handRaised
               ? "border-transparent bg-violet-600 text-white hover:bg-violet-500"
               : "border-violet-300 text-violet-600 hover:bg-violet-50 dark:border-violet-500/40 dark:text-violet-400 dark:hover:bg-violet-500/10"

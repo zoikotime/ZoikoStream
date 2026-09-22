@@ -136,7 +136,22 @@ def test_watch_out_exposes_category_end_time_and_raise_hand():
         _cleanup(db, org, user, ev)
 
 
-def test_watch_out_raise_hand_forced_off_for_memorial_category():
+def test_watch_out_does_not_force_memorial_controls_off():
+    """INVERTED, not deleted. This used to assert the opposite — that a memorial event's
+    watch payload reported raise_hand_enabled and reactions_enabled as False whatever the
+    organiser had configured.
+
+    That restriction is retired by product decision, and was removed from crud.event
+    (create/update) and services/broadcast._seed_settings some time ago. These two clamps in
+    routers/events.watch_event were the last place it still ran — and the most damaging one,
+    because this payload is what decides whether the viewer's controls RENDER AT ALL. A
+    memorial host could tick Raise Hand, see it stored, see it seeded at go-live, and still
+    have every viewer served False.
+
+    It was already contradicting the server's own enforcement: _seed_settings seeds
+    reactions_enabled from DEFAULT_SETTINGS regardless of category, so
+    moderation._reaction_add would have accepted a reaction whose button this payload had
+    hidden."""
     db = SessionLocal()
     client = TestClient(m.app)
     org = _org(db)
@@ -145,8 +160,24 @@ def test_watch_out_raise_hand_forced_off_for_memorial_category():
     db.commit()
     try:
         body = client.get(f"/api/events/{ev.id}/watch").json()
+        assert body["raise_hand_enabled"] is True, body
+        assert body["reactions_enabled"] is True, body
+    finally:
+        _cleanup(db, org, user, ev)
+
+
+def test_watch_out_reports_raise_hand_off_when_the_organiser_turned_it_off():
+    """The other half, and the reason the inversion above is not just "always True": a real
+    False still travels. Nothing fakes an enabled feature."""
+    db = SessionLocal()
+    client = TestClient(m.app)
+    org = _org(db)
+    user = _user(db, org)
+    ev = _event(db, org, user, category="Funeral / Memorial", raise_hand_enabled=False)
+    db.commit()
+    try:
+        body = client.get(f"/api/events/{ev.id}/watch").json()
         assert body["raise_hand_enabled"] is False, body
-        assert body["reactions_enabled"] is False, body
     finally:
         _cleanup(db, org, user, ev)
 
