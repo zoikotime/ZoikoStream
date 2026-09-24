@@ -103,8 +103,31 @@ def test_db_identity_distinguishes_different_databases_on_same_host():
 # real pytest collection does, in a throwaway process, with a controlled environment — without
 # ever starting pytest recursively.
 
+# The variables the guard reads. These are cleared from the child's environment so each case
+# starts from a known state; everything else is inherited.
+_GUARD_VARS = ("ENVIRONMENT", "DATABASE_URL", "TEST_DATABASE_URL")
+
+
 def _run_conftest_import(env_overrides: dict, extra_code: str = "") -> subprocess.CompletedProcess:
-    env = {"PATH": __import__("os").environ.get("PATH", ""), "SystemRoot": __import__("os").environ.get("SystemRoot", "")}
+    """Import conftest in a child process with the guard's inputs controlled exactly.
+
+    The environment is INHERITED and then scrubbed of _GUARD_VARS, rather than rebuilt from
+    just PATH + SystemRoot. The rebuilt version isolated more than the test needed: the two
+    refusal cases passed because conftest exits before `import pytest`, but the case that is
+    ALLOWED to continue reached that import and died with `ModuleNotFoundError: pluggy` —
+    the interpreter could no longer locate its own site-packages. That failure was about the
+    harness, not the guard, and it left a permanently red test on the one mechanism standing
+    between the suite and a production database, which is the kind of red nobody keeps
+    looking at.
+
+    Isolation of what actually matters is unchanged: all three guard variables are removed
+    and then set only from `env_overrides`.
+    """
+    import os
+
+    env = dict(os.environ)
+    for var in _GUARD_VARS:
+        env.pop(var, None)
     env.update(env_overrides)
     code = "import conftest" + ("\n" + extra_code if extra_code else "")
     return subprocess.run(

@@ -21,6 +21,7 @@ import Modal from "../../ui/Modal";
 import { Input, Label } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import { fmtDate } from "../../data/events";
+import { recordingState } from "../../data/recordingState";
 
 // Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
 // as a dependency, and a fresh `[]` literal on every render would defeat every one of them
@@ -249,19 +250,40 @@ function ExportModal({ recording, onClose }) {
   );
 }
 
-function RecordingCard({ r, onDownload, onShare, onDelete, onExport }) {
-  const watchHref = `/events/${r.event_id}/watch`;
+// Watch Replay plays THIS recording. It used to link to `/events/{event_id}/watch`, the
+// public attendee portal, which is wrong three ways: it is keyed on the EVENT, so on a
+// dual-recorded event both cards opened the same thing and neither opened the one you
+// clicked; it is the viewer surface, so an org admin arriving there is put through the
+// attendee access path and bounced back to the event; and it does not play a recording at
+// all for anyone the event's visibility excludes.
+//
+// The signed URL is already in the payload — generated server-side, time-limited, and (since
+// livekit.signed_url started verifying) only present when the object really exists. So the
+// player needs no new endpoint and no new playback infrastructure: it plays `r.url`.
+//
+// "View event" is kept as a SEPARATE action, because going to the event is a thing people
+// legitimately want — just not the thing the play button should do.
+function RecordingCard({ r, onWatch, onDownload, onShare, onDelete, onExport }) {
+  const state = recordingState(r);
+  const ready = state?.key === "ready" && Boolean(r.url);
   return (
     <Card padding="none" hover className="flex flex-col overflow-hidden">
       {/* Thumbnail */}
       <div className={cx("group relative grid aspect-video place-items-center bg-gradient-to-br", thumbFor(r.category))}>
-        <Link
-          to={watchHref}
-          aria-label={`Watch ${r.title || "recording"}`}
-          className="grid h-12 w-12 place-items-center rounded-full bg-white/15 text-white backdrop-blur transition hover:scale-110 hover:bg-white/25"
-        >
-          <FiPlay className="ml-0.5 text-xl" />
-        </Link>
+        {ready ? (
+          <button
+            type="button"
+            onClick={() => onWatch(r)}
+            aria-label={`Watch ${r.title || "recording"}`}
+            className="grid h-12 w-12 place-items-center rounded-full bg-white/15 text-white backdrop-blur transition hover:scale-110 hover:bg-white/25"
+          >
+            <FiPlay className="ml-0.5 text-xl" />
+          </button>
+        ) : (
+          <span className="rounded bg-black/50 px-2 py-1 text-[11px] font-semibold text-white">
+            {state?.label}
+          </span>
+        )}
         <span className="absolute bottom-2 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[11px] font-medium text-white">
           {fmtDuration(r.duration_seconds)}
         </span>
@@ -279,6 +301,14 @@ function RecordingCard({ r, onDownload, onShare, onDelete, onExport }) {
         </p>
         <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
           {r.started_at ? fmtDate(r.started_at) : "—"}
+          {" · "}
+          {/* A separate action from Watch Replay, and labelled as one. */}
+          <Link
+            to={`/organization/events/${r.event_id}`}
+            className="font-medium text-violet-600 hover:text-violet-500 dark:text-violet-400"
+          >
+            View event
+          </Link>
         </p>
 
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
@@ -293,13 +323,19 @@ function RecordingCard({ r, onDownload, onShare, onDelete, onExport }) {
           )}
         </div>
 
+        {/* Why this one cannot be played, when it cannot. Stated on the card rather than
+            discovered by clicking a control that then fails. */}
+        {!ready && state?.detail && (
+          <p className="mt-3 text-xs leading-snug text-slate-500 dark:text-slate-400">{state.detail}</p>
+        )}
+
         {/* Actions */}
         <div className="mt-4 space-y-2 border-t border-slate-100 pt-3 dark:border-slate-800">
-          <Button size="sm" href={watchHref} className="w-full">
+          <Button size="sm" onClick={() => onWatch(r)} disabled={!ready} className="w-full">
             <FiPlay className="text-base" /> Watch Replay
           </Button>
           <div className="flex items-center gap-1.5">
-            <ActionBtn icon={FiDownload} label="Download" disabled={!r.url} onClick={() => onDownload(r)} />
+            <ActionBtn icon={FiDownload} label="Download" disabled={!ready} onClick={() => onDownload(r)} />
             <ActionBtn icon={FiShare2} label="Share" onClick={() => onShare(r)} />
           </div>
           <div className="flex items-center gap-1.5">
@@ -315,6 +351,27 @@ function RecordingCard({ r, onDownload, onShare, onDelete, onExport }) {
   );
 }
 
+// Plays the recording's own signed URL. Not a new playback stack: the URL is produced by
+// the same services/livekit.signed_url the rest of the product uses, and a <video> element
+// is all a finished MP4 needs. The viewer portal (/events/:id/watch) stays the attendee
+// surface for a live or public event; this is the operator's library.
+function PlayerModal({ recording, onClose }) {
+  if (!recording) return null;
+  return (
+    <Modal open onClose={onClose} title={recording.title || "Recording"} size="xl">
+      {/* No <track>: egress produces no caption file, and adding an empty one would claim
+          accessibility support that does not exist. */}
+      <video
+        src={recording.url}
+        controls
+        autoPlay
+        className="aspect-video w-full rounded-lg bg-black"
+        data-testid="recording-player"
+      />
+    </Modal>
+  );
+}
+
 export default function OrganizationRecordings() {
   const { data, loading, error, reload } = useApi(() =>
     api.get("/organization/recordings").then((r) => r.data)
@@ -324,6 +381,7 @@ export default function OrganizationRecordings() {
   const [category, setCategory] = useState("All");
   const [sort, setSort] = useState("date-desc");
   const [exporting, setExporting] = useState(null);
+  const [playing, setPlaying] = useState(null);
 
   const categories = useMemo(
     () => ["All", ...new Set(list.map((r) => r.category).filter(Boolean))],
@@ -334,13 +392,19 @@ export default function OrganizationRecordings() {
   // is the only place it exists) has size_bytes = null. `|| 0` made those files look like
   // they occupied nothing, silently understating the org's storage — an unknown is not a
   // zero. The known total is still shown, with the shortfall named rather than hidden.
+  // Only rows that are actually a library recording count toward either total. A capture
+  // still finalising, or one whose object is missing from the bucket, is listed so the
+  // operator can see it — but counting it as a recording, or letting it contribute to
+  // storage, would report something the org does not have.
+  const ready = useMemo(() => list.filter((r) => recordingState(r)?.key === "ready"), [list]);
+
   const storage = useMemo(() => {
-    const known = list.filter((r) => typeof r.size_bytes === "number");
+    const known = ready.filter((r) => typeof r.size_bytes === "number");
     return {
       bytes: known.reduce((sum, r) => sum + r.size_bytes, 0),
-      unknown: list.length - known.length,
+      unknown: ready.length - known.length,
     };
-  }, [list]);
+  }, [ready]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -434,12 +498,20 @@ export default function OrganizationRecordings() {
 
       {/* Statistics cards — only what's real: no view/watch-time tracking exists yet */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <StatsCard title="Total Recordings" value={list.length} icon={FiFilm} accent="emerald" />
+        <StatsCard
+          title="Total Recordings"
+          value={ready.length}
+          hint={list.length > ready.length
+            ? `${list.length - ready.length} not available yet`
+            : undefined}
+          icon={FiFilm}
+          accent="emerald"
+        />
         <StatsCard
           title="Total Storage"
           // Nothing measured at all -> an em dash, not "0.0 GB": with every size unknown
           // there is no total to report, only an absence of one.
-          value={storage.unknown === list.length && list.length > 0 ? "—" : fmtTotalBytes(storage.bytes)}
+          value={storage.unknown === ready.length && ready.length > 0 ? "—" : fmtTotalBytes(storage.bytes)}
           hint={storage.unknown > 0
             ? `Excludes ${storage.unknown} recording${storage.unknown === 1 ? "" : "s"} of unknown size`
             : undefined}
@@ -464,12 +536,13 @@ export default function OrganizationRecordings() {
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {shown.map((r) => (
-            <RecordingCard key={r.id} r={r} onDownload={onDownload} onShare={onShare} onDelete={onDelete} onExport={onExport} />
+            <RecordingCard key={r.id} r={r} onWatch={setPlaying} onDownload={onDownload} onShare={onShare} onDelete={onDelete} onExport={onExport} />
           ))}
         </div>
       )}
 
       {exporting && <ExportModal recording={exporting} onClose={() => setExporting(null)} />}
+      <PlayerModal recording={playing} onClose={() => setPlaying(null)} />
     </div>
   );
 }

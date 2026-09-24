@@ -242,7 +242,12 @@ export default function Users() {
     <div className="mx-auto max-w-[1440px] space-y-6">
       <div>
         <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Users</h1>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Every account across every organization</p>
+        {/* Says what the page is, because the counts below it are scoped the same way. The
+            old "Every account across every organization" was true of the query and is not
+            true of this page's subject. */}
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          Platform administrators — Super Admin and Org Admin accounts, across every organization
+        </p>
       </div>
 
       {statsFailed && (
@@ -265,14 +270,19 @@ export default function Users() {
             <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Search by name, email, or username…" className={inputCls} />
           </div>
-          {/* The two platform roles, matching what the Edit modal can assign — filtering by a
-              role this console cannot grant was a dead end nobody reached for.
+          {/* The two platform roles, matching what the Edit modal can assign.
 
-              "All roles" is untouched and still means ALL: useUsersData sends no `role` param
-              for "all", so the backend applies no role predicate and every Billing Admin,
-              Host, Speaker and Viewer comes back. Narrowing the options here removes three
-              ways to SLICE the list, never a way to see someone — the Role column still shows
-              each account's real role, and search still finds them by name/email/username. */}
+              "All roles" means all roles THIS PAGE ADMINISTERS — Super Admin + Org Admin —
+              not every account in the database. It used to mean the latter: no `role` param
+              went out, the backend applied no predicate, and the page returned every Host,
+              Speaker and Viewer on the platform alongside a KPI row counting them too. The
+              scope is enforced in crud.admin.IDENTITY_ACCESS_ROLES, so it holds for search,
+              sorting, every page of pagination and the counts, and cannot be widened from the
+              query string.
+
+              Those accounts are not hidden, they are elsewhere: an org's members and an
+              event's hosts/speakers are granted and managed inside the organization, which is
+              also where their authorization is enforced. */}
           <select value={role} onChange={(e) => resetPage(() => setRole(e.target.value))} className={selectCls} aria-label="Filter by role">
             <option value="all">All roles</option>
             {ASSIGNABLE_PLATFORM_ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}

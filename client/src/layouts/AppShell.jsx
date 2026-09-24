@@ -10,12 +10,17 @@ import { register } from "../ui/dismissStack";
 // the wrapper. `fullHeight` locks the viewport (admin console); default scrolls (org).
 // `surface` overrides the page background — the admin console runs a true-black dark
 // theme while the org area keeps slate. Default preserves the original look exactly.
+// `outletContext` is handed to the routed page via useOutletContext(); the shell already
+// fetches the state both bars need, so a page that needs the same state (the console's
+// elevation grant, say) reads it from here instead of issuing a second request. Undefined
+// by default, which is exactly what <Outlet /> had before.
 export default function AppShell({
   renderSidebar,
   renderTopbar,
   fullHeight = false,
   surface = "bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200",
   mainClass = "p-4 sm:p-6 lg:p-8",
+  outletContext,
 }) {
   const [open, setOpen] = useState(false);
 
@@ -50,7 +55,7 @@ export default function AppShell({
               </div>
             }
           >
-            <Outlet />
+            <Outlet context={outletContext} />
           </Suspense>
         </main>
       </div>

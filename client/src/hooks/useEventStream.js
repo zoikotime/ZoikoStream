@@ -48,6 +48,24 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken)
   const [latency, setLatency] = useState(null);
   const [attempt, setAttempt] = useState(0);          // surfaces "retrying…" in the header
 
+  // Switching to a DIFFERENT event opens a different socket, so the old one's verdict must
+  // not describe it. Without this, opening Event B from an Event A console that had gone
+  // "offline" (or was mid-reconnect) showed B as offline/reconnecting until its own
+  // handshake landed — reporting a failure that belonged to another event.
+  //
+  // Adjusted during render rather than in an effect: this is React's documented "adjusting
+  // state when a prop changes" pattern (the same one pages/watch/EventWatch.jsx uses for
+  // its per-event reset), and it lands BEFORE the connect effect runs, so the first paint
+  // for the new event is already correct instead of being corrected a frame later.
+  const [connectedTo, setConnectedTo] = useState(eventId);
+  if (eventId !== connectedTo) {
+    setConnectedTo(eventId);
+    setStatus(authKey ? "connecting" : "unauthorized");
+    setAttempt(0);
+    setCloseReason(null);
+    setLatency(null);
+  }
+
   const socket = useRef(null);
   const manuallyClosed = useRef(false);
   const retryTimer = useRef(null);
@@ -65,12 +83,19 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken)
     let closed = false;     // component unmounted / deps changed — stop reconnecting
     manuallyClosed.current = false;
     let retries = 0;
+    // Has this socket EVER been open? "Reconnecting" is a claim about history — it says a
+    // working connection was lost — and without this flag there was nothing to base that
+    // claim on. A first attempt that failed took the same branch as a dropped session, so a
+    // freshly created event whose first handshake did not land announced "Reconnecting to
+    // the studio…" for a studio it had never reached.
+    let everOpen = false;
 
     const connect = () => {
       const ws = new WebSocket(wsUrl(eventId, token, regToken, linkToken));
       socket.current = ws;
 
       ws.onopen = () => {
+        everOpen = true;
         retries = 0;
         setAttempt(0);
         setStatus("open");
@@ -107,7 +132,13 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken)
         }
         retries += 1;
         setAttempt(retries);
-        setStatus(retries > 4 ? "offline" : "reconnecting");
+        // Still "connecting" until a connection has actually existed. Retrying the FIRST
+        // handshake is part of connecting, not a reconnect — and the distinction is the
+        // whole point of the word: an operator reading "Reconnecting" is being told
+        // something broke, which on a brand-new event is simply untrue.
+        // Repeated failure still escalates to "offline" either way, so a studio that
+        // genuinely cannot be reached is never dressed up as a connection in progress.
+        setStatus(retries > 4 ? "offline" : everOpen ? "reconnecting" : "connecting");
         // Jitter matters at scale: without it every console that dropped on the same
         // server blip reconnects in the same millisecond and knocks it over again.
         const wait = Math.min(1000 * 2 ** (retries - 1), MAX_BACKOFF_MS) * (0.7 + Math.random() * 0.6);

@@ -277,13 +277,21 @@ export function reducer(state, env) {
           : state.event,
       };
 
-    case "recording/recording.update":
+    case "recording/recording.update": {
+      // The active slot drives the console's recording indicator and timer, so it may only
+      // hold a recording that is genuinely RUNNING. This used to blacklist one terminal
+      // status (`=== "stopped" ? null : data`), which meant every other non-running status
+      // — "failed" above all — landed in the slot and started a timer for a capture that
+      // was not happening. Whitelisting the two live states is the same rule stated so that
+      // any future terminal status is handled correctly by default.
+      const active = data.status === "recording" || data.status === "paused";
       return {
         ...state,
-        // A stopped recording leaves the active slot but stays in the log.
-        recording: data.status === "stopped" ? null : data,
+        // A finished or failed recording leaves the active slot but stays in the log.
+        recording: active ? data : null,
         recordings: upsert(state.recordings, data),
       };
+    }
 
     case "analytics/analytics.tick":
       return {

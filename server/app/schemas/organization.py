@@ -306,7 +306,7 @@ class EventRecordingOut(BaseModel):
     """
     id: uuid.UUID
     event_id: uuid.UUID
-    status: str                       # recording | paused | stopped | failed
+    status: str                       # recording | paused | processing | stopped | failed
     # False when LiveKit egress never accepted the job, so no file was ever produced.
     enforced: bool
     error: str | None = None
@@ -318,6 +318,11 @@ class EventRecordingOut(BaseModel):
     size_bytes: int | None = None
     # Signed, time-limited, generated per request. None unless a real file exists.
     url: str | None = None
+    # The SAME verdict the org library renders (crud.event.recording_library_state), so the
+    # two pages cannot disagree about one row. `status` above stays for diagnostics; clients
+    # decide what to offer from this. "in_progress" is the one value only this endpoint can
+    # produce, since the library never lists a capture that is still running.
+    state: str = "ready"
     legal_hold: bool = False
     validation_status: str | None = None
 
@@ -341,6 +346,11 @@ class RecordingOut(BaseModel):
     # "Validation pending" label, not used to gate anything.
     validation_status: str | None = None
     url: str | None = None
+    # ready | processing | storage_unavailable | failed — crud.event.recording_library_state.
+    # The single verdict both the library and the event's Recording tab render, so the two
+    # can no longer reach different conclusions about the same row. Clients gate Watch and
+    # Download on this, never on `status`/`enforced`/`url` individually.
+    state: str = "ready"
 
 
 # ── Live Inputs (LiveKit Ingress) ─────────────────────────────────────────────

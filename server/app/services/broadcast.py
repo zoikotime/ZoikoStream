@@ -928,7 +928,17 @@ async def _stop_recording_rows(ctx, now) -> list[dict]:
                 continue
             if r.status == "paused" and r.paused_at:
                 r.paused_ms += int((now - r.paused_at).total_seconds() * 1000)
-            r.status, r.stopped_at, r.paused_at = "stopped", now, None
+            # "processing", not "stopped". Clicking stop ends the CAPTURE; the egress worker
+            # then finalises the container and uploads it, which takes real time and can
+            # fail. Writing "stopped" here claimed the recording was done the instant the
+            # host let go of the button, so the library listed a row whose object did not
+            # exist yet (or ever) and handed out a signed URL to nothing.
+            #
+            # record_egress_result below is the only thing that may write a terminal state,
+            # because LiveKit is the only party that knows whether the file landed. A row
+            # with no egress_id never had a job to wait on, so it goes terminal immediately.
+            terminal = "stopped" if not r.egress_id else "processing"
+            r.status, r.stopped_at, r.paused_at = terminal, now, None
             if errors.get(rid):
                 r.error = errors[rid]
             rows.append(recording_out(r))
@@ -1005,9 +1015,23 @@ async def _recording_start(ctx, payload):
         rows = []
         session = _current_session(db, ctx)
         for role, filepath, egress_id, error in started:
+            # A path with no egress_id is NOT recording — LiveKit refused or never answered,
+            # so nothing is being captured. It used to be written as status="recording"
+            # anyway, which had three consequences, all of them wrong:
+            #   * _current_recordings counted it as live, so the host's NEXT click came back
+            #     "A recording is already running" and they could never retry;
+            #   * the console showed a running timer for a file that did not exist;
+            #   * it sat in the org's history as a recording that was never made.
+            # Terminal from the start, with the provider's own message attached. The attempt
+            # is still persisted — the diagnostics are the point — it is just not pretending
+            # to be in progress.
+            captured_path = bool(egress_id)
             r = LiveRecording(
-                event_id=ctx.event_id, org_id=ctx.org_id, status="recording", quality=quality,
-                role=role, egress_id=egress_id, started_at=now, enforced=bool(egress_id), error=error,
+                event_id=ctx.event_id, org_id=ctx.org_id,
+                status="recording" if captured_path else "failed", quality=quality,
+                role=role, egress_id=egress_id, started_at=now,
+                stopped_at=None if captured_path else now,
+                enforced=captured_path, error=error,
                 auto_upload=bool(settings.get("auto_upload", True)),
                 file_url=filepath if egress_id else None, created_by=ctx.user_id,
             )
@@ -1031,10 +1055,26 @@ async def _recording_start(ctx, payload):
         # comparison against None.
         out = [recording_out(r) for r in rows]
         recording_comms_notify_started(db, rows[0])
-        return out, act
+        return out, act, captured
 
-    recs, act = await mod.tx(work)
-    return [("recording", "recording.update", r) for r in recs] + [("activity", "activity.new", act)]
+    recs, act, captured = await mod.tx(work)
+    envelopes = [("recording", "recording.update", r) for r in recs] + [("activity", "activity.new", act)]
+    if not captured:
+        # Nothing was captured on any path. The host must learn that NOW, on the click that
+        # failed, instead of discovering it in Event Details after the event. The console
+        # already listens on this channel (hooks/useLiveEvent.js surfaces it as a toast) —
+        # the server simply never published it, so a failed start was silent.
+        #
+        # An envelope rather than a returned error string on purpose: a string short-circuits
+        # mod.dispatch and would suppress the recording.update above, leaving the console with
+        # no row to reconcile against and its own state untouched.
+        first_error = next((e for (_role, _fp, _eid, e) in started if e), None)
+        envelopes.append(("recording", "recording.error", {
+            "message": f"Recording could not start — {first_error}" if first_error
+                       else "Recording could not start — LiveKit egress did not accept the job.",
+            "event_id": str(ctx.event_id),
+        }))
+    return envelopes
 
 
 async def _recording_pause(ctx, payload, resume: bool = False):
@@ -1602,6 +1642,29 @@ async def _retire_stale_session(session_id: str, event_id: str, reason: str) -> 
         row.ended_at = now
         row.ended_reason = STALE_SESSION_REASON
         row.paused_at = None
+        # Any recording still open on this session goes with it. Retiring the session and
+        # leaving its LiveRecording at "recording" is what produced the reported state: an
+        # event reading Ended while its Recording tab said "This recording is still running.
+        # It will finish when the broadcast ends" — of a broadcast that ended days earlier.
+        # Nothing else would ever have closed those rows; _stop_recording_rows only runs on
+        # the host's own stop/end path, which by definition did not happen here.
+        #
+        # "processing", not "stopped" or "failed": this says the capture is no longer
+        # running, which is all that is actually known. Whether a file landed is LiveKit's
+        # to answer, and _reconcile_recordings_once asks it.
+        for rec in db.scalars(
+            select(LiveRecording).where(
+                LiveRecording.session_id == row.id,
+                LiveRecording.status.in_(("recording", "paused")),
+            )
+        ).all():
+            rec.status = "processing" if rec.egress_id else "failed"
+            rec.stopped_at = rec.stopped_at or now
+            rec.paused_at = None
+            if not rec.egress_id and not rec.error:
+                rec.error = "The broadcast session was closed without a recording job running."
+            log.warning("stale_session_recording session_id=%s recording_id=%s -> %s",
+                        session_id, rec.id, rec.status)
         return True
 
     closed = await mod.tx(work)
@@ -1785,10 +1848,65 @@ async def _sample_once() -> list[tuple[str, dict]]:
     return out
 
 
+# How long a recording may sit un-finalised before the sampler asks LiveKit about it
+# directly. Comfortably longer than a normal upload, so the webhook always wins the race and
+# reconciliation stays the exception it is meant to be.
+RECORDING_FINALISE_GRACE = timedelta(minutes=10)
+RECONCILE_BATCH = 20
+
+
+async def _reconcile_recordings_once() -> int:
+    """Catch up the rows a missed `egress_ended` webhook would otherwise strand forever.
+
+    reconcile_stuck_recording() has existed since the live-operations work and was correct,
+    complete, and CALLED BY NOTHING — referenced only from a comment. So the entire
+    missed-webhook recovery story was theoretical: if LiveKit could not reach
+    /api/live/webhooks/livekit (wrong URL, restart mid-flight, a 500 on our side), the row
+    stayed "recording" indefinitely, the library never listed it, and the event's Recording
+    tab claimed the broadcast was still running.
+
+    Deliberately NOT a new ticker. This rides the analytics sampler that is already running
+    on its own interval, so there is one background loop, not two, and no new polling
+    mechanism to reason about. The grace window and the batch cap keep it cheap: on a healthy
+    deployment this query returns nothing and costs one indexed scan per tick.
+
+    Idempotent by construction — it finalises through record_egress_result, the same writer
+    the webhook uses, so a row reconciled here is indistinguishable from one finalised
+    normally, and a webhook arriving late simply writes the same values again.
+    """
+    cutoff = datetime.now(timezone.utc) - RECORDING_FINALISE_GRACE
+
+    def _stuck(db):
+        return [
+            (str(r.id), r.egress_id)
+            for r in db.scalars(
+                select(LiveRecording)
+                .where(
+                    LiveRecording.egress_id.isnot(None),
+                    LiveRecording.status.in_(("recording", "paused", "processing")),
+                    LiveRecording.created_at < cutoff,
+                )
+                .order_by(LiveRecording.created_at)
+                .limit(RECONCILE_BATCH)
+            ).all()
+        ]
+
+    rows = await mod.tx(_stuck)
+    finalised = 0
+    for recording_id, egress_id in rows:
+        try:
+            if await reconcile_stuck_recording(recording_id, egress_id) == "finalized":
+                finalised += 1
+        except Exception:  # noqa: BLE001 — one bad row must not stop the rest
+            log.exception("recording reconciliation failed for %s", recording_id)
+    return finalised
+
+
 async def run_sampler(interval: float = SAMPLE_SECONDS) -> None:
     while True:
         await asyncio.sleep(interval)
         try:
+            await _reconcile_recordings_once()
             for event_id, tick in await _sample_once():
                 # Per event: publishing goes through the same Redis, so during an outage
                 # every one of these fails. One unreachable publish must not discard the

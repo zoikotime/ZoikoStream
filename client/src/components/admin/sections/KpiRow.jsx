@@ -16,7 +16,6 @@ export default function KpiRow({ kpis, age }) {
   const live = k.live_sessions || {};
   const risk = k.at_risk_sessions || {};
   const audience = k.concurrent_audience || {};
-  const quality = k.playback_quality || {};
   const apiHealth = k.api_health || {};
 
   const liveDelta = seriesDelta(live.series);
@@ -30,7 +29,12 @@ export default function KpiRow({ kpis, age }) {
   ].filter(Boolean).join(" · ");
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+    // Five tiles. Playback quality was the sixth and is gone: nothing has ever written a
+    // playback_* row to platform_metrics (the table holds only platform_health_ok,
+    // api_p95_ms and api_error_ratio), so the tile was a permanent em dash plus an
+    // explanation of why. An overview is the wrong place to explain a missing integration;
+    // System Status is where an operator goes to find out what is not wired up.
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       <MetricTile
         label="Platform health"
         value={HEALTH_WORD[health.status] || "—"}
@@ -98,26 +102,6 @@ export default function KpiRow({ kpis, age }) {
         color="#22d3ee"
         to="/admin/live-events"
         linkLabel="Live Now"
-        age={age}
-      />
-
-      <MetricTile
-        label="Playback quality"
-        value={pct1(quality.value)}
-        unit={quality.value != null ? "%" : null}
-        note={
-          quality.value != null
-            ? [
-                quality.startup_ms != null ? `Startup ${(quality.startup_ms / 1000).toFixed(1)}s` : null,
-                quality.rebuffer_ratio != null ? `rebuffer ${quality.rebuffer_ratio}%` : null,
-                quality.fatal_ratio != null ? `fatal ${quality.fatal_ratio}%` : null,
-              ].filter(Boolean).join(" · ")
-            : quality.note
-        }
-        series={quality.series}
-        color="#ec4899"
-        to="/admin/analytics"
-        linkLabel="Delivery"
         age={age}
       />
 

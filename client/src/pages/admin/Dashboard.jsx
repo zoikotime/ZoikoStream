@@ -10,28 +10,42 @@ import Skeleton from "../../ui/Skeleton";
 import { ConsoleButton } from "../../ui/Button";
 import { downloadJson } from "../../utils/export";
 import CommandFilters from "../../components/admin/sections/CommandFilters";
-import LifecycleRail from "../../components/admin/sections/LifecycleRail";
 import KpiRow from "../../components/admin/sections/KpiRow";
 import SessionsAttention from "../../components/admin/sections/SessionsAttention";
-import StageMatrix from "../../components/admin/sections/StageMatrix";
-import IncidentsSecurity from "../../components/admin/sections/IncidentsSecurity";
-import ActionQueues from "../../components/admin/sections/ActionQueues";
-import GovernanceExposure from "../../components/admin/sections/GovernanceExposure";
-import PrivilegedActivity from "../../components/admin/sections/PrivilegedActivity";
+import IncidentSummary from "../../components/admin/sections/IncidentSummary";
 import UpcomingEvents from "../../components/admin/sections/UpcomingEvents";
+import ConsoleFooterLinks from "../../components/admin/sections/ConsoleFooterLinks";
 
 // The console re-reads itself on a timer; an operator should never have to wonder whether
 // what they are looking at is current. The "Refreshed Ns ago" line is the receipt.
 const REFRESH_MS = 30_000;
 const SLO_SECONDS = 600; // beyond this the page says so instead of quietly going stale
 
-// Footing notes — the console's operating rules. Static because they describe how the
-// system behaves, not what it currently measures.
-const RULES = [
-  "Live mode is the default; test data never enters readiness, badge, or attention counts.",
-  "Lifecycle, health, risk, readiness, and mode remain separate governed axes.",
-  "High-risk actions require scoped elevation, impact preview, step-up authentication, and audit.",
-];
+// ── WHAT THIS PAGE IS ───────────────────────────────────────────────────────────────────
+// An executive overview that answers five questions and stops:
+//
+//   Is the platform healthy?  Are there live sessions?  Does anything need me right now?
+//   Is there an incident?     Is anything high-impact coming up?
+//
+// It had grown into a second copy of six other consoles. Removed, with where each one
+// actually lives:
+//
+//   Lifecycle rail + stage matrix  -> System Status / Media Infrastructure. 8 stages x 4
+//       regions of "100.00%", which services/ops.availability computes as 100 minus recorded
+//       incident time — i.e. "nobody filed an incident", rendered as measured uptime. Thirty-two
+//       green cells asserting something nothing measured is worse than no cells.
+//   Playback quality KPI          -> nothing has ever written a playback_* metric, so the tile
+//       was a permanent em dash with an apology attached.
+//   Incidents feed                -> IncidentSummary below; System Status / Trust & Safety own
+//       the list.
+//   Action queues                 -> Support Operations / Trust & Safety / Commerce.
+//   Governance exposure           -> Governance / Usage & Entitlements / Commerce.
+//   Privileged activity feed      -> Audit, which is its own sidebar entry.
+//   Static "operating rules" prose-> described how the system behaves, measured nothing.
+//
+// The surviving counts are in ConsoleFooterLinks, and only when non-zero. If you are about
+// to add a panel here, check first whether it answers one of the five questions; if it
+// answers "what is the detail", it belongs on the page that owns the detail.
 
 function CommandCenterSkeleton() {
   return (
@@ -188,41 +202,23 @@ export default function AdminDashboard() {
         refreshing={loading}
       />
 
-      {/* Lifecycle rail */}
-      <LifecycleRail stages={data?.lifecycle || []} trend={kpis.concurrent_audience?.series || []} />
-
-      {/* KPI row */}
+      {/* Row 1 — the five measured KPIs */}
       <KpiRow kpis={kpis} age={`${ageSeconds}s`} />
 
-      {/* Attention + stage health */}
-      <div className="grid gap-4 xl:grid-cols-[1.35fr_1fr]">
-        <SessionsAttention items={data?.attention || []} />
-        <StageMatrix stages={data?.lifecycle || []} regions={data?.regions || []} />
-      </div>
+      {/* Row 2 — the only thing on this page an operator acts on directly */}
+      <SessionsAttention items={data?.attention || []} />
 
-      {/* Incidents + queues */}
+      {/* Row 3 — is anything burning, and is anything big coming */}
       <div className="grid gap-4 xl:grid-cols-2">
-        <IncidentsSecurity incidents={data?.incidents || []} />
-        <ActionQueues queues={data?.action_queues || []} />
+        <IncidentSummary incidents={data?.incidents || []} />
+        <UpcomingEvents events={data?.upcoming_events || []} />
       </div>
 
-      {/* Governance + privileged activity */}
-      <div className="grid gap-4 xl:grid-cols-2">
-        <GovernanceExposure governance={data?.governance} />
-        <PrivilegedActivity activity={data?.privileged_activity || []} />
-      </div>
-
-      {/* Upcoming high-impact events */}
-      <UpcomingEvents events={data?.upcoming_events || []} />
-
-      {/* Operating rules */}
-      <div className={cx("grid gap-x-8 gap-y-2 border-t pt-4 sm:grid-cols-2 lg:grid-cols-3", CONSOLE.divider)}>
-        {RULES.map((rule) => (
-          <p key={rule} className={cx("text-[11px] leading-relaxed", CONSOLE.faint)}>
-            — {rule}
-          </p>
-        ))}
-      </div>
+      <ConsoleFooterLinks
+        queues={data?.action_queues || []}
+        governance={data?.governance}
+        privilegedCount={(data?.privileged_activity || []).length}
+      />
 
       {/* Elevation reminder: the console states when the caller is acting with elevated
           scope, so a privileged session is never invisible. */}

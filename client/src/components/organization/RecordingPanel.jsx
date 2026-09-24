@@ -33,8 +33,12 @@ const fmtDuration = (s) => {
   return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : m >= 1 ? `${m}m` : `${Math.round(s)}s`;
 };
 
-function Row({ rec }) {
-  const st = recordingState(rec);
+function Row({ rec, eventEnded }) {
+  // The event's own lifecycle is an input to the verdict. A row stuck at status="recording"
+  // on an event that has already ended must never keep saying "it will finish when the
+  // broadcast ends" — that sentence is exactly what made a stranded capture look normal for
+  // days on end. See data/recordingState.js.
+  const st = recordingState(rec, { eventEnded });
   const size = fmtSize(rec.size_bytes);
   const dur = fmtDuration(rec.duration_seconds);
   const facts = [
@@ -134,7 +138,9 @@ export default function RecordingPanel({ event, recordings }) {
     );
   }
 
-  const failed = recordings.filter((r) => recordingState(r).key === "failed").length;
+  // "ended" and "completed" both mean the broadcast is over as far as this panel cares.
+  const eventEnded = ["ended", "completed", "cancelled"].includes(String(event?.status || "").toLowerCase());
+  const failed = recordings.filter((r) => recordingState(r, { eventEnded }).key === "failed").length;
 
   return (
     <div>
@@ -152,7 +158,7 @@ export default function RecordingPanel({ event, recordings }) {
         </div>
       )}
       <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-        {recordings.map((r) => <Row key={r.id} rec={r} />)}
+        {recordings.map((r) => <Row key={r.id} rec={r} eventEnded={eventEnded} />)}
       </ul>
     </div>
   );

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { FiSearch, FiRadio, FiGrid, FiClock } from "react-icons/fi";
+import { FiSearch, FiRadio, FiGrid, FiClock, FiSlash } from "react-icons/fi";
+import toast from "react-hot-toast";
 import api, { diagnoseLoadError } from "../../api";
 import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
@@ -10,6 +11,7 @@ import StatsCard from "../../ui/StatsCard";
 import HealthDot from "../../components/admin/HealthDot";
 import DataTable from "../../components/admin/DataTable";
 import { initials, timeAgo } from "../../components/admin/format";
+import EndSessionDialog from "./EndSessionDialog";
 
 // Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
 // as a dependency, and a fresh `[]` literal on every render would defeat every one of them
@@ -59,6 +61,8 @@ export default function LiveEvents() {
   useInterval(reload, POLL_MS);
   const [tab, setTab] = useState("live");
   const [q, setQ] = useState("");
+  // The row whose End-session confirmation is open. Null closes it.
+  const [ending, setEnding] = useState(null);
 
   const live = data?.live || NONE;
   const recent = data?.recent || [];
@@ -100,12 +104,40 @@ export default function LiveEvents() {
     { key: "duration", header: "Duration", align: "right", className: "whitespace-nowrap", render: (e) => duration(e.started_at, e.ended_at) },
     { key: "viewers", header: "Viewers", align: "right", className: "whitespace-nowrap", render: (e) => (e.viewers != null ? e.viewers.toLocaleString() : dash) },
     ...(tab === "live"
-      ? [{ key: "health", header: "Health", className: "whitespace-nowrap", render: (e) => (e.health ? <HealthDot status={e.health} /> : dash) }]
+      ? [
+          // "unknown" has no TONE entry, so HealthDot falls through to its neutral/"Unknown"
+          // tone — grey, and explicitly not Operational. That is the point: the reconciliation
+          // pass reports what LiveKit said, and when it could not be asked it says so.
+          { key: "health", header: "Health", className: "whitespace-nowrap", render: (e) => (e.health ? <HealthDot status={e.health} /> : dash) },
+          {
+            key: "actions",
+            header: "",
+            align: "right",
+            className: "whitespace-nowrap",
+            render: (e) => (
+              <button
+                type="button"
+                // The row itself navigates to the event; this must not do both.
+                onClick={(ev) => { ev.stopPropagation(); setEnding(e); }}
+                title="Force-end this broadcast session"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 dark:border-slate-700 dark:text-slate-300 dark:hover:border-rose-500/40 dark:hover:bg-rose-500/10 dark:hover:text-rose-300"
+              >
+                <FiSlash aria-hidden="true" /> End
+              </button>
+            ),
+          },
+        ]
       : []),
   ];
 
   return (
     <div className="space-y-6">
+      <EndSessionDialog
+        session={ending}
+        onClose={() => setEnding(null)}
+        onDone={(message) => { toast.success(message); reload(); }}
+      />
+
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
@@ -174,7 +206,7 @@ export default function LiveEvents() {
               rows={rows}
               rowKey={(e) => e.id}
               loading={loading}
-              minWidth={900}
+              minWidth={tab === "live" ? 1000 : 900}
               onRowClick={(e) => e.event_id && navigate(`/admin/live-events/${e.event_id}`)}
               empty={{ title: `No ${tab === "live" ? "live" : "recently ended"} events${q ? " match your search" : ""}.` }}
             />

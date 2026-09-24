@@ -56,12 +56,9 @@ export default function UpcomingEvents({ events = [] }) {
       }
     >
       {events.length === 0 ? (
-        <div className="py-6 text-center">
-          <p className={cx("text-[13px] font-medium", CONSOLE.body)}>No high-impact events scheduled</p>
-          <p className={cx("mt-1 text-[12px]", CONSOLE.faint)}>
-            Events classified high or unrepeatable appear here once scheduled.
-          </p>
-        </div>
+        <p className={cx("text-[13px]", CONSOLE.body)}>
+          No high-impact events scheduled.
+        </p>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {events.map((e) => {

@@ -310,9 +310,31 @@ USER_SORTS = {
 }
 
 
+# ── Identity & Access scope ─────────────────────────────────────────────────────────────
+# The two PLATFORM appointments, and the only accounts Super Admin -> Identity & Access
+# lists. It already assigned only these two (roleInfo.ASSIGNABLE_PLATFORM_ROLES) — the list
+# it assigned them over was every account on the platform, which on this deployment meant
+# 1,128 rows of which the overwhelming majority were Hosts, Speakers and Viewers that this
+# console cannot grant, cannot revoke and is not where anyone manages.
+#
+# Host / Speaker / Viewer / Billing Admin are granted INSIDE an organization (invitations,
+# member management) or per event, and that is where they are administered. They are not
+# hidden from the platform — they are simply not this page's subject.
+#
+# Enforced HERE rather than in the router or the browser, so there is one predicate and no
+# parameter combination that can step around it: both the list and the KPI counts read from
+# this constant, which is what stops the cards describing a different population than the
+# table. Nothing is deleted and no other role surface changes.
+IDENTITY_ACCESS_ROLES = ("super_admin", "org_admin")
+
+
 def list_users(db, q=None, role=None, org_id=None, is_active=None, page=1, page_size=20,
                sort_by=None, order="desc"):
-    stmt = select(User)
+    # Applied first and unconditionally. `role` below can only ever NARROW within this set:
+    # a request for role="host" ANDs to an empty result rather than reaching past the scope,
+    # so the listing cannot be widened from the query string. The router additionally rejects
+    # such a value outright, so it is a 422 rather than a silent empty page.
+    stmt = select(User).where(User.role.in_(IDENTITY_ACCESS_ROLES))
     if q:
         like = f"%{q.lower()}%"
         stmt = stmt.where(or_(func.lower(User.full_name).like(like),
@@ -353,14 +375,20 @@ def list_users(db, q=None, role=None, org_id=None, is_active=None, page=1, page_
 
 def user_stats(db) -> dict:
     """Dataset-wide counts for the Users console's KPI row — one query instead of the four
-    page_size=1 round trips the page used to make per load."""
+    page_size=1 round trips the page used to make per load.
+
+    Scoped to IDENTITY_ACCESS_ROLES, the same predicate list_users applies. Counting the whole
+    users table while the table below it listed a subset is how the page came to read
+    "Total 1,128" over a list that could never contain more than a few dozen — a KPI that
+    describes a different population than the rows under it is worse than no KPI.
+    """
     row = db.execute(
         select(
             func.count(),
             func.count().filter(User.is_active.is_(True)),
             func.count().filter(User.is_active.is_(False)),
             func.count().filter(User.role == "super_admin"),
-        )
+        ).where(User.role.in_(IDENTITY_ACCESS_ROLES))
     ).one()
     total, active, inactive, super_admins = row
     return {"total": total, "active": active, "inactive": inactive, "super_admins": super_admins}

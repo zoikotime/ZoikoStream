@@ -29,6 +29,10 @@ export default function AdminLayout() {
   return (
     <AppShell
       fullHeight
+      // Pages get the same console state the chrome runs on — specifically the elevation
+      // grant, so a page holding an elevation-gated control can show its real blocked state
+      // rather than offering a button the server will refuse.
+      outletContext={{ state, unknown, reload }}
       surface={`${CONSOLE.page} text-slate-800 dark:text-neutral-200`}
       mainClass="p-4 sm:p-6 lg:px-8 lg:py-7"
       renderSidebar={({ open, setOpen }) => (

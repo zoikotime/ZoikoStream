@@ -28,6 +28,18 @@ export default function Roles() {
       <div>
         <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Roles & Permissions</h1>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">What each role can do across the platform</p>
+        {/* This tab documents the COMPLETE authorization ladder — services/admin.roles()
+            derives it from security._ROLE_RANK precisely so it cannot drift from what is
+            actually enforced. It is reference material, not a list of things this console
+            hands out, and trimming it to the two platform appointments would turn an accurate
+            RBAC reference into a misleading one.
+            Saying so is what keeps the two tabs from being read as one list. */}
+        <p className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-[12px] leading-relaxed text-slate-600 dark:bg-white/[0.06] dark:text-neutral-300">
+          Reference only — this is the platform&rsquo;s full authorization model, derived from the
+          code that enforces it. Roles other than Super Admin and Org Admin are granted inside an
+          organization or per event, not from this console. The <strong>Users</strong> tab lists and
+          assigns the two platform appointments.
+        </p>
       </div>
 
       <div className="flex items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-5 py-3.5 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-300">

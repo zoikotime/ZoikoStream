@@ -262,6 +262,65 @@ def require_commercial(action: str):
     return _dep
 
 
+# ── step-up privilege (elevation) ────────────────────────────────────────────────────────
+
+# Scope names used by require_elevation below. Kept in one place so the console, the audit
+# trail and the guards cannot drift apart on spelling.
+ELEVATION_SCOPES = ("identity", "platform", "broadcast", "support")
+
+
+def require_elevation(scope: str):
+    """Gate one high-risk platform action on an ACTIVE, in-scope elevation session.
+
+    Usage: Depends(require_elevation("identity")).
+
+    ── WHY THIS EXISTS ──────────────────────────────────────────────────────────────────
+    The console has always shown "Standing access / Elevate" with a live countdown, which
+    tells an operator that destructive actions are gated behind a short, deliberate,
+    audited step-up. Nothing enforced it: POST /admin/elevation opened a session and
+    `services/ops.current_elevation` was read only to DRAW that badge. A super admin could
+    deactivate an account, flip a platform setting or force-end a broadcast with the badge
+    dark, and the product would happily do it. A security control that is only ever
+    rendered teaches a habit it does not back.
+
+    ── WHAT IT IS NOT ───────────────────────────────────────────────────────────────────
+    This is authorization DEPTH for platform operations, not breadth. It is layered on top
+    of require_super_admin (the router already applies that), never instead of it, and it
+    grants nothing inside a customer tenant: reaching into an Organization still goes
+    through /admin/support-access with that org's own approval and countersign (ORG-009).
+    Elevation carries no org scope, deliberately — see start_elevation's docstring.
+
+    Expiry is enforced HERE, server-side, on every request: current_elevation selects on
+    `expires_at > now()` and `ended_at IS NULL`, so a session that lapsed mid-task stops
+    authorizing the next call. A greyed-out button is a courtesy, not a control.
+    """
+    if scope not in ELEVATION_SCOPES:           # a typo must fail at import, not at 3am
+        raise ValueError(f"unknown elevation scope: {scope!r}")
+
+    def _dep(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+        # Imported here, not at module scope: services/ops imports from this module, and a
+        # top-level import would close the cycle.
+        from .services import ops as ops_svc
+
+        # ALL live sessions, not just the newest: a super admin can hold a platform
+        # elevation and a tenant support elevation at once (services/support_access opens
+        # its own), and reading only the most recent let one silently shadow the other.
+        granted = ops_svc.active_elevation_scopes(db, user)
+        if not granted:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "This action needs elevated access. Start an elevation session and try again.",
+            )
+        if scope not in granted:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Your elevation does not cover '{scope}'. Re-elevate with that scope to continue.",
+            )
+        return user
+
+    return _dep
+
+
 # ── Scheduler service identity (Cloud Scheduler -> Cloud Run, OIDC) ──────────────────────
 
 class SchedulerIdentity:
