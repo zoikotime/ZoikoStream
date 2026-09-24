@@ -363,9 +363,32 @@ jobs:
       # twelve suites with exit 4 and the job failed. The guard is right and stays; the
       # invocation is what had to change. testguard swaps this value into settings.DATABASE_URL
       # for the process, so the suites reach the same ephemeral container as before.
+      # BOTH variables, and both naming the same ephemeral container.
+      #
+      # DATABASE_URL is a REQUIRED Settings field with no default (app/config.py), and its
+      # env_file is the repository .env — which is gitignored and therefore does not exist on
+      # a runner. app/db.py imports `settings` at line 7 and only calls testguard.resolve()
+      # at line 15, so with TEST_DATABASE_URL alone every direct suite died during import:
+      #
+      #     ValidationError: 1 validation error for Settings
+      #     DATABASE_URL  Field required
+      #
+      # before the guard could swap anything in. The earlier comment here claimed the guard
+      # supplies the value; it does, but not early enough to satisfy Settings construction.
+      #
+      # TEST_DATABASE_URL stays, and is not redundant: app/testguard.py refuses a direct test
+      # run outright when it is absent, which is the interlock that stops a suite writing to a
+      # developer or production database. Setting both keeps that check armed while giving
+      # Settings something valid to construct from.
+      #
+      # Identical values are safe here specifically because these run OUTSIDE pytest:
+      # conftest's "TEST_DATABASE_URL and DATABASE_URL resolve to the same database" refusal
+      # applies to a pytest session, which this is not. The pytest step above still passes
+      # TEST_DATABASE_URL alone, so that refusal remains meaningful where it applies.
       - name: Self-check suites
         working-directory: server
         env:
+          DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
           TEST_DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
         run: |
           failed=""
