@@ -142,8 +142,15 @@ jobs:
           POSTGRES_DB: zoikostream_ci
         ports:
           - 5432:5432
+        # -U/-d explicitly. Bare `pg_isready` connects as the probe process's OS user, which
+        # inside the container is root, so every probe wrote `FATAL: role "root" does not
+        # exist` into the Postgres log. It was never a failure — pg_isready returns 0 for
+        # "server is accepting connections" the moment the server ANSWERS, and a rejected
+        # role is an answer — so the container went healthy and the job ran. But a FATAL in
+        # the service log of a failing job is the first thing anyone chases, and it cost
+        # exactly that here. Naming the real user and database makes the probe log clean.
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U zoiko -d zoikostream_ci"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -345,10 +352,21 @@ jobs:
       # The self-check suites, each through its own driver. `set -e` is the default, and the
       # loop records every failure rather than stopping at the first, so one run tells you
       # everything that is broken instead of only the earliest thing.
+      # TEST_DATABASE_URL, not DATABASE_URL. These suites are run DIRECTLY (`python test_x.py`),
+      # which never loads conftest.py — so app/testguard.py is what stands between them and a
+      # real database, and it refuses a direct test run outright unless TEST_DATABASE_URL names
+      # one. That guard exists because the old arrangement silently wrote fixture rows into
+      # whatever DATABASE_URL happened to name; it put 1,124 fixture accounts into a developer
+      # database once already.
+      #
+      # This step was still passing DATABASE_URL alone, so the guard correctly refused all
+      # twelve suites with exit 4 and the job failed. The guard is right and stays; the
+      # invocation is what had to change. testguard swaps this value into settings.DATABASE_URL
+      # for the process, so the suites reach the same ephemeral container as before.
       - name: Self-check suites
         working-directory: server
         env:
-          DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
+          TEST_DATABASE_URL: postgresql://zoiko:zoiko@127.0.0.1:5432/zoikostream_ci
         run: |
           failed=""
           for suite in ${{ steps.split.outputs.selfcheck }}; do
