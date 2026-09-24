@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import select
 
 from app.crud import admin as crud
+from app.crud.admin import IDENTITY_ACCESS_ROLES
 from app.db import SessionLocal
 from app.models import Organization, User
 from app.security import hash_password
@@ -28,10 +29,14 @@ from app.security import hash_password
 
 @pytest.fixture
 def world():
-    """Seven accounts of its own, across two organizations.
+    """Eight accounts of its own, across two organizations — six of them VISIBLE.
 
-    Seven, not five, because the pagination test needs more rows than two pages of three —
-    and it must own all of them. Depending on whatever else is in the database made it pass
+    The count that matters is the visible one. crud.list_users shows super_admin and
+    org_admin only, so of the five tagged accounts below just three are listed, and the
+    pagination test needs more rows than two pages of three. Hence three org_admin fillers:
+    3 tagged + 3 fillers + the seeded super admin = 7 visible.
+
+    It must own all of them. Depending on whatever else is in the database made this pass
     locally and fail on CI, where a freshly seeded database contributes exactly one row.
     """
     db = SessionLocal()
@@ -53,20 +58,31 @@ def world():
             db.add(u)
             users.append(u)
 
-        # Two more accounts that exist ONLY so pagination has a boundary to cross.
+        # Three more accounts that exist ONLY so pagination has a boundary to cross.
+        #
+        # THEY MUST HOLD A ROLE THE ADMIN LISTING ACTUALLY SHOWS. crud.list_users is scoped to
+        # IDENTITY_ACCESS_ROLES (super_admin + org_admin), so the previous "viewer"/"host"
+        # fillers were created, counted by the fixture, and then correctly filtered straight
+        # back out of every listing — padding that padded nothing. On a freshly seeded CI
+        # database that left only four visible rows (the seeded admin plus the three platform
+        # accounts above) against assertions needing more than five and more than six:
+        #
+        #     assert 4 > 5     assert 4 > 6
+        #
+        # Three org_admins, not two: the total has to clear `> 6`, and 4 + 3 = 7 does.
         #
         # test_pages_do_not_overlap_or_skip asserts `total > 6` because two pages of three
         # have to be genuinely distinct for the id-tiebreaker to be under test at all. It used
         # to get that sixth-and-beyond row from whatever else happened to be in the database —
-        # which is true locally and false on a freshly seeded CI database, where the only
-        # other row is the seeded super admin and the total lands on exactly 6.
+        # which is true locally and false on a freshly seeded CI database.
         #
         # Deliberately NOT tagged: every name, email and username here is uuid-derived and
         # contains no `tag`, so test_search_is_case_insensitive_and_partial still matches
-        # exactly the five accounts above. They also belong to the PRIMARY org, so
-        # test_org_filter_is_applied_in_sql still finds exactly one account in `other`.
-        # Neither is a super_admin, so the last-admin guard tests are unaffected.
-        for role in ("viewer", "host"):
+        # exactly the three VISIBLE tagged accounts above. They also belong to the PRIMARY
+        # org, so test_org_filter_is_applied_in_sql still finds exactly one account in
+        # `other`. None is a super_admin, so the last-admin guard tests are unaffected —
+        # org_admin keeps them visible without adding to the super-admin floor.
+        for role in ("org_admin", "org_admin", "org_admin"):
             pad = uuid.uuid4().hex[:12]
             u = User(org_id=org.id, full_name=f"Pagination Filler {pad}", role=role,
                      is_active=True, email=f"pagination-{pad}@example.com",
@@ -93,13 +109,29 @@ def world():
 
 
 # ── sorting is global, and safe ────────────────────────────────────────────────────────
+#
+# "Global" means the whole set the admin listing SHOWS, not the whole users table. Each test
+# below compares crud.list_users against an expectation computed independently, and that
+# expectation has to be drawn from the same population or it is comparing two different
+# questions. It used to select across every User row, so the moment the listing became scoped
+# to IDENTITY_ACCESS_ROLES these asserted that a Host or Viewer should have sorted first —
+# a test failing because the expectation is wrong, not the code.
+#
+# IDENTITY_ACCESS_ROLES is imported from crud rather than restated here on purpose: a copy of
+# the contract in the test file is a copy that can disagree with it.
+
+
+def _visible():
+    """The accounts /admin/users lists — the population every expectation here is drawn from."""
+    return select(User).where(User.role.in_(IDENTITY_ACCESS_ROLES))
+
 
 def test_sorting_spans_the_whole_set_not_the_returned_page(world):
     """The defect, stated directly: page 1 of an ascending sort must hold the global first
     row, not the first of some other slice."""
     db = world["db"]
     asc, total = crud.list_users(db, page=1, page_size=5, sort_by="joined", order="asc")
-    true_oldest = db.scalars(select(User).order_by(User.created_at.asc()).limit(1)).first()
+    true_oldest = db.scalars(_visible().order_by(User.created_at.asc()).limit(1)).first()
 
     assert total > 5, "needs more rows than one page for this to mean anything"
     assert asc[0].created_at == true_oldest.created_at
@@ -108,14 +140,14 @@ def test_sorting_spans_the_whole_set_not_the_returned_page(world):
 def test_descending_is_the_other_end_of_the_same_set(world):
     db = world["db"]
     desc, _ = crud.list_users(db, page=1, page_size=5, sort_by="joined", order="desc")
-    true_newest = db.scalars(select(User).order_by(User.created_at.desc()).limit(1)).first()
+    true_newest = db.scalars(_visible().order_by(User.created_at.desc()).limit(1)).first()
     assert desc[0].created_at == true_newest.created_at
 
 
 def test_name_sorting_is_global(world):
     db = world["db"]
     rows, _ = crud.list_users(db, page=1, page_size=5, sort_by="name", order="asc")
-    true_first = db.scalars(select(User).order_by(User.full_name.asc()).limit(1)).first()
+    true_first = db.scalars(_visible().order_by(User.full_name.asc()).limit(1)).first()
     assert rows[0].full_name == true_first.full_name
 
 
