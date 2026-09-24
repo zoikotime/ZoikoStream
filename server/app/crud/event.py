@@ -651,15 +651,53 @@ def list_event_recordings(db, org_id, event_id, limit: int = 50) -> list[LiveRec
     ).all())
 
 
+# Capture states that belong in the org library: the capture is over and a file either
+# exists or is still being finalised. "recording"/"paused" are live and belong to the host
+# console; "failed" never produced a file and stays on the event's own diagnostics tab.
+LIBRARY_STATUSES = ("stopped", "processing")
+
+
+def recording_library_state(rec: LiveRecording, url: str | None) -> str:
+    """THE verdict on one recording row — ready | processing | storage_unavailable | failed.
+
+    One function, called by both the org library and the event's Recording tab, because the
+    reported bug was precisely that those two pages read the same row differently: the event
+    tab showed a recording the library insisted did not exist. Any page that derives its own
+    answer from the raw columns will drift again, so the columns stop being the interface and
+    this is.
+
+    `url` is the caller's already-resolved signed URL. It is an INPUT rather than something
+    computed here because signing is an I/O call the caller batches, and because since
+    livekit.signed_url started verifying existence, "we could not produce a URL" is exactly
+    the evidence that distinguishes a finished-and-playable recording from one whose object
+    is not in the bucket. That distinction is not derivable from the row alone: `enforced`
+    only says LiveKit ACCEPTED the job, and `status` only says the capture stopped.
+    """
+    if rec.status == "failed" or not rec.enforced:
+        return "failed"
+    if rec.status == "processing":
+        return "processing"
+    if url:
+        return "ready"
+    # Terminal, enforced, and yet nothing signable is behind it.
+    return "storage_unavailable"
+
+
 def list_org_recordings(db, org_id, limit: int = 100) -> list[tuple[LiveRecording, Event]]:
     """Every captured recording across the org, newest first — the org-wide Recordings
     library. Joined to Event for title/category; org-scoped via Event.org_id (matches every
     other org-isolation check in this module) rather than LiveRecording.org_id directly, so
-    a stale org_id copy on the recording row can never leak a row from another tenant."""
+    a stale org_id copy on the recording row can never leak a row from another tenant.
+
+    Includes "processing" as well as "stopped". Listing only terminal rows meant a recording
+    vanished from the library for the whole finalisation window while the event's own tab
+    still showed it — the two pages disagreeing about the same row, which is the bug. It is
+    listed with state="processing" and no URL, never as a playable item.
+    """
     rows = db.execute(
         select(LiveRecording, Event)
         .join(Event, Event.id == LiveRecording.event_id)
-        .where(Event.org_id == org_id, LiveRecording.status == "stopped",
+        .where(Event.org_id == org_id, LiveRecording.status.in_(LIBRARY_STATUSES),
                LiveRecording.enforced.is_(True))
         .order_by(LiveRecording.stopped_at.desc())
         .limit(limit)

@@ -3,6 +3,8 @@ monitoring. Everything here is computed from real tables. Where no data source e
 (concurrent viewers, per-stream bitrate, infra latency for un-integrated services), the
 value is null/not_configured with a note — never a fabricated number."""
 
+import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -17,6 +19,8 @@ from ..models import (
 )
 from ..security import _ROLE_RANK
 from . import livekit
+
+log = logging.getLogger(__name__)
 
 # Excluded from customer-facing counts — it only holds the super admin (matches dashboard.py).
 PLATFORM_ORG_NAME = "ZoikoStream Platform"
@@ -197,10 +201,31 @@ def roles() -> list[dict]:
     ]
 
 
-def live_events(db: Session, state: str = "live") -> list[dict]:
+async def live_events(db: Session, state: str = "live") -> list[dict]:
     """Broadcast sessions for the platform monitor, joined up to their event and org.
     state="live"   -> currently broadcasting (including paused mid-broadcast), newest first
     state="recent" -> finished broadcasts, most recently ended first
+
+    ── WHY THIS ASKS LIVEKIT ────────────────────────────────────────────────────────────
+    The "live" list used to be `BroadcastSession.status IN ("live","paused")` and nothing
+    else, and `health` was `"ok" if s.status in ("live","paused")` — the row vouching for
+    itself. A session whose worker died never reaches "ended", so it sat in the monitor for
+    weeks: the reported case showed two rows started 15 days earlier, 383 hours of
+    "duration", both reading **Operational**. A status page that calls a fortnight-old
+    corpse healthy is worse than no status page, because operators learn to discount it.
+
+    So every supposedly-live session is now reconciled against the media server, which is
+    the only thing that actually knows. Three answers, kept distinct:
+
+      room present  -> genuinely live (or paused); real participant count attached
+      room absent   -> stale. Retired through broadcast._retire_stale_session — the SAME
+                       lifecycle the analytics sampler uses, so the row is closed with a
+                       reason, bus presence/state is cleared, and Event.status is left
+                       alone — then dropped from this list. It reappears under Recently
+                       Ended, where it belongs.
+      cannot ask    -> health "unknown". NOT retired and NOT called healthy: a LiveKit
+                       outage must not make the console start closing live broadcasts, and
+                       it must not let them keep claiming Operational either.
     """
     if state == "recent":
         stmt = (
@@ -235,11 +260,58 @@ def live_events(db: Session, state: str = "live") -> list[dict]:
             "server": livekit.room_for_event(s.event_id),  # services.livekit.room_for_event == Ctx.room
             "started_at": s.started_at,
             "ended_at": s.ended_at,
-            "health": "ok" if s.status in ("live", "paused") else None,
-            "viewers": None,        # source: LiveKit room stats (not integrated)
+            "status": s.status,
+            # Filled in by the reconciliation pass below for "live"; an ended session is
+            # history and has no current health to report.
+            "health": None,
+            "viewers": None,
             "bitrate_kbps": None,   # source: LiveKit track stats (not integrated)
         })
-    return out
+    if state == "recent":
+        return out
+    return await _reconcile_live(out)
+
+
+# Health vocabulary for the Live Operations table. "unknown" is a first-class answer, not a
+# fallback — see _reconcile_live.
+LIVE_HEALTH_OK = "ok"
+LIVE_HEALTH_UNKNOWN = "unknown"
+
+
+async def _reconcile_live(rows: list[dict]) -> list[dict]:
+    """Confirm each supposedly-live session against LiveKit; retire the ones that are gone.
+
+    Probed concurrently — an operator opening the monitor should not wait on N sequential
+    round trips, and these are independent reads.
+    """
+    # Imported here: services/broadcast imports this module's siblings, and a module-level
+    # import would close the cycle.
+    from . import broadcast as bc
+
+    if not rows:
+        return rows
+    probes = await asyncio.gather(
+        *(livekit.room_is_live(r["server"]) for r in rows), return_exceptions=True
+    )
+
+    live: list[dict] = []
+    for row, probe in zip(rows, probes):
+        # An exception that escaped the probe is still "we could not tell".
+        alive = None if isinstance(probe, BaseException) else probe
+        if alive is False:
+            # The media server says this room does not exist. Close it through the real
+            # lifecycle rather than editing the row here, so the reason, the bus cleanup and
+            # the audit trail are the same ones every other stale session gets.
+            retired = await bc._retire_stale_session(row["id"], row["event_id"], "livekit_room_absent")
+            log.warning("live-operations: session %s (event %s) had no LiveKit room — retired=%s",
+                        row["id"], row["event_id"], retired)
+            continue
+        row["health"] = LIVE_HEALTH_OK if alive else LIVE_HEALTH_UNKNOWN
+        if alive:
+            # Real participant count, or None when LiveKit cannot say. Never 0 by default.
+            row["viewers"] = await livekit.room_participant_count(row["server"])
+        live.append(row)
+    return live
 
 
 def list_recordings(db: Session, status: str | None = None, org_id=None, limit: int = 200) -> list[dict]:

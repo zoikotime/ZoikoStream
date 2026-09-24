@@ -37,12 +37,11 @@ export default function SessionsAttention({ items = [] }) {
       className="flex flex-col"
     >
       {items.length === 0 ? (
-        <div className="px-5 py-10 text-center">
-          <p className={cx("text-[13px] font-medium", CONSOLE.body)}>No sessions need attention</p>
-          <p className={cx("mt-1 text-[12px]", CONSOLE.faint)}>
-            Every live session is publishing, attended and capturing as configured.
-          </p>
-        </div>
+        // Compact by design: the healthy state is the common one, and a full-height empty
+        // card for it was most of why this page ran to three screens.
+        <p className={cx("px-4 py-3 text-[13px] sm:px-5", CONSOLE.body)}>
+          No live session needs attention.
+        </p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[42rem] text-left">

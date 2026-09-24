@@ -533,9 +533,18 @@ def list_event_recordings(
             duration = int((rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000)
         # A link only where a file was actually produced. enforced=False means egress never
         # accepted the job; file_url may still hold the intended path, which is not a file.
-        url = livekit.signed_url(rec.file_url) if (rec.enforced and rec.file_url) else None
+        url = (
+            livekit.signed_url(rec.file_url)
+            if (rec.enforced and rec.file_url and rec.status == "stopped")
+            else None
+        )
+        state = (
+            "in_progress" if rec.status in ("recording", "paused")
+            else event_crud.recording_library_state(rec, url)
+        )
         out.append(EventRecordingOut(
             id=rec.id, event_id=event_id, status=rec.status, enforced=rec.enforced,
+            state=state,
             error=rec.error, quality=rec.quality, role=rec.role,
             started_at=rec.started_at, stopped_at=rec.stopped_at,
             duration_seconds=duration, size_bytes=rec.size_bytes, url=url,
@@ -561,10 +570,15 @@ def list_recordings(
         duration = None
         if rec.started_at and rec.stopped_at:
             duration = int((rec.stopped_at - rec.started_at).total_seconds() - rec.paused_ms / 1000)
+        # Signed once, then reused: signed_url now verifies the object exists, so the
+        # absence of a URL is the evidence recording_library_state needs to tell a finished
+        # recording apart from one whose file never landed in the bucket.
+        url = livekit.signed_url(rec.file_url) if rec.status == "stopped" else None
         out.append(RecordingOut(
             id=rec.id, event_id=ev.id, title=ev.title, category=ev.category,
             started_at=rec.started_at, duration_seconds=duration, size_bytes=rec.size_bytes,
-            url=livekit.signed_url(rec.file_url),
+            url=url,
+            state=event_crud.recording_library_state(rec, url),
             legal_hold=rec.legal_hold or ev.id in held_event_ids,
             validation_status=rec.validation_status,
         ))

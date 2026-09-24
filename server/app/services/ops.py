@@ -872,6 +872,34 @@ def _role_label(role: str | None) -> str | None:
 
 # ── elevation ─────────────────────────────────────────────────────────────────
 
+def active_elevation_scopes(db: Session, user: User) -> set[str]:
+    """Every scope this user is currently elevated for, across ALL live sessions.
+
+    Plural on purpose. `current_elevation` below returns only the NEWEST session because the
+    console badge can show one thing — but a super admin legitimately holds more than one at
+    a time: services/support_access opens its own elevation when a tenant support session
+    starts, scoped to that case. Authorizing from the newest alone meant starting a support
+    session silently revoked an unrelated platform elevation, because the support one shadowed
+    it. Whether an action is permitted is a question about the SET, not about whichever row
+    happens to be most recent.
+
+    Expiry is applied here, so a lapsed session contributes nothing.
+    """
+    rows = db.scalars(
+        select(ElevationSession).where(
+            ElevationSession.user_id == user.id,
+            ElevationSession.ended_at.is_(None),
+            ElevationSession.expires_at > _now(),
+        )
+    ).all()
+    out: set[str] = set()
+    for row in rows:
+        if row.scope:
+            out.add(row.scope)
+        out.update(row.scopes or [])
+    return out
+
+
 def current_elevation(db: Session, user: User) -> dict | None:
     row = db.scalar(
         select(ElevationSession).where(
@@ -886,6 +914,12 @@ def current_elevation(db: Session, user: User) -> dict | None:
         "id": str(row.id),
         "scope": row.scope,
         "scopes": row.scopes or [],
+        # What the SERVER will actually authorize, unioned across every live session —
+        # the same set require_elevation() checks against. `scope`/`scopes` above describe
+        # this one row and are what the badge prints; a console that disabled a control
+        # from those alone would block an operator who legitimately holds a second grant
+        # (see active_elevation_scopes). The UI gate must read the same truth the gate does.
+        "granted_scopes": sorted(active_elevation_scopes(db, user)),
         "reason": row.reason,
         "granted_at": _aware(row.granted_at),
         "expires_at": _aware(row.expires_at),

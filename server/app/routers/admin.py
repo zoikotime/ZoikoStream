@@ -25,6 +25,7 @@ from ..services import media_retention
 from ..services import tenant_access
 from ..services.tenant_access import SupportContext, support_context
 from ..models import (
+    BroadcastSession,
     ESCALATION_REASONS,
     EVIDENCE_ACCESS_TTL_HOURS,
     FeatureAnnouncement,
@@ -106,7 +107,7 @@ from ..schemas.admin import (
     UserUpdate,
 )
 from .. import security
-from ..security import require_super_admin
+from ..security import require_elevation, require_super_admin
 from ..services import admin as svc
 from ..services import broadcast as broadcast_svc
 from ..services import livekit
@@ -494,6 +495,7 @@ def update_organization(org_id: uuid.UUID, data: OrgUpdate, request: Request,
 
 @router.delete("/organizations/{org_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_organization(org_id: uuid.UUID, request: Request, background: BackgroundTasks,
+                       _elevated: User = Depends(require_elevation("platform")),
                        db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     org = db.get(Organization, org_id)
     if not org:
@@ -524,7 +526,11 @@ def delete_organization(org_id: uuid.UUID, request: Request, background: Backgro
 @router.get("/users", response_model=Page)
 def list_users(
     q: str | None = None,
-    role: str | None = None,
+    # Constrained to the two platform appointments this console administers. A request for
+    # any other role is a 422, not an empty page: the listing is scoped in
+    # crud.admin.IDENTITY_ACCESS_ROLES regardless, and failing loudly is clearer than
+    # silently returning nothing for a role that does exist elsewhere in the product.
+    role: str | None = Query(None, pattern="^(super_admin|org_admin)$"),
     org_id: uuid.UUID | None = None,
     is_active: bool | None = None,
     page: int = Query(1, ge=1),
@@ -586,6 +592,13 @@ def _assert_super_admins_remain(db: Session, target: User, *, demoting_to=None,
 @router.patch("/users/{user_id}")
 def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
                background: BackgroundTasks,
+               # NO elevation guard here, deliberately. This endpoint is already behind the
+               # ORG-009 support context: org-approved, countersigned, capability-scoped, and
+               # it AUDITS its refusals (support_access.denied_out_of_scope). Stacking a
+               # coarser platform gate in front pre-empted that check and silenced the audit
+               # record for an out-of-scope reach — a strictly worse security posture than
+               # the finer control alone. Elevation covers the platform actions that have no
+               # tenant control of their own; see require_elevation's docstring.
                ctx: SupportContext = Depends(support_context),
                db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     user = db.get(User, user_id)
@@ -643,6 +656,13 @@ def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(user_id: uuid.UUID, request: Request, background: BackgroundTasks,
+               # NO elevation guard here, deliberately. This endpoint is already behind the
+               # ORG-009 support context: org-approved, countersigned, capability-scoped, and
+               # it AUDITS its refusals (support_access.denied_out_of_scope). Stacking a
+               # coarser platform gate in front pre-empted that check and silenced the audit
+               # record for an out-of-scope reach — a strictly worse security posture than
+               # the finer control alone. Elevation covers the platform actions that have no
+               # tenant control of their own; see require_elevation's docstring.
                ctx: SupportContext = Depends(support_context),
                db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     user = db.get(User, user_id)
@@ -723,8 +743,63 @@ def analytics(db: Session = Depends(get_db)):
 
 
 @router.get("/live-events")
-def live_events(state: str = Query("live", pattern="^(live|recent)$"), db: Session = Depends(get_db)):
-    return svc.live_events(db, state=state)
+async def live_events(state: str = Query("live", pattern="^(live|recent)$"), db: Session = Depends(get_db)):
+    # async because the "live" list is reconciled against LiveKit before it is returned —
+    # see services/admin.live_events. A stale row must never be reported as Operational.
+    return await svc.live_events(db, state=state)
+
+
+@router.post("/live-events/{session_id}/end", status_code=status.HTTP_200_OK)
+async def end_live_session(
+    session_id: uuid.UUID,
+    request: Request,
+    _elevated: User = Depends(require_elevation("broadcast")),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    """Force-end one broadcast session from the platform monitor.
+
+    For the two cases an operator actually has: a genuinely live broadcast that must be
+    stopped now, and a stale row the reconciliation pass could not retire (LiveKit
+    unreachable at the time, so it was correctly left alone rather than guessed at).
+
+    Deliberately NOT a status write. It goes through broadcast._retire_stale_session — the
+    same lifecycle the analytics sampler and the live-events reconciliation use — which
+    closes the session with a reason and clears the event's bus presence/state/bans, and
+    which leaves Event.status alone (ending a leaked session must not re-end an event's own
+    lifecycle). The LiveKit room is closed first when one is still up, so a forced end
+    actually disconnects people rather than just relabelling a row.
+
+    Idempotent: a session already ended returns ok=False and changes nothing, so a double
+    click or a retried request is harmless.
+
+    Elevation-gated on "broadcast" and audited either way — this disconnects a live
+    audience, which is exactly the class of action the standing-access badge has always
+    implied was protected.
+    """
+    from ..services import broadcast as bc
+
+    row = db.get(BroadcastSession, session_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    event_id = str(row.event_id)
+    already_ended = row.ended_at is not None
+
+    # Close the room first: retiring the row while the media server still has people in it
+    # would leave an audience connected to a broadcast the platform believes is over.
+    room_closed = False
+    if not already_ended:
+        room_closed = await livekit.close_room(livekit.room_for_event(row.event_id))
+
+    retired = False if already_ended else await bc._retire_stale_session(
+        str(session_id), event_id, "admin_force_end"
+    )
+    _audit(db, admin, request, "live_session.force_end",
+           target_type="broadcast_session", target_id=session_id,
+           meta={"event_id": event_id, "room_closed": room_closed,
+                 "already_ended": already_ended})
+    db.commit()
+    return {"ok": retired, "already_ended": already_ended, "room_closed": room_closed}
 
 
 @router.get("/platform-health")
@@ -847,6 +922,7 @@ def get_settings(db: Session = Depends(get_db)):
 
 @router.patch("/settings")
 def update_settings(data: SettingsUpdate, request: Request,
+                   _elevated: User = Depends(require_elevation("platform")),
                    db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     for key, value in data.values.items():
         row = db.get(PlatformSetting, key)
@@ -878,6 +954,7 @@ def list_feature_flags(db: Session = Depends(get_db)):
 
 @router.post("/feature-flags", response_model=FeatureFlagOut, status_code=status.HTTP_201_CREATED)
 def create_feature_flag(data: FeatureFlagCreate, request: Request,
+                        _elevated: User = Depends(require_elevation("platform")),
                         db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     if crud.get_feature_flag_by_key(db, data.key):
         raise HTTPException(status.HTTP_409_CONFLICT, f"Flag '{data.key}' already exists")
@@ -889,6 +966,7 @@ def create_feature_flag(data: FeatureFlagCreate, request: Request,
 
 @router.patch("/feature-flags/{flag_id}", response_model=FeatureFlagOut)
 def update_feature_flag(flag_id: uuid.UUID, data: FeatureFlagUpdate, request: Request,
+                        _elevated: User = Depends(require_elevation("platform")),
                         db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     flag = crud.get_feature_flag(db, flag_id)
     if not flag:
@@ -901,6 +979,7 @@ def update_feature_flag(flag_id: uuid.UUID, data: FeatureFlagUpdate, request: Re
 
 @router.delete("/feature-flags/{flag_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_feature_flag(flag_id: uuid.UUID, request: Request,
+                        _elevated: User = Depends(require_elevation("platform")),
                         db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     flag = crud.get_feature_flag(db, flag_id)
     if not flag:

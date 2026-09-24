@@ -55,15 +55,20 @@ import PrivacyCenter from "./pages/organization/PrivacyCenter";
 // shipping these 14 pages (plus their charts and tables) in the main bundle made every
 // visitor to the public homepage download them. Same pattern as Home above.
 const AdminDashboard = /* @__PURE__ */ lazy(() => import("./pages/admin/Dashboard"));
-const Organizations = /* @__PURE__ */ lazy(() => import("./pages/admin/Organizations"));
+// The console consolidation's three merged pages. These REPLACE the direct lazy imports
+// of Organizations / Users / SystemStatus: each merged page pulls its host in, so the code
+// split now happens at the mergedPages boundary rather than per page. Each renders its host page plus the page
+// that left the rail, as tabs (see pages/admin/mergedPages.jsx). The moved pages keep their
+// own routes below, so every existing link and bookmark still resolves.
+const IdentityAccess = /* @__PURE__ */ lazy(() => import("./pages/admin/mergedPages").then((m) => ({ default: m.IdentityAccess })));
+const OrganizationsConsole = /* @__PURE__ */ lazy(() => import("./pages/admin/mergedPages").then((m) => ({ default: m.OrganizationsConsole })));
+const SystemStatusConsole = /* @__PURE__ */ lazy(() => import("./pages/admin/mergedPages").then((m) => ({ default: m.SystemStatusConsole })));
 const LiveEvents = /* @__PURE__ */ lazy(() => import("./pages/admin/LiveEvents"));
 const AdminEventDetail = /* @__PURE__ */ lazy(() => import("./pages/admin/EventDetail"));
-const AdminUsers = /* @__PURE__ */ lazy(() => import("./pages/admin/Users"));
 const Subscriptions = /* @__PURE__ */ lazy(() => import("./pages/admin/Subscriptions"));
 const Analytics = /* @__PURE__ */ lazy(() => import("./pages/admin/Analytics"));
 const AuditLogs = /* @__PURE__ */ lazy(() => import("./pages/admin/AuditLogs"));
 const PlatformSettings = /* @__PURE__ */ lazy(() => import("./pages/admin/Settings"));
-const SystemStatus = /* @__PURE__ */ lazy(() => import("./pages/admin/SystemStatus"));
 const FeatureFlags = /* @__PURE__ */ lazy(() => import("./pages/admin/FeatureFlags"));
 const ReleaseCenter = /* @__PURE__ */ lazy(() => import("./pages/admin/ReleaseCenter"));
 const Support = /* @__PURE__ */ lazy(() => import("./pages/admin/Support"));
@@ -310,18 +315,23 @@ export default function App() {
               <Route element={<RoleRoute allow={["super_admin"]} />}>
                 <Route element={<AdminLayout />}>
                   <Route path="/admin/dashboard" element={<AdminDashboard />} />
-                  <Route path="/admin/organizations" element={<Organizations />} />
+                  <Route path="/admin/organizations" element={<OrganizationsConsole />} />
                   <Route path="/admin/live-events" element={<LiveEvents />} />
                   <Route path="/admin/live-events/:eventId" element={<AdminEventDetail />} />
-                  <Route path="/admin/users" element={<AdminUsers />} />
+                  <Route path="/admin/users" element={<IdentityAccess />} />
                   <Route path="/admin/subscriptions" element={<Subscriptions />} />
                   <Route path="/admin/analytics" element={<Analytics />} />
                   <Route path="/admin/audit" element={<AuditLogs />} />
                   <Route path="/admin/settings" element={<PlatformSettings />} />
-                  <Route path="/admin/status" element={<SystemStatus />} />
+                  <Route path="/admin/status" element={<SystemStatusConsole />} />
                   <Route path="/admin/feature-flags" element={<FeatureFlags />} />
                   <Route path="/admin/releases" element={<ReleaseCenter />} />
                   <Route path="/admin/support" element={<Support />} />
+                  {/* Kept after the console consolidation moved these three into tabs on
+                      their host page. They are no longer in the rail, but a bookmark, a
+                      runbook link or an old deep link must still land somewhere real —
+                      dropping the route is the one part of "merging a page" that would
+                      actually lose something. */}
                   <Route path="/admin/roles" element={<Roles />} />
                   <Route path="/admin/developers" element={<Developers />} />
                   <Route path="/admin/event-readiness" element={<EventReadiness />} />

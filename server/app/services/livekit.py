@@ -277,6 +277,53 @@ async def participant_connected(room: str, identity: str) -> bool:
     )
 
 
+async def room_is_live(room: str) -> bool | None:
+    """Does this room actually exist on the media server right now?
+
+        True   - LiveKit lists it. The broadcast is genuinely up.
+        False  - LiveKit answered and the room is NOT there. Whatever a BroadcastSession row
+                 says, nobody is streaming.
+        None   - UNKNOWN. LiveKit is unconfigured or the call failed.
+
+    Three states, not two, and that is the entire point. `_with_room` collapses "the call
+    failed" into False, which is right for a control action (fall back to permissive) and
+    exactly wrong for a status read: it would let an unreachable provider be reported as a
+    dead room, and the Live Operations monitor would start retiring sessions during a LiveKit
+    outage. A caller that cannot tell must say so rather than guess in either direction.
+    """
+    if not configured():
+        return None
+    lk = api.LiveKitAPI(settings.LIVEKIT_URL, settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+    try:
+        res = await lk.room.list_rooms(api.ListRoomsRequest(names=[room]))
+        return bool(list(getattr(res, "rooms", None) or []))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("livekit room lookup failed for %s: %s", room, exc)
+        return None
+    finally:
+        await lk.aclose()
+
+
+async def room_participant_count(room: str) -> int | None:
+    """How many participants LiveKit currently has in the room, or None if it cannot say.
+
+    None, never 0, when the provider is unreachable — the Live Operations monitor prints an
+    em dash for unknown, and turning "we could not ask" into "nobody is watching" is the
+    fabricated-metric failure this console is meant not to have.
+    """
+    if not configured():
+        return None
+    lk = api.LiveKitAPI(settings.LIVEKIT_URL, settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+    try:
+        res = await lk.room.list_participants(api.ListParticipantsRequest(room=room))
+        return len(list(getattr(res, "participants", None) or []))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("livekit participant lookup failed for %s: %s", room, exc)
+        return None
+    finally:
+        await lk.aclose()
+
+
 async def ensure_room(room: str, empty_timeout: int = 600) -> bool:
     """Create the room ahead of the first publisher so a Go Live click has somewhere to
     land. Already-exists is success, not an error."""
@@ -527,9 +574,29 @@ def _gcs_client() -> gcs_storage.Client | None:
         return None
 
 
-def signed_url(object_key: str, expires_minutes: int = 180) -> str | None:
+def signed_url(object_key: str, expires_minutes: int = 180, verify: bool = True) -> str | None:
     """A time-limited playback URL for a private recording. None if GCS isn't configured,
-    the object doesn't exist, or signing fails — never a broken/expired-looking link."""
+    the object doesn't exist, or signing fails — never a broken/expired-looking link.
+
+    THE EXISTENCE CHECK IS THE POINT, and it was the one thing this function promised and
+    did not do. Signing is a pure local operation over the bucket + key: GCS is never
+    contacted, so a key naming an object that was never uploaded signs perfectly happily.
+    The browser then follows that URL and gets raw GCS XML back —
+
+        <Code>NoSuchKey</Code><Message>The specified key does not exist.</Message>
+        No such object: zoiko-stream-recordings/zoikostream/<org>/<event>/<ts>.mp4
+
+    — which is a storage internal leaked to a customer, and which reads like a path bug when
+    it is not one. That object path is exactly what LiveRecording.file_url holds and exactly
+    what we asked egress to write; the bucket prefix is GCS's own error formatting, not a
+    duplicated segment. The file simply is not there, because the egress never completed.
+
+    `blob.exists()` is one HEAD request, on a page that already does per-row work, and it
+    converts a leaked provider error into a None the caller can present honestly.
+
+    `verify=False` exists for callers that have already established existence in the same
+    request and should not pay for a second round trip — never as a way to skip the check.
+    """
     if not object_key:
         return None
     client = _gcs_client()
@@ -537,6 +604,9 @@ def signed_url(object_key: str, expires_minutes: int = 180) -> str | None:
         return None
     try:
         blob = client.bucket(settings.GCS_BUCKET).blob(object_key)
+        if verify and not blob.exists():
+            log.info("recording object missing in bucket, refusing to sign: %s", object_key)
+            return None
         return blob.generate_signed_url(
             version="v4", expiration=timedelta(minutes=expires_minutes), method="GET"
         )

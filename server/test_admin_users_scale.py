@@ -183,13 +183,26 @@ def test_org_filter_is_applied_in_sql(world):
     assert all(r.org_id == world["other"].id for r in rows)
 
 
-def test_role_filter_none_means_every_role(world):
-    """"All roles" sends no role param. Legacy-role accounts must still be returned."""
+def test_role_filter_none_means_the_two_platform_roles(world):
+    """"All roles" sends no role param, and now means the roles Identity & Access administers
+    — super_admin + org_admin — not every account in the database.
+
+    This test previously asserted the opposite ("legacy-role accounts must still be
+    returned"), which was the contract before the console was scoped: the page could only
+    assign those two roles but listed all 1,128 accounts on the deployment, and its KPI row
+    counted them. The coverage is kept and re-pointed rather than deleted — what it guards is
+    still "no role param must not mean no predicate", only the correct predicate changed.
+    """
     db = world["db"]
-    _, total_all = crud.list_users(db, page=1, page_size=1)
-    _, total_host = crud.list_users(db, page=1, page_size=1, role="host")
-    assert total_host >= 1
-    assert total_all > total_host
+    rows, total_all = crud.list_users(db, page=1, page_size=100, q=world["tag"])
+
+    assert {u.role for u in rows} == {"super_admin", "org_admin"}
+    # The fixture creates one host and one viewer under the same tag; neither is listed.
+    assert total_all == 3, f"expected the 3 platform accounts, got {total_all}"
+
+    # And they were not deleted to achieve that — this is a visibility scope, nothing else.
+    assert db.query(User).filter(User.role == "host",
+                                 User.email.like(f"sc-{world['tag']}-%")).count() == 1
 
 
 def test_search_is_case_insensitive_and_partial(world):
@@ -197,7 +210,9 @@ def test_search_is_case_insensitive_and_partial(world):
     tag = world["tag"]
     lower, n_lower = crud.list_users(db, page=1, page_size=10, q=tag.lower())
     _, n_upper = crud.list_users(db, page=1, page_size=10, q=tag.upper())
-    assert n_lower == n_upper == 5
+    # 3, not 5: the fixture's host and viewer share this tag but are out of the console's
+    # scope. What is under test here is that case does not change the answer, and it does not.
+    assert n_lower == n_upper == 3
     assert lower
 
 

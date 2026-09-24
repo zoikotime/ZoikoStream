@@ -3,9 +3,16 @@ import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
+from . import testguard
 from .config import settings
 
 log = logging.getLogger(__name__)
+
+
+# A test module run directly (python test_x.py) never loads conftest.py, so its database
+# guard never applies. app/db.py is the choke point every suite must pass through; see
+# app/testguard.py for the whole reasoning and why the interlock lives in app code.
+testguard.resolve(settings)
 
 # Connection pool, sized deliberately rather than left on SQLAlchemy's defaults (5 + 10).
 #

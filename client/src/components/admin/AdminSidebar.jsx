@@ -1,11 +1,7 @@
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
 import toast from "react-hot-toast";
-import {
-  FiX, FiActivity, FiCheckSquare, FiGrid, FiFilm, FiShield, FiUser, FiCode,
-  FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget, FiDollarSign,
-  FiTrendingUp, FiFlag, FiPackage, FiUsers, FiServer, FiLock,
-} from "react-icons/fi";
+import { FiX, FiActivity, FiCheckSquare, FiGrid, FiFilm, FiShield, FiUser, FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget, FiDollarSign, FiTrendingUp, FiFlag, FiPackage, FiLock } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import useInterval from "../../hooks/useInterval";
@@ -26,6 +22,21 @@ import Logo from "../../ui/Logo";
 const NAV_ON = "bg-violet-50 text-violet-700 dark:bg-violet-500/[0.16] dark:text-violet-200";
 const NAV_ICON_ON = "text-violet-600 dark:text-violet-300";
 
+// Four tiers, seventeen entries, down from twenty flat ones. Nothing was deleted and no
+// route was removed. The three that left the rail became TABS on the page they always
+// belonged to (pages/admin/mergedPages.jsx), and their own URLs still resolve, so a
+// bookmark or a runbook link is unaffected (see App.jsx):
+//
+//   Roles               -> Identity & Access  (read-only reference data ABOUT the roles that
+//                          page assigns; services/admin.roles() is derived from
+//                          security._ROLE_RANK and is explicitly not editable)
+//   Developer Platform  -> Organizations      (it only ever fetched /admin/organizations)
+//   Media Infrastructure-> System Status      (both called the IDENTICAL endpoint,
+//                          /admin/platform-health — the clearest duplication in the console)
+//
+// "Advanced" exists because Governance, Feature Flags and Release Center are real but
+// low-frequency: a rail is read top-down under pressure, and burying Live Operations under
+// twelve platform links costs more than the links are worth.
 const GROUPS = [
   {
     label: "Operate",
@@ -39,25 +50,27 @@ const GROUPS = [
     label: "Govern",
     items: [
       { to: "/admin/organizations", label: "Organizations", icon: FiGrid },
-      { to: "/admin/media", label: "Media", icon: FiFilm },
-      { to: "/admin/security", label: "Trust & Safety", icon: FiShield },
       { to: "/admin/users", label: "Identity & Access", icon: FiUser },
-      { to: "/admin/roles", label: "Roles", icon: FiUsers },
+      { to: "/admin/security", label: "Trust & Safety", icon: FiShield },
+      { to: "/admin/audit", label: "Audit", icon: FiFileText },
     ],
   },
   {
     label: "Platform",
     items: [
-      { to: "/admin/developers", label: "Developer Platform", icon: FiCode },
+      { to: "/admin/media", label: "Media", icon: FiFilm },
       { to: "/admin/subscriptions", label: "Usage & Entitlements", icon: FiBarChart2 },
-      { to: "/admin/commerce", label: "Live Events Commerce", icon: FiDollarSign },
+      { to: "/admin/commerce", label: "Commerce", icon: FiDollarSign },
       { to: "/admin/analytics", label: "Analytics", icon: FiTrendingUp },
       { to: "/admin/support", label: "Support Operations", icon: FiClock },
-      { to: "/admin/settings", label: "Platform Configuration", icon: FiSliders },
-      { to: "/admin/governance", label: "Governance", icon: FiGlobe },
-      { to: "/admin/audit", label: "Audit", icon: FiFileText },
       { to: "/admin/status", label: "System Status", icon: FiShield, badge: "system_status" },
-      { to: "/admin/infrastructure", label: "Media Infrastructure", icon: FiServer },
+      { to: "/admin/settings", label: "Platform Configuration", icon: FiSliders },
+    ],
+  },
+  {
+    label: "Advanced",
+    items: [
+      { to: "/admin/governance", label: "Governance", icon: FiGlobe },
       { to: "/admin/feature-flags", label: "Feature Flags", icon: FiFlag },
       { to: "/admin/releases", label: "Release Center", icon: FiPackage },
     ],
@@ -276,8 +289,20 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
                   api.post("/admin/elevation", {
                     // The scope is what is being elevated INTO, not who the operator is —
                     // it names the capability set the grant covers.
-                    scope: "Platform Operations",
-                    scopes: ["organizations:write", "subscriptions:write", "settings:write"],
+                    //
+                    // These MUST be the vocabulary security.require_elevation checks
+                    // (ELEVATION_SCOPES). They used to read "Platform Operations" /
+                    // "organizations:write", which nothing on the server matched, so the one
+                    // button that is supposed to unlock the console granted a token that
+                    // satisfied no gate — the operator elevated and every protected action
+                    // still 403'd. server/test_admin_elevation.py pins this button's payload
+                    // against the guarded endpoints so the two cannot drift apart again.
+                    //
+                    // "support" is deliberately absent: reaching into a customer tenant is
+                    // not something an operator grants themselves here. That goes through
+                    // /admin/support-access with the organization's own approval (ORG-009).
+                    scope: "platform",
+                    scopes: ["identity", "broadcast"],
                     reason: "Console session",
                     minutes: 15,
                   }),
