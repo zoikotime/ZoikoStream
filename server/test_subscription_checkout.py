@@ -994,7 +994,12 @@ def test_checkout_refuses_an_organization_that_already_has_a_live_subscription()
     invoice."""
     from app.routers import organization
     src = code_only(organization.create_subscription_checkout)
-    assert "stripe_subscription_id" in src, \
+    # The CONDITION now lives in models.subscription.has_live_provider_subscription, because
+    # the console has to ask the same question to decide whether to render "Upgrade" at all —
+    # and when it asked separately it got a different answer for `conversion_pending` and
+    # offered a button whose only possible outcome was this refusal. The route must still
+    # CONSULT it.
+    assert "has_live_provider_subscription" in src, \
         "the route must consider whether a live Stripe subscription already exists"
     assert "already has an active subscription" in src
 
@@ -1002,10 +1007,19 @@ def test_checkout_refuses_an_organization_that_already_has_a_live_subscription()
 def test_the_refusal_still_admits_a_terminated_subscription():
     """A canceled/closed/expired tenant must be able to buy again — the guard is about a LIVE
     subscription, not about having ever had one."""
-    from app.routers import organization
-    src = code_only(organization.create_subscription_checkout)
+    # Asserted against the predicate the route now calls, which is where the terminal states
+    # are named — and behaviourally, not merely by the token appearing in a source file.
+    from app.models.subscription import (
+        PROVIDER_RELEASED_STATES, has_live_provider_subscription,
+    )
+
+    class _Row:
+        def __init__(self, sid, status):
+            self.stripe_subscription_id, self.status = sid, status
+
     for terminal in ("canceled", "closed", "trial_expired"):
-        assert terminal in src, f"{terminal} must remain purchasable"
+        assert terminal in PROVIDER_RELEASED_STATES, f"{terminal} must remain purchasable"
+        assert has_live_provider_subscription(_Row("sub_1", terminal)) is False, terminal
 
 
 def test_the_backend_agrees_with_what_the_billing_page_tells_the_customer():

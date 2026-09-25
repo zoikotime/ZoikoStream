@@ -80,8 +80,12 @@ def test_the_frontend_and_backend_retired_sets_agree():
     right against an older server — so they have to be checked against each other."""
     import re
     from pathlib import Path
-    jsx = Path("../client/src/pages/organization/Billing.jsx").read_text(encoding="utf-8")
-    m = re.search(r"const RETIRED_PLAN_SLUGS = \[([^\]]*)\]", jsx)
-    assert m, "Billing.jsx must declare its own RETIRED_PLAN_SLUGS"
+    # The page filters through planPresentation.visiblePlans, which is where the frontend copy
+    # of the rule lives (Billing.jsx imports it rather than re-spelling the slugs).
+    jsx = Path(
+        "../client/src/pages/organization/planPresentation.js"
+    ).read_text(encoding="utf-8")
+    m = re.search(r"RETIRED_PLAN_SLUGS = \[([^\]]*)\]", jsx)
+    assert m, "planPresentation.js must declare RETIRED_PLAN_SLUGS"
     frontend = {s.strip().strip('"').strip("'") for s in m.group(1).split(",") if s.strip()}
     assert frontend == set(RETIRED_PLAN_SLUGS), (frontend, set(RETIRED_PLAN_SLUGS))

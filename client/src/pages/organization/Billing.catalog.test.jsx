@@ -236,9 +236,24 @@ describe("An organization still on a retired tier", () => {
     expect(screen.getByText("active")).toBeTruthy();
   });
 
-  it("is still not OFFERED the retired tier in the catalog", async () => {
+  it("keeps its own retired card, and is offered no OTHER retired tier", async () => {
+    // Retired tiers are dropped from the catalog, with one exception: the one this customer is
+    // actually on. Hiding the tier somebody is paying for would leave them looking at three
+    // cards, none of them theirs, with no indication which they hold. So Pro stays and is
+    // marked current; Starter — which is nobody's here — is still gone.
     await renderBilling(onPro);
-    expect(cardTitles()).toEqual(["Developer", "Business", "Enterprise"]);
+    // Pro ranks alongside Business (migrate_plan_names maps pro -> business), so it sorts
+    // into that tier rather than to the end.
+    expect(cardTitles()).toEqual(["Developer", "Business", "Pro", "Enterprise"]);
+    expect(within(planCard("Pro")).getByText("Current")).toBeTruthy();
+    expect(screen.queryByText("Starter", { selector: "p" })).toBeNull();
+  });
+
+  it("cannot re-buy the retired tier it is on", async () => {
+    await renderBilling(onPro);
+    const el = cta("Pro");
+    expect(el).toHaveTextContent("Current Plan");
+    expect(el).toBeDisabled();
   });
 
   it("has nothing written back on render", async () => {

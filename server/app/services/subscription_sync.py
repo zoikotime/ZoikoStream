@@ -58,10 +58,20 @@ from ..models.subscription import (
     normalize_subscription_state,
 )
 from . import payments as payment_svc
-from .maintenance import _local_interval
 from .payments_stripe_events import _SUBSCRIPTION_STATUS_STATE
 
 log = logging.getLogger("zoikostream.billing.sync")
+
+
+def _local_interval(provider_interval: str | None) -> str | None:
+    """Stripe's cadence word in OUR vocabulary, or None for one we do not model.
+
+    Defined here rather than imported so this module depends only on the config vocabulary it
+    is translating into — a reconciliation sweep elsewhere may come and go without taking the
+    on-demand repair path down with it.
+    """
+    from ..config import ANNUAL, MONTHLY
+    return {"month": MONTHLY, "year": ANNUAL}.get(provider_interval or "")
 
 # Outcomes, reported to the caller so the console can say something true rather than spin.
 SYNC_APPLIED = "applied"            # provider state differed and was applied
