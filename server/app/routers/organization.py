@@ -27,7 +27,7 @@ from ..db import get_db
 from ..email import UnsafeLinkError
 from ..services import account_lifecycle as lifecycle
 from ..services import payments as payment_svc
-from ..models.plan import Plan
+from ..models.plan import RETIRED_PLAN_SLUGS, Plan
 from ..models.subscription import normalize_subscription_state
 from ..models import (
     ABUSE_CATEGORIES,
@@ -200,10 +200,20 @@ def list_plans(db: Session = Depends(get_db)):
     for the plan (settings.subscription_price_map). The browser never decides this, and never
     sees the Price ID itself — it sends a plan slug back and the server re-resolves. That keeps
     ZST-COM-PLAN-001 Section 03's CTA split (Developer/Business "Start building" vs Enterprise
-    "Talk to an expert") derived from configuration rather than hardcoded in the UI."""
+    "Talk to an expert") derived from configuration rather than hardcoded in the UI.
+
+    Retired tiers are excluded here and only here. `starter`/`pro` are the pre-Section-03
+    spellings of Developer/Business (see models.plan.RETIRED_PLAN_SLUGS): on a deployment that
+    has not run migrate_plan_names.py they are still real rows with real subscriptions on them,
+    so they must keep existing and keep entitling — they just must not be OFFERED. The Super
+    Admin console reads the same crud.list_plans and still sees them, which is why this filter
+    is at the customer-facing endpoint rather than in the CRUD.
+    """
     out = []
     for plan in admin_crud.list_plans(db):
         if not plan.is_active:
+            continue
+        if plan.slug in RETIRED_PLAN_SLUGS:
             continue
         item = PlanOut.model_validate(plan).model_dump()
         # Which CADENCES this plan can actually be bought on, straight from the approved price

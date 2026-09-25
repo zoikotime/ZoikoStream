@@ -12,6 +12,22 @@ from app.db import Base
 if TYPE_CHECKING:
     from .subscription import Subscription
 
+# Tiers that are no longer part of the customer-facing catalog. ZST-COM-PLAN-001 Section 03
+# names three: Developer, Business, Enterprise. `starter` and `pro` are the pre-Section-03
+# spellings of the first two — migrate_plan_names.py renames starter -> developer and
+# pro -> business, and verify_billing_readiness.py scores any surviving row as a failure.
+#
+# They are RETIRED, NOT DELETED, and the distinction is the whole point. A deployment that has
+# not run the rename still has real rows here, and real subscriptions pointing at them through
+# `subscriptions.plan_id` and `pending_plan_id`. Removing the rows would break those foreign
+# keys and rewrite what a customer was actually sold. So the row keeps existing, keeps
+# entitling whoever is on it, and keeps being administrable — it simply stops being OFFERED.
+#
+# Used only by the customer-facing catalog (routers/organization.py::list_plans). The Super
+# Admin console reads the same crud.list_plans and must keep seeing every plan, which is why
+# the filter lives at that one endpoint and not in the CRUD.
+RETIRED_PLAN_SLUGS = frozenset({"starter", "pro"})
+
 
 class Plan(Base):
     """A billing plan orgs subscribe to. Limits are None = unlimited.

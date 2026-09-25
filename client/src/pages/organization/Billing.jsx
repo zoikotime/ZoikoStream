@@ -70,6 +70,11 @@ function UsageMeter({ label, used, limit, unit }) {
   );
 }
 
+// Kept in step with server/app/models/plan.py::RETIRED_PLAN_SLUGS. Retired, not deleted:
+// a deployment that has not run migrate_plan_names.py still has real subscriptions on
+// these rows, so they keep entitling whoever holds them — they just are not offered.
+const RETIRED_PLAN_SLUGS = ["starter", "pro"];
+
 const STATUS_TONE = { active: "active", trial: "info", past_due: "warning", cancelled: "error" };
 
 export default function OrganizationBilling() {
@@ -183,6 +188,20 @@ export default function OrganizationBilling() {
   }, []);
 
   const ent = overview?.entitlements;
+  // Tiers the catalog no longer offers. The backend already excludes them from
+  // GET /organization/plans; filtered again here so the RENDERED data is right even against a
+  // server that predates that change — and so "only three plans are offered" is a property of
+  // this component, testable without a backend.
+  //
+  // A filter, not CSS: a hidden card is still in the DOM, still in the grid's flow, and still
+  // reachable by anything that reads the page.
+  const offeredPlans = useMemo(
+    () => (plansList || []).filter((p) => !RETIRED_PLAN_SLUGS.includes(p.slug)),
+    [plansList]
+  );
+
+  // NOTE: currentPlan deliberately reads the UNFILTERED list, so an organization still on a
+  // retired tier keeps its real plan name and price in the subscription card above.
   const currentPlan = useMemo(
     () => plansList?.find((p) => p.slug === ent?.plan_slug),
     [plansList, ent]
@@ -468,7 +487,7 @@ export default function OrganizationBilling() {
               )}
             </div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              {(plansList || []).map((p) => {
+              {offeredPlans.map((p) => {
                 const current = p.slug === ent?.plan_slug;
                 return (
                   <div
