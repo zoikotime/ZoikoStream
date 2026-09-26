@@ -27,8 +27,12 @@ from ..db import get_db
 from ..email import UnsafeLinkError
 from ..services import account_lifecycle as lifecycle
 from ..services import payments as payment_svc
-from ..models.plan import Plan
-from ..models.subscription import normalize_subscription_state
+from ..models.plan import RETIRED_PLAN_SLUGS, Plan
+from ..models.subscription import (
+    SUBSCRIPTION_ENTITLED_STATES,
+    has_live_provider_subscription,
+    normalize_subscription_state,
+)
 from ..models import (
     ABUSE_CATEGORIES,
     ABUSE_SUBJECT_TYPES,
@@ -129,6 +133,7 @@ from ..services import developer_export
 from ..services import signing_rotation
 from ..services import media_comms
 from ..services import media_retention
+from ..services import subscription_sync
 from ..services import webhook_lifecycle
 from ..services import webhook_security
 from ..services import notifications as notif_svc
@@ -200,10 +205,20 @@ def list_plans(db: Session = Depends(get_db)):
     for the plan (settings.subscription_price_map). The browser never decides this, and never
     sees the Price ID itself — it sends a plan slug back and the server re-resolves. That keeps
     ZST-COM-PLAN-001 Section 03's CTA split (Developer/Business "Start building" vs Enterprise
-    "Talk to an expert") derived from configuration rather than hardcoded in the UI."""
+    "Talk to an expert") derived from configuration rather than hardcoded in the UI.
+
+    Retired tiers are excluded here and only here. `starter`/`pro` are the pre-Section-03
+    spellings of Developer/Business (see models.plan.RETIRED_PLAN_SLUGS): on a deployment that
+    has not run migrate_plan_names.py they are still real rows with real subscriptions on them,
+    so they must keep existing and keep entitling — they just must not be OFFERED. The Super
+    Admin console reads the same crud.list_plans and still sees them, which is why this filter
+    is at the customer-facing endpoint rather than in the CRUD.
+    """
     out = []
     for plan in admin_crud.list_plans(db):
         if not plan.is_active:
+            continue
+        if plan.slug in RETIRED_PLAN_SLUGS:
             continue
         item = PlanOut.model_validate(plan).model_dump()
         # Which CADENCES this plan can actually be bought on, straight from the approved price
@@ -276,8 +291,11 @@ def create_subscription_checkout(data: SubscriptionCheckoutCreate,
     # those rules this stays a sales conversation, which is what the Billing page already
     # tells the customer — this makes the backend agree with it instead of quietly
     # double-billing.
-    if sub.stripe_subscription_id and normalize_subscription_state(sub.status) not in (
-            "canceled", "closed", "trial_expired"):
+    #
+    # The condition itself now lives in ONE place (models.subscription), because the console
+    # has to ask the same question to decide whether to render "Upgrade" at all — and when it
+    # asked separately, it got a different answer and offered a button that could only 409.
+    if has_live_provider_subscription(sub):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "This organization already has an active subscription. Changing the plan of a "
@@ -453,14 +471,65 @@ def subscription_checkout_status(session_id: str = Query(..., max_length=120),
     # Tenant check: a session reference belonging to another organization reveals nothing.
     if sub is None or sub.org_id != org.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Checkout session not found")
-    confirmed = sub.stripe_subscription_id is not None
-    return {
+
+    # If the activation webhook has not arrived, ASK Stripe rather than waiting for it — the row
+    # is otherwise stuck at `conversion_pending` forever and this endpoint would report
+    # "confirming…" on every poll for the life of the subscription.
+    sync = None
+    if subscription_sync.needs_provider_sync(sub):
+        sync = subscription_sync.sync_from_provider(db, sub)
+        db.refresh(sub)
+
+    # "Confirmed" means ENTITLED, not merely "an id got written". The old test was
+    # `stripe_subscription_id is not None`, which is already true in `conversion_pending` — so
+    # this reported success for a subscription that entitled the payer to nothing, and the
+    # console dutifully refetched an overview that still showed no plan.
+    entitled = normalize_subscription_state(sub.status) in {
+        normalize_subscription_state(x) for x in SUBSCRIPTION_ENTITLED_STATES
+    }
+    body = {
         "status": sub.status,
         "plan": sub.plan.name if sub.plan else None,
-        # False until a signature-verified webhook has bound the Stripe subscription.
-        "payment_confirmed": confirmed,
-        "state": "confirmed" if confirmed else "pending",
+        "payment_confirmed": sub.stripe_subscription_id is not None,
+        "state": "confirmed" if entitled else "pending",
     }
+    # A sync that could not complete is reported as such. Leaving the console on "pending" after
+    # Stripe has said the payment is incomplete is the failure this replaces: a spinner that can
+    # never resolve and says nothing.
+    if sync is not None and not sync.get("applied") and sync.get("error"):
+        body["state"] = "confirmed" if entitled else "error"
+        body["error"] = sync["error"]
+    return body
+
+
+@router.post("/billing/sync")
+def sync_subscription_from_provider(org: Organization = Depends(get_my_org_admin),
+                                     user: User = Depends(get_current_user),
+                                     db: Session = Depends(get_db)):
+    """Re-read THIS organization's subscription from Stripe and apply what it says.
+
+    The console calls this when it holds a live provider subscription it cannot identify —
+    `checkout_locked` with no entitled plan — which is the shape a missed
+    `customer.subscription.created` leaves behind. A repair for that divergence, not a refresh.
+
+    Reads only. It cannot create a subscription (the sole provider call is a retrieve of an id
+    we already hold), cannot bypass the duplicate-checkout 409, and every state change still
+    goes through the Section 12 machine. Admin-only, scoped to the caller's own organization.
+    """
+    sub = admin_crud.current_subscription_for_update(db, org.id)
+    if sub is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "This organization has no subscription record")
+    if not subscription_sync.needs_provider_sync(sub):
+        # Already healthy, or never had a provider subscription. Pointedly not a Stripe call,
+        # so this cannot be used to generate provider traffic.
+        return {"synced": False, "outcome": subscription_sync.SYNC_NOT_NEEDED,
+                "status": sub.status}
+
+    result = subscription_sync.sync_from_provider(db, sub, actor=user)
+    db.refresh(sub)
+    return {"synced": bool(result.get("applied")), "outcome": result.get("outcome"),
+            "status": sub.status, "error": result.get("error")}
 
 
 @router.get("/analytics")

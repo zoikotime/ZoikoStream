@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from ..models import (
     SUBSCRIPTION_ENTITLED_STATES,
+    has_live_provider_subscription,
     normalize_subscription_state,
     AnalyticsSnapshot,
     BroadcastSession,
@@ -277,6 +278,29 @@ def enforcement_plan(db: Session, org_id) -> Plan | None:
     return lapsed.plan if lapsed is not None else None
 
 
+def _subscription_row(db: Session, org_id) -> Subscription | None:
+    """The org's current subscription row WHATEVER its state, or None if it never had one.
+
+    The REPORTING counterpart to the row the checkout guard locks. Selection is
+    entitled-preferred, else most recent — the same intent as `enforcement_plan` and
+    `crud.admin._current_subs`. Kept separate from `enforcement_plan` because that one answers
+    a QUOTA question and is pinned by its own structural test.
+    """
+    entitled = db.scalar(
+        select(Subscription).where(
+            Subscription.org_id == org_id,
+            Subscription.status.in_(SUBSCRIPTION_ENTITLED_STATES),
+        ).order_by(Subscription.started_at.desc())
+    )
+    if entitled is not None:
+        return entitled
+    return db.scalar(
+        select(Subscription)
+        .where(Subscription.org_id == org_id)
+        .order_by(Subscription.started_at.desc())
+    )
+
+
 def _streaming_hours(db: Session, org_id) -> float:
     """Broadcast hours this org has run, from real session timestamps (live sessions count
     up to now)."""
@@ -299,6 +323,12 @@ def entitlements(db: Session, org: Organization) -> dict:
     model actually carries are reported — a bar with an invented ceiling would be worse
     than no bar."""
     sub, plan = _plan(db, org.id)
+    # The row the CHECKOUT GUARD will judge — not always the row above. A subscription that has
+    # completed Stripe checkout but has not yet been activated sits in `conversion_pending`: it
+    # has a live Stripe subscription (so a second checkout is refused) but is not entitled (so
+    # `_plan` returns None). Reporting only the entitled view left the console believing the
+    # tenant had no subscription at all.
+    provider_sub = _subscription_row(db, org.id)
     members = db.scalar(
         select(func.count(User.id)).where(User.org_id == org.id, User.deleted_at.is_(None))
     ) or 0
@@ -334,6 +364,15 @@ def entitlements(db: Session, org: Organization) -> dict:
         "pending_billing_interval": sub.pending_billing_interval if sub else None,
         "plan_change_effective_at": (
             _aware(sub.plan_change_effective_at) if sub else None),
+        # What the checkout guard would say, so the console never offers a purchase the
+        # backend will refuse. Asked through the SAME predicate the guard uses.
+        "checkout_locked": has_live_provider_subscription(provider_sub),
+        # That row's plan and state, for the case where it is NOT the entitled one. These
+        # describe a subscription that exists; `plan_slug` above remains the only field that
+        # means "this tenant is entitled to this plan".
+        "subscription_plan_slug": (
+            provider_sub.plan.slug if provider_sub is not None and provider_sub.plan else None),
+        "subscription_status": provider_sub.status if provider_sub is not None else None,
         "trial_ends_at": _aware(sub.trial_ends_at) if sub else None,
         "current_period_end": _aware(sub.current_period_end) if sub else None,
         "items": items,

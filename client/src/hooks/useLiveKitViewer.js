@@ -135,8 +135,34 @@ const logSubscription = (label, room, extra) => {
   }
 };
 
+// livekit's attachToElement() REMOVES every existing same-kind track from an element's
+// srcObject before adding the new one, so ONE element can hold exactly one audio track and
+// one video track. That is why this hook owns a set of <audio> elements: putting the host's
+// mic and a promoted speaker's mic on the same element made the second silently erase the
+// first, and the host went inaudible the moment anyone else spoke.
+//
+// Choosing the video track deterministically (a screen share wins, otherwise the first
+// camera) is the same problem on the video side: without it two publishers evicted each
+// other on every effect re-run, which is the flicker and the black frame.
+const primaryVideoTrack = (trackSet) => {
+  let firstCamera = null;
+  let screenShare = null;
+  trackSet.forEach((t) => {
+    if (t.kind !== Track.Kind.Video) return;
+    if (t.source === Track.Source.ScreenShare) {
+      if (!screenShare) screenShare = t;
+    } else if (!firstCamera) {
+      firstCamera = t;
+    }
+  });
+  return screenShare || firstCamera;
+};
+
+// `audioMuted`/`audioVolume` are the VIEWER's own playback controls. They apply to the
+// dedicated <audio> elements below, because remote audio no longer rides on the <video>.
 export default function useLiveKitViewer({ enabled, url, token, canPublish = false,
-                                          onMuteChange }) {
+                                          onMuteChange,
+                                          audioMuted = false, audioVolume = 100 }) {
   const roomRef = useRef(null);
 
   // A callback ref that ALSO exposes `.current`, so consumers can keep doing both
@@ -167,7 +193,39 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
   // reading a ref at render time (React can't know to re-render on a ref mutation, so the
   // flags could paint stale; react-hooks/refs rejects it outright).
   const tracksRef = useRef(new Set());
+  // track -> its own <audio>. A Map keyed by the track object is what makes "one element
+  // per track" true across re-renders: an element is created only when its key is absent,
+  // so an unrelated track arriving never rebuilds the ones already playing, and
+  // StrictMode's double-invoke finds the key present and creates nothing.
+  const audioElsRef = useRef(new Map());
+  // The video track currently attached to the shared element. Attaching is skipped unless
+  // this actually changes, so an audio event cannot detach and re-attach live video.
+  const attachedVideoRef = useRef(null);
   const [tracks, setTracks] = useState({ version: 0, hasVideo: false, hasAudio: false });
+  // Detach, remove from the document, and forget. Safe for a track that has no element, so
+  // unsubscribe and unmount can both call it unconditionally.
+  const releaseAudioFor = useCallback((track) => {
+    const el = audioElsRef.current.get(track);
+    if (!el) return;
+    audioElsRef.current.delete(track);
+    try {
+      track.detach(el);
+    } catch {
+      // Already detached.
+    }
+    try {
+      el.pause();
+      el.srcObject = null;
+    } catch {
+      // jsdom, or an element already torn down.
+    }
+    el.remove();
+  }, []);
+
+  const releaseAllAudio = useCallback(() => {
+    [...audioElsRef.current.keys()].forEach(releaseAudioFor);
+  }, [releaseAudioFor]);
+
   const bumpTracks = useCallback(() => {
     let hasVideo = false;
     let hasAudio = false;
@@ -238,6 +296,8 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
         }
       });
       tracksRef.current.clear();
+      releaseAllAudio();
+      attachedVideoRef.current = null;
       bumpTracks();
     };
 
@@ -314,6 +374,8 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
         } catch {
           // Already detached.
         }
+        releaseAudioFor(track);
+        if (attachedVideoRef.current === track) attachedVideoRef.current = null;
         tracksRef.current.delete(track);
         if (track.kind === Track.Kind.Video) {
           videoPubRef.current = null;
@@ -450,23 +512,80 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       micPubRef.current = null;
       setMicOn(false);
     };
-  }, [enabled, url, token, bumpTracks]);
+    // releaseAudioFor/releaseAllAudio are stable useCallbacks with stable deps, so naming them
+    // cannot re-run this effect (which would tear down and rebuild the room); it just keeps the
+    // dependency list honest.
+  }, [enabled, url, token, bumpTracks, releaseAudioFor, releaseAllAudio]);
 
-  // Attach every subscribed track to the element, whenever either side changes. attach() is
-  // idempotent per (track, element) in livekit-client — it checks whether the element is
-  // already in the track's attachedElements — so re-running this cannot create duplicate
-  // <video> elements or double-add a track.
+  // VIDEO: one track on the shared element, re-attached only when it CHANGES.
+  // The old effect attached every subscribed track to the one element on every bump.
+  // Because attachToElement evicts same-kind tracks, an arriving AUDIO track tore the live
+  // video off and put it back - a visible flicker - and two video publishers evicted each
+  // other forever.
   useEffect(() => {
     const el = mediaRef.current;
     if (!el) return;
+    const next = primaryVideoTrack(tracksRef.current) || null;
+    if (next === attachedVideoRef.current) return;  // do NOT disturb what is playing
+    const previous = attachedVideoRef.current;
+    if (previous) {
+      try {
+        previous.detach(el);
+      } catch {
+        // Already gone.
+      }
+    }
+    attachedVideoRef.current = next;
+    if (!next) return;
+    try {
+      next.attach(el);
+    } catch {
+      // Ended between subscribe and attach; the next bump re-derives.
+    }
+  }, [tracks.version, elVersion, mediaRef]);
+
+  // AUDIO: one dedicated <audio> per track, created once and then left alone. Anything
+  // already playing keeps playing when an unrelated track arrives, which is what lets the
+  // host and a promoted speaker be heard at the same time.
+  useEffect(() => {
+    const live = new Set();
     tracksRef.current.forEach((track) => {
+      if (track.kind !== Track.Kind.Audio) return;
+      live.add(track);
+      if (audioElsRef.current.has(track)) return;   // already has one - do not rebuild it
+      const el = document.createElement("audio");
+      el.autoplay = true;
+      // Not in the layout: it exists only to play, and there is nothing here for a screen
+      // reader to operate.
+      el.setAttribute("data-zoiko-remote-audio", "");
+      el.setAttribute("aria-hidden", "true");
+      el.style.display = "none";
+      document.body.appendChild(el);
+      audioElsRef.current.set(track, el);
       try {
         track.attach(el);
       } catch {
-        // A track that ended between subscribe and attach; the next bump re-derives.
+        // Ended in between; the sweep below removes the element on the next pass.
       }
     });
-  }, [tracks.version, elVersion, mediaRef]);
+    // Any element whose track is no longer subscribed goes with it.
+    [...audioElsRef.current.keys()].forEach((track) => {
+      if (!live.has(track)) releaseAudioFor(track);
+    });
+  }, [tracks.version, releaseAudioFor]);
+
+  // The viewer's playback controls apply to the elements this hook owns, not to the
+  // <video>, which carries no audio any more.
+  useEffect(() => {
+    audioElsRef.current.forEach((el) => {
+      el.muted = audioMuted;
+      el.volume = Math.min(1, Math.max(0, audioVolume / 100));
+    });
+  }, [audioMuted, audioVolume, tracks.version]);
+
+  // Nothing this hook created may outlive it - an orphaned <audio> keeps playing in the
+  // document after the player has gone.
+  useEffect(() => () => releaseAllAudio(), [releaseAllAudio]);
 
   // Recomputed in bumpTracks (see above) whenever the Set changes, so they cannot desync
   // from what is actually attached — and so a second publisher leaving doesn't clear a flag

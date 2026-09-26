@@ -167,8 +167,19 @@ class WatchOut(BaseModel):
 
 
 class RegistrationCreate(BaseModel):
+    # Whitespace is stripped before validation, so `min_length` measures real characters.
+    # Without this "   " satisfied min_length=1 and registered somebody called " " — harmless
+    # while an email address was also required and carried the real identity, and not harmless
+    # now that the name is the ONLY thing a viewer supplies.
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     name: str = Field(..., min_length=1, max_length=200)
-    email: EmailStr
+    # OPTIONAL. The viewer gate asks for a name only, so an anonymous registration arrives
+    # without one; the older identify-yourself form still sends it, and every existing caller
+    # keeps working unchanged. When it is absent the route mints a non-routable placeholder
+    # so the NOT NULL column and the UNIQUE(event_id, email) key are still satisfied — see
+    # routers/events.register_for_event for why that is done there and not here.
+    email: EmailStr | None = None
 
 
 class RegistrationOut(BaseModel):

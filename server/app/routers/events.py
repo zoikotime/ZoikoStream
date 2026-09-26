@@ -566,22 +566,48 @@ def register_for_event(
         # access is host-granted only, via invite_viewers below.
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private — ask the host for an invite")
 
-    existing = crud.get_registration(db, event_id, data.email)
-    if existing is not None:
-        return RegistrationOut(
-            id=existing.id, name=existing.name, email=existing.email,
-            token=create_registration_token(existing),
-        )
+    # ── NAME-ONLY REGISTRATION ────────────────────────────────────────────────────────────
+    # The viewer gate asks for a name and nothing else, so `email` may be absent. It stays
+    # REQUIRED in the database: `event_registrations.email` is NOT NULL and carries
+    # UNIQUE(event_id, email), which is what makes a re-submission idempotent instead of
+    # piling up duplicate rows. Making the column nullable would need a migration AND would
+    # quietly destroy that guarantee, because Postgres allows many NULLs in a unique index.
+    #
+    # So a name-only registration is given a placeholder that CANNOT be delivered to. The
+    # `.invalid` TLD is reserved by RFC 2606 for exactly this: it has no DNS, so nothing can
+    # accidentally route to it, and a stray address in an export reads as obviously synthetic
+    # rather than as somebody's real mailbox.
+    #
+    # It is random per registration, not derived from the name. Deriving it would make two
+    # different people called "Jane Doe" collide on the unique key, and the second would be
+    # handed the FIRST one's registration row and access token — an identity bug far worse
+    # than the duplicate rows it would save.
+    anonymous = data.email is None
+    email = f"anon-{uuid.uuid4().hex}@no-email.invalid" if anonymous else data.email
+
+    # Idempotency is keyed on the address, so it only means anything when the viewer supplied
+    # one. A placeholder is unique by construction and has nothing to match against.
+    if not anonymous:
+        existing = crud.get_registration(db, event_id, email)
+        if existing is not None:
+            return RegistrationOut(
+                id=existing.id, name=existing.name, email=existing.email,
+                token=create_registration_token(existing),
+            )
 
     if ev.registration_limit is not None and crud.count_registrations(db, event_id) >= ev.registration_limit:
         raise HTTPException(status.HTTP_409_CONFLICT, "This event is full")
 
-    reg = crud.create_registration(db, event_id, data.name, data.email)
-    background.add_task(
-        send_registration_confirmation_email,
-        reg.email, reg.name, ev.title or "this event",
-        _registration_console_url(ev.id, create_registration_token(reg)),
-    )
+    reg = crud.create_registration(db, event_id, data.name, email)
+    # Only where there is somewhere to send it. Posting a `.invalid` address to the mail
+    # provider would bounce every single time, which costs sender reputation and buries real
+    # delivery failures in noise.
+    if not anonymous:
+        background.add_task(
+            send_registration_confirmation_email,
+            reg.email, reg.name, ev.title or "this event",
+            _registration_console_url(ev.id, create_registration_token(reg)),
+        )
     webhooks.enqueue(db, ev.org_id, "registration.created", {
         "event_id": str(ev.id), "registration_id": str(reg.id), "email": reg.email, "name": reg.name,
     })

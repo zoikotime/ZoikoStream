@@ -3,7 +3,7 @@
 // The credential itself is unchanged: POST /register returns an opaque server-signed token
 // bound to this event (server/test_remembered_registration.py pins that half). All the
 // checkbox decides is how long this browser KEEPS it — localStorage when ticked, sessionStorage
-// when not. What is never stored either way is the name or the email AS PROOF: those are
+// when not. What is never stored either way is the name AS PROOF: that is
 // registration DATA, and treating them as evidence of access is the failure this design
 // exists to avoid. They are kept, with consent, as a typing convenience — see
 // utils/viewerProfile.js and pages/watch/ViewerProfile.test.jsx.
@@ -44,11 +44,11 @@ const renderGate = () =>
 const checkbox = () => screen.getByRole("checkbox", { name: /remember me for this event/i });
 
 async function fillForm(user) {
-  await user.type(screen.getByPlaceholderText(/jane doe|full name|name/i), NAME);
-  await user.type(screen.getByPlaceholderText(/jane@company\.com/i), EMAIL);
+  await user.type(screen.getByPlaceholderText(/enter your name|jane doe|full name|name/i), NAME);
 }
 
-const register = (user) => user.click(screen.getByRole("button", { name: /^register/i }));
+const register = (user) =>
+  user.click(screen.getByRole("button", { name: /continue to watch/i }));
 
 describe("the checkbox", () => {
   it("appears with its helper text", () => {
@@ -63,15 +63,35 @@ describe("the checkbox", () => {
     expect(checkbox()).not.toBeChecked();
   });
 
-  it("sits below the Email field and above Register", () => {
+  it("sits below the name field and above the submit button", () => {
     const { container } = renderGate();
     const order = [...container.querySelectorAll("input, button")];
-    const email = order.findIndex((el) => el.getAttribute("type") === "email");
+    const name = order.findIndex((el) => el.getAttribute("type") !== "checkbox"
+      && el.tagName === "INPUT");
     const box = order.findIndex((el) => el.getAttribute("type") === "checkbox");
     const submit = order.findIndex((el) => el.getAttribute("type") === "submit");
-    expect(email).toBeGreaterThanOrEqual(0);
-    expect(box).toBeGreaterThan(email);
+    expect(name).toBeGreaterThanOrEqual(0);
+    expect(box).toBeGreaterThan(name);
     expect(submit).toBeGreaterThan(box);
+  });
+
+  it("asks for a name and nothing else", () => {
+    const { container } = renderGate();
+    // No email input, and no field that could collect one.
+    expect(container.querySelector('input[type="email"]')).toBeNull();
+    expect(screen.queryByText(/email/i)).toBeNull();
+    expect(screen.queryByText(/registration required/i)).toBeNull();
+    // Heading and description are asserted separately — "enter your name" also matches the
+    // input's own placeholder, so an unscoped query would match three nodes.
+    expect(screen.getByRole("heading", { name: /^enter your name$/i })).toBeTruthy();
+    expect(screen.getByText("Enter your name to watch the live event.")).toBeTruthy();
+  });
+
+  it("refuses an empty name", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await user.click(screen.getByRole("button", { name: /continue to watch/i }));
+    expect(api.post).not.toHaveBeenCalled();
   });
 });
 
@@ -85,7 +105,6 @@ describe("registering", () => {
     await waitFor(() => expect(onRegistered).toHaveBeenCalled());
     expect(api.post).toHaveBeenCalledWith(`/events/${EVENT_ID}/register`, {
       name: NAME,
-      email: EMAIL.toLowerCase(),
     });
     expect(onRegistered).toHaveBeenCalledWith(TOKEN, false);
   });
@@ -114,15 +133,15 @@ describe("registering", () => {
     expect(sessionStorage.getItem(`zk_reg_${EVENT_ID}`)).toBeNull();
   });
 
-  it("never writes the name or the email as PROOF of anything", async () => {
-    // Narrowed, not relaxed. This used to assert that the name and email appeared in no
+  it("never writes the name as PROOF of anything", async () => {
+    // Narrowed, not relaxed. This used to assert that the name appeared in no
     // store at all, which was a fair proxy while nothing remembered the viewer. The device
     // profile (utils/viewerProfile) now deliberately keeps exactly those two fields to save
     // a returning viewer from retyping them — a convenience that grants nothing.
     //
     // The invariant underneath is unchanged and is what is asserted here: identity is never
     // stored as evidence. No store may carry a "registered" flag, the CREDENTIAL keys hold
-    // the opaque token and nothing else, and the profile holds a name and an email and
+    // the opaque token and nothing else, and the profile holds a name and
     // nothing else — in particular never the token, which is what would turn a convenience
     // into a second way in.
     const user = userEvent.setup();
@@ -147,7 +166,7 @@ describe("registering", () => {
     }
     // The profile carries identity alone — and no credential.
     const profile = JSON.parse(localStorage.getItem("zk_viewer_profile"));
-    expect(Object.keys(profile).sort()).toEqual(["email", "name"]);
+    expect(Object.keys(profile).sort()).toEqual(["name"]);
     expect(JSON.stringify(profile)).not.toContain(TOKEN);
 
     // What DOES travel onward is the opaque credential, and nothing else.

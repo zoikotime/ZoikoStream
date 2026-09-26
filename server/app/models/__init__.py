@@ -10,6 +10,8 @@ from .subscription import (
     SUBSCRIPTION_TERMINATED_STATES,
     SUBSCRIPTION_REVENUE_STATES,
     LEGACY_SUBSCRIPTION_STATES,
+    PROVIDER_RELEASED_STATES,
+    has_live_provider_subscription,
     normalize_subscription_state,
     subscription_transition_error,
 )

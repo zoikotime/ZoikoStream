@@ -1,0 +1,5 @@
+# P3 approved provisioning exclusions
+# Product must explicitly approve each organization before adding its UUID.
+# Do not add organizations based on names, roles, domains, or heuristics.
+# Format:
+# <organization-uuid> # <reason>

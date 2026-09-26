@@ -101,12 +101,12 @@ function renderWatch() {
   );
 }
 
-const gate = () => screen.queryByRole("heading", { name: /registration required/i });
-const registerButton = () => screen.getByRole("button", { name: /register/i });
+const gate = () => screen.queryByRole("heading", { name: /enter your name/i });
+// Matches both resting ("Continue to Watch") and in-flight ("Continuing…") labels.
+const registerButton = () => screen.getByRole("button", { name: /continu/i });
 
 async function fillForm(u) {
-  await u.type(screen.getByPlaceholderText(/jane doe/i), "naveen");
-  await u.type(screen.getByPlaceholderText(/jane@company\.com/i), "mail@gmail.com");
+  await u.type(screen.getByPlaceholderText(/enter your name/i), "naveen");
 }
 
 beforeEach(() => {
@@ -123,19 +123,19 @@ describe("one click on Register", () => {
   it("sends exactly one registration request", async () => {
     const u = userEvent.setup();
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
 
     await fillForm(u);
     await u.click(registerButton());
 
     await waitFor(() => expect(registerCalls()).toHaveLength(1));
-    expect(registerCalls()[0][1]).toEqual({ name: "naveen", email: "mail@gmail.com" });
+    expect(registerCalls()[0][1]).toEqual({ name: "naveen" });
   });
 
   it("admits the viewer immediately — no second click", async () => {
     const u = userEvent.setup();
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
 
     await fillForm(u);
     await u.click(registerButton());
@@ -150,7 +150,7 @@ describe("one click on Register", () => {
     // it read a state value React had not committed.
     const u = userEvent.setup();
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
 
     await fillForm(u);
     await u.click(registerButton());
@@ -162,7 +162,7 @@ describe("one click on Register", () => {
     // Defect 2: the stale-credential guard deleted the token it had just been handed.
     const u = userEvent.setup();
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
 
     await fillForm(u);
     await u.click(registerButton());
@@ -181,12 +181,13 @@ describe("while the request is in flight", () => {
     vi.mocked(api.post).mockImplementation(() => new Promise((r) => { release = r; }));
 
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
     await fillForm(u);
     await u.click(registerButton());
 
     expect(registerButton()).toBeDisabled();
-    expect(screen.getByRole("button", { name: /registering/i })).toBeInTheDocument();
+    // The label swaps to "Continuing…" while the request is in flight.
+    expect(screen.getByRole("button", { name: /continuing/i })).toBeInTheDocument();
 
     release({ data: { token: TOKEN } });
   });
@@ -197,7 +198,7 @@ describe("while the request is in flight", () => {
     vi.mocked(api.post).mockImplementation(() => new Promise((r) => { release = r; }));
 
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
     await fillForm(u);
 
     await u.click(registerButton());
@@ -215,7 +216,7 @@ describe("Remember me", () => {
   it("persists the credential when ticked", async () => {
     const u = userEvent.setup();
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
 
     await fillForm(u);
     await u.click(screen.getByRole("checkbox", { name: /remember me/i }));
@@ -229,7 +230,7 @@ describe("Remember me", () => {
   it("keeps the credential to the session when left unticked", async () => {
     const u = userEvent.setup();
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
 
     await fillForm(u);
     await u.click(registerButton());
@@ -240,7 +241,7 @@ describe("Remember me", () => {
 
   it("is unticked by default", async () => {
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
     expect(screen.getByRole("checkbox", { name: /remember me/i })).not.toBeChecked();
   });
 });
@@ -255,7 +256,7 @@ describe("when registration fails", () => {
     });
 
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
     await fillForm(u);
     await u.click(registerButton());
 
@@ -268,7 +269,7 @@ describe("when registration fails", () => {
     vi.mocked(api.post).mockRejectedValueOnce({ response: { status: 500 }, message: "boom" });
 
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
     await fillForm(u);
     await u.click(registerButton());
 
@@ -286,7 +287,7 @@ describe("when registration fails", () => {
     vi.mocked(api.post).mockRejectedValue({ response: { status: 409 } });
 
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
     await fillForm(u);
     await u.click(registerButton());
 
@@ -300,18 +301,18 @@ describe("validation", () => {
   it("keeps Register disabled until both fields are valid", async () => {
     const u = userEvent.setup();
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
 
+    // The name is the only thing asked for now, so it is the only thing gating the button.
     expect(registerButton()).toBeDisabled();
 
-    await u.type(screen.getByPlaceholderText(/jane doe/i), "naveen");
+    // Whitespace is not a name — the button must not unlock on it.
+    await u.type(screen.getByPlaceholderText(/enter your name/i), "   ");
     expect(registerButton()).toBeDisabled();
 
-    await u.type(screen.getByPlaceholderText(/jane@company\.com/i), "not-an-email");
-    expect(registerButton()).toBeDisabled();
-
-    await u.type(screen.getByPlaceholderText(/jane@company\.com/i), "@gmail.com");
+    await u.type(screen.getByPlaceholderText(/enter your name/i), "naveen");
     expect(registerButton()).toBeEnabled();
+    // Nothing has been submitted just by typing.
     expect(registerCalls()).toHaveLength(0);
   });
 });
@@ -326,7 +327,7 @@ describe("a saved credential the server rejects", () => {
     vi.mocked(api.get).mockResolvedValue({ data: ANONYMOUS });
 
     renderWatch();
-    await screen.findByRole("heading", { name: /registration required/i });
+    await screen.findByRole("heading", { name: /enter your name/i });
 
     await waitFor(() => expect(localStorage.getItem(`zk_reg_${EVENT_ID}`)).toBeNull());
   });

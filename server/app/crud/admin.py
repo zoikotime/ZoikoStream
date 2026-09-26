@@ -80,6 +80,37 @@ def _event_counts(db: Session, org_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]
     return {oid: n for oid, n in rows}
 
 
+def current_subscription_for_update(db: Session, org_id: uuid.UUID) -> Subscription | None:
+    """The same row `_current_subs` would pick, held under a WRITE LOCK.
+
+    Exists so the checkout endpoint can serialise concurrent purchases for ONE organization.
+    `_current_subs` reads without a lock, so two requests arriving together both saw
+    `checkout_session_ref = NULL`, both passed the duplicate guard, and both created a Stripe
+    session — two live subscriptions for one tenant, billed twice.
+
+    FOR UPDATE, not SKIP LOCKED, and the difference matters: a contended row here is not
+    somebody else's work to do later, it is a competing checkout for the same tenant that must
+    not proceed until the first has finished and its outcome is visible. So this WAITS and then
+    reads the committed truth, which is what makes the guard downstream of it correct.
+
+    Selection order is deliberately identical to `_current_subs` — the guard must lock the row
+    the rest of the endpoint will actually read, not a different one.
+    """
+    subs = db.scalars(
+        select(Subscription)
+        .where(Subscription.org_id == org_id)
+        .order_by(Subscription.started_at.desc())
+        .with_for_update()
+    ).all()
+    best: Subscription | None = None
+    for s in subs:
+        if best is None:
+            best = s
+        elif best.status in SUBSCRIPTION_TERMINATED_STATES and s.status in _ACTIVE_SUB:
+            best = s
+    return best
+
+
 def _current_subs(db: Session, org_ids: list[uuid.UUID]) -> dict[uuid.UUID, Subscription]:
     """Best subscription per org: newest non-cancelled, else newest overall."""
     if not org_ids:

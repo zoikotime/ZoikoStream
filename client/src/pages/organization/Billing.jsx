@@ -20,7 +20,7 @@
 // the change is SCHEDULED, never immediate: no proration, effective at current_period_end, and
 // the customer keeps their current plan's entitlements until then. This page therefore shows a
 // change as PENDING with its effective date and never implies it has already happened.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   FiClock, FiHardDrive, FiUsers, FiCalendar, FiCreditCard, FiCheck, FiMail, FiFileText,
@@ -35,6 +35,7 @@ import Spinner from "../../ui/Spinner";
 import { fmtDate } from "../../data/events";
 import { SUPPORTS_IN_APP_CHECKOUT } from "../../platform";
 import { onAppResume, openExternal } from "../../native/bridge";
+import { visiblePlans, planCta, downgradePath } from "./planPresentation";
 
 const METER_ICON = { Storage: FiHardDrive, Members: FiUsers, "Streaming hours": FiClock };
 const METER_ACCENT = { Storage: "blue", Members: "emerald", "Streaming hours": "violet" };
@@ -70,6 +71,39 @@ function UsageMeter({ label, used, limit, unit }) {
   );
 }
 
+// What to tell someone whose Upgrade click did not reach Stripe.
+//
+// The backend authors real customer-facing prose for the cases it can explain — 404 "Plan not
+// found", 409 "already has a paid subscription", 422 a bad cadence, 503 "Payments are not
+// configured" — so those are shown as written. The exceptions are deliberate: a 502 from that
+// route is `f"Payment provider error: {e}"`, which interpolates a provider exception and is the
+// one place a Stripe-side detail could reach a browser; 401/403 are about the session, not the
+// purchase; and no status at all means the request never left the machine.
+const checkoutError = (e) => {
+  const status = e?.response?.status;
+  if (!status) return "Couldn't reach ZoikoStream to start checkout. Check your connection and try again.";
+  if (status === 401) return "Your session has expired. Sign in again to continue.";
+  if (status === 403) return "You need to be an organization owner or admin to change billing.";
+  if (status === 502) return "Stripe couldn't start a checkout just now. Nothing has been charged — please try again in a moment.";
+  if (status >= 500 && status !== 503) return "Something went wrong starting checkout. Nothing has been charged.";
+  return errMsg(e, "Couldn't start checkout. Nothing has been charged.");
+};
+
+// A Checkout URL is a full-page navigation, so it is validated before the browser follows it.
+// `assign(undefined)` walks to "<origin>/undefined" — a 404 dressed up as a redirect, with the
+// purchase silently not started — and an arbitrary origin would be an open redirect out of a
+// billing page.
+const isStripeCheckoutUrl = (url) => {
+  if (typeof url !== "string" || !url) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:"
+      && (u.hostname === "checkout.stripe.com" || u.hostname.endsWith(".checkout.stripe.com"));
+  } catch {
+    return false;
+  }
+};
+
 const STATUS_TONE = { active: "active", trial: "info", past_due: "warning", cancelled: "error" };
 
 export default function OrganizationBilling() {
@@ -83,6 +117,8 @@ export default function OrganizationBilling() {
 
   // ── Stripe-hosted subscription checkout (ZST-COM-PLAN-001 Section 13/18) ──────────────
   const [checkoutFor, setCheckoutFor] = useState(null);
+  // Guards startCheckout against a double-click; see there for why state alone is not enough.
+  const checkoutInFlight = useRef(false);
   // Native only: a checkout was handed to the device browser and this page is now waiting for
   // the user to come back so it can re-read entitlements. Never set on the web, where the
   // browser navigates away and the ?session_id flow below answers instead.
@@ -110,6 +146,12 @@ export default function OrganizationBilling() {
   }, [plansList]);
 
   const startCheckout = async (planSlug, billingInterval) => {
+    // Synchronous re-entry guard. `checkoutFor` also disables the button, but it is state: it
+    // takes a render to apply, so two clicks dispatched in the same tick both got past it and
+    // opened two Checkout Sessions. A ref is already true for the second call. The backend's
+    // idempotency key makes Stripe collapse duplicates anyway; this stops them being sent.
+    if (checkoutInFlight.current) return;
+    checkoutInFlight.current = true;
     setCheckoutFor(planSlug);
     try {
       // The body carries a plan slug and a canonical cadence ONLY. The server resolves the
@@ -119,6 +161,16 @@ export default function OrganizationBilling() {
         plan_slug: planSlug,
         billing_interval: billingInterval,
       });
+
+      // Never navigate to a URL the server did not send, and never to one that is not
+      // Stripe's. See isStripeCheckoutUrl.
+      if (!isStripeCheckoutUrl(data?.checkout_url)) {
+        setCheckoutFor(null);
+        checkoutInFlight.current = false;
+        notify.error("Checkout didn't start — no valid payment link was returned. "
+          + "Nothing has been charged.");
+        return;
+      }
 
       if (SUPPORTS_IN_APP_CHECKOUT) {
         // Web: full-page navigation to Stripe-hosted Checkout — card details are entered on
@@ -144,10 +196,14 @@ export default function OrganizationBilling() {
       // lands the plan simply reads as it did before, which is the safe direction.
       await openExternal(data.checkout_url);
       setCheckoutFor(null);
+      checkoutInFlight.current = false;
       setAwaitingExternal(true);
     } catch (e) {
+      // Restore the button so the customer can retry — the point of failing here rather than
+      // leaving them on a permanent "Redirecting…".
       setCheckoutFor(null);
-      notify.error(errMsg(e));
+      checkoutInFlight.current = false;
+      notify.error(checkoutError(e));
     }
   };
 
@@ -174,7 +230,14 @@ export default function OrganizationBilling() {
     if (returned?.state !== "checking" || !sessionId) return;
     let cancelled = false;
     api.get("/organization/billing/checkout-status", { params: { session_id: sessionId } })
-      .then((r) => { if (!cancelled) setReturned(r.data); })
+      .then((r) => {
+        if (cancelled) return;
+        setReturned(r.data);
+        // "confirmed" now means ENTITLED, not merely "an id was written", so this reload
+        // genuinely has a new plan to show. Re-reading on "pending" would refetch the same
+        // unchanged state.
+        if (r.data?.state === "confirmed") reloadOverview?.();
+      })
       // A failed read means "not confirmed yet", never "confirmed" — the safe direction.
       .catch(() => { if (!cancelled) setReturned({ state: "pending" }); });
     return () => { cancelled = true; };
@@ -183,6 +246,23 @@ export default function OrganizationBilling() {
   }, []);
 
   const ent = overview?.entitlements;
+  // Tiers the catalog no longer offers. The backend already excludes them from
+  // GET /organization/plans; filtered again here so the RENDERED data is right even against a
+  // server that predates that change — and so "only three plans are offered" is a property of
+  // this component, testable without a backend.
+  //
+  // A filter, not CSS: a hidden card is still in the DOM, still in the grid's flow, and still
+  // reachable by anything that reads the page.
+  // Plans this page OFFERS, in tier order. `visiblePlans` drops the retired tiers
+  // (starter/pro) EXCEPT when one is the organization's own current plan — hiding the tier a
+  // customer is actually paying for would leave them looking at three cards, none of them
+  // theirs. Distinct from `plansList`, which stays the whole served catalog and still backs
+  // `currentPlan` below.
+  const offeredPlans = useMemo(
+    () => visiblePlans(plansList, ent?.plan_slug),
+    [plansList, ent]
+  );
+
   const currentPlan = useMemo(
     () => plansList?.find((p) => p.slug === ent?.plan_slug),
     [plansList, ent]
@@ -193,7 +273,23 @@ export default function OrganizationBilling() {
   // (it would create a second Stripe subscription and bill twice), so the CTA must not offer
   // one. The distinction comes from the backend's Section 12 status, not from anything the
   // page decides for itself. `trial` is the pre-Section-12 spelling still present on old rows.
-  const paidSubscription = ["active", "past_due", "plan_change_scheduled"].includes(ent?.status);
+  // Would a new checkout create a SECOND paid subscription? The backend's own answer
+  // (`has_live_provider_subscription`, the predicate behind the checkout endpoint's 409).
+  //
+  // It used to BE the status list below, and that is what produced the bug: a subscription that
+  // has completed Stripe checkout but has not been activated sits in `conversion_pending`, which
+  // is in none of those three — so the page believed the tenant had no subscription, rendered
+  // "Upgrade" everywhere, and every click came back 409. The `??` keeps an older backend on the
+  // previous behaviour rather than treating a paying tenant as unsubscribed, which is the
+  // dangerous direction; `conversion_pending` is added to that fallback for the same reason.
+  const checkoutLocked = ent?.checkout_locked
+    ?? ["active", "past_due", "plan_change_scheduled", "conversion_pending"].includes(ent?.status);
+  // Retained name for the plan-change branches below: an org whose provider subscription is
+  // live is exactly the one that must be MOVED rather than re-bought.
+  const paidSubscription = checkoutLocked;
+  // A live subscription the hierarchy cannot place: locked, with no entitled `plan_slug`.
+  // Either a conversion Stripe has not confirmed, or a plan outside the known tiers.
+  const unmappedSubscription = checkoutLocked && !ent?.plan_slug;
   // A change already scheduled. All three fields are written together by the backend, so
   // `pending_plan_slug` is a sufficient test for "is one pending".
   const pending = ent?.pending_plan_slug
@@ -204,6 +300,30 @@ export default function OrganizationBilling() {
         effectiveAt: ent.plan_change_effective_at,
       }
     : null;
+
+  // ── Resolve an unidentified subscription against Stripe, once ──────────────────────────
+  // `unmappedSubscription` is what a missed `customer.subscription.created` looks like from
+  // here. Nothing local can resolve it — the missing fact is at Stripe — so the console asks
+  // for it instead of showing "confirming…" forever. The endpoint only READS from Stripe and
+  // applies the answer through the Section 12 state machine; it cannot create a subscription.
+  //
+  // Attempted once per mount, tracked by a ref so a re-render from the reload cannot start a
+  // second attempt. `syncError` holds the real reason when it fails.
+  const syncAttempted = useRef(false);
+  const [syncError, setSyncError] = useState(null);
+  useEffect(() => {
+    if (!unmappedSubscription || syncAttempted.current) return undefined;
+    syncAttempted.current = true;
+    let cancelled = false;
+    api.post("/organization/billing/sync")
+      .then(async ({ data }) => {
+        if (cancelled) return;
+        if (data?.error) setSyncError(data.error);
+        if (data?.synced) await reloadOverview?.();
+      })
+      .catch((e) => { if (!cancelled) setSyncError(errMsg(e)); });
+    return () => { cancelled = true; };
+  }, [unmappedSubscription, reloadOverview]);
 
   const [changing, setChanging] = useState(null);
 
@@ -467,9 +587,31 @@ export default function OrganizationBilling() {
                 </div>
               )}
             </div>
+            {/* A live subscription this page cannot place. Shown instead of silently rendering
+                three purchasable cards, which is what previously sent people into a 409 they
+                could not act on. Names no Stripe identifier: the customer-facing fact is "you
+                have one and we are confirming it"; the id is for the audit log. */}
+            {unmappedSubscription && (
+              <div
+                role="status"
+                className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
+              >
+                <strong className="font-semibold">Current subscription detected.</strong>{" "}
+                {syncError
+                  ? <>{syncError}{" "}Plan changes are paused and nothing further will be
+                      charged.{" "}</>
+                  : <>We&apos;re synchronizing it with Stripe, so plan changes are paused for the
+                      moment. Nothing further will be charged.{" "}</>}
+                <Link to="/contact" className="underline underline-offset-2">Contact us</Link>{" "}
+                if this doesn&apos;t clear shortly.
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              {(plansList || []).map((p) => {
-                const current = p.slug === ent?.plan_slug;
+              {offeredPlans.map((p) => {
+                // Decided from the BACKEND's current plan slug and the plan's server-set
+                // `self_service`, never from the price shown on the card.
+                const cta = planCta(p, ent?.plan_slug, { checkoutLocked });
+                const current = cta.kind === "current";
                 return (
                   <div
                     key={p.id}
@@ -501,31 +643,59 @@ export default function OrganizationBilling() {
                         </li>
                       ))}
                     </ul>
-                    {!current && (paidSubscription && p.self_service ? (
-                      // Already paying, and this plan is self-service: SCHEDULE the change
-                      // rather than opening checkout. Checkout would create a second Stripe
-                      // subscription and bill for both; this moves the existing one at the
-                      // period boundary. The label says "Switch to" rather than "Upgrade"
-                      // because nothing changes on click — a date is set.
+                    {/* CTA, one branch per planCta() outcome.
+                        Current  : disabled, nothing to buy.
+                        Upgrade  : the EXISTING Stripe paths, still split by whether money is
+                                   already moving — an org with a live paid subscription must
+                                   not be sent to checkout, which would create a SECOND Stripe
+                                   subscription; it schedules the move on the existing one.
+                        Downgrade: a link to the contact form. No endpoint is called.
+                        Contact  : quote-led (Enterprise) or unrankable. */}
+                    {cta.kind === "current" ? (
                       <button
                         type="button"
-                        onClick={() => schedulePlanChange(
-                          p.slug,
-                          (p.billing_intervals || []).includes(interval)
-                            ? interval
-                            : (p.billing_intervals || ["monthly"])[0],
-                        )}
-                        disabled={changing !== null || Boolean(pending)}
-                        aria-label={`Schedule a change to the ${p.name} plan`}
-                        title={pending
-                          ? "Cancel the scheduled change first"
-                          : "Takes effect at the end of your billing period"}
-                        className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-violet-300 px-3 py-1.5 text-xs font-medium text-violet-700 transition hover:bg-violet-50 disabled:opacity-50 dark:border-violet-800 dark:text-violet-300 dark:hover:bg-violet-950/40"
+                        disabled
+                        aria-current="true"
+                        aria-label={`${p.name} is your current plan`}
+                        className="mt-4 inline-flex w-full cursor-default items-center justify-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700 disabled:opacity-100 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300"
                       >
-                        {changing === p.slug ? "Scheduling…" : `Switch to ${p.name}`}
+                        Current Plan
                       </button>
-                    ) : paidSubscription ? (
-                      // Paying, but this plan is contract-priced — still a sales conversation.
+                    ) : cta.kind === "upgrade" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const billingInterval = (p.billing_intervals || []).includes(interval)
+                            ? interval
+                            : (p.billing_intervals || ["monthly"])[0];
+                          return paidSubscription
+                            ? schedulePlanChange(p.slug, billingInterval)
+                            : startCheckout(p.slug, billingInterval);
+                        }}
+                        disabled={paidSubscription
+                          ? (changing !== null || Boolean(pending))
+                          : checkoutFor !== null}
+                        aria-label={`Upgrade to the ${p.name} plan`}
+                        title={paidSubscription
+                          ? (pending
+                              ? "Cancel the scheduled change first"
+                              : "Takes effect at the end of your billing period")
+                          : undefined}
+                        className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-700 disabled:opacity-60"
+                      >
+                        {checkoutFor === p.slug
+                          ? "Redirecting to Stripe…"
+                          : changing === p.slug ? "Scheduling…" : "Upgrade"}
+                      </button>
+                    ) : cta.kind === "downgrade" ? (
+                      <Link
+                        to={downgradePath(p)}
+                        aria-label={`Contact us to downgrade to the ${p.name} plan`}
+                        className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                      >
+                        Contact us to downgrade
+                      </Link>
+                    ) : (
                       <Link
                         to={`/contact?plan=${encodeURIComponent(p.name)}`}
                         aria-label={`Talk to an expert about the ${p.name} plan`}
@@ -533,43 +703,7 @@ export default function OrganizationBilling() {
                       >
                         Talk to an expert
                       </Link>
-                    ) : (
-                      // ZST-COM-PLAN-001 Section 03 splits the CTA by plan type: a
-                      // self-service plan gets "Start building / Upgrade", a contracted plan
-                      // gets "Talk to an expert". Which is which is NOT decided here — the
-                      // server sets `self_service` from whether an approved Stripe price is
-                      // configured for the plan, so this only renders the decision.
-                      p.self_service ? (
-                        <button
-                          type="button"
-                          // Buy this plan on the selected cadence, falling back to whichever
-                          // single cadence it offers — a plan priced monthly-only must not send
-                          // an annual request just because the toggle happens to say annual.
-                          onClick={() => startCheckout(
-                            p.slug,
-                            (p.billing_intervals || []).includes(interval)
-                              ? interval
-                              : (p.billing_intervals || ["monthly"])[0],
-                          )}
-                          disabled={checkoutFor !== null}
-                          aria-label={`Upgrade to the ${p.name} plan`}
-                          className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-700 disabled:opacity-60"
-                        >
-                          {checkoutFor === p.slug ? "Redirecting to Stripe…" : "Upgrade"}
-                        </button>
-                      ) : (
-                        <Link
-                          // Contracted / unpriced plans keep the inquiry path (Section 03
-                          // "Talk to an expert"). Carries the plan so the form opens with the
-                          // commercial topic chosen and the plan already named.
-                          to={`/contact?plan=${encodeURIComponent(p.name)}`}
-                          aria-label={`Talk to an expert about the ${p.name} plan`}
-                          className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-                        >
-                          Talk to an expert
-                        </Link>
-                      )
-                    ))}
+                    )}
                   </div>
                 );
               })}

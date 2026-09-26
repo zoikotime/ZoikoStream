@@ -277,8 +277,11 @@ export default function useLiveKitPublish({
       const room = new Room({
         stopLocalTrackOnUnpublish: false,
         dynacast: true,
+        // ONLY the ladder is overridden. The Room constructor merges publishDefaults over
+        // livekit's own, so naming `simulcast` here bought nothing — it is already the SDK
+        // default — while breaking the rule this object depends on: that codec, audioPreset,
+        // dtx and red keep their existing values because they are not mentioned.
         publishDefaults: {
-          simulcast: true,
           videoSimulcastLayers: [VideoPresets.h360, VideoPresets.h720],
         },
       });

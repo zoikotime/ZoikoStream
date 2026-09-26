@@ -122,6 +122,32 @@ SUBSCRIPTION_TERMINATED_STATES = _with_legacy("canceled", "closed")
 SUBSCRIPTION_REVENUE_STATES = _with_legacy("active", "trialing")
 
 
+# States in which the provider-side subscription has been RELEASED — Stripe is no longer
+# billing for it, so a fresh checkout is the correct way to start paying again.
+PROVIDER_RELEASED_STATES = ("canceled", "closed", "trial_expired")
+
+
+def has_live_provider_subscription(sub) -> bool:
+    """True when this subscription still has a LIVE Stripe counterpart — i.e. when starting a
+    NEW checkout would mint a SECOND subscription on the same customer and bill twice.
+
+    THE SINGLE SOURCE OF TRUTH for that question. The checkout endpoint's duplicate guard and
+    the overview the console renders were each deciding it separately, and the two answers did
+    not agree: a subscription that has completed checkout but has not yet been activated by
+    `customer.subscription.created` sits in `conversion_pending`, which IS guarded here (it has
+    a stripe_subscription_id) but is deliberately NOT in SUBSCRIPTION_ENTITLED_STATES. The
+    overview therefore reported no plan at all, the console offered "Upgrade" on every card, and
+    every click came back 409.
+
+    Deliberately NOT the same question as entitlement: `conversion_pending` unlocks nothing
+    (Section 18) and this does not claim it does. It answers only "is Stripe already billing
+    this row", which is what decides checkout versus plan-change.
+    """
+    if sub is None or not getattr(sub, "stripe_subscription_id", None):
+        return False
+    return normalize_subscription_state(sub.status) not in PROVIDER_RELEASED_STATES
+
+
 def subscription_transition_error(current: str | None, new: str | None) -> str | None:
     """None if `current -> new` is a §12-legal transition, else why it is refused.
 
