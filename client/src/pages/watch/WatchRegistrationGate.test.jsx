@@ -116,19 +116,19 @@ describe("a fresh visitor to a public event", () => {
 
   it("is asked to register", async () => {
     renderWatch(EVENT_A);
-    expect(await screen.findByText(/registration required/i)).toBeInTheDocument();
+    expect(await screen.findByText("Enter your name to watch the live event.")).toBeInTheDocument();
   });
 
   it("is offered the Remember me choice, unticked", async () => {
     renderWatch(EVENT_A);
-    await screen.findByText(/registration required/i);
+    await screen.findByText("Enter your name to watch the live event.");
     const box = screen.getByRole("checkbox", { name: /remember me for this event/i });
     expect(box).not.toBeChecked();
   });
 
   it("presents no saved credential, because there is none", async () => {
     renderWatch(EVENT_A);
-    await screen.findByText(/registration required/i);
+    await screen.findByText("Enter your name to watch the live event.");
     // Fresh browser: the watch call carries no reg/link params at all.
     const [, config] = vi.mocked(api.get).mock.calls[0];
     expect(config?.params).toBeUndefined();
@@ -141,7 +141,7 @@ describe("a caller the server accepts", () => {
     renderWatch(EVENT_A);
 
     await waitFor(() =>
-      expect(screen.queryByText(/registration required/i)).not.toBeInTheDocument()
+      expect(screen.queryByText("Enter your name to watch the live event.")).not.toBeInTheDocument()
     );
     expect(screen.queryByRole("checkbox", { name: /remember me/i })).not.toBeInTheDocument();
   });
@@ -158,7 +158,7 @@ describe("a remembered credential", () => {
     const [url, config] = vi.mocked(api.get).mock.calls[0];
     expect(url).toBe(`/events/${EVENT_A}/watch`);
     expect(config.params).toMatchObject({ reg: "saved.credential.for.a" });
-    expect(screen.queryByText(/registration required/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Enter your name to watch the live event.")).not.toBeInTheDocument();
   });
 
   it("does nothing for a DIFFERENT event", async () => {
@@ -167,7 +167,7 @@ describe("a remembered credential", () => {
     vi.mocked(api.get).mockResolvedValue({ data: unregistered(EVENT_B) });
 
     renderWatch(EVENT_B);
-    expect(await screen.findByText(/registration required/i)).toBeInTheDocument();
+    expect(await screen.findByText("Enter your name to watch the live event.")).toBeInTheDocument();
     const [, config] = vi.mocked(api.get).mock.calls[0];
     expect(config?.params).toBeUndefined();
   });
@@ -178,7 +178,7 @@ describe("a remembered credential", () => {
     vi.mocked(api.get).mockResolvedValue({ data: unregistered(EVENT_A) });
 
     renderWatch(EVENT_A);
-    expect(await screen.findByText(/registration required/i)).toBeInTheDocument();
+    expect(await screen.findByText("Enter your name to watch the live event.")).toBeInTheDocument();
     await waitFor(() => expect(localStorage.getItem(`zk_reg_${EVENT_A}`)).toBeNull());
     expect(sessionStorage.getItem(`zk_reg_${EVENT_A}`)).toBeNull();
   });
