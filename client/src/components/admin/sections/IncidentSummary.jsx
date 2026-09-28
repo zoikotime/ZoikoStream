@@ -25,8 +25,11 @@ const SEV_TONE = {
   sev4: "text-slate-500 dark:text-neutral-400",
 };
 
-export default function IncidentSummary({ incidents = [] }) {
-  const active = incidents.filter((i) => i.status !== "resolved");
+export default function IncidentSummary({ incidents = [], summary }) {
+  // `summary.active` is EVERY open incident, whatever the selected range: an incident that
+  // started before the window is still burning. The range decides only `resolved_count`.
+  const active = summary ? summary.active || [] : incidents.filter((i) => i.status !== "resolved");
+  const resolvedCount = summary ? summary.resolved_count || 0 : incidents.length;
   const worst = active.reduce(
     (acc, i) => ((SEV_RANK[i.severity] || 0) > (SEV_RANK[acc?.severity] || 0) ? i : acc),
     null
@@ -49,9 +52,9 @@ export default function IncidentSummary({ incidents = [] }) {
         <p className={cx("flex items-center gap-2 text-[13px]", CONSOLE.body)}>
           <FiCheck className="shrink-0 text-green-600 dark:text-green-400" aria-hidden="true" />
           No active incidents recorded.
-          {incidents.length > 0 && (
+          {resolvedCount > 0 && (
             <span className={CONSOLE.faint}>
-              {incidents.length} resolved in this window.
+              {resolvedCount} resolved in the selected window.
             </span>
           )}
         </p>

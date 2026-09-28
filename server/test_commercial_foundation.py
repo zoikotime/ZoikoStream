@@ -26,7 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.crud import commercial as crud
-from _testsupport import code_only
+from _testsupport import code_only, published_catalog_fields
 from app.db import engine
 from app.models import (
     CapacityPool, CatalogLine, CatalogVersion, CommercialAccount, Event, EventOrder,
@@ -679,8 +679,18 @@ def test_draft_catalog_versions_are_hidden_from_customers(  ):
     authenticated user could list every draft price book."""
     vertical = f"tenant-test-{uuid.uuid4().hex[:8]}"
     with Session(engine) as db:
+        # A published version must name its publisher (models/commercial publish invariant).
+        org = Organization(name=f"cat-vis-{uuid.uuid4().hex[:8]}")
+        db.add(org)
+        db.flush()
+        publisher = User(org_id=org.id, full_name="Publisher", role="super_admin",
+                         email=f"pub-{uuid.uuid4().hex[:8]}@t.test",
+                         username=f"pub{uuid.uuid4().hex[:8]}", password_hash="x")
+        db.add(publisher)
+        db.flush()
         draft = CatalogVersion(version_label="v-draft", vertical=vertical, status="draft")
-        published = CatalogVersion(version_label="v-pub", vertical=vertical, status="published")
+        published = CatalogVersion(version_label="v-pub", vertical=vertical,
+                                   **published_catalog_fields(publisher.id))
         retired = CatalogVersion(version_label="v-old", vertical=vertical, status="retired")
         db.add_all([draft, published, retired])
         db.commit()
@@ -691,6 +701,8 @@ def test_draft_catalog_versions_are_hidden_from_customers(  ):
             assert {c.status for c in staff_view} == {"draft", "published", "retired"}
         finally:
             db.execute(text("DELETE FROM catalog_versions WHERE vertical = :v"), {"v": vertical})
+            db.execute(text("DELETE FROM users WHERE id = :u"), {"u": publisher.id})
+            db.execute(text("DELETE FROM organizations WHERE id = :o"), {"o": org.id})
             db.commit()
 
 

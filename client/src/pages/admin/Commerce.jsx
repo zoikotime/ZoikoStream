@@ -73,8 +73,21 @@ function CatalogTab() {
                 <div className="min-w-0">
                   <p className="font-medium text-slate-800 dark:text-slate-100">{v.vertical} · {v.version_label}</p>
                   <p className="text-xs text-slate-500 dark:text-slate-400">{v.lines.length} line{v.lines.length === 1 ? "" : "s"}{v.notes ? ` · ${v.notes}` : ""}</p>
+                  {/* Server-computed (schemas/commercial.CatalogVersionOut.integrity_issue): a
+                      "published" row with no recorded publisher or time did not come from the
+                      governed publish path, so it is flagged rather than shown as a normal
+                      price book. The row itself is left untouched. */}
+                  {v.integrity_issue && (
+                    <p className="mt-1 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300" data-testid="catalog-integrity-issue">
+                      <FiAlertTriangle className="mt-0.5 shrink-0" />
+                      <span>{v.integrity_issue}</span>
+                    </p>
+                  )}
                 </div>
-                <StatusBadge status={v.status} />
+                <div className="flex shrink-0 items-center gap-2">
+                  {v.integrity_issue && <Badge status="warning">Anomaly</Badge>}
+                  <StatusBadge status={v.status} />
+                </div>
               </li>
             ))}
           </ul>
@@ -400,6 +413,47 @@ function ReconciliationTab() {
   );
 }
 
+// What the payment provider is ACTUALLY configured as. This used to be fixed copy —
+// "Stripe runs in TEST mode" — shown identically on a deployment with a live key and on one
+// with no key at all. GET /admin/payment-provider derives the mode from the key's prefix on
+// the server and returns only the mode, never the key.
+const PROVIDER_COPY = {
+  test: {
+    tone: "text-amber-500",
+    text: "Stripe is configured with a TEST-mode key — checkout works end to end but no real money moves.",
+  },
+  live: {
+    tone: "text-rose-500",
+    text: "Stripe is configured with a LIVE key — checkout collects real payments.",
+  },
+  not_configured: {
+    tone: "text-slate-400",
+    text: "Stripe is not configured — no checkout can be completed on this deployment.",
+  },
+  unrecognised: {
+    tone: "text-rose-500",
+    text: "A Stripe key is set but is not in a format Stripe issues — checkout will fail.",
+  },
+};
+
+function ProviderNotice() {
+  const { data, error } = useApi(() => api.get("/admin/payment-provider").then((r) => r.data));
+  // Unknown is said as unknown. A failed read must not fall back to any of the copy above,
+  // each of which is a claim about the configuration.
+  const copy = error
+    ? { tone: "text-slate-400", text: "Payment provider status unavailable." }
+    : data
+      ? PROVIDER_COPY[data.mode] || PROVIDER_COPY.unrecognised
+      : null;
+  if (!copy) return null;
+  return (
+    <span className="inline-flex items-start gap-2" data-testid="payment-provider-notice">
+      <FiAlertTriangle className={`mt-0.5 shrink-0 ${copy.tone}`} />
+      {copy.text}
+    </span>
+  );
+}
+
 export default function Commerce() {
   const [tab, setTab] = useState("catalog");
 
@@ -407,10 +461,11 @@ export default function Commerce() {
     <div className="mx-auto max-w-[1100px] space-y-6">
       <div>
         <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Live Events Commerce</h1>
-        <p className="mt-1 flex items-start gap-2 text-sm text-slate-500 dark:text-slate-400">
-          <FiAlertTriangle className="mt-0.5 shrink-0 text-amber-500" />
-          Stripe runs in TEST mode — checkout works end to end but no real money moves. This
-          configures the registries a Live Event order is built from (ZST-LE-COM-001).
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          This configures the registries a Live Event order is built from (ZST-LE-COM-001).
+        </p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          <ProviderNotice />
         </p>
       </div>
 

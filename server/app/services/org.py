@@ -334,16 +334,55 @@ def entitlements(db: Session, org: Organization) -> dict:
     ) or 0
     hours = _streaming_hours(db, org.id)
 
-    def bar(label, used, limit, unit):
-        pct = round(100 * used / limit, 1) if limit else None
-        return {"label": label, "used": used, "limit": limit, "unit": unit, "percent": pct}
+    # The ceiling ACTUALLY applied, which can differ from the displayed plan: a lapsed
+    # subscription reports no entitled plan (see _plan) yet stays capped at its old plan's
+    # limits (see enforcement_plan), and storage is further bounded by the platform ceiling.
+    # Reporting only the displayed limit would tell an operator a tenant is uncapped while the
+    # platform is in fact refusing their uploads.
+    enf = enforcement_plan(db, org.id)
+    from . import platform_settings as _ps
+    _storage_caps = [c for c in ((enf.max_storage_gb if enf else None),
+                                 _ps.storage_ceiling_gb(db)) if c is not None]
+    enforced_limits = {
+        "storage": min(_storage_caps) if _storage_caps else None,
+        "members": enf.max_users if enf else None,
+        "streaming_hours": None,           # nothing enforces this - see `enforced` below
+    }
+
+    def bar(key, label, used, limit, unit, *, enforced: bool):
+        # Three different "no number" states, kept distinct because they mean different things:
+        #   no plan at all        -> the quota is NOT APPLICABLE (nothing is entitled)
+        #   plan, limit None      -> UNLIMITED (Enterprise: services/broadcast falls through to
+        #                            the platform ceiling rather than a plan cap)
+        #   plan, limit set       -> a real quota, with remaining and percent
+        # `used` is always MEASURED here - each figure below is counted from rows - so a 0 is a
+        # measured zero, never a stand-in for unknown.
+        if plan is None:
+            quota_state, remaining, pct = "not_applicable", None, None
+        elif limit is None:
+            quota_state, remaining, pct = "unlimited", None, None
+        else:
+            quota_state = "exceeded" if used > limit else "within"
+            remaining = round(limit - used, 1) if isinstance(used, float) else limit - used
+            pct = round(100 * used / limit, 1) if limit else None
+        return {"key": key, "label": label, "used": used, "limit": limit, "unit": unit,
+                "percent": pct, "remaining": remaining,
+                "unlimited": plan is not None and limit is None,
+                "quota_state": quota_state, "usage_state": "measured",
+                # Whether the platform actually REFUSES something at this limit. Storage and
+                # seats are enforced (broadcast recording gate; member invitations). Streaming
+                # hours is shown against the plan but nothing enforces it - stated rather
+                # than implied, so an operator does not read a bar as a control.
+                "enforced": enforced,
+                "enforced_limit": enforced_limits.get(key) if enforced else None}
 
     items = [
-        bar("Storage", round(float(org.storage_used_gb or 0), 1),
-            plan.max_storage_gb if plan else None, "GB"),
-        bar("Members", members, plan.max_users if plan else None, "seats"),
-        bar("Streaming hours", hours,
-            plan.max_streaming_hours if plan else None, "hrs"),
+        bar("storage", "Storage", round(float(org.storage_used_gb or 0), 1),
+            plan.max_storage_gb if plan else None, "GB", enforced=True),
+        bar("members", "Members", members, plan.max_users if plan else None, "seats",
+            enforced=True),
+        bar("streaming_hours", "Streaming hours", hours,
+            plan.max_streaming_hours if plan else None, "hrs", enforced=False),
     ]
     highest = max((i["percent"] for i in items if i["percent"] is not None), default=None)
     return {

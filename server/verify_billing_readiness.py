@@ -77,7 +77,8 @@ def read_only_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
         return None, None
-    engine = create_engine(url, connect_args={"connect_timeout": 30})
+    from app.dburl import engine_url  # psycopg2 explicitly; see app/dburl.py
+    engine = create_engine(engine_url(url), connect_args={"connect_timeout": 30})
     conn = engine.connect()
     conn.execute(text("SET TRANSACTION READ ONLY"))
     return conn, text

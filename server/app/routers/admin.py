@@ -9,6 +9,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from pydantic import BaseModel, Field
+from ..config import settings
 from ..crud import admin as crud
 from ..crud import event as event_crud
 from ..db import get_db
@@ -35,6 +37,7 @@ from ..models import (
     Release,
     ReleaseDigest,
     SecurityAdvisory,
+    Subscription,
     TrustEvidenceRequest,
     VulnerabilityReport,
     LiveRecording,
@@ -144,23 +147,18 @@ def command_center(
     """Whole-page payload for /admin/dashboard. One call because every region reports on the
     same window and the same instant.
 
-    range=custom requires `from`; `to` defaults to now. Validated here rather than in the
-    service so a bad window is a 400 the console can explain, not a silently empty page."""
-    if range_ == "custom":
-        if from_ is None:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                                "range=custom requires a 'from' timestamp")
-        until = to or datetime.now(timezone.utc)
-        if from_.tzinfo is None:
-            from_ = from_.replace(tzinfo=timezone.utc)
-        if until.tzinfo is None:
-            until = until.replace(tzinfo=timezone.utc)
-        if from_ >= until:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "'from' must be before 'to'")
-        return ops_svc.command_center(db, admin, range_=range_, since=from_, until=until,
-                                      region=region, scope=scope, include_test=include_test)
-    return ops_svc.command_center(db, admin, range_=range_, region=region,
-                                  scope=scope, include_test=include_test)
+    The window is resolved in ONE place (services/ops_window.resolve): named ranges end now,
+    range=custom needs `from` (`to` defaults to, and is clamped to, now). `from`/`to` are only
+    read for range=custom. An impossible window is a 400 the console can explain, never a
+    silently empty page."""
+    from ..services import ops_window
+    try:
+        return ops_svc.command_center(
+            db, admin, range_=range_, region=region, scope=scope, include_test=include_test,
+            since=from_ if range_ == "custom" else None,
+            until=to if range_ == "custom" else None)
+    except ops_window.WindowError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
 
 
 @router.get("/console-state")
@@ -239,6 +237,77 @@ def _support_out(req: SupportAccessRequest) -> dict:
     payload = SupportAccessOut.model_validate(req).model_dump()
     payload["allowed_action_list"] = support_svc.actions_list(req.allowed_actions)
     return payload
+
+
+@router.get("/support-access")
+def list_support_access(
+    status_: str | None = Query(None, alias="status",
+                                pattern="^(requested|approved|active|ended|expired|denied)$"),
+    org_id: uuid.UUID | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_super_admin),
+):
+    """Every ORG-009 support-access request, platform-wide — for Support Operations.
+
+    A READ over the existing SupportAccessRequest rows, filtered and paged in SQL. Support
+    Operations previously showed tickets only, so the platform's authorized-access lifecycle
+    — who asked to reach into which tenant, for what, whether that tenant agreed, and when it
+    ends — had no operational view at all.
+
+    Nothing here grants, approves or starts anything. Approval belongs to the Organization;
+    the platform-side actions (countersign, start, end, amend) keep their own routes, which
+    each enforce their own lifecycle rules.
+
+    `summary` is dataset-wide per status, not a count of the page.
+    """
+    stmt = select(SupportAccessRequest)
+    if status_:
+        stmt = stmt.where(SupportAccessRequest.status == status_)
+    if org_id:
+        stmt = stmt.where(SupportAccessRequest.org_id == org_id)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.scalars(
+        stmt.order_by(SupportAccessRequest.requested_at.desc(), SupportAccessRequest.id.desc())
+        .offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    counts = dict(db.execute(
+        select(SupportAccessRequest.status, func.count(SupportAccessRequest.id))
+        .group_by(SupportAccessRequest.status)
+    ).all())
+    org_names = dict(db.execute(
+        select(Organization.id, Organization.name).where(
+            Organization.id.in_({r.org_id for r in rows} or {uuid.uuid4()}))
+    ).all())
+    items = []
+    for r in rows:
+        out = _support_out(r)
+        out["organization_name"] = org_names.get(r.org_id)
+        # What the console needs to offer only the actions the server will accept: start is
+        # the requesting engineer's alone, and break-glass needs someone ELSE to countersign.
+        out["engineer_id"] = str(r.engineer_id) if r.engineer_id else None
+        out["is_mine"] = r.engineer_id == admin.id
+        out["countersigned"] = r.emergency_authorizer_id is not None
+        items.append(out)
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "summary": {k: counts.get(k, 0) for k in
+                        ("requested", "approved", "active", "ended", "expired", "denied")}}
+
+
+@router.get("/support-access/vocabulary")
+def support_access_vocabulary(admin: User = Depends(require_super_admin)):
+    """The request form's choices, from the same constants the request route validates
+    against - so the console cannot offer a reason or capability the server would refuse."""
+    from ..models.support_access import SUPPORT_MAX_MINUTES
+    return {
+        "reasons": list(SUPPORT_REASONS),
+        "capabilities": [
+            {"key": k, "label": v, "sensitive": k in tenant_access.SENSITIVE_CAPABILITIES}
+            for k, v in tenant_access.CAPABILITIES.items()
+        ],
+        "max_minutes": SUPPORT_MAX_MINUTES,
+    }
 
 
 @router.get("/support-access/state")
@@ -387,6 +456,12 @@ def start_support_access(req_id: uuid.UUID, request: Request, background: Backgr
     req = db.get(SupportAccessRequest, req_id)
     if req is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Support request not found")
+    # The session - and the elevation it opens - belongs to the engineer the Organization
+    # approved (services/support_access.start issues it to req.engineer_id). A colleague
+    # starting it would begin another person's access clock without them.
+    if req.engineer_id != admin.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Only the engineer who raised this request can start it")
 
     outcome, _elevation = support_svc.start(db, req)
     if outcome == support_svc.NOT_APPROVED:
@@ -589,17 +664,47 @@ def _assert_super_admins_remain(db: Session, target: User, *, demoting_to=None,
         )
 
 
+# The changes that decide who operates the PLATFORM, rather than what happens inside one
+# customer. Making someone a super_admin grants authority over every tenant; removing the
+# role, or deactivating such an account, takes it away. Those need a deliberate step-up.
+def _is_high_risk_user_change(user: User, data: UserUpdate) -> str | None:
+    """A short reason string when this patch needs elevation, else None."""
+    if data.role is not None and data.role != user.role:
+        if "super_admin" in (data.role, user.role):
+            return f"platform role change {user.role} -> {data.role}"
+    if data.is_active is False and user.role == "super_admin":
+        return "deactivating a Super Admin"
+    if data.staff_commercial_role is not None:
+        return "staff commercial scoping"
+    return None
+
+
 @router.patch("/users/{user_id}")
 def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
                background: BackgroundTasks,
-               # NO elevation guard here, deliberately. This endpoint is already behind the
-               # ORG-009 support context: org-approved, countersigned, capability-scoped, and
-               # it AUDITS its refusals (support_access.denied_out_of_scope). Stacking a
-               # coarser platform gate in front pre-empted that check and silenced the audit
-               # record for an out-of-scope reach — a strictly worse security posture than
-               # the finer control alone. Elevation covers the platform actions that have no
-               # tenant control of their own; see require_elevation's docstring.
-               ctx: SupportContext = Depends(support_context),
+               # ── PLATFORM GOVERNANCE, NOT TENANT SUPPORT ACCESS ───────────────────────
+               # This route no longer requires an ORG-009 support context, and that is a
+               # deliberate product decision rather than a relaxation nobody noticed.
+               #
+               # Every field UserUpdate carries — role, is_active, full_name,
+               # staff_commercial_role — is a PLATFORM attribute of an account, not customer
+               # content. `role` decides whether someone administers the whole platform;
+               # `is_active` decides whether the account may authenticate at all;
+               # `staff_commercial_role` scopes ZOIKO's own staff. Asking a customer to
+               # approve who becomes a platform operator inverts the relationship: the
+               # customer has no standing to grant that, and no ability to judge it.
+               #
+               # It is the same carve-out tenant_access.py already documents for adverse
+               # platform enforcement (suspend/restrict/delete an organization): requiring
+               # the customer's consent to act on the customer makes the control meaningless.
+               #
+               # WHAT IS NOT GIVEN UP: the organization is still TOLD. ORG-003's
+               # announce_access_changed still fires below, so a member's access changing is
+               # still disclosed to them — the change moves from "customer pre-approves" to
+               # "customer is notified", which is the posture the rest of platform
+               # enforcement already uses. Deleting a member (delete_user) is untouched and
+               # still ORG-009-gated, because that destroys tenant data rather than
+               # governing an account.
                db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     user = db.get(User, user_id)
     if not user:
@@ -612,14 +717,24 @@ def update_user(user_id: uuid.UUID, data: UserUpdate, request: Request,
     # identity grounds does not get recorded as a consumed support action.
     _assert_super_admins_remain(db, user, demoting_to=data.role,
                                 deactivating=data.is_active is False)
-    # ORG-009 gate. Editing a tenant's member is support access to that tenant, so the
-    # Organization must have approved it. Platform enforcement of the ORGANIZATION itself
-    # (suspend/restrict/delete) is a separate, deliberately ungated path — see
-    # update_organization — because requiring the customer's consent to restrict the
-    # customer would make that control meaningless.
-    ctx.authorize(user.org_id, tenant_access.CAP_MEMBERS_WRITE,
-                  resource="user", resource_id=user.id,
-                  summary=", ".join(sorted(data.model_dump(exclude_none=True))))
+    # Step-up for the high-risk subset only. A name correction is ordinary administration;
+    # minting or removing a platform operator is not, and neither is switching off one's
+    # ability to sign in. Checked inline rather than as Depends(require_elevation(...))
+    # because whether it applies depends on the TARGET row and the payload, which a
+    # dependency cannot see.
+    risk = _is_high_risk_user_change(user, data)
+    if risk is not None:
+        granted = ops_svc.active_elevation_scopes(db, admin)
+        if "identity" not in granted:
+            _audit(db, admin, request, "user.update.denied_no_elevation",
+                   target_type="user", target_id=user.id, org_id=user.org_id,
+                   meta={"reason": risk})
+            db.commit()
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"This change ({risk}) needs an active 'identity' elevation. "
+                "Elevate from the console and try again.",
+            )
     was_active = user.is_active
     previous_access = org_comms.describe_access(role=user.role, org=user.organization,
                                                 active=user.is_active)
@@ -701,15 +816,54 @@ def list_plans(db: Session = Depends(get_db)):
     return crud.list_plans(db)
 
 
+@router.get("/usage")
+def usage_overview(
+    q: str | None = Query(None, max_length=120),
+    plan: str | None = Query(None, max_length=60),
+    status_: str | None = Query(None, alias="status", max_length=30),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    sort: str = Query("name", pattern="^(name|-name|storage)$"),
+    db: Session = Depends(get_db),
+):
+    """Usage & Entitlements: effective entitlements, quota evaluation and measured usage per
+    organization. Read-only; filtered, sorted and paged in SQL (services/admin.usage_overview)."""
+    return svc.usage_overview(db, q=q, plan_slug=plan, sub_status=status_,
+                              page=page, page_size=page_size, sort=sort)
+
+
 @router.get("/subscriptions", response_model=Page)
 def list_subscriptions(
     status_: str | None = Query(None, alias="status"),
+    q: str | None = Query(None, max_length=120),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    items, total = crud.list_subscriptions(db, status=status_, page=page, page_size=page_size)
+    items, total = crud.list_subscriptions(db, status=status_, page=page, page_size=page_size, q=q)
     return Page(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.get("/subscriptions/summary")
+def subscription_summary(db: Session = Depends(get_db)):
+    """Dataset-wide subscription counts and contracted MRR for the Usage & Entitlements KPIs.
+
+    The page computed these in the browser from the first 100 rows it had fetched, so every
+    count was silently capped at 100 and MRR summed trials at list price — while Analytics
+    reported a different MRR for the same platform. Both now read svc._monthly_revenue, so
+    the two pages cannot disagree about one number.
+    """
+    rows = dict(db.execute(
+        select(Subscription.status, func.count(Subscription.id)).group_by(Subscription.status)
+    ).all())
+    return {
+        "total": sum(rows.values()),
+        "active": rows.get("active", 0),
+        "trial": rows.get("trial", 0) + rows.get("trialing", 0),
+        "past_due": rows.get("past_due", 0),
+        "contracted_mrr": svc._monthly_revenue(db),
+        "mrr_basis": "contracted_list_price",
+    }
 
 
 @router.patch("/subscriptions/{sub_id}")
@@ -738,8 +892,20 @@ def update_subscription(sub_id: uuid.UUID, data: SubscriptionUpdate, request: Re
 # ── Analytics / Live monitoring / Health ─────────────────────────────────────
 
 @router.get("/analytics")
-def analytics(db: Session = Depends(get_db)):
-    return svc.analytics(db)
+def analytics(
+    range_: str = Query("30d", alias="range", pattern="^(24h|7d|30d|90d|custom)$"),
+    since: datetime | None = Query(None, alias="from"),
+    until: datetime | None = Query(None, alias="to"),
+    org_id: uuid.UUID | None = None,
+    db: Session = Depends(get_db),
+):
+    """Filtered in SQL: org and window both reach the queries (services/admin.analytics)."""
+    if range_ == "custom" and since is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            "A custom range needs a 'from' date.")
+    if org_id is not None and db.get(Organization, org_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    return svc.analytics(db, org_id=org_id, range_key=range_, since=since, until=until)
 
 
 @router.get("/live-events")
@@ -807,16 +973,55 @@ def platform_health(db: Session = Depends(get_db)):
     return svc.platform_health(db)
 
 
+@router.get("/payment-provider")
+def payment_provider():
+    """Which Stripe mode this deployment is actually running, derived from the key.
+
+    The Commerce console used to state "Stripe runs in TEST mode" as fixed copy, on every
+    deployment, whatever the configuration — so a production environment with a live key, or
+    one with no key at all, displayed the same reassurance. The truth was already available:
+    Stripe keys carry their mode in the prefix (sk_test_ / sk_live_, and rk_ for restricted
+    keys), and app/config.py already reads it to warn about a test key in production.
+
+    Returns the MODE only. The key never leaves the server, not even a fragment of it —
+    a prefix check is all the console needs, and a secret that is partially displayed is a
+    secret that has started to leak.
+    """
+    key = (settings.STRIPE_SECRET_KEY or "").strip()
+    if not key:
+        mode = "not_configured"
+    elif key.startswith(("sk_test_", "rk_test_")):
+        mode = "test"
+    elif key.startswith(("sk_live_", "rk_live_")):
+        mode = "live"
+    else:
+        # Set, but not in any shape Stripe issues. Reported as such rather than guessed.
+        mode = "unrecognised"
+    return {"provider": "stripe", "configured": bool(key), "mode": mode}
+
+
 @router.get("/recordings")
 def list_recordings(
     status_: str | None = Query(None, alias="status"),
     org_id: uuid.UUID | None = None,
+    q: str | None = Query(None, max_length=120),
     limit: int = Query(200, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
     """Cross-org recordings for the Media console (pages/admin/Media.jsx) — real
-    LiveRecording rows, nothing fabricated."""
-    return svc.list_recordings(db, status=status_, org_id=org_id, limit=limit)
+    LiveRecording rows, nothing fabricated. Newest `limit` rows; totals come from
+    /recordings/summary, never from the length of this list."""
+    return svc.list_recordings(db, status=status_, org_id=org_id, limit=limit, q=q)
+
+
+@router.get("/recordings/summary")
+def recordings_summary(
+    org_id: uuid.UUID | None = None,
+    q: str | None = Query(None, max_length=120),
+    db: Session = Depends(get_db),
+):
+    """Dataset-wide recording counts by lifecycle status and by verdict."""
+    return svc.recordings_summary(db, org_id=org_id, q=q)
 
 
 @router.get("/recordings/{recording_id}/playback-url")
@@ -920,12 +1125,41 @@ def get_settings(db: Session = Depends(get_db)):
     return {r.key: {"value": r.value, "category": r.category, "updated_at": r.updated_at} for r in rows}
 
 
+# The keys Platform Configuration manages, and the ONLY keys this endpoint may write.
+#
+# It used to accept any key and create it on the spot. platform_settings is shared storage:
+# services/media_retention reads "media_retention_policy" from it to decide how long a
+# recording is protected, and services/broadcast reads "media_publishing". So the generic
+# settings form was a way to rewrite the retention policy — set retention_days to 0 and every
+# retained recording became deletable — sidestepping the maker-checker path retention is
+# deliberately governed through (MED-011). Each governed key keeps its own governed writer;
+# this one is limited to the four the page actually edits.
+EDITABLE_SETTING_KEYS = frozenset({"brand", "global", "storage_limits", "streaming_limits"})
+
+
 @router.patch("/settings")
 def update_settings(data: SettingsUpdate, request: Request,
                    _elevated: User = Depends(require_elevation("platform")),
                    db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    unknown = sorted(set(data.values) - EDITABLE_SETTING_KEYS)
+    if unknown:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Not an editable platform setting: {', '.join(unknown)}. "
+            f"Editable here: {', '.join(sorted(EDITABLE_SETTING_KEYS))}.",
+        )
+    not_objects = sorted(k for k, v in data.values.items() if not isinstance(v, dict))
+    if not_objects:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            f"Setting value must be an object: {', '.join(not_objects)}")
+
+    # Before AND after, per key. The audit row used to record only which keys were touched,
+    # which answers "did someone change the storage ceiling" but not "from what, to what" —
+    # the question that matters when a limit starts refusing uploads.
+    changes = {}
     for key, value in data.values.items():
         row = db.get(PlatformSetting, key)
+        changes[key] = {"before": (row.value if row else None), "after": value}
         if row:
             row.value = value
             row.updated_by = admin.email
@@ -933,9 +1167,88 @@ def update_settings(data: SettingsUpdate, request: Request,
             db.add(PlatformSetting(key=key, value=value, updated_by=admin.email))
     db.commit()
     _audit(db, admin, request, "settings.update", target_type="setting",
-           meta={"keys": list(data.values.keys())})
+           meta={"keys": list(data.values.keys()), "changes": changes})
     rows = db.scalars(select(PlatformSetting)).all()
     return {r.key: {"value": r.value, "category": r.category, "updated_at": r.updated_at} for r in rows}
+
+
+# ── Retention policy (governed, maker-checker) ───────────────────────────────
+#
+# The ONLY write path to media_retention_policy. The generic PATCH /settings cannot touch it
+# (EDITABLE_SETTING_KEYS), because a single request there could set retention to zero and
+# make every retained recording deletable. Here a change is proposed by one person, approved
+# by a different one, and the effective policy does not move until that approval.
+
+class RetentionProposalIn(BaseModel):
+    retention_days: int
+    warning_days: int
+    reason: str = Field(min_length=10, max_length=500)
+
+
+class RetentionDecisionIn(BaseModel):
+    reason: str | None = Field(None, max_length=500)
+
+
+@router.get("/retention-policy")
+def get_retention_policy(db: Session = Depends(get_db)):
+    """Effective policy, any pending proposal, bounds, and the change's real impact."""
+    return media_retention.policy_state(db)
+
+
+@router.post("/retention-policy/proposals", status_code=status.HTTP_201_CREATED)
+def propose_retention_policy(data: RetentionProposalIn, request: Request,
+                             _elevated: User = Depends(require_elevation("platform")),
+                             db: Session = Depends(get_db),
+                             admin: User = Depends(require_super_admin)):
+    try:
+        proposal = media_retention.propose_policy(
+            db, actor=admin, retention_days=data.retention_days,
+            warning_days=data.warning_days, reason=data.reason)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
+    _audit(db, admin, request, "retention_policy.propose", target_type="retention_policy",
+           meta={"before": proposal["previous"],
+                 "proposed": {"retention_days": proposal["retention_days"],
+                              "warning_days": proposal["warning_days"]},
+                 "reason": proposal["reason"]})
+    return media_retention.policy_state(db)
+
+
+@router.post("/retention-policy/proposals/approve")
+def approve_retention_policy(request: Request,
+                             _elevated: User = Depends(require_elevation("platform")),
+                             db: Session = Depends(get_db),
+                             admin: User = Depends(require_super_admin)):
+    try:
+        result = media_retention.approve_policy(db, approver=admin)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+    except ValueError as exc:
+        # Maker-checker refusals land here. Audited: an attempt to self-approve a change to
+        # the platform's keep-guarantee is exactly the kind of event worth finding later.
+        _audit(db, admin, request, "retention_policy.approve_denied",
+               target_type="retention_policy", meta={"reason": str(exc)})
+        db.commit()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc))
+    _audit(db, admin, request, "retention_policy.approve", target_type="retention_policy",
+           meta={"before": result["before"], "after": result["after"],
+                 "requested_by": result["proposal"].get("requested_by"),
+                 "reason": result["proposal"].get("reason")})
+    return media_retention.policy_state(db)
+
+
+@router.post("/retention-policy/proposals/reject")
+def reject_retention_policy(data: RetentionDecisionIn, request: Request,
+                            _elevated: User = Depends(require_elevation("platform")),
+                            db: Session = Depends(get_db),
+                            admin: User = Depends(require_super_admin)):
+    try:
+        result = media_retention.reject_policy(db, actor=admin, reason=data.reason or "")
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+    _audit(db, admin, request, "retention_policy.reject", target_type="retention_policy",
+           meta={"proposal": result["proposal"], "reason": result["reason"]})
+    return media_retention.policy_state(db)
 
 
 # ── Roles & permissions (read-only reference) ────────────────────────────────
@@ -1035,6 +1348,35 @@ def list_support_tickets(
 ):
     items, total = crud.list_support_tickets(db, status=status_, org_id=org_id, page=page, page_size=page_size)
     return Page(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.get("/support-tickets/summary")
+def support_ticket_summary(db: Session = Depends(get_db)):
+    """Dataset-wide ticket counts for the Support Operations KPIs.
+
+    The page counted Open / In Progress / Resolved / Urgent off the first 100 tickets it had
+    fetched, so each number was silently capped and changed meaning as the queue grew past a
+    page. Counted here, in SQL, over every ticket.
+    """
+    from ..models import SupportTicket
+
+    by_status = dict(db.execute(
+        select(SupportTicket.status, func.count(SupportTicket.id)).group_by(SupportTicket.status)
+    ).all())
+    urgent = db.scalar(
+        select(func.count(SupportTicket.id)).where(
+            SupportTicket.priority == "urgent",
+            SupportTicket.status.not_in(("resolved", "closed")),
+        )
+    ) or 0
+    return {
+        "total": sum(by_status.values()),
+        "open": by_status.get("open", 0),
+        "in_progress": by_status.get("in_progress", 0),
+        "resolved": by_status.get("resolved", 0),
+        "closed": by_status.get("closed", 0),
+        "urgent_unresolved": urgent,
+    }
 
 
 @router.post("/support-tickets", response_model=SupportTicketOut, status_code=status.HTTP_201_CREATED)

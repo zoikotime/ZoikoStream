@@ -44,10 +44,17 @@ function startLabel(iso, timezone) {
   }
 }
 
-export default function UpcomingEvents({ events = [] }) {
+// Forward-looking over a fixed horizon (services/ops.UPCOMING_HORIZON). The page's range
+// selector looks BACKWARD and deliberately does not apply here.
+const horizonDays = (u) =>
+  u?.from && u?.to ? Math.round((new Date(u.to) - new Date(u.from)) / 86400000) : null;
+
+export default function UpcomingEvents({ events = [], upcoming }) {
+  const days = horizonDays(upcoming);
   return (
     <Panel
       title="Upcoming high-impact events"
+      description={days ? `Next ${days} days${upcoming.total > events.length ? ` · showing ${events.length} of ${upcoming.total}` : ""}` : undefined}
       count={events.filter((e) => e.verdict === "blocked").length}
       action={
         <Link to="/admin/event-readiness" className={cx("text-[12px] font-semibold", CONSOLE.link)}>
@@ -57,7 +64,7 @@ export default function UpcomingEvents({ events = [] }) {
     >
       {events.length === 0 ? (
         <p className={cx("text-[13px]", CONSOLE.body)}>
-          No high-impact events scheduled.
+          No high-impact events scheduled{days ? ` in the next ${days} days` : ""}.
         </p>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

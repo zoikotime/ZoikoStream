@@ -14,7 +14,14 @@ const RING = {
   warn: "ring-2 ring-offset-2",
   down: "ring-2 ring-offset-2 animate-pulse motion-reduce:animate-none",
   not_configured: "ring-1 opacity-50",
+  unmonitored: "ring-1 opacity-50",
 };
+
+// Statuses that are NOT evidence of health. Their node is drawn hollow. The fill used to be
+// keyed on `=== "not_configured"` alone, so a stage whose only member was configured-but-
+// unprobed would have rendered a SOLID coloured node — a confident green for something
+// nothing had checked.
+const HOLLOW = new Set(["not_configured", "unmonitored"]);
 
 // `eyebrow` labels the rail (the org console names which services are in scope).
 // `dimUnused` fades stages whose `in_use` is false — an org that never records should not
@@ -78,7 +85,7 @@ export default function LifecycleRail({ stages = [], trend = [], eyebrow, dimUnu
                 <span
                   className={cx("relative z-10 h-4 w-4 rounded-full", RING[s.status] || RING.not_configured)}
                   style={{
-                    backgroundColor: s.status === "not_configured" ? "transparent" : color,
+                    backgroundColor: HOLLOW.has(s.status) ? "transparent" : color,
                     // Tailwind can't express a per-stage ring colour, and the ring is the
                     // stage identity — so it is set inline alongside the fill.
                     "--tw-ring-color": color,

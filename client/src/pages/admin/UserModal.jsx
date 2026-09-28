@@ -5,7 +5,7 @@ import { Input, Select, Label, Switch } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import { ASSIGNABLE_PLATFORM_ROLES, roleLabel, STAFF_COMMERCIAL_ROLES } from "./roleInfo";
-import { CAP_MEMBERS_WRITE, readSupportState } from "./supportAccess";
+import { readSupportState } from "./supportAccess";
 
 // Edit an existing platform user's role/name/active state. The admin API has no user
 // creation route (accounts are created through org signup/invitations), so this is
@@ -35,7 +35,6 @@ export default function UserModal({ open, onClose, user, onSaved }) {
   // its async handlers — a synchronous setState inside an effect is an error under this
   // repo's eslint-plugin-react-hooks. The modal is keyed by user, so this IS the per-open reset.
   const [supportLoading, setSupportLoading] = useState(() => Boolean(user?.org_id));
-  const [requesting, setRequesting] = useState(false);
   const orgId = user?.org_id;
 
   useEffect(() => {
@@ -53,29 +52,6 @@ export default function UserModal({ open, onClose, user, onSaved }) {
 
   const access = readSupportState(support);
 
-  const requestAccess = async () => {
-    setRequesting(true);
-    try {
-      // The real endpoint, with the real required fields. It creates a REQUEST — the
-      // organization still has to approve it, and a session still has to be started.
-      await api.post("/admin/support-access", {
-        org_id: orgId,
-        case_reference: `IDN-${String(user.id).slice(0, 8)}`,
-        reason_category: "customer_reported_issue",
-        engineer_display: "Platform Support",
-        requested_scope: `Account administration for ${user.email}`,
-        allowed_actions: [CAP_MEMBERS_WRITE],
-        minutes: 60,
-      });
-      notify.success("Access requested. The organization has been asked to approve it.");
-      const r = await api.get("/admin/support-access/state", { params: { org_id: orgId } });
-      setSupport(r.data);
-    } catch (e) {
-      notify.error(errMsg(e));
-    } finally {
-      setRequesting(false);
-    }
-  };
 
   // Super Admin and Org Admin are the only roles this console GRANTS. The account's existing
   // role is appended when it is not one of those, which is the whole reason this is a list
@@ -135,11 +111,13 @@ export default function UserModal({ open, onClose, user, onSaved }) {
             size="sm"
             onClick={submit}
             loading={saving}
-            // Disabled while the gate is closed so the operator is not invited to fill in a
-            // form that cannot be submitted. The server still refuses regardless — this
-            // reflects the rule, it does not implement it.
-            disabled={supportLoading || !access.canWrite}
-            title={access.canWrite ? undefined : "Organization approval is required"}
+            // Enabled. Editing an account's platform attributes — name, platform role,
+            // whether it may sign in — is platform governance, and PATCH /admin/users/{id}
+            // no longer sits behind an ORG-009 support context (see its docstring). The
+            // server is still the authority: it requires super_admin, requires an "identity"
+            // elevation for the high-risk subset, and refuses anything that would empty the
+            // active super-admin set.
+            disabled={saving}
           >
             Save changes
           </Button>
@@ -147,30 +125,19 @@ export default function UserModal({ open, onClose, user, onSaved }) {
       }
     >
       <form onSubmit={submit} className="space-y-4">
-        {!supportLoading && !access.canWrite && (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3.5 dark:border-amber-500/25 dark:bg-amber-500/10">
-            <p className="text-sm font-medium text-amber-900 dark:text-amber-100">
-              Organization approval is required before account changes can be made.
-            </p>
-            <p className="mt-1 text-xs leading-relaxed text-amber-800/90 dark:text-amber-200/80">
-              {access.label}. {access.detail}
-            </p>
-            {access.canRequest && (
-              <Button
-                variant="secondary"
-                size="sm"
-                className="mt-2.5"
-                onClick={requestAccess}
-                loading={requesting}
-              >
-                Request support access
-              </Button>
-            )}
-          </div>
-        )}
+        {/* No blocking banner. This modal used to refuse every edit — including fixing a
+            typo in a name — until the customer approved a support session, which made
+            ordinary platform administration impossible: the super admin had to ask the
+            tenant for permission to manage an account the PLATFORM owns the governance of.
+            The gate moved to where it belongs (see the endpoint), and what is left here is
+            a statement of what the server will actually enforce.
+
+            The support session notice is still shown when one IS active, because that is a
+            real and relevant fact about the operator's current session — it is just no
+            longer a precondition for saving. */}
         {!supportLoading && access.canWrite && (
           <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs text-emerald-800 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-200">
-            Support session active — account changes are enabled.
+            Support session active for this organization.
             {access.expiresAt ? ` Expires ${new Date(access.expiresAt).toLocaleString()}.` : ""}
           </p>
         )}

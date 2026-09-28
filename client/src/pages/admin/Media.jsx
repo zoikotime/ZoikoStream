@@ -1,17 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FiFilm, FiPlay, FiRefreshCw, FiSearch, FiCheckCircle, FiUpload } from "react-icons/fi";
 import {
   Badge, Button, DataTable, DetailField, KpiCard, Panel, CONSOLE, cx, type,
 } from "../../components/admin";
 import ConsoleScreen from "../../components/admin/ConsoleScreen";
+import { bytes } from "../../components/admin/format";
 import Drawer from "../../ui/Drawer";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import { notify } from "../../ui/Toast";
 
-// Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
-// as a dependency, and a fresh `[]` literal on every render would defeat every one of them
-// (permanently, for a response that simply omits the field). It is never mutated.
+// Stable identity for the "nothing loaded yet" case, so the table is not handed a fresh `[]`
+// literal on every render. It is never mutated.
 const NONE = [];
 
 // Media — cross-org recordings. Real GET /admin/recordings: every real LiveRecording row
@@ -26,6 +26,16 @@ const NONE = [];
 
 const STATUSES = ["recording", "paused", "stopped", "failed"];
 const STATUS_TONE = { recording: "danger", paused: "warning", stopped: "neutral", failed: "danger" };
+
+// The server's verdict (crud.event.recording_list_state), from PERSISTED evidence only — never
+// computed here. "ready" means the provider reported a finished file; "unverified" means the
+// capture stopped cleanly but nothing recorded proves the file landed. A file_url string is
+// the key egress was ASKED to write, so it is never treated as evidence of a file.
+const VERDICT_TONE = { ready: "success", unverified: "warning", processing: "info", in_progress: "info", failed: "danger" };
+const VERDICT_LABEL = { ready: "Ready", unverified: "Unverified", processing: "Processing", in_progress: "In progress", failed: "Failed" };
+const VERDICT_HINT = {
+  unverified: "Stopped cleanly, but the provider never reported a file size. Playback performs the real storage check.",
+};
 
 // Dual-recording validation (services/validation.py) + the replay publish gate
 // (routers/events.py::watch_event's ReplayEntitlement check).
@@ -47,13 +57,7 @@ const WATERMARK_LABEL = {
   not_applicable: "Not started", pending: "Preparing…", ready: "Ready", failed: "Failed",
 };
 
-function fmtBytes(n) {
-  if (!n) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n, i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
-  return `${v.toFixed(1)} ${units[i]}`;
-}
+const fmtBytes = bytes;
 
 function fmtDuration(startedAt, stoppedAt) {
   if (!startedAt) return "—";
@@ -64,11 +68,21 @@ function fmtDuration(startedAt, stoppedAt) {
   return `${Math.floor(mins / 60)}h ${mins % 60}m`;
 }
 
-function useRecordingsData(status, orgId) {
+// Status AND search go to the server. Search used to run over the fetched rows, which are the
+// newest 200 — so an older recording could not be found at all.
+function useRecordingsData(status, q) {
   return useApi(() =>
     api
-      .get("/admin/recordings", { params: { status: status === "all" ? undefined : status, org_id: orgId === "all" ? undefined : orgId } })
+      .get("/admin/recordings", { params: { status: status === "all" ? undefined : status, q: q || undefined } })
       .then((r) => r.data)
+  );
+}
+
+// Dataset-wide totals. The KPIs were counted off the list above, so "Recordings" stopped at
+// 200 and "Playable" counted rows with a file_url string — not rows with a confirmed file.
+function useRecordingSummary(q) {
+  return useApi(() =>
+    api.get("/admin/recordings/summary", { params: { q: q || undefined } }).then((r) => r.data)
   );
 }
 
@@ -278,6 +292,19 @@ function RecordingDrawer({ recording, open, onClose }) {
       <dl className={cx("divide-y", CONSOLE.divider)}>
         <DetailField label="Organization" value={recording.organization || "—"} />
         <DetailField label="Status" value={<Badge tone={STATUS_TONE[recording.status]}>{recording.status}</Badge>} />
+        {recording.state && (
+          <DetailField
+            label="File verdict"
+            value={
+              <span>
+                <Badge tone={VERDICT_TONE[recording.state] || "neutral"}>{VERDICT_LABEL[recording.state] || recording.state}</Badge>
+                {VERDICT_HINT[recording.state] && (
+                  <span className="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">{VERDICT_HINT[recording.state]}</span>
+                )}
+              </span>
+            }
+          />
+        )}
         <DetailField label="Quality" value={recording.quality || "—"} />
         <DetailField label="Size" value={fmtBytes(recording.size_bytes)} />
         <DetailField label="Started" value={recording.started_at ? new Date(recording.started_at).toLocaleString() : "—"} />
@@ -327,30 +354,45 @@ function RecordingDrawer({ recording, open, onClose }) {
 
 export default function Media() {
   const [status, setStatus] = useState("all");
+  const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState(null);
 
-  const { data, loading, error, reload } = useRecordingsData(status, "all");
-  const recordings = data || NONE;
+  const { data, loading, error, reload } = useRecordingsData(status, q);
+  const { data: summary, reload: reloadSummary } = useRecordingSummary(q);
+  const rows = data || NONE;
 
-  const counts = useMemo(() => ({
-    total: recordings.length,
-    failed: recordings.filter((r) => r.status === "failed").length,
-    playable: recordings.filter((r) => r.has_file_reference).length,
-  }), [recordings]);
+  // Debounced, so a search is one request rather than one per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setQ(qInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [qInput]);
 
-  const rows = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    return recordings.filter((r) => {
-      if (query && !`${r.event_title || ""} ${r.organization || ""}`.toLowerCase().includes(query)) return false;
-      return true;
-    });
-  }, [recordings, q]);
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) { mounted.current = true; return; }
+    reload();
+  }, [status, q, reload]);
+  const searchMounted = useRef(false);
+  useEffect(() => {
+    if (!searchMounted.current) { searchMounted.current = true; return; }
+    reloadSummary();
+  }, [q, reloadSummary]);
+
+  // "—" while the summary is unknown: never a count of the fetched page standing in for it.
+  const counts = summary
+    ? { total: summary.total, failed: summary.by_state.failed, ready: summary.by_state.ready,
+        unverified: summary.by_state.unverified }
+    : { total: "—", failed: "—", ready: "—", unverified: "—" };
+  const refreshAll = () => { reload(); reloadSummary(); };
 
   const columns = [
     { key: "event_title", header: "Event", render: (r) => <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>{r.event_title || "Untitled event"}</p> },
     { key: "organization", header: "Organization", render: (r) => r.organization || "—" },
     { key: "status", header: "Status", render: (r) => <Badge tone={STATUS_TONE[r.status]} dot>{r.status}</Badge> },
+    { key: "state", header: "File", render: (r) => (r.state
+      ? <span title={VERDICT_HINT[r.state] || undefined}><Badge tone={VERDICT_TONE[r.state] || "neutral"}>{VERDICT_LABEL[r.state] || r.state}</Badge></span>
+      : "—") },
     { key: "quality", header: "Quality", render: (r) => r.quality || "—" },
     { key: "started_at", header: "Started", align: "right", render: (r) => (r.started_at ? new Date(r.started_at).toLocaleString() : "—") },
     { key: "duration", header: "Duration", align: "right", render: (r) => fmtDuration(r.started_at, r.stopped_at) },
@@ -369,19 +411,25 @@ export default function Media() {
       hasData={Boolean(data)}
       endpoint="/admin/recordings"
       onRetry={reload}
-      actions={<Button variant="secondary" leftIcon={FiRefreshCw} onClick={reload}>Refresh</Button>}
+      actions={<Button variant="secondary" leftIcon={FiRefreshCw} onClick={refreshAll}>Refresh</Button>}
     >
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <KpiCard label="Recordings" value={counts.total} />
-        <KpiCard label="Failed" value={counts.failed} tone={counts.failed ? "text-rose-600 dark:text-rose-400" : undefined} pressed={status === "failed"} onClick={() => setStatus(status === "failed" ? "all" : "failed")} />
-        <KpiCard label="Playable" value={counts.playable} />
+        <KpiCard label="Failed" value={counts.failed} tone={counts.failed > 0 ? "text-rose-600 dark:text-rose-400" : undefined} pressed={status === "failed"} onClick={() => setStatus(status === "failed" ? "all" : "failed")} />
+        <KpiCard label="Ready (file confirmed)" value={counts.ready} />
+        <KpiCard label="Unverified" value={counts.unverified} />
       </div>
+      {summary && summary.total > rows.length && (
+        <p className="text-xs text-slate-500 dark:text-slate-400" data-testid="media-list-cap">
+          Showing the newest {rows.length} of {summary.total} recordings. Search or filter to reach older ones.
+        </p>
+      )}
 
       <Panel title="Recordings" flush>
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           <div className="relative min-w-[220px] flex-1">
             <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search event or organization…" aria-label="Search recordings" className={CONSOLE.search} />
+            <input value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Search event or organization…" aria-label="Search recordings" className={CONSOLE.search} />
           </div>
           <select value={status} onChange={(e) => setStatus(e.target.value)} className={CONSOLE.select} aria-label="Filter by status">
             <option value="all">All statuses</option>

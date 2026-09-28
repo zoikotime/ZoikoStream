@@ -6,11 +6,17 @@ import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import Skeleton from "../../ui/Skeleton";
+import RetentionPolicyPanel from "./RetentionPolicyPanel";
 
 const DEFAULTS = {
   brand: { name: "ZoikoStream", primary_color: "#8b5cf6", support_email: "" },
-  storage_limits: { default_gb: 50, max_gb: 5000 },
-  streaming_limits: { default_hours: 20, max_bitrate_kbps: 8000 },
+  // null, not a number. When unset the server enforces NO ceiling
+  // (platform_settings.storage_ceiling_gb / max_bitrate_kbps return None), but this form used
+  // to seed 5000 GB and 8000 kbps — so it displayed limits that were not in force, and saving
+  // the page untouched WROTE them, silently turning a displayed default into an enforced cap.
+  // Same rule as audience_envelope below: unset is a real state, rendered as an empty field.
+  storage_limits: { default_gb: null, max_gb: null },
+  streaming_limits: { default_hours: null, max_bitrate_kbps: null },
   global: { signups_enabled: true, maintenance_mode: false },
 };
 
@@ -79,10 +85,15 @@ function SettingsForm({ settings, onSaved }) {
       await api.patch("/admin/settings", {
         values: {
           brand: form.brand,
-          storage_limits: { default_gb: Number(form.storage_limits.default_gb), max_gb: Number(form.storage_limits.max_gb) },
+          // parseEnvelope, not Number(): Number("") is 0, so clearing a ceiling to mean "no
+          // limit" would have saved a limit of ZERO and refused every upload/stream.
+          storage_limits: {
+            default_gb: parseEnvelope(form.storage_limits.default_gb),
+            max_gb: parseEnvelope(form.storage_limits.max_gb),
+          },
           streaming_limits: {
-            default_hours: Number(form.streaming_limits.default_hours),
-            max_bitrate_kbps: Number(form.streaming_limits.max_bitrate_kbps),
+            default_hours: parseEnvelope(form.streaming_limits.default_hours),
+            max_bitrate_kbps: parseEnvelope(form.streaming_limits.max_bitrate_kbps),
             // Explicitly included (even as null) on every save — streaming_limits is stored
             // and replaced as one JSON blob (routers/admin.py update_settings), so omitting
             // this key here would silently drop it the next time anything else in the panel
@@ -105,8 +116,8 @@ function SettingsForm({ settings, onSaved }) {
     <div className="mx-auto max-w-[1000px] space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Platform Settings</h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Platform-wide brand, limits, and access config</p>
+          <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Platform Configuration</h1>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Platform-wide brand, limits, access and retention governance</p>
         </div>
         <Button leftIcon={FiSave} onClick={save} loading={saving}>Save changes</Button>
       </div>
@@ -141,19 +152,21 @@ function SettingsForm({ settings, onSaved }) {
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <Label>Default storage (GB)</Label>
-            <Input variant="console" type="number" min={0} value={form.storage_limits.default_gb} onChange={(e) => setField("storage_limits", "default_gb", e.target.value)} />
+            {/* Read-only: nothing provisions from this value (see the panel description). An
+                editable field that affects nothing is a control that lies about what it does. */}
+            <Input variant="console" type="number" value={form.storage_limits.default_gb ?? ""} placeholder="Not set" disabled className="opacity-60" />
           </div>
           <div>
             <Label>Max storage (GB)</Label>
-            <Input variant="console" type="number" min={0} value={form.storage_limits.max_gb} onChange={(e) => setField("storage_limits", "max_gb", e.target.value)} />
+            <Input variant="console" type="number" min={0} value={form.storage_limits.max_gb ?? ""} placeholder="No ceiling" onChange={(e) => setField("storage_limits", "max_gb", e.target.value)} />
           </div>
           <div>
             <Label>Default streaming hours</Label>
-            <Input variant="console" type="number" min={0} value={form.streaming_limits.default_hours} onChange={(e) => setField("streaming_limits", "default_hours", e.target.value)} />
+            <Input variant="console" type="number" value={form.streaming_limits.default_hours ?? ""} placeholder="Not set" disabled className="opacity-60" />
           </div>
           <div>
             <Label>Max bitrate (kbps)</Label>
-            <Input variant="console" type="number" min={0} value={form.streaming_limits.max_bitrate_kbps} onChange={(e) => setField("streaming_limits", "max_bitrate_kbps", e.target.value)} />
+            <Input variant="console" type="number" min={0} value={form.streaming_limits.max_bitrate_kbps ?? ""} placeholder="No ceiling" onChange={(e) => setField("streaming_limits", "max_bitrate_kbps", e.target.value)} />
           </div>
           <div className="sm:col-span-2">
             <Label>Approved audience capacity envelope (peak concurrent viewers)</Label>
@@ -205,6 +218,10 @@ function SettingsForm({ settings, onSaved }) {
           />
         </div>
       </Panel>
+
+      {/* Not part of "Save changes": the retention policy is changed only through its own
+          propose/approve workflow, which the generic settings PATCH refuses to touch. */}
+      <RetentionPolicyPanel />
     </div>
   );
 }

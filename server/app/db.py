@@ -5,6 +5,7 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from . import testguard
 from .config import settings
+from .dburl import engine_url
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +31,9 @@ DB_MAX_OVERFLOW = 5
 DB_MAX_CONNECTIONS = DB_POOL_SIZE + DB_MAX_OVERFLOW
 
 engine = create_engine(
-    settings.DATABASE_URL,
+    # psycopg2 named explicitly: SQLAlchemy 2.1 made psycopg (v3) the default for a plain
+    # postgresql:// URL, and only psycopg2 is installed. See app/dburl.py.
+    engine_url(settings.DATABASE_URL),
     pool_pre_ping=True,      # keeps the Supabase pooler connection healthy across idle periods
     pool_size=DB_POOL_SIZE,
     max_overflow=DB_MAX_OVERFLOW,

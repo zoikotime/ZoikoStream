@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 import app.email as email_mod
 import app.main as m
 from app import ratelimit
+from _testsupport import published_catalog_fields
 from app.db import SessionLocal
 from app.models import (
     CatalogVersion,
@@ -154,6 +155,12 @@ class World:
             self.speaker_id = self._u(db, "viewer", self.speaker_email, "Speaker One")
             org.owner_user_id = self.admin_id
             self.billing_email = _new_email("billing")
+            # This World's own catalog - see quote() for why it no longer borrows one.
+            catalog = CatalogVersion(vertical=f"lve-{uuid.uuid4().hex[:8]}", version_label="v1",
+                                     **published_catalog_fields(self.admin_id))
+            db.add(catalog)
+            db.flush()
+            self.catalog_id = catalog.id
 
             account = CommercialAccount(
                 org_id=org.id, billing_contact_email=self.billing_email,
@@ -188,13 +195,10 @@ class World:
     def quote(self, *, status="draft", valid_until=None):
         db = SessionLocal()
         try:
-            catalog = db.query(CatalogVersion).first()
-            if catalog is None:
-                catalog = CatalogVersion(vertical="events", version_label="v1",
-                                         status="published")
-                db.add(catalog)
-                db.flush()
-            q = Quote(event_id=self.event_id, version=1, catalog_version_id=catalog.id,
+            # The World's own catalog. This used to take ANY catalog in the database and, when
+            # there was none, create `events / v1 / published` with no publisher and never
+            # delete it - the anomalous row found in a real database.
+            q = Quote(event_id=self.event_id, version=1, catalog_version_id=self.catalog_id,
                       currency="GBP", amount=1200, status=status,
                       valid_until=valid_until, created_by=self.admin_id)
             if status == "issued":
@@ -250,6 +254,8 @@ class World:
             if org is not None:
                 org.owner_user_id = None
             db.commit()
+            # After the quotes priced from it (deleted above), before its publisher.
+            db.query(CatalogVersion).filter(CatalogVersion.id == self.catalog_id).delete()
             db.query(User).filter(User.org_id == self.org_id).delete()
             db.query(Organization).filter(Organization.id == self.org_id).delete()
             db.commit()

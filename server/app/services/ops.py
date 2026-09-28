@@ -11,7 +11,9 @@ What is genuinely measured:
   * concurrent audience + peak  <- AnalyticsSnapshot rows written every 15s by the
                                    broadcast sampler (real presence, not an estimate)
   * live sessions              <- BroadcastSession rows
-  * API error rate + p95        <- RequestStats, fed by the ASGI timing middleware
+  * API requests / errors / p95 <- RequestStats (ASGI timing middleware), flushed per
+                                   process per minute to platform_metrics, so any window
+                                   up to the retention limit can be answered
   * event readiness verdicts    <- the event's own stored configuration and assignments
   * action queues / governance  <- Incident, SupportTicket, Subscription, GovernanceRecord
 
@@ -24,11 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import false, func, literal_column, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -50,6 +55,7 @@ from ..models import (
 )
 from ..crud import commercial as commercial_crud
 from . import admin as admin_svc
+from . import ops_window
 
 log = logging.getLogger(__name__)
 
@@ -139,47 +145,94 @@ def _aware(dt: datetime | None) -> datetime | None:
 
 # ── live API measurement ──────────────────────────────────────────────────────
 
-class RequestStats:
-    """Rolling per-minute request buckets. Fed by the ASGI middleware in main.py, so the
-    console's API-health tile reports this process's real traffic instead of a guess.
+# Latency histogram bounds (ms). A percentile over a WINDOW cannot be merged from per-minute
+# percentiles, but it can be read from summed histograms: p95 is reported as the upper bound
+# of the bucket that holds the 95th percentile ("p95 <= 250 ms"), never interpolated into a
+# more precise-looking number than the data supports.
+LATENCY_BOUNDS_MS = (10, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000, 1500,
+                     2000, 3000, 5000, 10000)
+API_REQUESTS, API_ERRORS, API_LATENCY = "api_requests", "api_errors", "api_lat_le_"
 
-    In-memory and per-process on purpose: it is a health signal, not billing data, and a
-    table write per request would cost more than the signal is worth. With multiple
-    workers each reports its own slice — noted in the payload.
+
+def _lat_bucket(latency_ms: float) -> int:
+    for i, bound in enumerate(LATENCY_BOUNDS_MS):
+        if latency_ms <= bound:
+            return i
+    return len(LATENCY_BOUNDS_MS)
+
+
+def _lat_name(i: int) -> str:
+    return f"{API_LATENCY}{LATENCY_BOUNDS_MS[i]}" if i < len(LATENCY_BOUNDS_MS) else f"{API_LATENCY}inf"
+
+
+class RequestStats:
+    """Per-minute request buckets, fed by the ASGI middleware in main.py.
+
+    In memory per process, and FLUSHED once a minute (run_request_stats_flusher, which runs in
+    every process - not only the ticker leader - because every process serves requests) to
+    platform_metrics as: api_requests (written for every minute the process was alive, zero
+    included, so a missing minute means "not collected", not "no traffic"), api_errors, and a
+    latency histogram. The Command Center reads those rows for whatever window is selected;
+    before this, the tile always showed the last 15 minutes of one process whatever range was
+    picked.
     """
 
     def __init__(self, minutes: int = 60):
         self.minutes = minutes
-        # minute-epoch -> [requests, errors, [latency_ms, ...]]
+        # minute-epoch -> [requests, errors, [latency_ms, ...], histogram]
         self._buckets: deque[tuple[int, list]] = deque(maxlen=minutes)
+        self._lock = threading.Lock()
+        # Minutes before this process started were not observed by it.
+        self._flushed_through = int(time.time() // 60) - 1
 
     def record(self, latency_ms: float, status_code: int) -> None:
         minute = int(time.time() // 60)
-        if not self._buckets or self._buckets[-1][0] != minute:
-            self._buckets.append((minute, [0, 0, []]))
-        _, cell = self._buckets[-1]
-        cell[0] += 1
-        if status_code >= 500:
-            cell[1] += 1
-        # Cap the sample list so a hot minute can't grow without bound; p95 over 2k
-        # samples is as good as p95 over 200k.
-        if len(cell[2]) < 2000:
-            cell[2].append(latency_ms)
+        with self._lock:
+            if not self._buckets or self._buckets[-1][0] != minute:
+                self._buckets.append((minute, [0, 0, [], [0] * (len(LATENCY_BOUNDS_MS) + 1)]))
+            _, cell = self._buckets[-1]
+            cell[0] += 1
+            if status_code >= 500:
+                cell[1] += 1
+            # Cap the sample list so a hot minute can't grow without bound.
+            if len(cell[2]) < 2000:
+                cell[2].append(latency_ms)
+            cell[3][_lat_bucket(latency_ms)] += 1
+
+    def drain(self, now_minute: int | None = None) -> list[tuple[int, int, int, list[int]]]:
+        """Completed minutes not yet flushed, zero-traffic minutes included, oldest first.
+        The current minute is never drained - it is still being counted."""
+        now_minute = int(time.time() // 60) if now_minute is None else now_minute
+        with self._lock:
+            by_minute = {m: c for m, c in self._buckets}
+            start = max(self._flushed_through + 1, now_minute - self.minutes)
+            out = []
+            for m in range(start, now_minute):
+                c = by_minute.get(m)
+                if c is None:
+                    out.append((m, 0, 0, [0] * (len(LATENCY_BOUNDS_MS) + 1)))
+                else:
+                    out.append((m, c[0], c[1], list(c[3])))
+            if out:
+                self._flushed_through = now_minute - 1
+            return out
 
     def snapshot(self, window_minutes: int = 15) -> dict:
+        """This process's in-memory view (exact p95). Kept for diagnostics; the console reads
+        the flushed, cross-process rows instead (api_window)."""
         cutoff = int(time.time() // 60) - window_minutes
-        cells = [(m, c) for m, c in self._buckets if m >= cutoff]
-        requests = sum(c[0] for _, c in cells)
-        if not requests:
-            return {"error_ratio": None, "p95_ms": None, "requests": 0, "series": []}
-        errors = sum(c[1] for _, c in cells)
-        samples = sorted(v for _, c in cells for v in c[2])
+        with self._lock:
+            cells = [(m, c) for m, c in self._buckets if m >= cutoff]
+            requests = sum(c[0] for _, c in cells)
+            if not requests:
+                return {"error_ratio": None, "p95_ms": None, "requests": 0, "series": []}
+            errors = sum(c[1] for _, c in cells)
+            samples = sorted(v for _, c in cells for v in c[2])
         p95 = samples[min(len(samples) - 1, int(len(samples) * 0.95))] if samples else None
         return {
             "error_ratio": round(100 * errors / requests, 3),
             "p95_ms": round(p95) if p95 is not None else None,
             "requests": requests,
-            # One point per minute: the tile's sparkline is real traffic over the window.
             "series": [{"label": str(m), "value": c[0]} for m, c in cells],
         }
 
@@ -256,39 +309,6 @@ def metric_latest(db: Session, name: str) -> float | None:
     )
 
 
-def metric_series(db: Session, name: str, since: datetime, points: int = 30) -> list[dict]:
-    """Down-sampled series for a sparkline. Buckets by time so the tile gets a fixed
-    number of points regardless of sampling cadence."""
-    rows = db.execute(
-        select(PlatformMetric.recorded_at, PlatformMetric.value)
-        .where(PlatformMetric.name == name, PlatformMetric.recorded_at >= since)
-        .order_by(PlatformMetric.recorded_at)
-    ).all()
-    return _bucket([( _aware(t), v) for t, v in rows], since, _now(), points)
-
-
-def _bucket(rows: list[tuple[datetime, float]], since: datetime, until: datetime,
-            points: int, agg: str = "avg") -> list[dict]:
-    """Average (or max) the samples into `points` equal time buckets. Empty buckets are
-    dropped rather than zero-filled — a gap in sampling is not a value of zero."""
-    if not rows or points < 1:
-        return []
-    span = max((until - since).total_seconds(), 1.0)
-    width = span / points
-    sums: dict[int, list[float]] = {}
-    for stamp, value in rows:
-        if stamp is None:
-            continue
-        idx = min(points - 1, max(0, int((stamp - since).total_seconds() / width)))
-        sums.setdefault(idx, []).append(float(value))
-    out = []
-    for idx in sorted(sums):
-        vals = sums[idx]
-        value = max(vals) if agg == "max" else sum(vals) / len(vals)
-        out.append({"label": str(idx), "value": round(value, 3)})
-    return out
-
-
 # ── audience, from the broadcast sampler's real snapshots ─────────────────────
 
 def _live_session_rows(db: Session, include_test: bool) -> list[BroadcastSession]:
@@ -325,44 +345,6 @@ def _latest_snapshot_per_event(db: Session, event_ids: list, since: datetime) ->
     return {s.event_id: s for s in rows}
 
 
-def audience(db: Session, since: datetime, include_test: bool) -> dict:
-    """Concurrent audience now, peak over the window, and the largest single session —
-    all from AnalyticsSnapshot rows the broadcast sampler writes from real presence."""
-    sessions = _live_session_rows(db, include_test)
-    event_ids = [s.event_id for s in sessions]
-    # "Now" means the most recent sample; snapshots older than two sampler intervals are
-    # stale (worker down, event idle) and are not counted as current audience.
-    fresh_since = _now() - timedelta(seconds=60)
-    latest = _latest_snapshot_per_event(db, event_ids, fresh_since)
-    current = sum(s.viewers for s in latest.values())
-
-    largest_event_id, largest = None, 0
-    for event_id, snap in latest.items():
-        if snap.viewers > largest:
-            largest_event_id, largest = event_id, snap.viewers
-    largest_title = None
-    if largest_event_id is not None:
-        largest_title = db.scalar(select(Event.title).where(Event.id == largest_event_id))
-
-    # Peak = highest platform-wide total, so per-tick sums are needed rather than a plain
-    # MAX over rows (two sessions of 500 is a peak of 1000, not 500).
-    ticks = db.execute(
-        select(AnalyticsSnapshot.created_at, func.sum(AnalyticsSnapshot.viewers))
-        .where(AnalyticsSnapshot.created_at >= since)
-        .group_by(AnalyticsSnapshot.created_at)
-        .order_by(AnalyticsSnapshot.created_at)
-    ).all()
-    peak = max((int(v or 0) for _, v in ticks), default=0)
-
-    return {
-        "current": current,
-        "peak": peak,
-        "largest_session": largest or None,
-        "largest_session_title": largest_title,
-        "series": _bucket([(_aware(t), float(v or 0)) for t, v in ticks], since, _now(), 30, agg="max"),
-    }
-
-
 # ── live sessions + attention ─────────────────────────────────────────────────
 
 # Weighting for derived attention items. Written down rather than buried: an unrepeatable
@@ -376,7 +358,15 @@ _ISSUE_RULES = (
 )
 
 
-def live_sessions(db: Session, since: datetime, include_test: bool) -> dict:
+def _risk_summary(items: list[dict]) -> dict:
+    counts = {sev: sum(1 for i in items if i["severity"] == sev)
+              for sev in ("critical", "high", "monitoring")}
+    stages = [i["stage"] for i in items if i["stage"]]
+    dominant = max(set(stages), key=stages.count) if stages else None
+    return {"total": len(items), **counts, "dominant_stage": dominant}
+
+
+def live_sessions(db: Session, since: datetime, include_test: bool, org_ok=None) -> dict:
     """The live-sessions tile plus the attention table.
 
     Attention items are derived from rows that already exist (session status, the latest
@@ -385,6 +375,8 @@ def live_sessions(db: Session, since: datetime, include_test: bool) -> dict:
     keeps the console from disagreeing with the host console about the same session.
     """
     sessions = _live_session_rows(db, include_test)
+    if org_ok is not None:
+        sessions = [s for s in sessions if org_ok(s.org_id)]
     live = [s for s in sessions if s.status == "live"]
     paused = [s for s in sessions if s.status == "paused"]
     event_ids = [s.event_id for s in sessions]
@@ -436,6 +428,7 @@ def live_sessions(db: Session, since: datetime, include_test: bool) -> dict:
             items.append({
                 "id": f"{s.event_id}:{key}",
                 "event_id": str(s.event_id),
+                "org_id": str(s.org_id),
                 "event": ev.title or "Untitled event",
                 "organization": org.name if org else None,
                 "impact": ev.impact or "standard",
@@ -455,10 +448,13 @@ def live_sessions(db: Session, since: datetime, include_test: bool) -> dict:
     for a in raised:
         if a.org_id in test_orgs:
             continue
+        if org_ok is not None and not org_ok(a.org_id):
+            continue
         ev = events.get(a.event_id) or db.get(Event, a.event_id)
         items.append({
             "id": str(a.id),
             "event_id": str(a.event_id),
+            "org_id": str(a.org_id) if a.org_id else None,
             "event": (ev.title if ev else None) or "Untitled event",
             "organization": ev.organization.name if ev and ev.organization else None,
             "impact": (ev.impact if ev else None) or "standard",
@@ -485,33 +481,23 @@ def live_sessions(db: Session, since: datetime, include_test: bool) -> dict:
         )
     ).all()
     soon = [e for e in soon if include_test or not (e.organization and e.organization.is_test)]
+    if org_ok is not None:
+        soon = [e for e in soon if org_ok(e.org_id)]
     soon_hosts = _event_hosts(db, [e.id for e in soon])
     unattended = sum(1 for e in soon if not soon_hosts.get(e.id))
-
-    counts = {sev: sum(1 for i in items if i["severity"] == sev) for sev in ("critical", "high", "monitoring")}
-    stages = [i["stage"] for i in items if i["stage"]]
-    dominant = max(set(stages), key=stages.count) if stages else None
 
     return {
         "live": len(live),
         "paused": len(paused),
         "starting_soon": len(soon),
         "unattended": unattended,
-        "series": _bucket(
-            [(_aware(t), float(v or 0)) for t, v in db.execute(
-                select(AnalyticsSnapshot.created_at, func.count(func.distinct(AnalyticsSnapshot.event_id)))
-                .where(AnalyticsSnapshot.created_at >= since)
-                .group_by(AnalyticsSnapshot.created_at)
-                .order_by(AnalyticsSnapshot.created_at)
-            ).all()],
-            since, _now(), 30, agg="max",
-        ),
+        # The live rows themselves, for the caller's windowed metrics. Not serialized.
+        "rows": sessions,
         "attention": items,
-        "at_risk": {
-            "total": len(items),
-            **counts,
-            "dominant_stage": dominant,
-        },
+        # The attention list is CURRENT operational state: open alerts and conditions on
+        # sessions live now. No created_at filter - a session failing now is shown however
+        # long ago it started.
+        "at_risk": _risk_summary(items),
     }
 
 
@@ -532,15 +518,23 @@ def _event_hosts(db: Session, event_ids: list) -> dict:
 
 # ── lifecycle stage health ────────────────────────────────────────────────────
 
-_RANK = {"ok": 0, "not_configured": 1, "warn": 2, "down": 3}
-_WORST = {v: k for k, v in _RANK.items()}
+# "unmonitored" ranks with "not_configured": neither is an outage, and neither is evidence of
+# health, so a stage carried only by one must not show a confident green node.
+#
+# _WORST is spelled out rather than built by inverting _RANK. Inversion silently keeps only
+# the LAST key per rank, so the moment two statuses share a rank the mapping quietly drops
+# one of them — exactly what adding "unmonitored" beside "not_configured" would have done.
+# It is only used for incident escalation now (ranks 2 and 3), which is unambiguous.
+_RANK = {"ok": 0, "unmonitored": 1, "not_configured": 1, "warn": 2, "down": 3}
+_WORST = {2: "warn", 3: "down"}
 
 
-def stage_health(db: Session, health: dict, since: datetime, stages: tuple[str, ...]) -> list[dict]:
+def stage_health(db: Session, health: dict, since: datetime, stages: tuple[str, ...],
+                 until: datetime | None = None) -> list[dict]:
     """Per-stage status (from real service probes + open incidents) and availability
     (from recorded incident windows), plus the per-region matrix the console renders."""
     services = {s["id"]: s for s in health["services"]}
-    avail = availability(db, since)
+    avail = availability(db, since, until)
 
     open_by_stage: dict[str, list[Incident]] = {}
     for inc in db.scalars(select(Incident).where(Incident.status != "resolved")).all():
@@ -558,11 +552,15 @@ def stage_health(db: Session, health: dict, since: datetime, stages: tuple[str, 
         # (Produce <- Workers) has nothing else to report, so it falls back to them.
         gating = [m for m in members if m["id"] not in INFORMATIONAL_SERVICES]
         statuses = [m["status"] for m in (gating or members)] or ["not_configured"]
-        # An unintegrated dependency must not read as healthy, and must not read as an
-        # outage either — it ranks between ok and warn.
-        status = _WORST[max(_RANK.get(s, 1) for s in statuses)]
+        # An unintegrated or unmonitored dependency must not read as healthy, and must not
+        # read as an outage either — it ranks between ok and warn. The worst MEMBER'S OWN
+        # status is kept, so a stage reports "unmonitored" or "not_configured" as whichever
+        # it actually is, instead of both collapsing to one label.
+        status = max(statuses, key=lambda st: _RANK.get(st, 1))
         for inc in open_by_stage.get(code, []):
-            status = _WORST[max(_RANK[status], 3 if inc.severity in ("sev1", "sev2") else 2)]
+            floor = 3 if inc.severity in ("sev1", "sev2") else 2
+            if _RANK.get(status, 1) < floor:
+                status = _WORST[floor]
 
         regions = {}
         for region, _rlabel in REGIONS:
@@ -644,23 +642,38 @@ def _verdict(gates: list[dict]) -> str:
     return "passed"
 
 
-def event_readiness(db: Session, include_test: bool, limit: int = 8,
-                    high_impact_only: bool = True) -> list[dict]:
-    """Upcoming events with a readiness verdict computed from their real configuration."""
-    stmt = (
-        select(Event).where(
-            Event.deleted_at.is_(None),
-            Event.status.in_(("scheduled", "published")),
-            Event.start_time.isnot(None),
-            Event.start_time >= _now(),
-        ).order_by(Event.start_time).limit(limit * 3)
+def _upcoming_stmt(include_test: bool, high_impact_only: bool, horizon: timedelta | None,
+                   org_filter: "OrgFilter | None", test_ids):
+    now = _now()
+    stmt = select(Event).where(
+        Event.deleted_at.is_(None),
+        Event.status.in_(("scheduled", "published")),
+        Event.start_time.isnot(None),
+        Event.start_time >= now,
     )
-    events = list(db.scalars(stmt).all())
+    # Every narrowing happens in SQL, BEFORE the limit. It used to fetch the next limit*3
+    # events and filter those in Python, so a run of standard or test-org events ahead of
+    # a high-impact one pushed it out of the list entirely.
+    if horizon is not None:
+        stmt = stmt.where(Event.start_time < now + horizon)
     if high_impact_only:
-        events = [e for e in events if (e.impact or "standard") in ("high", "unrepeatable")]
-    if not include_test:
-        events = [e for e in events if not (e.organization and e.organization.is_test)]
-    events = events[:limit]
+        stmt = stmt.where(Event.impact.in_(("high", "unrepeatable")))
+    if not include_test and test_ids:
+        stmt = stmt.where(Event.org_id.notin_(test_ids))
+    if org_filter is not None:
+        cond = org_filter.cond(Event.org_id)
+        if cond is not None:
+            stmt = stmt.where(cond)
+    return stmt
+
+
+def event_readiness(db: Session, include_test: bool, limit: int = 8,
+                    high_impact_only: bool = True, *, horizon: timedelta | None = None,
+                    org_filter: "OrgFilter | None" = None) -> list[dict]:
+    """Upcoming events with a readiness verdict computed from their real configuration."""
+    test_ids = [] if include_test else _test_org_ids(db)
+    stmt = _upcoming_stmt(include_test, high_impact_only, horizon, org_filter, test_ids)
+    events = list(db.scalars(stmt.order_by(Event.start_time).limit(limit)).all())
     if not events:
         return []
 
@@ -698,19 +711,52 @@ def event_readiness(db: Session, include_test: bool, limit: int = 8,
 
 # ── incidents, queues, governance ─────────────────────────────────────────────
 
-def incidents(db: Session, since: datetime, limit: int = 6) -> list[dict]:
-    rows = db.scalars(
-        select(Incident)
-        .where(or_(Incident.status != "resolved", Incident.started_at >= since))
-        .order_by(Incident.started_at.desc()).limit(limit)
-    ).all()
-    return [{
+def _incident_out(i: Incident) -> dict:
+    return {
         "id": str(i.id), "ref": i.ref, "title": i.title, "detail": i.detail,
         "severity": i.severity, "kind": i.kind, "stage": i.stage, "region": i.region,
         "status": i.status, "commander": i.commander,
         "organization": i.organization.name if i.organization else None,
         "started_at": _aware(i.started_at), "resolved_at": _aware(i.resolved_at),
-    } for i in rows]
+    }
+
+
+def incident_summary(db: Session, window: "ops_window.Window", org_filter: "OrgFilter",
+                     stages: tuple[str, ...], limit: int = 6) -> dict:
+    """Active incidents NOW, plus incidents resolved inside the window.
+
+    `active` is every open incident whatever its start date: an incident that began before
+    the selected window is still burning. It used to share one newest-first list of six with
+    the window's resolved incidents, so a busy week could push an older, still-open incident
+    off the page. The window only decides `resolved_in_window`.
+
+    Filters: region -> the incident's own region, and a region-less (global) incident counts
+    in every region; scope -> the incident's lifecycle stage, stage-less incidents in every
+    scope; test mode -> incidents attached to a test organization are hidden unless included.
+    """
+    def narrowed(stmt):
+        if org_filter.region:
+            stmt = stmt.where(or_(Incident.region == org_filter.region, Incident.region.is_(None)))
+        stmt = stmt.where(or_(Incident.stage.in_(stages), Incident.stage.is_(None)))
+        if not org_filter.include_test and org_filter.test_ids:
+            stmt = stmt.where(or_(Incident.org_id.is_(None),
+                                  Incident.org_id.notin_(org_filter.test_ids)))
+        return stmt
+
+    active = db.scalars(narrowed(select(Incident).where(Incident.status != "resolved"))
+                        .order_by(Incident.started_at.desc())).all()
+    resolved_q = narrowed(select(Incident).where(
+        Incident.status == "resolved",
+        Incident.resolved_at >= window.since, Incident.resolved_at < window.until))
+    resolved_count = db.scalar(select(func.count()).select_from(resolved_q.subquery())) or 0
+    resolved = db.scalars(resolved_q.order_by(Incident.resolved_at.desc()).limit(limit)).all()
+    return {
+        "semantics": "current",
+        "active": [_incident_out(i) for i in active],
+        "active_count": len(active),
+        "resolved_in_window": [_incident_out(i) for i in resolved],
+        "resolved_count": int(resolved_count),
+    }
 
 
 def action_queues(db: Session, readiness: list[dict]) -> list[dict]:
@@ -970,8 +1016,12 @@ def console_state(db: Session, user: User) -> dict:
     degraded = sum(1 for s in health["services"] if s["status"] in ("warn", "down"))
 
     return {
+        # `unmonitored` travels with the verdict so the header can say what "operational"
+        # actually covers. Without it, "ok" read as "everything is fine" while three of the
+        # dependencies in that count had never been checked.
         "health": {"overall": health["overall"], "degraded": degraded,
-                   "total": len(health["services"])},
+                   "total": len(health["services"]),
+                   "unmonitored": health.get("unmonitored", 0)},
         "badges": {
             "live_operations": sessions["at_risk"]["total"],
             "event_readiness": sum(1 for e in readiness if e["verdict"] != "passed"),
@@ -986,99 +1036,450 @@ def console_state(db: Session, user: User) -> dict:
     }
 
 
+# ── windowed metrics (window rules: services/ops_window) ─────────────────────────
+
+def _as_uuid(value):
+    return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+
+
+class OrgFilter:
+    """Region + test-mode narrowing over organizations, resolved once per request.
+
+    Region comes from Organization.region (free text, mapped by region_of). An organization
+    whose region maps to nothing belongs to NO region, so a region filter excludes it rather
+    than guessing one. Test organizations are excluded unless include_test.
+    """
+
+    def __init__(self, db: Session, region: str | None, include_test: bool):
+        self.region = region
+        self.include_test = include_test
+        self.active = bool(region) or not include_test
+        self.allowed: set = set()
+        self.test_ids: set = set()
+        for oid, org_region, is_test in db.execute(
+                select(Organization.id, Organization.region, Organization.is_test)).all():
+            if is_test:
+                self.test_ids.add(oid)
+                if not include_test:
+                    continue
+            if region and region_of(org_region) != region:
+                continue
+            self.allowed.add(oid)
+
+    def ok(self, org_id) -> bool:
+        if not self.active:
+            return True
+        return org_id is not None and _as_uuid(org_id) in self.allowed
+
+    def cond(self, col):
+        """SQL condition on an org_id column, or None when nothing is narrowed."""
+        if self.region:
+            return col.in_(self.allowed) if self.allowed else false()
+        if not self.include_test and self.test_ids:
+            return col.notin_(self.test_ids)
+        return None
+
+
+def _narrow(stmt, cond):
+    return stmt if cond is None else stmt.where(cond)
+
+
+def _session_intervals(db: Session, win: "ops_window.Window", org_filter: OrgFilter):
+    """Sessions that were live at any point inside the window: started before it ended and
+    not ended before it began. BroadcastSession is authoritative for this, so an interval
+    with no session is a MEASURED zero."""
+    stmt = select(BroadcastSession.started_at, BroadcastSession.ended_at).where(
+        BroadcastSession.started_at.isnot(None),
+        BroadcastSession.started_at < win.until,
+        or_(BroadcastSession.ended_at.is_(None), BroadcastSession.ended_at > win.since),
+    )
+    stmt = _narrow(stmt, org_filter.cond(BroadcastSession.org_id))
+    return [(_aware(a), _aware(b)) for a, b in db.execute(stmt).all()]
+
+
+def _overlaps(intervals, start: datetime, end: datetime) -> int:
+    return sum(1 for a, b in intervals if a < end and (b is None or b > start))
+
+
+def sessions_in_window(db: Session, win: "ops_window.Window", org_filter: OrgFilter) -> dict:
+    current = _session_intervals(db, win, org_filter)
+    previous = _session_intervals(db, win.previous, org_filter)
+    step = timedelta(seconds=win.bucket_seconds)
+    counts = {i: _overlaps(current, b0, min(b0 + step, win.until))
+              for i, b0 in enumerate(win.bucket_starts())}
+    return {
+        "in_period": len(current),
+        # Sessions live at any point in each bucket.
+        "series": ops_window.series(win, counts, fill="zero"),
+        "comparison": ops_window.compare(len(current), len(previous)),
+        "intervals": current,
+    }
+
+
+AUDIENCE_SLOT_SECONDS = 30
+_SLOT = literal_column(str(AUDIENCE_SLOT_SECONDS))
+
+
+def _audience_slots(db: Session, win: "ops_window.Window", org_filter: OrgFilter):
+    """Platform-wide concurrent audience per 30-second slot inside the window.
+
+    The broadcast sampler writes each event's snapshot in its OWN transaction, so rows from
+    one tick carry slightly different created_at values. The old peak grouped by exact
+    created_at, which never summed two events together - it reported the single largest
+    event as the platform peak. Here each event contributes its highest sample per slot
+    (it is sampled every 15s, so at least once per 30s slot while live) and those are summed.
+    """
+    slot = func.floor(func.extract("epoch", AnalyticsSnapshot.created_at) / _SLOT)
+    per_event = _narrow(
+        select(AnalyticsSnapshot.event_id.label("event_id"), slot.label("slot"),
+               func.max(AnalyticsSnapshot.viewers).label("viewers"))
+        .where(AnalyticsSnapshot.created_at >= win.since, AnalyticsSnapshot.created_at < win.until),
+        org_filter.cond(AnalyticsSnapshot.org_id),
+    ).group_by(AnalyticsSnapshot.event_id, slot).subquery()
+    rows = db.execute(select(per_event.c.slot, func.sum(per_event.c.viewers),
+                             func.count())
+                      .group_by(per_event.c.slot)).all()
+    slots = sorted((datetime.fromtimestamp(float(s) * AUDIENCE_SLOT_SECONDS, tz=timezone.utc),
+                    int(v or 0)) for s, v, _n in rows)
+    # (event, slot) pairs actually sampled - the numerator of sampling coverage.
+    return slots, sum(int(n) for _s, _v, n in rows)
+
+
+def _expected_slots(intervals, win: "ops_window.Window") -> float:
+    """(session, slot) pairs the sampler SHOULD have written: broadcast time inside the
+    window, in slots. Sessions still open run to the window end."""
+    secs = 0.0
+    for a, b in intervals:
+        start, end = max(a, win.since), min(b or win.until, win.until)
+        if end > start:
+            secs += (end - start).total_seconds()
+    return secs / AUDIENCE_SLOT_SECONDS
+
+
+def audience_window(db: Session, win: "ops_window.Window", org_filter: OrgFilter,
+                    live_rows: list, intervals: list) -> dict:
+    # NOW: the latest sample (<= 60s old) of every session live now.
+    live_events = {s.event_id for s in live_rows}
+    fresh = _latest_snapshot_per_event(db, list(live_events), _now() - timedelta(seconds=60))
+    if not live_events:
+        current, current_state = 0, "measured"          # nothing live: nobody can be watching
+    elif not fresh:
+        current, current_state = None, "not_sampled"    # live, but no recent sample
+    else:
+        current = sum(s.viewers for s in fresh.values())
+        current_state = "measured" if len(fresh) == len(live_events) else "partial"
+    largest_event_id, largest = None, 0
+    for event_id, snap in fresh.items():
+        if snap.viewers > largest:
+            largest_event_id, largest = event_id, snap.viewers
+    largest_title = (db.scalar(select(Event.title).where(Event.id == largest_event_id))
+                     if largest_event_id else None)
+
+    def summarize(w, ivals):
+        slots, sampled = _audience_slots(db, w, org_filter)
+        expected = _expected_slots(ivals, w)
+        coverage = round(min(1.0, sampled / expected) * 100, 1) if expected else None
+        if slots:
+            vals = [v for _, v in slots]
+            # A peak read from a fraction of the broadcast time is a floor, not the peak, so
+            # thin sampling is reported as partial rather than as a measurement.
+            state = "partial" if coverage is not None and coverage < 90 else "measured"
+            return slots, max(vals), round(sum(vals) / len(vals), 1), state, coverage
+        if not ivals:
+            return slots, 0, 0.0, "measured", None      # no broadcast in the window at all
+        return slots, None, None, "not_sampled", 0.0    # broadcasts ran, nothing was sampled
+
+    slots, peak, average, window_state, coverage = summarize(win, intervals)
+    _, prev_peak, _, prev_state, _ = summarize(
+        win.previous, _session_intervals(db, win.previous, org_filter))
+    # Each session's own recorded peak (BroadcastSession.peak_viewers, from live presence).
+    # Per session and over the WHOLE session, so it is reported beside - never as - the
+    # platform-wide concurrent peak.
+    session_peak = db.scalar(_narrow(
+        select(func.max(BroadcastSession.peak_viewers)).where(
+            BroadcastSession.started_at.isnot(None),
+            BroadcastSession.started_at < win.until,
+            or_(BroadcastSession.ended_at.is_(None), BroadcastSession.ended_at > win.since)),
+        org_filter.cond(BroadcastSession.org_id)))
+
+    step = timedelta(seconds=win.bucket_seconds)
+    values: dict[int, float] = {}
+    for ts, v in slots:
+        i = win.bucket_index(ts)
+        if i is not None:
+            values[i] = max(values.get(i, 0), v)
+    for i, b0 in enumerate(win.bucket_starts()):
+        # A bucket with no sample is a zero only when no session was live in it; otherwise
+        # it is a sampling gap and stays out of the line.
+        if i not in values and not _overlaps(intervals, b0, min(b0 + step, win.until)):
+            values[i] = 0
+
+    return {
+        "current": current,
+        "current_state": current_state,
+        "unsampled_now": len(live_events) - len(fresh),
+        "peak": peak,
+        "average": average,
+        "window_state": window_state,
+        "sampling_coverage_pct": coverage,
+        "highest_session_peak": session_peak,
+        "largest_session": largest or None,
+        "largest_session_title": largest_title,
+        "series": ops_window.series(win, values, fill="gap"),
+        # Only compared when both windows were fully measured: a partial peak is a floor.
+        "comparison": ops_window.compare(
+            peak if window_state == "measured" else None,
+            prev_peak if prev_state == "measured" else None),
+    }
+
+
+# The last minutes are not flushed yet (flush interval + the minute still being counted), so
+# they are not expected to be covered.
+API_FLUSH_LAG = timedelta(minutes=2)
+
+
+def _hist_percentile(totals: dict, q: float) -> tuple[int | None, bool]:
+    ordered = [(b, float(totals.get(f"{API_LATENCY}{b}", 0) or 0)) for b in LATENCY_BOUNDS_MS]
+    ordered.append((None, float(totals.get(f"{API_LATENCY}inf", 0) or 0)))
+    total = sum(n for _, n in ordered)
+    if total <= 0:
+        return None, False
+    target, cum = math.ceil(q * total), 0.0
+    for bound, n in ordered:
+        cum += n
+        if cum >= target:
+            return (bound, False) if bound is not None else (LATENCY_BOUNDS_MS[-1], True)
+    return LATENCY_BOUNDS_MS[-1], True
+
+
+def _api_totals(db: Session, win: "ops_window.Window") -> tuple[dict, dict]:
+    in_window = (PlatformMetric.recorded_at >= win.since, PlatformMetric.recorded_at < win.until)
+    totals = dict(db.execute(
+        select(PlatformMetric.name, func.sum(PlatformMetric.value)).where(
+            *in_window,
+            or_(PlatformMetric.name.in_((API_REQUESTS, API_ERRORS)),
+                PlatformMetric.name.like(f"{API_LATENCY}%")))
+        .group_by(PlatformMetric.name)).all())
+    minutes = dict(db.execute(
+        select(PlatformMetric.recorded_at, func.sum(PlatformMetric.value))
+        .where(*in_window, PlatformMetric.name == API_REQUESTS)
+        .group_by(PlatformMetric.recorded_at)).all())
+    return totals, minutes
+
+
+def api_window(db: Session, win: "ops_window.Window") -> dict:
+    """Requests, error rate, p95 and the sparkline, ALL from the same window's rows."""
+    totals, minutes = _api_totals(db, win)
+    expected_end = min(win.until, _now() - API_FLUSH_LAG)
+    expected = max(0, int((expected_end - win.since).total_seconds() // 60))
+    covered = len(minutes)
+    if covered == 0:
+        state = "not_measured"
+    elif expected and covered < 0.9 * expected:
+        state = "partial"
+    else:
+        state = "measured"
+
+    requests = int(totals.get(API_REQUESTS, 0) or 0) if covered else None
+    errors = int(totals.get(API_ERRORS, 0) or 0) if covered else None
+    p95, overflow = _hist_percentile(totals, 0.95) if requests else (None, False)
+
+    values: dict[int, float] = {}
+    for ts, n in minutes.items():
+        i = win.bucket_index(ts)
+        if i is not None:
+            values[i] = values.get(i, 0) + float(n or 0)
+
+    prev_totals, prev_minutes = _api_totals(db, win.previous)
+    prev_requests = int(prev_totals.get(API_REQUESTS, 0) or 0) if prev_minutes else None
+    return {
+        "measurement_state": state,
+        "coverage_pct": round(100 * min(covered, expected) / expected, 1) if expected else None,
+        "requests": requests,
+        "errors": errors,
+        # None when nothing was requested: an error RATE over zero requests does not exist.
+        "value": round(100 * errors / requests, 3) if requests else None,
+        "p95_ms": p95,
+        "p95_basis": "histogram_upper_bound",
+        "p95_overflow": overflow,
+        # Buckets with collected minutes only; uncollected time is a gap, not zero traffic.
+        "series": ops_window.series(win, values, fill="gap"),
+        "comparison": ops_window.compare(requests, prev_requests),
+    }
+
+
+def health_window(db: Session, win: "ops_window.Window") -> dict:
+    """Healthy-service count over the window, from the sampler's platform_health_ok rows."""
+    def samples(w):
+        return [(_aware(t), float(v)) for t, v in db.execute(
+            select(PlatformMetric.recorded_at, PlatformMetric.value).where(
+                PlatformMetric.name == "platform_health_ok",
+                PlatformMetric.recorded_at >= w.since, PlatformMetric.recorded_at < w.until)
+        ).all()]
+
+    cur, prev = samples(win), samples(win.previous)
+    grouped: dict[int, list[float]] = {}
+    for ts, v in cur:
+        i = win.bucket_index(ts)
+        if i is not None:
+            grouped.setdefault(i, []).append(v)
+    avg = (lambda rows: round(sum(v for _, v in rows) / len(rows), 2) if rows else None)
+    return {
+        "series": ops_window.series(win, {i: sum(v) / len(v) for i, v in grouped.items()},
+                                    fill="gap"),
+        "average_ok": avg(cur),
+        "samples": len(cur),
+        "comparison": ops_window.compare(avg(cur), avg(prev)),
+    }
+
+
+UPCOMING_HORIZON = timedelta(days=7)
+
+
+def upcoming_high_impact(db: Session, org_filter: OrgFilter, include_test: bool) -> dict:
+    """FORWARD-looking: high-impact events starting in the next UPCOMING_HORIZON. The page's
+    range selector looks backward and never applies here."""
+    test_ids = [] if include_test else list(org_filter.test_ids)
+    total = db.scalar(select(func.count()).select_from(
+        _upcoming_stmt(include_test, True, UPCOMING_HORIZON, org_filter, test_ids).subquery())) or 0
+    now = _now()
+    return {
+        "semantics": "upcoming",
+        "from": now,
+        "to": now + UPCOMING_HORIZON,
+        "total": int(total),
+        "events": event_readiness(db, include_test, horizon=UPCOMING_HORIZON,
+                                  org_filter=org_filter),
+    }
+
+
+def _scoped_health(health: dict, stages: tuple[str, ...], scope: str) -> dict:
+    ids = {sid for code, _label, sids in STAGES if code in stages for sid in sids}
+    services = health["services"] if scope == "core_live" else [
+        s for s in health["services"] if s["id"] in ids]
+    by = {st: sum(1 for s in services if s["status"] == st)
+          for st in ("ok", "warn", "down", "unmonitored", "not_configured")}
+    if scope == "core_live":
+        overall = health["overall"]
+    else:
+        probed = [s["status"] for s in services
+                  if s["status"] in ("ok", "warn", "down") and s["id"] not in INFORMATIONAL_SERVICES]
+        overall = ("down" if "down" in probed else "warn" if "warn" in probed
+                   else "ok" if probed else "unknown")
+    return {"status": overall, "total": len(services), **by}
+
+
 # ── the page payload ──────────────────────────────────────────────────────────
 
 def command_center(db: Session, user: User, range_: str = "live", region: str | None = None,
                    scope: str = "core_live", include_test: bool = False,
                    since: datetime | None = None, until: datetime | None = None) -> dict:
-    """One call for the whole Command Center. The page has eleven interdependent regions
-    over the same window; eleven round trips would only give eleven chances to disagree
-    about what "now" is.
+    """One call for the whole Command Center, over ONE resolved window.
 
-    `since`/`until` are supplied only for range="custom"; every named range derives its
-    window from RANGES so the two paths can't drift.
+    Every tile says what kind of number it is (`semantics`):
+      current   state NOW, whatever range is selected: platform health, live sessions,
+                at-risk sessions, active incidents. The range only drives their trend or
+                their clearly-labelled windowed secondary figure.
+      window    an aggregate over the selected window: concurrent-audience peak/average,
+                API requests / error rate / p95, sessions in the period.
+      upcoming  forward-looking over a fixed horizon: high-impact events.
+    and which filters genuinely apply to it (`applies`), so the console can say "not
+    region-specific" instead of implying a filter it cannot honour. `measurement_state`
+    separates a measured zero from "nothing was measured".
+
+    Raises ops_window.WindowError for an impossible window (the router answers 400).
     """
-    # `generated_at` is always the real clock — it is when this payload was built, which is
-    # what the page's freshness line reports. `window_end` is what the DATA covers, and for
-    # a custom historical range those are deliberately different.
     generated_at = _now()
-    window_end = until or generated_at
-    since = since or (window_end - RANGES.get(range_, RANGES["live"]))
+    win = ops_window.resolve(range_, since, until, now=generated_at)
     stages = SCOPES.get(scope, SCOPES["core_live"])
+    orgs = OrgFilter(db, region, include_test)
 
     health = admin_svc.platform_health(db)
-    sessions = live_sessions(db, since, include_test)
-    aud = audience(db, since, include_test)
-    api = request_stats.snapshot()
-    readiness = event_readiness(db, include_test)
-    lifecycle = stage_health(db, health, since, stages)
+    scoped = _scoped_health(health, stages, scope)
+    hist = health_window(db, win) if scope == "core_live" else None
 
-    if region:
-        # Region narrows the session/attention view to orgs delivering from that region
-        # and the incidents scoped to it. Availability is already per-region.
-        org_region = {o.id: region_of(o.region) for o in db.scalars(select(Organization)).all()}
-        keep_events = {
-            str(e_id) for e_id, org_id in db.execute(
-                select(Event.id, Event.org_id).where(Event.deleted_at.is_(None))
-            ).all() if org_region.get(org_id) == region
-        }
-        sessions["attention"] = [a for a in sessions["attention"] if a["event_id"] in keep_events]
-        readiness = [e for e in readiness if e["id"] in keep_events]
-
-    ok_services = sum(1 for s in health["services"] if s["status"] == "ok")
-    live_services = [s for s in health["services"] if s["status"] in ("ok", "warn", "down")]
+    sessions = live_sessions(db, win.since, include_test, org_ok=orgs.ok if orgs.active else None)
+    live_rows = sessions.pop("rows")
+    attention = [i for i in sessions["attention"] if not i["stage"] or i["stage"] in stages]
+    in_window = sessions_in_window(db, win, orgs)
+    aud = audience_window(db, win, orgs, live_rows, in_window.pop("intervals"))
+    api = api_window(db, win)
+    upcoming = upcoming_high_impact(db, orgs, include_test)
+    incident_view = incident_summary(db, win, orgs, stages)
 
     return {
         "generated_at": generated_at,
-        "window": {"range": range_, "since": since, "until": window_end,
+        "range": win.as_dict(),
+        # Kept in its original shape for the other pages and for exports.
+        "window": {"range": range_, "since": win.since, "until": win.until,
                    "region": region, "scope": scope, "include_test": include_test},
-        "lifecycle": lifecycle,
+        "lifecycle": stage_health(db, health, win.since, stages, until=win.until),
         "regions": [{"code": c, "label": l} for c, l in REGIONS],
         "kpis": {
             "platform_health": {
-                "status": health["overall"],
-                "ok": ok_services,
-                "total": len(health["services"]),
-                "unavailable": sum(1 for s in live_services if s["status"] == "down"),
-                "series": metric_series(db, "platform_health_ok", since),
+                "semantics": "current",
+                **scoped,
+                "unavailable": scoped["down"],
+                "series": hist["series"] if hist else [],
+                "average_ok": hist["average_ok"] if hist else None,
+                "comparison": hist["comparison"] if hist else None,
+                "history_note": None if hist else (
+                    "Health history is sampled platform-wide, so the trend is shown for "
+                    "Core + Live Events only."),
+                "applies": {"range": "trend", "region": False, "scope": True,
+                            "include_test": False},
             },
             "live_sessions": {
+                "semantics": "current",
+                "measurement_state": "measured",
                 "value": sessions["live"],
+                "paused": sessions["paused"],
                 "starting_soon": sessions["starting_soon"],
                 "unattended": sessions["unattended"],
-                "series": sessions["series"],
+                "in_period": in_window["in_period"],
+                "series": in_window["series"],
+                "comparison": in_window["comparison"],
+                "applies": {"range": "secondary", "region": True, "scope": False,
+                            "include_test": True},
             },
-            "at_risk_sessions": sessions["at_risk"],
+            "at_risk_sessions": {
+                "semantics": "current",
+                **_risk_summary(attention),
+                "applies": {"range": False, "region": True, "scope": True, "include_test": True},
+            },
             "concurrent_audience": {
-                "value": aud["current"] or None,
-                "peak": aud["peak"] or None,
-                "largest_session": aud["largest_session"],
-                "largest_session_title": aud["largest_session_title"],
-                "series": aud["series"],
+                "semantics": "current" if range_ == "live" else "window",
+                # Live: the audience now. Any other range: the peak inside the window.
+                "value": aud["current"] if range_ == "live" else aud["peak"],
+                "measurement_state": aud["current_state"] if range_ == "live" else aud["window_state"],
+                **aud,
+                "applies": {"range": True, "region": True, "scope": False, "include_test": True},
             },
             "playback_quality": {
+                "semantics": "window",
+                "measurement_state": "not_measured",
                 "value": metric_latest(db, "playback_quality_pct"),
-                "startup_ms": metric_latest(db, "playback_startup_ms"),
-                "rebuffer_ratio": metric_latest(db, "playback_rebuffer_ratio"),
-                "fatal_ratio": metric_latest(db, "playback_fatal_ratio"),
-                "series": metric_series(db, "playback_quality_pct", since),
+                "series": [],
                 "note": "Playback QoE needs a player beacon writing platform_metrics "
                         "(no ingest yet).",
             },
             "api_health": {
-                "value": api["error_ratio"],
-                "p95_ms": api["p95_ms"],
-                "requests": api["requests"],
-                "series": api["series"],
-                "note": "Measured in-process; with multiple workers each reports its own share.",
+                "semantics": "window",
+                **api,
+                "note": "Every process's requests, flushed per minute. Error = HTTP 5xx.",
+                "applies": {"range": True, "region": False, "scope": False,
+                            "include_test": False},
             },
         },
-        "attention": sessions["attention"],
-        "incidents": incidents(db, since),
-        "action_queues": action_queues(db, readiness),
+        "attention": attention,
+        # Active incidents first (all of them), then the window's resolved ones.
+        "incidents": incident_view["active"] + incident_view["resolved_in_window"],
+        "incident_summary": incident_view,
+        "action_queues": action_queues(db, upcoming["events"]),
         "governance": governance_exposure(db),
         "privileged_activity": privileged_activity(db),
-        "upcoming_events": readiness,
+        "upcoming_events": upcoming["events"],
+        "upcoming": {k: v for k, v in upcoming.items() if k != "events"},
         "elevation": current_elevation(db, user),
     }
 
@@ -1094,13 +1495,10 @@ def record_samples(db: Session) -> None:
     names stay absent until something measures them."""
     health = admin_svc.platform_health(db)
     ok = sum(1 for s in health["services"] if s["status"] == "ok")
+    # API traffic is no longer sampled here: this ticker runs on the leader only, so it saw
+    # one process's slice through overlapping 5-minute windows. Every process now flushes its
+    # own per-minute counts (flush_request_stats).
     rows = [PlatformMetric(name="platform_health_ok", value=float(ok))]
-
-    api = request_stats.snapshot(window_minutes=5)
-    if api["requests"]:
-        rows.append(PlatformMetric(name="api_error_ratio", value=float(api["error_ratio"])))
-        if api["p95_ms"] is not None:
-            rows.append(PlatformMetric(name="api_p95_ms", value=float(api["p95_ms"])))
 
     db.add_all(rows)
     # Bounded growth: one delete per tick beats a cron nobody sets up.
@@ -1122,6 +1520,59 @@ async def run_metric_sampler(interval: float = SAMPLE_SECONDS) -> None:
             raise
         except Exception:  # noqa: BLE001 — a bad sample must not kill the sampler
             log.exception("platform metric sampler tick failed")
+        # Provider health rides this same ticker rather than a new scheduler. It throttles
+        # itself to PROBE_INTERVAL, so most ticks return immediately.
+        try:
+            from . import provider_health
+            await provider_health.probe_round(SessionLocal)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a failed probe round must not kill the sampler
+            log.exception("provider health probe round failed")
+
+
+def flush_request_stats(session_factory, stats: RequestStats | None = None) -> int:
+    """Write this process's completed minutes to platform_metrics. Returns rows written.
+    A failed write loses those minutes - reported later as a coverage gap, never as zero."""
+    stats = stats or request_stats
+    entries = stats.drain()
+    if not entries:
+        return 0
+    rows = []
+    for minute, requests, errors, hist in entries:
+        at = datetime.fromtimestamp(minute * 60, tz=timezone.utc)
+        rows.append(PlatformMetric(name=API_REQUESTS, value=float(requests), recorded_at=at))
+        if errors:
+            rows.append(PlatformMetric(name=API_ERRORS, value=float(errors), recorded_at=at))
+        for i, n in enumerate(hist):
+            if n:
+                rows.append(PlatformMetric(name=_lat_name(i), value=float(n), recorded_at=at))
+    db = session_factory()
+    try:
+        db.add_all(rows)
+        db.commit()
+        return len(rows)
+    except Exception:  # noqa: BLE001 - a failed flush must not kill the flusher
+        db.rollback()
+        log.exception("request stats flush failed; %d minute(s) not recorded", len(entries))
+        return 0
+    finally:
+        db.close()
+
+
+async def run_request_stats_flusher(interval: float = 60.0) -> None:
+    """Per PROCESS, not leader-elected: every process serves requests and holds its own
+    counts. Started from main.lifespan."""
+    from ..db import SessionLocal
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(flush_request_stats, SessionLocal)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("request stats flusher tick failed")
 
 
 def _sample_tick(session_factory) -> None:
@@ -1156,17 +1607,6 @@ def _selfcheck() -> None:
 
     # Empty history = no recorded impact.
     assert _impact_seconds([], base, base + h) == 0
-
-    # Bucketing: 4 samples over a 4-bucket window land one per bucket, averaged.
-    rows = [(base + timedelta(minutes=m), float(v)) for m, v in ((0, 10), (15, 20), (30, 30), (45, 40))]
-    out = _bucket(rows, base, base + h, 4)
-    assert [p["value"] for p in out] == [10.0, 20.0, 30.0, 40.0], out
-    # Two samples in one bucket average; max aggregation takes the peak.
-    rows2 = [(base, 10.0), (base + timedelta(minutes=1), 30.0)]
-    assert _bucket(rows2, base, base + h, 4)[0]["value"] == 20.0
-    assert _bucket(rows2, base, base + h, 4, agg="max")[0]["value"] == 30.0
-    # A gap is dropped, not zero-filled.
-    assert len(_bucket([(base, 5.0)], base, base + h, 4)) == 1
 
     # Region mapping is prefix-based and refuses to guess.
     assert region_of("US East") == "na"

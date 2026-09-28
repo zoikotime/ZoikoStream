@@ -243,14 +243,18 @@ def test_1_super_admin_alone_cannot_read_tenant_data():
         r2 = client.get(f"/api/admin/organizations/{w.org_id}/api-keys", headers=headers)
         assert r2.status_code == 403, "tenant credentials must be gated"
 
+        # DELETE, not PATCH. Editing an account's platform attributes (name, role, whether
+        # it may sign in) is platform GOVERNANCE and no longer sits behind ORG-009 — see
+        # routers/admin.update_user and test_admin_user_governance.py. Destroying a tenant's
+        # member record still does, because that removes customer data rather than governing
+        # a platform account, so this is still the right probe for "reaching into a tenant".
         _reset_limits()
-        r3 = client.patch(f"/api/admin/users/{w.member_id}",
-                          json={"full_name": "Renamed By Staff"}, headers=headers)
-        assert r3.status_code == 403, "modifying a tenant's member must be gated"
+        r3 = client.delete(f"/api/admin/users/{w.member_id}", headers=headers)
+        assert r3.status_code == 403, "removing a tenant's member must be gated"
 
         db = SessionLocal()
         try:
-            assert db.get(User, w.member_id).full_name == "Member", "and nothing changed"
+            assert db.get(User, w.member_id) is not None, "and nothing was removed"
         finally:
             db.close()
     finally:
@@ -280,10 +284,10 @@ def test_2_approved_active_session_allows_only_approved_scope():
         assert denied.status_code == 403, "unapproved capability must be refused"
         assert "does not permit" in denied.text
 
-        # Out of scope — member writes were never approved.
+        # Out of scope — member writes were never approved. Probed through DELETE, which is
+        # the member-write operation still governed by ORG-009 (see test_1).
         _reset_limits()
-        denied2 = client.patch(f"/api/admin/users/{w.member_id}",
-                               json={"full_name": "Nope"}, headers=headers)
+        denied2 = client.delete(f"/api/admin/users/{w.member_id}", headers=headers)
         assert denied2.status_code == 403
     finally:
         w.cleanup()
@@ -477,8 +481,7 @@ def test_9_every_privileged_action_creates_attribution():
 
         # An out-of-scope attempt is recorded too — a refused reach is worth knowing about.
         _reset_limits()
-        client.patch(f"/api/admin/users/{w.member_id}", json={"full_name": "X"},
-                     headers=headers)
+        client.delete(f"/api/admin/users/{w.member_id}", headers=headers)
         denied = [r for r in w.audit_for(req_id)
                   if r.action == "support_access.denied_out_of_scope"]
         assert denied, "an out-of-scope attempt must be recorded"

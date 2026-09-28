@@ -18,6 +18,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import app.email as email_mod
+from _testsupport import published_catalog_fields
 from app.db import SessionLocal
 from app.models import (
     CHARGE_MAY_BE_AUTHORIZED,
@@ -178,12 +179,14 @@ class World:
             db.flush()
             self.event_id = ev.id
 
-            catalog = db.query(CatalogVersion).first()
-            if catalog is None:
-                catalog = CatalogVersion(vertical="events", version_label="v1",
-                                         status="published")
-                db.add(catalog)
-                db.flush()
+            # This World's own catalog. It used to take ANY catalog in the database and, when
+            # there was none, create `events / v1 / published` with no publisher and never
+            # delete it - the anomalous row found in a real database.
+            catalog = CatalogVersion(vertical=f"cc-{uuid.uuid4().hex[:8]}", version_label="v1",
+                                     **published_catalog_fields(self.owner_id))
+            db.add(catalog)
+            db.flush()
+            self.catalog_id = catalog.id
             order = EventOrder(event_id=ev.id, commercial_account_id=account.id,
                                catalog_version_id=catalog.id, currency="GBP",
                                order_version=1, status="accepted",
@@ -216,9 +219,8 @@ class World:
         """
         db = SessionLocal()
         try:
-            catalog = db.query(CatalogVersion).first()
             order = EventOrder(event_id=self.event_id, commercial_account_id=self.account_id,
-                               catalog_version_id=catalog.id, currency="GBP",
+                               catalog_version_id=self.catalog_id, currency="GBP",
                                order_version=1, status="accepted",
                                idempotency_key=uuid.uuid4().hex)
             db.add(order)
@@ -303,6 +305,8 @@ class World:
             if org is not None:
                 org.owner_user_id = None
             db.commit()
+            # After every order priced from it (gone with the event), before its publisher.
+            db.query(CatalogVersion).filter(CatalogVersion.id == self.catalog_id).delete()
             db.query(User).filter(User.org_id == self.org_id).delete()
             db.query(Organization).filter(Organization.id == self.org_id).delete()
             db.query(Plan).filter(Plan.id == self.plan_id).delete()

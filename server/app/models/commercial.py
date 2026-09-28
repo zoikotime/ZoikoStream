@@ -1336,3 +1336,32 @@ class PartnerAttribution(Base):
     commission_basis: Mapped[str | None] = mapped_column(String(120))
     commission_state: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── publish invariant ───────────────────────────────────────────────────────────────────
+#
+# A published price book must say WHO published it and WHEN. crud.commercial.
+# publish_catalog_version always sets both, but nothing stopped a row being written as
+# status="published" by any other path - and one such row exists: "events · v1", published,
+# with published_by and published_at both NULL, which the governed path cannot produce.
+#
+# Enforced at FLUSH, not with @validates: publish sets `status` before `published_by`, so a
+# per-attribute validator would reject the governed path itself. And it checks only rows being
+# WRITTEN (new or dirty), so the historical anomalous row is left exactly as it is - repairing it
+# is a data-cleanup decision, not something a model hook should do silently.
+from sqlalchemy import event as _sa_event
+from sqlalchemy.orm import Session as _Session
+
+
+class PublishInvariantError(ValueError):
+    pass
+
+
+@_sa_event.listens_for(_Session, "before_flush")
+def _catalog_publish_invariant(session, _flush_context, _instances):
+    for obj in list(session.new) + list(session.dirty):
+        if isinstance(obj, CatalogVersion) and obj.status == "published":
+            if obj.published_by is None or obj.published_at is None:
+                raise PublishInvariantError(
+                    "A published catalog version must record published_by and published_at; "
+                    "publish it through crud.commercial.publish_catalog_version.")

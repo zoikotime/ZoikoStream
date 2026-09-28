@@ -238,7 +238,8 @@ def main() -> int:
 
     url = resolve_url(args.url)
     guard(url)
-    engine = create_engine(url)
+    from app.dburl import engine_url  # psycopg2 explicitly; see app/dburl.py
+    engine = create_engine(engine_url(url))
 
     with engine.begin() as conn:            # ONE transaction; any error rolls everything back
         found = classify(conn)

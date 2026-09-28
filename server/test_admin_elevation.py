@@ -154,22 +154,25 @@ def test_the_secondary_scopes_list_also_authorizes(world):
 
 
 def test_tenant_actions_are_gated_by_ORG_009_not_by_elevation(world):
-    """The division of labour, pinned.
+    """The division of labour, pinned — on the route where it still applies.
 
-    Reaching into a customer's organization is NOT an elevation question — /admin/users/{id}
-    sits behind the support context, which is org-approved, countersigned, capability-scoped
-    and audits its own refusals. Stacking elevation in front of it pre-empted that check and
-    silenced `support_access.denied_out_of_scope`, so the coarser gate was removed from these
-    two endpoints. What must stay true is that the tenant control still refuses on its own."""
+    This used to probe PATCH /admin/users/{id}. That route is now platform GOVERNANCE and is
+    gated by elevation rather than a support context (see routers/admin.update_user and
+    test_admin_user_governance.py): editing an account's platform role or whether it may sign
+    in is not a customer's decision to approve.
+
+    DELETE is the member operation that remains tenant data — it destroys a customer's record
+    rather than governing a platform account — so it is the honest probe for the boundary this
+    test exists to pin: an elevation, however valid, buys nothing inside a tenant."""
     elevate(world, scope="identity")     # a platform elevation buys nothing here
     c = client_for(world["admin"])
 
-    r = c.patch(f"/api/admin/users/{world['victim'].id}", json={"is_active": False})
+    r = c.delete(f"/api/admin/users/{world['victim'].id}")
 
     assert r.status_code == 403, r.text
-    assert "support" in r.json()["detail"].lower()
+    assert "support" in r.json()["detail"].lower() or "approved" in r.json()["detail"].lower()
     world["db"].expire_all()
-    assert world["db"].get(User, world["victim"].id).is_active is True
+    assert world["db"].get(User, world["victim"].id) is not None
 
 
 # ── reads are untouched ────────────────────────────────────────────────────────────────

@@ -2,11 +2,12 @@
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
 from ..config import BILLING_INTERVALS
+from ..models.user import ROLES
 
 # ── Generic ────────────────────────────────────────────────────────────────
 
@@ -84,7 +85,17 @@ class AdminUserOut(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    role: str | None = None
+    # Constrained to the real role vocabulary (models.user.ROLES). It was a bare `str`, so
+    # PATCH {"role": "wizard"} was accepted, written to the column and persisted — the row
+    # then held a role nothing in the authorization ladder recognises, which fails open or
+    # closed depending on which check reads it first. A 422 naming the field is the honest
+    # answer, and it happens before anything reaches SQL.
+    #
+    # Validated against the FULL tuple rather than the two the console can assign: editing a
+    # Host's name is legitimate and must not be refused merely because the payload echoes
+    # their existing role back. What may be GRANTED is narrowed separately, in the console
+    # (roleInfo.ASSIGNABLE_PLATFORM_ROLES) and by the elevation gate on the high-risk subset.
+    role: Annotated[str, Field(pattern="^(" + "|".join(ROLES) + ")$")] | None = None
     is_active: bool | None = None
     full_name: str | None = Field(None, min_length=1, max_length=120)
     # One of models.user.STAFF_COMMERCIAL_ROLES, or "" to clear it back to unscoped

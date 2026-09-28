@@ -121,7 +121,10 @@ export function CatalogVersionDrawer({ version, onClose, onChanged }) {
     }
   };
 
-  const canPublish = version.status === "draft";
+  // The server refuses an empty or non-draft version (crud.publish_catalog_version); the
+  // button mirrors that rather than offering a click that can only fail.
+  const canPublish = version.status === "draft" && lines.length > 0;
+  const publishedAt = version.published_at ? new Date(version.published_at).toLocaleString() : null;
 
   return (
     <Modal
@@ -139,6 +142,13 @@ export function CatalogVersionDrawer({ version, onClose, onChanged }) {
       }
     >
       <div className="space-y-4">
+        {version.integrity_issue ? (
+          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200" data-testid="catalog-drawer-integrity">
+            {version.integrity_issue}
+          </p>
+        ) : publishedAt ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">Published {publishedAt}</p>
+        ) : null}
         {lines.length === 0 ? (
           <p className="text-sm text-slate-500 dark:text-slate-400">No lines yet — add at least one priced line before publishing.</p>
         ) : (

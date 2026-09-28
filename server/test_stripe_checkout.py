@@ -20,7 +20,7 @@ import stripe
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from _testsupport import code_only
+from _testsupport import code_only, published_catalog_fields
 from app.crud import commercial as crud
 from app.db import engine
 from app.models import (
@@ -380,7 +380,7 @@ class TestCheckoutAgainstRealCommercialRecords:
             event = Event(org_id=org.id, created_by=user.id, title="Checkout test")
             account = CommercialAccount(org_id=org.id)
             catalog = CatalogVersion(version_label="v1", vertical=f"co-{uuid.uuid4().hex[:6]}",
-                                     status="published")
+                                     **published_catalog_fields(user.id))
             db.add_all([event, account, catalog])
             db.flush()
             line = CatalogLine(catalog_version_id=catalog.id, service_code="MEM-MANAGED",

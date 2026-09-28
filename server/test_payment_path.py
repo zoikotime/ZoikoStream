@@ -28,7 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.crud import commercial as crud
-from _testsupport import code_only
+from _testsupport import code_only, published_catalog_fields
 from app.db import engine
 from app.models import (
     AuditLog, CatalogVersion, CommercialAccount, CommercialException, Event, EventOrder,
@@ -476,7 +476,7 @@ class TestGoLiveGate:
             db.flush()
             account = CommercialAccount(org_id=org.id)
             catalog = CatalogVersion(version_label="v1", vertical=f"gl-{uuid.uuid4().hex[:6]}",
-                                     status="published")
+                                     **published_catalog_fields(user.id))
             db.add_all([account, catalog])
             db.flush()
             ids = SimpleNamespace(org_id=org.id, user_id=user.id,
@@ -768,7 +768,7 @@ class TestProviderEvents:
             # account it bills and the catalog version it was priced from.
             account = CommercialAccount(org_id=org.id)
             catalog = CatalogVersion(version_label=f"t-{uuid.uuid4().hex[:6]}",
-                                     vertical=f"test-{uuid.uuid4().hex[:6]}", status="published")
+                                     vertical=f"test-{uuid.uuid4().hex[:6]}", **published_catalog_fields(user.id))
             db.add_all([account, catalog])
             db.flush()
             order = EventOrder(
@@ -1019,7 +1019,7 @@ class TestProviderEvents:
             db.flush()
             other_account = CommercialAccount(org_id=other_org.id)
             other_catalog = CatalogVersion(version_label=f"o-{uuid.uuid4().hex[:6]}",
-                                           vertical=f"other-{uuid.uuid4().hex[:6]}", status="published")
+                                           vertical=f"other-{uuid.uuid4().hex[:6]}", **published_catalog_fields(other_user.id))
             db.add_all([other_account, other_catalog])
             db.flush()
             other_order = EventOrder(event_id=other_event.id, commercial_account_id=other_account.id,

@@ -28,7 +28,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from _testsupport import code_only
+from _testsupport import code_only, published_catalog_fields
 from app import security
 from app.crud import commercial as crud
 from app.db import engine
@@ -534,7 +534,7 @@ class TestCommercialLifecycleDB:
                                          billing_classification="commercial")
             db.add(account)
             catalog = CatalogVersion(version_label=f"cv-{suffix}", vertical="memorials",
-                                      status="published", effective_at=NOW)
+                                      **published_catalog_fields(user.id), effective_at=NOW)
             db.add(catalog)
             db.flush()
             line = CatalogLine(catalog_version_id=catalog.id, service_code="base",
@@ -1029,7 +1029,7 @@ class TestCommercialLifecycleDB:
     def test_a_change_order_cannot_use_a_foreign_catalog_line(self, ctx):
         with Session(engine) as db:
             other = CatalogVersion(version_label="other", vertical="worship",
-                                    status="published", effective_at=NOW)
+                                    **published_catalog_fields(ctx.user_id), effective_at=NOW)
             db.add(other)
             db.flush()
             foreign = CatalogLine(catalog_version_id=other.id, service_code="x", name="X",

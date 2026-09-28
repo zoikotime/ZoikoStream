@@ -79,7 +79,17 @@ export default function AdminTopbar({ onMenuClick, state, unknown, onRetry }) {
   useInterval(() => setClock(timeFmt.format(new Date())), 1000);
 
   const crumb = CRUMBS[pathname.split("/")[2]] || "Console";
-  const verdict = unknown ? UNKNOWN : VERDICT[state?.health?.overall] || UNKNOWN;
+  // "All systems operational" only when it is TRUE of all systems. The backend now reports
+  // how many dependencies are configured but unprobed (LiveKit, storage, email have no health
+  // check here), and while any are, the honest claim is narrower: the checked ones are fine,
+  // and this many were not checked. The old label read the same whether the platform had
+  // verified everything or only that the database answered SELECT 1.
+  const unmonitored = state?.health?.unmonitored ?? 0;
+  const base = unknown ? UNKNOWN : VERDICT[state?.health?.overall] || UNKNOWN;
+  const verdict =
+    base.status === "ok" && unmonitored > 0
+      ? { status: "ok", label: `Operational · ${unmonitored} not monitored` }
+      : base;
 
   // ⌘K / Ctrl+K focuses the command bar (console convention).
   useEffect(() => {
@@ -219,7 +229,8 @@ export default function AdminTopbar({ onMenuClick, state, unknown, onRetry }) {
           <Link
             to="/admin/status"
             className="hidden lg:block"
-            title={`${state?.health?.degraded ?? 0} of ${state?.health?.total ?? 0} degraded`}
+            title={`${state?.health?.degraded ?? 0} of ${state?.health?.total ?? 0} degraded` +
+              (unmonitored ? ` · ${unmonitored} configured without a health probe` : "")}
           >
             <HealthDot status={verdict.status} pulse={verdict.status !== "ok"}>
               {verdict.label}

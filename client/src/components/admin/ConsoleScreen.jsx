@@ -12,7 +12,15 @@ import { errMsg } from "../../api";
 // DIAGNOSIS, which is the part worth sharing: "the API didn't answer" sends someone hunting
 // the network when a 404 means the server predates the endpoint and a 401 means the session
 // expired. Different fixes, so the page names which one it is.
-const SLO_SECONDS = 600;
+// How old this page's data may get before the freshness line stops reading as green. It is
+// a STALENESS threshold for what is on screen, and nothing more.
+//
+// It used to be rendered as "within SLO", which claimed something the platform does not
+// have: there is no service-level objective defined anywhere for console data freshness, no
+// measurement of one, and nothing that would breach if this were exceeded. The timestamp and
+// the age ARE real — they come from the last successful fetch — so the age is kept and the
+// claim about it is dropped. "Up to date" says exactly what is known.
+const STALE_AFTER_SECONDS = 600;
 
 function diagnose(error, endpoint) {
   const status = error?.response?.status;
@@ -41,9 +49,9 @@ export default function ConsoleScreen({
   skeleton,
   children,
 }) {
-  const withinSlo = ageSeconds == null || ageSeconds <= SLO_SECONDS;
+  const fresh = ageSeconds == null || ageSeconds <= STALE_AFTER_SECONDS;
   const ageLabel = ageSeconds < 1 ? "just now" : `${ageSeconds} sec ago`;
-  const freshTone = withinSlo
+  const freshTone = fresh
     ? "text-green-600 dark:text-green-400"
     : "text-amber-600 dark:text-amber-400";
 
@@ -71,7 +79,7 @@ export default function ConsoleScreen({
             <p className={cx("mt-2 flex items-center gap-1.5 text-[12px]", type.mono)}>
               <span className={freshTone}>Refreshed {ageLabel}</span>
               <span className={CONSOLE.faint}>·</span>
-              <span className={freshTone}>{withinSlo ? "within SLO" : "stale — refresh"}</span>
+              <span className={freshTone}>{fresh ? "up to date" : "stale — refresh"}</span>
             </p>
           )}
         </div>

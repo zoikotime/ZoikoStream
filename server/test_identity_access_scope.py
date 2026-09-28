@@ -228,3 +228,52 @@ def test_the_final_super_admin_is_still_protected(world):
         assert exc.value.status_code == 409
 
     db.rollback()
+
+
+# ── the role filter's HTTP contract ────────────────────────────────────────────────────
+#
+# The deployed console shows "Couldn't load users" the moment Super Admin or Org Admin is
+# chosen. These pin what the API must do for each selection, so that if the deployed build
+# ever behaves differently the difference is in the artifact, not in this contract.
+
+@pytest.mark.parametrize("role", IDENTITY_ACCESS_ROLES)
+def test_a_valid_role_never_returns_422_or_500(world, role):
+    c = client_for(world["admin"])
+    r = c.get("/api/admin/users", params={"role": role, "page_size": 100})
+    assert r.status_code == 200, f"{role} -> {r.status_code}: {r.text[:200]}"
+
+
+def test_super_admin_returns_only_super_admins(world):
+    items = listing(world, role="super_admin")
+    assert items, "the fixture's super admin must be returned"
+    assert roles_in(items) == {"super_admin"}
+
+
+def test_org_admin_returns_only_org_admins(world):
+    items = listing(world, role="org_admin")
+    assert items
+    assert roles_in(items) == {"org_admin"}
+
+
+@pytest.mark.parametrize("bad", ["Super Admin", "Org Admin", "host", "", "super admin", "SUPER_ADMIN"])
+def test_a_label_or_unknown_role_is_a_controlled_422_never_a_500(world, bad):
+    """Including the display labels themselves. If a client ever did send "Super Admin", the
+    answer must be a validation error naming the field — not a 500, and not silently every
+    user on the platform."""
+    c = client_for(world["admin"])
+    r = c.get("/api/admin/users", params={"role": bad})
+    assert r.status_code == 422, f"{bad!r} -> {r.status_code}"
+    assert r.json()["detail"][0]["loc"] == ["query", "role"]
+
+
+def test_role_composes_with_search_org_status_sort_and_paging(world):
+    """Every control at once — the combination the console actually sends."""
+    c = client_for(world["admin"])
+    r = c.get("/api/admin/users", params={
+        "role": "org_admin", "q": world["tag"], "org_id": str(world["org"].id),
+        "is_active": True, "sort_by": "name", "order": "asc", "page": 1, "page_size": 50,
+    })
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert roles_in(items) == {"org_admin"}
+    assert all(u["is_active"] for u in items)
