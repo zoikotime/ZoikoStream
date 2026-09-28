@@ -27,6 +27,7 @@ from ..models import (
     Subscription,
     SUBSCRIPTION_ENTITLED_STATES,
     SUBSCRIPTION_TERMINATED_STATES,
+    SUBSCRIPTION_TRIALING_STATES,
     normalize_subscription_state,
     subscription_transition_error,
     SupportTicket,
@@ -1515,6 +1516,93 @@ def due_plan_changes(db, *, now: datetime | None = None) -> list[Subscription]:
             Subscription.plan_change_effective_at <= moment,
         ).with_for_update(skip_locked=True)
     ).all())
+
+
+# ── trial expiry (Section 12: TRIALING -> TRIAL_EXPIRED) ─────────────────────────────────
+#
+# `trial_expired` was a legal, terminal node of the graph that nothing ever wrote, while
+# `trialing` is entitled - so a trial granted its plan for ever. These three functions are the
+# clock behind that edge, built exactly like the plan-change sweep above: a cheap candidate
+# query, then an atomic per-row claim, then one audited transition.
+#
+# Post-trial entitlement policy is Product decision P2 and is UNDECIDED. Expiry therefore moves
+# one column. It edits no plan, seat or limit, cancels nothing, deletes nothing and involves no
+# payment system: Section 12 gives `trialing` no edge to `active`, so the only route to a paid
+# subscription is a deliberate conversion through CONVERSION_PENDING.
+
+def due_trial_expiries(db, *, now: datetime | None = None) -> list[Subscription]:
+    """Trials whose end date has arrived, in EITHER stored spelling, locked for this worker.
+
+    `trial_ends_at <= now`, not `<`: a trial whose end has arrived is over. A NULL end date is
+    never due - an absence is not a deadline in the past - and is reported by the sweep instead.
+    Like due_plan_changes, this batch lock does not survive the first applied row
+    (create_audit_log commits), so each row is re-claimed by claim_expired_trial.
+    """
+    moment = now or datetime.now(timezone.utc)
+    return list(db.scalars(
+        select(Subscription).where(
+            Subscription.status.in_(SUBSCRIPTION_TRIALING_STATES),
+            Subscription.trial_ends_at.isnot(None),
+            Subscription.trial_ends_at <= moment,
+        ).order_by(Subscription.trial_ends_at).with_for_update(skip_locked=True)
+    ).all())
+
+
+def claim_expired_trial(db, subscription_id, *, now: datetime | None = None):
+    """Re-read ONE trial under a fresh row lock, or None if it is no longer claimable.
+
+    The full predicate is re-asserted against COMMITTED state, so a row another worker holds
+    (SKIP LOCKED), has already expired, or that converted in the meantime (the tenant started
+    paying between the candidate query and this claim) is simply not returned.
+    """
+    moment = now or datetime.now(timezone.utc)
+    return db.scalar(
+        select(Subscription).where(
+            Subscription.id == subscription_id,
+            Subscription.status.in_(SUBSCRIPTION_TRIALING_STATES),
+            Subscription.trial_ends_at.isnot(None),
+            Subscription.trial_ends_at <= moment,
+        ).with_for_update(skip_locked=True).execution_options(populate_existing=True)
+    )
+
+
+def expire_trial(db, sub: Subscription, *, actor: User | None = None,
+                 reason: str = "maintenance:trial_expiry") -> tuple[bool, str | None]:
+    """Move one subscription to `trial_expired`. Returns (applied, error).
+
+    The graph decides whether the edge is legal - it is asked, never assumed. An illegal
+    source state is refused and audited, never forced; re-asserting `trial_expired` is a clean
+    no-op with no audit row. The stored spelling of the previous state (`trial` or `trialing`)
+    is recorded as it was.
+
+    Writes the lifecycle state and nothing else: Product decision P2 (what an expired tenant
+    may still do) is open, and the audit row says so.
+    """
+    previous = sub.status
+    error = subscription_transition_error(previous, "trial_expired")
+    if error:
+        create_audit_log(
+            db, actor=actor, action="subscription.transition_rejected",
+            target_type="subscription", target_id=sub.id, org_id=sub.org_id,
+            meta={"from": previous, "to": "trial_expired", "error": error, "reason": reason},
+        )
+        return False, error
+    if normalize_subscription_state(previous) == "trial_expired":
+        return False, None
+
+    expired_at = datetime.now(timezone.utc)
+    sub.status = "trial_expired"
+    create_audit_log(
+        db, actor=actor, action="subscription.transition",
+        target_type="subscription", target_id=sub.id, org_id=sub.org_id,
+        meta={"from": previous, "to": "trial_expired", "reason": reason,
+              "trial_ends_at": sub.trial_ends_at.isoformat() if sub.trial_ends_at else None,
+              "expired_at": expired_at.isoformat(),
+              "plan_id": str(sub.plan_id),
+              "entitlement_policy": "P2 undecided: entitlement ends with the trial state; "
+                                    "the plan, its limits and the tenant's data are unchanged"},
+    )
+    return True, None
 
 
 def claim_due_plan_change(db, subscription_id, *, now: datetime | None = None):

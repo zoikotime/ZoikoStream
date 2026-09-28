@@ -134,6 +134,10 @@ SUBSCRIPTION_TERMINATED_STATES = _with_legacy("canceled", "closed")
 # preserving the exact pre-existing MRR semantics rather than silently changing a finance
 # figure. Which states should count is a Finance question this document does not answer.
 SUBSCRIPTION_REVENUE_STATES = _with_legacy("active", "trialing")
+# TRIALING = in a trial right now, in either stored spelling. The trial-expiry sweep queries by
+# this: the production row that matters is stored as the legacy `trial`, and a query spelling
+# the state inline as "trialing" would skip exactly that row.
+SUBSCRIPTION_TRIALING_STATES = _with_legacy("trialing")
 
 
 # States in which the provider-side subscription has been RELEASED — Stripe is no longer

@@ -16,6 +16,8 @@ Five jobs:
                              only; the media object is never deleted by a sweep)
   report_stale_payments      payment attempts stuck mid-flight, REPORTED not deleted
   report_unmatched_settlements  open unattributed money, aged and alerted
+  expire_due_trials          trials past trial_ends_at -> TRIAL_EXPIRED (state only; no plan,
+                             limit or charge is touched - post-trial policy P2 is undecided)
 
 What none of them do is delete or rewrite a financial record. "Failed payment cleanup" is
 implemented as reporting, deliberately: a payment row is the evidence that an attempt happened,
@@ -36,7 +38,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..crud import commercial as crud
-from ..models import CapacityReservation, Event, Payment, User
+from ..models import (
+    SUBSCRIPTION_TRIALING_STATES,
+    CapacityReservation,
+    Event,
+    Payment,
+    Subscription,
+    User,
+)
 from . import platform_settings
 
 log = logging.getLogger(__name__)
@@ -277,6 +286,53 @@ def apply_due_plan_changes(db: Session, *, actor: User | None = None) -> dict:
                         "provider_failed": provider_failed}}
 
 
+def expire_due_trials(db: Session, *, actor: User | None = None) -> dict:
+    """Section 12's TRIALING -> TRIAL_EXPIRED, for every trial whose end date has arrived.
+
+    Same shape as apply_due_plan_changes: candidate ids, release the batch lock, then an atomic
+    per-row claim, so a scheduler double-fire, a retry or an operator run alongside the
+    schedule expires each trial exactly once and writes exactly one transition row.
+
+    A trial with NO end date is never expired - an absence is not a deadline - and is listed
+    for manual review instead, spelled as it is stored. Reaching the end of a trial charges
+    nobody and changes no plan or limit (Product decision P2 is open): see admin.expire_trial.
+
+    A failure inside a transition is NOT caught here. It propagates so run_all names this job
+    as failed, and the row being expired is left exactly as it was.
+    """
+    from ..crud import admin as admin_crud
+
+    now = datetime.now(timezone.utc)
+    candidate_ids = [s.id for s in admin_crud.due_trial_expiries(db, now=now)]
+    undated = [
+        {"subscription_id": str(s.id), "org_id": str(s.org_id), "status": s.status}
+        for s in db.scalars(select(Subscription).where(
+            Subscription.status.in_(SUBSCRIPTION_TRIALING_STATES),
+            Subscription.trial_ends_at.is_(None))).all()
+    ]
+    db.rollback()                     # release the batch lock; each row is re-claimed below
+
+    expired, refused, contended = [], [], 0
+    for sub_id in candidate_ids:
+        sub = admin_crud.claim_expired_trial(db, sub_id, now=now)
+        if sub is None:
+            # Held by another worker, already expired by one, or converted meanwhile.
+            contended += 1
+            db.rollback()
+            continue
+        applied, error = admin_crud.expire_trial(db, sub, actor=actor)
+        db.commit()
+        if applied:
+            expired.append({"subscription_id": str(sub.id), "org_id": str(sub.org_id)})
+        elif error:
+            refused.append({"subscription_id": str(sub.id), "error": error})
+
+    return {"job": "expire_due_trials", "candidates": len(candidate_ids),
+            "expired": len(expired), "refused": len(refused), "contended": contended,
+            "manual_review_no_trial_end_date": len(undated),
+            "detail": {"expired": expired, "refused": refused, "no_trial_end_date": undated}}
+
+
 JOBS = (
     expire_capacity_holds,
     release_stale_reservations,
@@ -285,6 +341,7 @@ JOBS = (
     report_unmatched_settlements,
     expire_commercial_overrides,
     apply_due_plan_changes,
+    expire_due_trials,
 )
 
 
