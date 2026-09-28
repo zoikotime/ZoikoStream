@@ -2,7 +2,9 @@
 // Recordings — manage all recorded live events. Route: /organization/recordings
 // Rendered inside OrganizationLayout (sidebar + topbar). Backed by GET/DELETE
 // /organization/recordings — only rows LiveKit egress actually captured (see
-// crud.event.list_org_recordings) ever appear here, so every card is a real, playable file.
+// crud.event.list_org_recordings) appear as cards; /organization/recordings/summary says what
+// happened to every other attempt (running, or failed to capture) so an empty library is
+// never mistaken for "nothing was attempted".
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -54,14 +56,20 @@ const fmtDuration = (secs) => {
   const s = Math.round(secs % 60);
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
 };
+// Unknown (null) is a dash. A MEASURED zero is "0 B", never hidden behind the same dash:
+// a zero-byte file is a capture that produced nothing, which is worth seeing. `!bytes` used
+// to treat both as unknown.
 const fmtBytes = (bytes) => {
-  if (!bytes) return "—";
+  if (bytes == null) return "—";
+  if (bytes === 0) return "0 B";
+  if (bytes < 1024 ** 2) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   const gb = bytes / 1024 ** 3;
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 };
 const fmtTotalBytes = (bytes) => {
   const gb = bytes / 1024 ** 3;
-  return gb >= 1000 ? `${(gb / 1000).toFixed(2)} TB` : `${gb.toFixed(1)} GB`;
+  if (gb >= 1000) return `${(gb / 1000).toFixed(2)} TB`;
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : fmtBytes(bytes);
 };
 
 const control =
@@ -336,7 +344,8 @@ function RecordingCard({ r, onWatch, onDownload, onShare, onDelete, onExport }) 
           </Button>
           <div className="flex items-center gap-1.5">
             <ActionBtn icon={FiDownload} label="Download" disabled={!ready} onClick={() => onDownload(r)} />
-            <ActionBtn icon={FiShare2} label="Share" onClick={() => onShare(r)} />
+            {/* Not for a recording with no playable file: the link would lead to nothing. */}
+            <ActionBtn icon={FiShare2} label="Share" disabled={!ready} onClick={() => onShare(r)} />
           </div>
           <div className="flex items-center gap-1.5">
             <ActionBtn
@@ -373,10 +382,16 @@ function PlayerModal({ recording, onClose }) {
 }
 
 export default function OrganizationRecordings() {
+  // The library (captured recordings) plus what happened to every other attempt. The summary
+  // is optional: an older API without it still renders the library exactly as before.
   const { data, loading, error, reload } = useApi(() =>
-    api.get("/organization/recordings").then((r) => r.data)
+    Promise.all([
+      api.get("/organization/recordings").then((r) => r.data),
+      api.get("/organization/recordings/summary").then((r) => r.data).catch(() => null),
+    ]).then(([list, summary]) => ({ list, summary }))
   );
-  const list = data || NONE;
+  const list = data?.list || NONE;
+  const summary = data?.summary || null;
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
   const [sort, setSort] = useState("date-desc");
@@ -397,6 +412,21 @@ export default function OrganizationRecordings() {
   // operator can see it — but counting it as a recording, or letting it contribute to
   // storage, would report something the org does not have.
   const ready = useMemo(() => list.filter((r) => recordingState(r)?.key === "ready"), [list]);
+  // Everything that is not a playable recording yet, said rather than folded into "0".
+  const notReady = useMemo(() => {
+    const by = {};
+    for (const r of list) {
+      const key = recordingState(r)?.key;
+      if (key && key !== "ready") by[key] = (by[key] || 0) + 1;
+    }
+    return by;
+  }, [list]);
+  const recordingsHint = [
+    notReady.processing ? `${notReady.processing} processing` : null,
+    notReady.storage_unavailable ? `${notReady.storage_unavailable} unavailable in storage` : null,
+    summary?.in_progress ? `${summary.in_progress} recording now` : null,
+    summary?.failed_attempts ? `${summary.failed_attempts} attempt${summary.failed_attempts === 1 ? "" : "s"} not captured` : null,
+  ].filter(Boolean).join(" · ") || undefined;
 
   const storage = useMemo(() => {
     const known = ready.filter((r) => typeof r.size_bytes === "number");
@@ -501,24 +531,48 @@ export default function OrganizationRecordings() {
         <StatsCard
           title="Total Recordings"
           value={ready.length}
-          hint={list.length > ready.length
-            ? `${list.length - ready.length} not available yet`
-            : undefined}
+          hint={recordingsHint}
           icon={FiFilm}
           accent="emerald"
         />
         <StatsCard
           title="Total Storage"
-          // Nothing measured at all -> an em dash, not "0.0 GB": with every size unknown
-          // there is no total to report, only an absence of one.
-          value={storage.unknown === ready.length && ready.length > 0 ? "—" : fmtTotalBytes(storage.bytes)}
-          hint={storage.unknown > 0
-            ? `Excludes ${storage.unknown} recording${storage.unknown === 1 ? "" : "s"} of unknown size`
-            : undefined}
+          // An em dash, not "0.0 GB", whenever there is no measured total: with no completed
+          // recording there is nothing to add up, and with every size unknown there is only
+          // an absence of one. "0.0 GB" read as a measurement of an empty library.
+          value={ready.length === 0 || storage.unknown === ready.length ? "—" : fmtTotalBytes(storage.bytes)}
+          hint={ready.length === 0
+            ? "No completed recordings"
+            : storage.unknown > 0
+              ? `Excludes ${storage.unknown} recording${storage.unknown === 1 ? "" : "s"} of unknown size`
+              : undefined}
           icon={FiDatabase}
           accent="blue"
         />
       </div>
+
+      {/* A failed attempt has no file, so it is not listed as a recording — but it must not
+          vanish either. Named here with the server's own reason, one click from the event's
+          Recording tab that holds the full history. */}
+      {summary?.latest_failure && (
+        <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200" data-testid="recording-failure-notice">
+          <p className="font-medium">
+            {summary.failed_attempts} recording attempt{summary.failed_attempts === 1 ? "" : "s"} did not capture a file.
+          </p>
+          <p className="mt-0.5 text-xs">
+            Latest: <span className="font-semibold">{summary.latest_failure.event_title || "Untitled event"}</span>
+            {summary.latest_failure.error ? ` — ${summary.latest_failure.error}` : ""}{" "}
+            <Link to={`/organization/events/${summary.latest_failure.event_id}?tab=Recording`} className="font-semibold underline">
+              View the event's recording history
+            </Link>
+          </p>
+        </div>
+      )}
+      {summary && summary.library_total > list.length && (
+        <p className="text-xs text-slate-500 dark:text-slate-400" data-testid="recording-list-cap">
+          Showing the newest {list.length} of {summary.library_total} recordings.
+        </p>
+      )}
 
       {/* Recording cards */}
       {error ? (
@@ -529,7 +583,7 @@ export default function OrganizationRecordings() {
         <Card className="py-16 text-center">
           <p className="text-sm text-slate-400">
             {list.length === 0
-              ? "No recordings yet — they'll show up here once a host records a live event."
+              ? "No recordings yet. A recording is made only when the host presses Record during the broadcast — enabling recording on an event does not start one automatically."
               : "No recordings match your filters."}
           </p>
         </Card>

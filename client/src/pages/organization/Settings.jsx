@@ -1,9 +1,9 @@
 // client/src/pages/organization/Settings.jsx
 // Organization Settings — profile, branding, security, permissions, notifications,
 // developer (API keys + integrations), and danger zone. Route: /organization/settings.
-// Rendered inside OrganizationLayout. No backend: form edits gate behind Save (local
-// state + a dirty flag); immediate actions (integrations, keys, danger) toast on their own.
-import { useState } from "react";
+// Rendered inside OrganizationLayout. Each editable panel saves ONLY its own section, and only
+// the fields that changed (see SECTIONS); immediate actions (keys, integrations) act on their own.
+import { useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   FiUser, FiImage, FiShield, FiBell, FiCode, FiAlertTriangle,
@@ -21,6 +21,7 @@ import { notify } from "../../ui/Toast";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import ApiCredentials from "../../components/organization/ApiCredentials";
 import ChangePasswordForm from "../../components/organization/profile/ChangePasswordForm";
+import BrandingPreview from "../../components/organization/BrandingPreview";
 import {
   INDUSTRIES, COMPANY_SIZES, ACCENTS,
   SESSION_TIMEOUTS, PASSWORD_LENGTHS,
@@ -78,6 +79,27 @@ function SettingRow({ title, desc, children }) {
         {desc && <p className="text-xs text-slate-500 dark:text-slate-400">{desc}</p>}
       </div>
       <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
+// The save control every editable panel ends with. The error stays IN the panel it belongs
+// to - it outlives the toast, and it never lands on a panel that saved fine.
+function SectionFooter({ id, label, dirty, saving, error, onSave }) {
+  return (
+    <div className="mt-5 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
+      <div className="min-w-0 text-xs" data-testid={`section-status-${id}`}>
+        {error ? (
+          <p role="alert" className="font-medium text-rose-600 dark:text-rose-400">
+            {label} not saved: {error}
+          </p>
+        ) : dirty ? (
+          <p className="font-medium text-amber-600 dark:text-amber-400">Unsaved changes</p>
+        ) : null}
+      </div>
+      <Button size="sm" onClick={onSave} disabled={!dirty || saving} aria-label={`Save ${label.toLowerCase()}`}>
+        <FiSave className="text-base" /> {saving ? "Saving…" : "Save"}
+      </Button>
     </div>
   );
 }
@@ -163,22 +185,31 @@ const fieldErrors = (err) => {
   return Object.fromEntries(pairs);
 };
 
-// `s` is null when the caller may not read the security policy (see softSecurity). The form
-// state still needs a shape, so the fields fall back to the schema's own defaults — they are
-// never rendered in that case, and never submitted either (see `save`). No security value is
-// invented for display.
-const fromApi = ({ profile: p, security: s0, notifs: n, domain: d, branding: b }) => ({
+// Per-section mappers. `from` turns a server payload (the GET at load, or the PATCH response
+// after a save) into that section's slice of form state; `payload` turns form state back into
+// the section's request body. One pair per section is what lets a save replace exactly its
+// own slice and leave every other panel's unsaved edits alone.
+//
+// Security: `s0` is null when the caller may not read the policy (see softSecurity). The form
+// still needs a shape, so the fields fall back to empty values - never rendered, never sent.
+const profileFrom = (p) => ({
   profile: {
     name: p.name ?? "", slug: p.slug ?? "", website: p.website ?? "",
     supportEmail: p.support_email ?? "", industry: p.industry ?? INDUSTRIES[0],
     size: p.company_size ?? COMPANY_SIZES[0], description: p.description ?? "",
   },
+});
+const domainFrom = (d) => ({
   customDomain: d.domain ?? "",
   domainStatus: d.domain_verified ? "Verified" : "Pending",
-  // primary_color stores an ACCENT key; anything else (a hex from another surface) falls
-  // back rather than indexing ACCENT[undefined] and crashing the picker.
+});
+// primary_color stores an ACCENT key; anything else (a hex from another surface) falls back
+// rather than indexing ACCENT[undefined] and crashing the picker.
+const brandingFrom = (b) => ({
   accent: ACCENTS.includes(b.primary_color) ? b.primary_color : "violet",
   logoUrl: b.logo_url ?? "",
+});
+const securityFrom = (s0) => ({
   security: {
     require2fa: s0?.require_2fa ?? false,
     enforceSSO: s0?.enforce_sso ?? false,
@@ -188,6 +219,8 @@ const fromApi = ({ profile: p, security: s0, notifs: n, domain: d, branding: b }
     sessionTimeout: s0?.session_timeout ?? null,
     allowedDomains: s0?.allowed_domains ?? "",
   },
+});
+const notifsFrom = (n) => ({
   notifs: {
     eventScheduled: n.event_scheduled, eventStarting: n.event_starting,
     recordingReady: n.recording_ready, weeklySummary: n.weekly_summary,
@@ -196,27 +229,62 @@ const fromApi = ({ profile: p, security: s0, notifs: n, domain: d, branding: b }
   },
 });
 
-// Only sends fields with a backend. EmailStr rejects "" → send null for empty optionals.
-const toApi = (s) => ({
+const fromApi = ({ profile, security, notifs, domain, branding }) => ({
+  ...profileFrom(profile), ...domainFrom(domain), ...brandingFrom(branding),
+  ...securityFrom(security), ...notifsFrom(notifs),
+});
+
+// One entry per independently saved section. Saving used to PATCH all five on every click,
+// so toggling one notification re-sent Branding and the custom domain too - and a failure in
+// ANY of the five requests surfaced as "Couldn't save Branding, Custom domain - ..." against
+// panels nobody had touched. Now a panel's Save sends one request, to its own endpoint, with
+// only the fields that differ from what the server last confirmed. The server treats every
+// PATCH as partial (exclude_unset), so an omitted field is preserved, not cleared.
+// EmailStr rejects "" -> empty optionals are sent as null (an explicit clear).
+const SECTIONS = {
   profile: {
-    name: s.profile.name, slug: s.profile.slug || null, website: s.profile.website || null,
-    description: s.profile.description || null, industry: s.profile.industry || null,
-    company_size: s.profile.size || null, support_email: s.profile.supportEmail || null,
+    label: "Organization profile", url: "/organization/profile", from: profileFrom,
+    payload: (f) => ({
+      name: f.profile.name, slug: f.profile.slug || null, website: f.profile.website || null,
+      description: f.profile.description || null, industry: f.profile.industry || null,
+      company_size: f.profile.size || null, support_email: f.profile.supportEmail || null,
+    }),
+  },
+  domain: {
+    label: "Custom domain", url: "/organization/domain", from: domainFrom,
+    payload: (f) => ({ domain: f.customDomain.trim() || null }),
+  },
+  branding: {
+    label: "Branding", url: "/organization/branding", from: brandingFrom,
+    payload: (f) => ({ primary_color: f.accent, logo_url: f.logoUrl.trim() || null }),
   },
   security: {
-    require_2fa: s.security.require2fa, enforce_sso: s.security.enforceSSO,
-    min_password_length: Number(s.security.minPasswordLength),
-    session_timeout: s.security.sessionTimeout, allowed_domains: s.security.allowedDomains,
+    label: "Security policy", url: "/organization/security", from: securityFrom,
+    payload: (f) => ({
+      require_2fa: f.security.require2fa, enforce_sso: f.security.enforceSSO,
+      min_password_length: Number(f.security.minPasswordLength),
+      session_timeout: f.security.sessionTimeout, allowed_domains: f.security.allowedDomains,
+    }),
   },
   notifs: {
-    event_scheduled: s.notifs.eventScheduled, event_starting: s.notifs.eventStarting,
-    recording_ready: s.notifs.recordingReady, weekly_summary: s.notifs.weeklySummary,
-    billing: s.notifs.billing, mentions: s.notifs.mentions,
-    member_joined: s.notifs.memberJoined, security_alerts: s.notifs.securityAlerts,
+    label: "Notifications", url: "/organization/notifications", from: notifsFrom,
+    payload: (f) => ({
+      event_scheduled: f.notifs.eventScheduled, event_starting: f.notifs.eventStarting,
+      recording_ready: f.notifs.recordingReady, weekly_summary: f.notifs.weeklySummary,
+      billing: f.notifs.billing, mentions: f.notifs.mentions,
+      member_joined: f.notifs.memberJoined, security_alerts: f.notifs.securityAlerts,
+    }),
   },
-  domain: { domain: s.customDomain || null },
-  branding: { primary_color: s.accent, logo_url: s.logoUrl.trim() || null },
-});
+};
+
+// The fields of one section whose value differs from the server-confirmed baseline.
+const changedFields = (key, form, base) => {
+  const now = SECTIONS[key].payload(form);
+  const was = SECTIONS[key].payload(base);
+  return Object.fromEntries(
+    Object.entries(now).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(was[k]))
+  );
+};
 
 export default function OrganizationSettings() {
   const { data, loading, error, reload } = useApi(loadSettings);
@@ -253,20 +321,30 @@ export default function OrganizationSettings() {
       },
       { replace: true }
     );
+  // `settings` is what the form shows; `baseline` is what the server last confirmed. A section
+  // is dirty exactly when the two differ for it, so dirtiness is derived, never tracked by hand.
   const [settings, setSettings] = useState(null);
+  const [baseline, setBaseline] = useState(null);
   const [seededData, setSeededData] = useState(null);
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState({});
   const [errors, setErrors] = useState({});
+  const [sectionErrors, setSectionErrors] = useState({});
+  // Synchronous guard: two clicks inside one render would both see saving=false.
+  const inFlight = useRef(new Set());
+  // Branding preview: open state, and the trigger to hand focus back to on close.
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const previewTrigger = useRef(null);
 
   // Seed the editable form the first render fetched data arrives (and again after a
   // retry, which yields a fresh object). React's "adjust state during render" pattern,
   // guarded so it runs once per data object — no effect, no cascading render.
   if (data && data !== seededData) {
+    const seeded = fromApi(data);
     setSeededData(data);
-    setSettings(fromApi(data));
-    setDirty(false);
+    setSettings(seeded);
+    setBaseline(seeded);
     setErrors({});
+    setSectionErrors({});
   }
 
   if (error) {
@@ -285,64 +363,75 @@ export default function OrganizationSettings() {
     );
   }
 
-  const patch = (updater) => { setSettings(updater); setDirty(true); };
+  // Editing a section clears that section's save error: the reader is fixing it.
+  const patch = (key, updater) => {
+    setSettings(updater);
+    setSectionErrors((e) => (e[key] ? { ...e, [key]: undefined } : e));
+  };
   // Editing a field clears its error — a stale red border under a corrected value is noise.
   const setProfile = (k, v) => {
     setErrors((e) => (e[k] ? { ...e, [k]: undefined } : e));
-    patch((s) => ({ ...s, profile: { ...s.profile, [k]: v } }));
+    patch("profile", (s) => ({ ...s, profile: { ...s.profile, [k]: v } }));
   };
-  const setSec = (k, v) => patch((s) => ({ ...s, security: { ...s.security, [k]: v } }));
-  const setDomain = (v) => patch((s) => ({ ...s, customDomain: v, domainStatus: "Pending" }));
-  const toggleNotif = (k) => patch((s) => ({ ...s, notifs: { ...s.notifs, [k]: !s.notifs[k] } }));
-
-  // Five independent PATCHes. Promise.all reported only the FIRST rejection and left the
-  // reader to guess which section it came from — while the other four had already been sent
-  // and (usually) succeeded, so "save failed" was simply untrue. allSettled lets the toast
-  // name exactly what didn't land, and any 422 is pushed back onto the offending field.
-  const save = async () => {
-    const found = validate(settings);
-    setErrors(found);
-    if (Object.keys(found).length) {
-      setTab("general");
-      notify.error("Check the highlighted fields.");
-      return;
-    }
-
-    const body = toApi(settings);
-    const sections = [
-      ["Profile", "/organization/profile", body.profile],
-      ["Branding", "/organization/branding", body.branding],
-      // Only sent by someone who could READ the policy. A host PATCHing it gets the same 403
-      // the GET gave, which would report "Security couldn't be saved" for a panel they were
-      // never shown and never edited. Omitting it is not a permission decision — the server
-      // still refuses the call; it just stops the page inventing a failure.
-      ...(canManageSecurity ? [["Security", "/organization/security", body.security]] : []),
-      ["Notifications", "/organization/notifications", body.notifs],
-      ["Custom domain", "/organization/domain", body.domain],
-    ];
-
-    setSaving(true);
-    const results = await Promise.allSettled(sections.map(([, url, payload]) => api.patch(url, payload)));
-    setSaving(false);
-
-    const failed = results
-      .map((r, i) => ({ name: sections[i][0], reason: r.reason, ok: r.status === "fulfilled" }))
-      .filter((r) => !r.ok);
-
-    if (!failed.length) {
-      setDirty(false);
-      notify.success("Settings saved");
-      // Re-read so the page shows what was actually persisted — a normalised slug, or the
-      // domain dropping back to unverified because it changed.
-      reload();
-      return;
-    }
-
-    // Don't reload here: the sections that succeeded are already correct on screen, and a
-    // refetch would throw away the edits the reader still has to fix.
-    setErrors(Object.assign({}, ...failed.map((f) => fieldErrors(f.reason))));
-    notify.error(`Couldn't save ${failed.map((f) => f.name).join(", ")} — ${errMsg(failed[0].reason)}`);
+  const setSec = (k, v) => patch("security", (s) => ({ ...s, security: { ...s.security, [k]: v } }));
+  const setDomain = (v) => {
+    setErrors((e) => (e.domain ? { ...e, domain: undefined } : e));
+    patch("domain", (s) => ({ ...s, customDomain: v, domainStatus: "Pending" }));
   };
+  const toggleNotif = (k) => patch("notifs", (s) => ({ ...s, notifs: { ...s.notifs, [k]: !s.notifs[k] } }));
+
+  const isDirty = (key) => Object.keys(changedFields(key, settings, baseline)).length > 0;
+  const editable = Object.keys(SECTIONS).filter((k) => k !== "security" || canManageSecurity);
+  const unsaved = editable.filter(isDirty);
+
+  // One section, one request, only the changed fields. A failure stays in its own panel: the
+  // other sections are neither re-sent nor blamed, and nothing typed is thrown away.
+  const saveSection = async (key) => {
+    if (inFlight.current.has(key)) return;
+    const section = SECTIONS[key];
+    if (key === "profile") {
+      const found = validate(settings);
+      if (Object.keys(found).length) {
+        setErrors((e) => ({ ...e, ...found }));
+        setSectionErrors((e) => ({ ...e, profile: "check the highlighted fields." }));
+        return;
+      }
+    }
+    const body = changedFields(key, settings, baseline);
+    if (!Object.keys(body).length) return;
+
+    inFlight.current.add(key);
+    setSaving((x) => ({ ...x, [key]: true }));
+    try {
+      const { data: saved } = await api.patch(section.url, body);
+      // The server's answer becomes the new baseline for THIS section only - a normalised
+      // slug, a domain dropping back to unverified - and every other panel keeps its edits.
+      const fresh = section.from(saved);
+      setBaseline((b) => ({ ...b, ...fresh }));
+      setSettings((f) => ({ ...f, ...fresh }));
+      setSectionErrors((e) => ({ ...e, [key]: undefined }));
+      notify.success(`${section.label} saved`);
+    } catch (err) {
+      const fields = fieldErrors(err);
+      setErrors((e) => ({ ...e, ...fields }));
+      const message = Object.keys(fields).length ? "check the highlighted fields." : errMsg(err);
+      setSectionErrors((e) => ({ ...e, [key]: message }));
+      notify.error(`${section.label} not saved: ${message}`);
+    } finally {
+      inFlight.current.delete(key);
+      setSaving((x) => ({ ...x, [key]: false }));
+    }
+  };
+  const footer = (key) => (
+    <SectionFooter
+      id={key}
+      label={SECTIONS[key].label}
+      dirty={isDirty(key)}
+      saving={Boolean(saving[key])}
+      error={sectionErrors[key]}
+      onSave={() => saveSection(key)}
+    />
+  );
   const copyText = async (t, label) => {
     try {
       await navigator.clipboard.writeText(t);
@@ -369,14 +458,17 @@ export default function OrganizationSettings() {
           <p className="text-sm text-slate-500 dark:text-slate-400">Manage your organization's profile, security, and integrations</p>
         </div>
         <div className="flex items-center gap-3">
+          {/* Each panel has its own Save. This line only says where unsaved edits are, so a
+              change made on one tab is not forgotten on another. */}
           {hasErrors ? (
             <span className="text-xs font-medium text-rose-600 dark:text-rose-400">Check the highlighted fields</span>
           ) : (
-            dirty && <span className="text-xs font-medium text-amber-600 dark:text-amber-400">Unsaved changes</span>
+            unsaved.length > 0 && (
+              <span className="text-xs font-medium text-amber-600 dark:text-amber-400" data-testid="unsaved-summary">
+                Unsaved changes: {unsaved.map((k) => SECTIONS[k].label).join(", ")}
+              </span>
+            )
           )}
-          <Button size="sm" onClick={save} disabled={!dirty || saving}>
-            <FiSave className="text-base" /> {saving ? "Saving…" : "Save Changes"}
-          </Button>
         </div>
       </div>
 
@@ -453,6 +545,7 @@ export default function OrganizationSettings() {
                     <Textarea variant="form" rows={3} maxLength={2000} error={errors.description} value={settings.profile.description} onChange={(e) => setProfile("description", e.target.value)} />
                   </Field>
                 </div>
+                {footer("profile")}
               </Panel>
 
               <Panel title="Custom Domain" desc="Serve your event pages from your own domain">
@@ -477,6 +570,7 @@ export default function OrganizationSettings() {
                     completed by support — automatic DNS checks aren't live yet.
                   </span>
                 </div>
+                {footer("domain")}
               </Panel>
             </>
           )}
@@ -490,7 +584,7 @@ export default function OrganizationSettings() {
               <Field
                 label="Logo URL"
                 error={errors.logo_url}
-                hint="Direct link to a square PNG or SVG. Used on your event pages and emails."
+                hint="Direct link to a square PNG or SVG. Stored on your organization — nothing displays it yet; event pages and emails still show the ZoikoStream mark."
               >
                 <div className="flex flex-wrap items-center gap-4">
                   <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-xl border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800">
@@ -512,7 +606,7 @@ export default function OrganizationSettings() {
                         error={errors.logo_url}
                         placeholder="https://cdn.yourcompany.com/logo.png"
                         value={settings.logoUrl}
-                        onChange={(e) => { setErrors((x) => (x.logo_url ? { ...x, logo_url: undefined } : x)); patch((s) => ({ ...s, logoUrl: e.target.value })); }}
+                        onChange={(e) => { setErrors((x) => (x.logo_url ? { ...x, logo_url: undefined } : x)); patch("branding", (s) => ({ ...s, logoUrl: e.target.value })); }}
                       />
                     </div>
                   </div>
@@ -531,7 +625,7 @@ export default function OrganizationSettings() {
                         <button
                           key={a}
                           type="button"
-                          onClick={() => patch((s) => ({ ...s, accent: a }))}
+                          onClick={() => patch("branding", (s) => ({ ...s, accent: a }))}
                           aria-label={a}
                           aria-pressed={selected}
                           title={a}
@@ -556,9 +650,42 @@ export default function OrganizationSettings() {
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
                     Preview · <span className="capitalize">{settings.accent}</span>
                   </p>
-                  <span className={cx("inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold text-white", ACCENT[settings.accent].solid)}>Go Live</span>
+                  {/* Was a <span> styled as a button: it looked like an action and did nothing.
+                      It now opens the preview, with the current (unsaved) values. */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      ref={previewTrigger}
+                      type="button"
+                      onClick={() => setPreviewOpen(true)}
+                      aria-haspopup="dialog"
+                      aria-label="Go Live — open branding preview"
+                      title="Open a preview. Nothing is started."
+                      className={cx(
+                        "inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110",
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2 dark:focus-visible:ring-white dark:focus-visible:ring-offset-slate-900",
+                        ACCENT[settings.accent].solid
+                      )}
+                    >
+                      Go Live
+                    </button>
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                      Opens a preview — nothing is started.
+                    </span>
+                  </div>
                 </div>
+                <BrandingPreview
+                  open={previewOpen}
+                  onClose={() => {
+                    setPreviewOpen(false);
+                    // Back to where the reader was, not the top of the page.
+                    requestAnimationFrame(() => previewTrigger.current?.focus());
+                  }}
+                  accent={settings.accent}
+                  logoUrl={settings.logoUrl}
+                  orgName={settings.profile.name}
+                />
               </div>
+              {footer("branding")}
             </Panel>
           )}
 
@@ -604,6 +731,7 @@ export default function OrganizationSettings() {
                       <Input variant="form" value={settings.security.allowedDomains} onChange={(e) => setSec("allowedDomains", e.target.value)} placeholder="acme.com, acme.io" />
                     </Field>
                   </div>
+                  {footer("security")}
                 </Panel>
               )}
               {securityAccess === "forbidden" && (
@@ -764,6 +892,7 @@ export default function OrganizationSettings() {
                   </div>
                 ))
               )}
+              {footer("notifs")}
             </Panel>
           )}
 

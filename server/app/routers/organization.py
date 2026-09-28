@@ -607,10 +607,7 @@ def list_event_recordings(
             if (rec.enforced and rec.file_url and rec.status == "stopped")
             else None
         )
-        state = (
-            "in_progress" if rec.status in ("recording", "paused")
-            else event_crud.recording_library_state(rec, url)
-        )
+        state = event_crud.recording_row_state(rec, url)
         out.append(EventRecordingOut(
             id=rec.id, event_id=event_id, status=rec.status, enforced=rec.enforced,
             state=state,
@@ -652,6 +649,20 @@ def list_recordings(
             validation_status=rec.validation_status,
         ))
     return out
+
+
+@router.get("/recordings/summary")
+def recordings_summary(
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """What happened to every recording attempt in this organization, for the library header.
+
+    The library above lists captured recordings only; this says how many attempts are still
+    running or failed to capture (and the latest failure's reason and event), so an empty
+    library is never mistaken for "nothing was attempted". Counted in SQL over all rows.
+    Org-scoped exactly like the library, and readable by the same members."""
+    return event_crud.org_recording_summary(db, org.id)
 
 
 @router.delete("/recordings/{recording_id}", status_code=status.HTTP_204_NO_CONTENT)

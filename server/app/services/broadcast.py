@@ -999,16 +999,26 @@ async def _recording_start(ctx, payload):
     # found this env's own GCS_CREDENTIALS_PATH pointed at a Console URL, not a key file,
     # and the only visible symptom was a silently-uncaptured recording.
     gcs_error = livekit.gcs_config_error()
+    # A configured credential that cannot be used means no file can reach the bucket, so no
+    # egress is started at all: recording a whole event into nothing is worse than a clear
+    # refusal the host sees immediately. See livekit.gcs_upload_blocked for why an UNSET
+    # credential is not treated the same way.
+    blocked = livekit.gcs_upload_blocked()
 
     roles = ("primary", "secondary") if dual else (None,)
     started: list[tuple[str | None, str, str | None, str | None]] = []   # (role, filepath, egress_id, error)
     for role in roles:
         suffix = f"-{role}" if role else ""
         filepath = f"zoikostream/{ctx.org_id}/{ctx.event_id}/{int(now.timestamp())}{suffix}.mp4"
-        egress_id, error = await livekit.start_recording(ctx.room, quality, filepath)
-        if egress_id is None and gcs_error:
-            error = gcs_error
-            log.warning("event %s: recording start not captured — %s", ctx.event_id, gcs_error)
+        if blocked:
+            egress_id, error = None, blocked
+            log.warning("event %s: recording not started — storage misconfigured: %s",
+                        ctx.event_id, blocked)
+        else:
+            egress_id, error = await livekit.start_recording(ctx.room, quality, filepath)
+            if egress_id is None and gcs_error:
+                error = gcs_error
+                log.warning("event %s: recording start not captured — %s", ctx.event_id, gcs_error)
         started.append((role, filepath, egress_id, error))
 
     def work(db):

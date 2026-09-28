@@ -714,6 +714,55 @@ def recording_library_state(rec: LiveRecording, url: str | None) -> str:
     return "storage_unavailable"
 
 
+def recording_row_state(rec: LiveRecording, url: str | None) -> str:
+    """recording_library_state plus the live case, for any page that lists raw rows.
+
+    A row still `recording`/`paused` is in progress, not a missing file. The event tab
+    special-cased this inline; both pages now call this one function.
+    """
+    if rec.status in ("recording", "paused"):
+        return "in_progress"
+    return recording_library_state(rec, url)
+
+
+def org_recording_summary(db, org_id) -> dict:
+    """Counts over EVERY recording attempt in the org, for the library's header.
+
+    The library lists captured recordings only (list_org_recordings), and that is deliberate:
+    a failed attempt has no file and is explained on its event's Recording tab. But a library
+    that says "0" while an attempt failed - or while a capture is still running - reads as
+    "nothing happened". This is what lets the header say what DID happen, without listing
+    unplayable rows as if they were recordings.
+
+    Counted in SQL over all rows, not over the listed page, so it is right past the list cap.
+    """
+    scoped = (Event.id == LiveRecording.event_id, Event.org_id == org_id)
+    library = (LiveRecording.status.in_(LIBRARY_STATUSES), LiveRecording.enforced.is_(True))
+    failed = or_(LiveRecording.status == "failed", LiveRecording.enforced.is_(False))
+
+    def count(*where):
+        return int(db.scalar(select(func.count(LiveRecording.id)).join(Event, scoped[0])
+                             .where(scoped[1], *where)) or 0)
+
+    latest = db.execute(
+        select(LiveRecording, Event).join(Event, scoped[0]).where(scoped[1], failed)
+        .order_by(func.coalesce(LiveRecording.stopped_at, LiveRecording.started_at,
+                                LiveRecording.created_at).desc())
+        .limit(1)
+    ).first()
+    return {
+        "library_total": count(*library),
+        "in_progress": count(LiveRecording.status.in_(("recording", "paused"))),
+        "failed_attempts": count(failed),
+        "latest_failure": None if latest is None else {
+            "event_id": str(latest[1].id),
+            "event_title": latest[1].title,
+            "at": latest[0].stopped_at or latest[0].started_at,
+            "error": latest[0].error,
+        },
+    }
+
+
 def list_org_recordings(db, org_id, limit: int = 100) -> list[tuple[LiveRecording, Event]]:
     """Every captured recording across the org, newest first — the org-wide Recordings
     library. Joined to Event for title/category; org-scoped via Event.org_id (matches every

@@ -20,7 +20,7 @@ import { register } from "./dismissStack";
 // left ITS dead entry on top — after which Escape stopped closing the drawer underneath,
 // because the top of the stack belonged to something no longer on screen.
 
-export default function Overlay({ open, onClose, className = "", children }) {
+export default function Overlay({ open, onClose, className = "", closeOnBackdrop = false, children }) {
   useEffect(() => {
     if (!open) return;
     const layer = register(() => onClose?.());
@@ -43,7 +43,14 @@ export default function Overlay({ open, onClose, className = "", children }) {
         className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm motion-safe:animate-[zk-fade-in_.2s]"
         onClick={onClose}
       />
-      <div className={cx("relative h-full w-full", className)}>{children}</div>
+      {/* This wrapper covers the backdrop above, so a click "outside" the dialog lands here, not
+          on the backdrop. Opt-in only: a modal holding a form must not lose it to a misclick. */}
+      <div
+        className={cx("relative h-full w-full", className)}
+        onClick={closeOnBackdrop ? (e) => e.target === e.currentTarget && onClose?.() : undefined}
+      >
+        {children}
+      </div>
     </div>,
     document.body
   );

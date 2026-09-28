@@ -5,11 +5,12 @@ counts/plan). These describe an org managing *itself*. Update schemas use exclud
 in the router so only supplied fields are patched.
 """
 
+import re
 import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ..config import BILLING_INTERVALS, MONTHLY
 
@@ -238,9 +239,39 @@ class OrgDomainOut(BaseModel):
     domain_verified: bool = False
 
 
+# A fully-qualified hostname: dot-separated labels of 1-63 letters, digits or hyphens (no
+# leading/trailing hyphen), ending in an alphabetic TLD, 253 characters at most.
+_HOSTNAME = re.compile(r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+
+
 class OrgDomainUpdate(BaseModel):
     # Setting/changing the domain resets verification (handled in the router).
     domain: str | None = Field(None, max_length=255)
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def _hostname(cls, value):
+        """Hostname FORMAT only, and only when the field is actually sent - an omitted field is
+        never validated, so saving any other setting cannot fail on the domain.
+
+        This is not verification. Nothing here resolves DNS or contacts the host: ownership and
+        TLS readiness are checked by support (the router drops `domain_verified` whenever the
+        value changes). An empty string clears the domain, like an explicit null.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Domain must be text.")
+        host = value.strip().lower().rstrip(".")
+        if not host:
+            return None
+        if "://" in host or any(ch in host for ch in "/:@?# "):
+            raise ValueError("Enter the hostname only, like events.yourcompany.com — no https://, path or port.")
+        if not _HOSTNAME.match(host):
+            raise ValueError("Enter a valid hostname, like events.yourcompany.com.")
+        if host == "zoikostream.com" or host.endswith(".zoikostream.com"):
+            raise ValueError("Use a domain your organization owns, not a zoikostream.com address.")
+        return host
 
 
 # ── Invitations ───────────────────────────────────────────────────────────────
