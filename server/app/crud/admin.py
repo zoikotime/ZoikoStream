@@ -514,10 +514,17 @@ def list_plans(db) -> list[PlanOut]:
     return [PlanOut.model_validate(p) for p in plans]
 
 
-def list_subscriptions(db, status=None, page=1, page_size=20):
+def list_subscriptions(db, status=None, page=1, page_size=20, q=None):
     stmt = select(Subscription)
     if status:
-        stmt = stmt.where(Subscription.status == status)
+        from ..models.subscription import stored_spellings
+        stmt = stmt.where(Subscription.status.in_(stored_spellings(status)))
+    if q:
+        # Search by organization name in SQL, over the whole set. The page used to fetch the
+        # first 100 subscriptions and filter those in the browser, so an organization past
+        # row 100 could not be found by name at all.
+        stmt = stmt.join(Organization, Subscription.org_id == Organization.id).where(
+            func.lower(Organization.name).like(f"%{q.lower()}%"))
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     subs = db.scalars(
         stmt.order_by(Subscription.started_at.desc()).offset((page - 1) * page_size).limit(page_size)

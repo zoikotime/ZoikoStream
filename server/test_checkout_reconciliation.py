@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from _testsupport import published_catalog_fields
 from app.crud import commercial as crud
 from app.db import engine
 from app.models import (
@@ -200,7 +201,7 @@ class TestReconciliation:
             event = Event(org_id=org.id, created_by=user.id, title="Reconciliation test")
             account = CommercialAccount(org_id=org.id)
             catalog = CatalogVersion(version_label="v1", vertical=f"rc-{uuid.uuid4().hex[:6]}",
-                                     status="published")
+                                     **published_catalog_fields(staff.id))
             db.add_all([event, account, catalog])
             db.flush()
             line = CatalogLine(catalog_version_id=catalog.id, service_code="MEM-MANAGED",

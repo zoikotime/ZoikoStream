@@ -77,3 +77,17 @@ def code_only_source(source: str) -> str:
     _strip_docstrings(tree)
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
+
+
+def published_catalog_fields(publisher_id) -> dict:
+    """The fields a PUBLISHED CatalogVersion must carry when a fixture writes one directly.
+
+    models/commercial.py refuses a published catalog version with no published_by or
+    published_at (the governed path, crud.commercial.publish_catalog_version, always sets
+    both). Fixtures that wrote `status="published"` alone produced exactly the anomalous
+    shape that invariant exists to stop - and two of them left such rows behind.
+    """
+    from datetime import datetime, timezone
+
+    return {"status": "published", "published_by": publisher_id,
+            "published_at": datetime.now(timezone.utc)}

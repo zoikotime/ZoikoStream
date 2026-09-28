@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 import app.main as main_app
 from app.config import settings
 from app.crud import commercial as crud
-from _testsupport import code_only
+from _testsupport import code_only, published_catalog_fields
 from app.db import engine
 from app.models import (
     CatalogVersion, CommercialAccount, Event, EventOrder, Organization, Payment,
@@ -478,7 +478,7 @@ class TestStripeWebhookProcessing:
             event = Event(org_id=org.id, created_by=user.id, title="Stripe webhook test")
             account = CommercialAccount(org_id=org.id)
             catalog = CatalogVersion(version_label="v1", vertical=f"sw-{uuid.uuid4().hex[:6]}",
-                                     status="published")
+                                     **published_catalog_fields(user.id))
             db.add_all([event, account, catalog])
             db.flush()
             order = EventOrder(event_id=event.id, commercial_account_id=account.id,
@@ -770,7 +770,7 @@ class TestStripeWebhookProcessing:
             other_account = CommercialAccount(org_id=other_org.id)
             other_catalog = CatalogVersion(version_label="v1",
                                            vertical=f"oth-{uuid.uuid4().hex[:6]}",
-                                           status="published")
+                                           **published_catalog_fields(other_user.id))
             db.add_all([other_event, other_account, other_catalog])
             db.flush()
             other_order = EventOrder(event_id=other_event.id,
@@ -1004,7 +1004,7 @@ class TestStripeLivemodeIsolation:
             event = Event(org_id=org.id, created_by=user.id, title="Livemode isolation test")
             account = CommercialAccount(org_id=org.id)
             catalog = CatalogVersion(version_label="v1", vertical=f"lm-{uuid.uuid4().hex[:6]}",
-                                     status="published")
+                                     **published_catalog_fields(user.id))
             db.add_all([event, account, catalog])
             db.flush()
             order = EventOrder(event_id=event.id, commercial_account_id=account.id,

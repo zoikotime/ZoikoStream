@@ -25,6 +25,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from _testsupport import published_catalog_fields
 from app.crud import commercial as crud
 from app.db import engine
 from app.models import (
@@ -196,7 +197,7 @@ class TestInvoiceIntegrity:
                                        country="GB", status="active")
             account = CommercialAccount(org_id=org.id, seller_legal_entity_id=entity_code)
             catalog = CatalogVersion(version_label="v1", vertical=f"inv-{uuid.uuid4().hex[:6]}",
-                                     status="published")
+                                     **published_catalog_fields(user.id))
             db.add_all([entity, account, catalog])
             db.flush()
             event = Event(org_id=org.id, created_by=user.id, title="Invoice integrity",

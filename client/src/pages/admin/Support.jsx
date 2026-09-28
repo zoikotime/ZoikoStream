@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { FiLifeBuoy, FiPlus, FiTrash2 } from "react-icons/fi";
 import { Badge, Button, CONSOLE, DataTable, Panel, StatCard } from "../../components/admin";
@@ -7,6 +7,7 @@ import { timeAgo } from "../../components/admin/format";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import SupportTicketModal from "./SupportTicketModal";
+import SupportAccessPanel from "./SupportAccessPanel";
 
 // Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
 // as a dependency, and a fresh `[]` literal on every render would defeat every one of them
@@ -20,46 +21,58 @@ const label = (s) => s.split("_").map((w) => w[0].toUpperCase() + w.slice(1)).jo
 // row at once, instead of being re-typed per page.
 const selectCls = CONSOLE.select;
 
-function useSupportData() {
+// The status filter goes to the server (GET /admin/support-tickets already accepted it), so
+// narrowing the queue narrows the whole queue — not just the first 100 tickets loaded.
+function useSupportData({ status }) {
   return useApi(() =>
     Promise.all([
-      api.get("/admin/support-tickets", { params: { page_size: 100 } }).then((r) => r.data.items),
+      api
+        .get("/admin/support-tickets", {
+          params: { page_size: 100, status: status === "all" ? undefined : status },
+        })
+        .then((r) => r.data.items),
       api.get("/admin/organizations", { params: { page_size: 100 } }).then((r) => r.data.items),
     ]).then(([tickets, organizations]) => ({ tickets, organizations }))
   );
+}
+
+// Dataset-wide counts. These were `tickets.filter(...).length` over the first 100 fetched, so
+// every KPI stopped at 100 and changed meaning as the queue grew past one page.
+function useSupportSummary() {
+  return useApi(() => api.get("/admin/support-tickets/summary").then((r) => r.data));
 }
 
 // Support ticket queue — real GET/POST/PATCH/DELETE against /admin/support-tickets. No
 // self-service submission exists in the org dashboard yet, so tickets are logged and
 // worked from here.
 export default function Support() {
-  const { data, loading, error, reload } = useSupportData();
   const [status, setStatus] = useState("all");
+  const { data, loading, error, reload } = useSupportData({ status });
+  const { data: summary, error: summaryError, reload: reloadSummary } = useSupportSummary();
+
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) { mounted.current = true; return; }
+    reload();
+  }, [status, reload]);
   const [modalOpen, setModalOpen] = useState(false);
 
   const tickets = data?.tickets || NONE;
   const organizations = data?.organizations || [];
 
-  const kpis = useMemo(
-    () => ({
-      open: tickets.filter((t) => t.status === "open").length,
-      inProgress: tickets.filter((t) => t.status === "in_progress").length,
-      resolved: tickets.filter((t) => t.status === "resolved").length,
-      urgent: tickets.filter((t) => t.priority === "urgent" && t.status !== "resolved" && t.status !== "closed").length,
-    }),
-    [tickets]
-  );
-
-  const filtered = useMemo(
-    () => (status === "all" ? tickets : tickets.filter((t) => t.status === status)),
-    [tickets, status]
-  );
+  // "—" when the summary could not be read — unknown, never a fabricated 0.
+  const kpis = summary
+    ? { open: summary.open, inProgress: summary.in_progress, resolved: summary.resolved,
+        urgent: summary.urgent_unresolved }
+    : { open: "—", inProgress: "—", resolved: "—", urgent: "—" };
+  const filtered = tickets;   // already filtered by the server
+  const refreshAll = () => { reload(); reloadSummary(); };
 
   const setTicketStatus = async (t, next) => {
     try {
       await api.patch(`/admin/support-tickets/${t.id}`, { status: next });
       toast.success(`${t.subject} → ${label(next)}`);
-      reload();
+      refreshAll();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -70,7 +83,7 @@ export default function Support() {
     try {
       await api.delete(`/admin/support-tickets/${t.id}`);
       toast.success("Ticket deleted");
-      reload();
+      refreshAll();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -116,13 +129,19 @@ export default function Support() {
     <div className="mx-auto max-w-[1200px] space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Support</h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Ticket queue across every organization</p>
+          <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Support Operations</h1>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Ticket queue and authorized support access across every organization</p>
         </div>
         <Button leftIcon={FiPlus} onClick={() => setModalOpen(true)} disabled={organizations.length === 0}>Log Ticket</Button>
       </div>
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        {summaryError && (
+          <div className="col-span-full flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
+            <span>Couldn&apos;t load the ticket totals. The queue below is unaffected.</span>
+            <Button variant="secondary" size="sm" onClick={reloadSummary}>Retry</Button>
+          </div>
+        )}
         <StatCard label="Open" value={kpis.open} loading={loading} />
         <StatCard label="In Progress" value={kpis.inProgress} loading={loading} />
         <StatCard label="Resolved" value={kpis.resolved} loading={loading} />
@@ -156,8 +175,10 @@ export default function Support() {
         />
       </Panel>
 
+      <SupportAccessPanel />
+
       {modalOpen && (
-        <SupportTicketModal open onClose={() => setModalOpen(false)} organizations={organizations} onSaved={reload} />
+        <SupportTicketModal open onClose={() => setModalOpen(false)} organizations={organizations} onSaved={refreshAll} />
       )}
     </div>
   );

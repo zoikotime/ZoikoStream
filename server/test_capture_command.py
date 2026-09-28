@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from _testsupport import published_catalog_fields
 from app.crud import commercial as crud
 from app.db import engine
 from app.models import (
@@ -60,7 +61,7 @@ class TestCaptureCommand:
             db.flush()
             event = Event(org_id=org.id, created_by=user.id, title="Capture command test")
             account = CommercialAccount(org_id=org.id)
-            catalog = CatalogVersion(version_label="v1", vertical=f"cap-{tag}", status="published")
+            catalog = CatalogVersion(version_label="v1", vertical=f"cap-{tag}", **published_catalog_fields(staff.id))
             db.add_all([event, account, catalog])
             db.flush()
             line = CatalogLine(catalog_version_id=catalog.id, service_code="MEM-MANAGED",

@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 RiskTier = Literal["r0", "r1", "r2", "r3"]
 PurchaserType = Literal["organization", "individual"]
@@ -66,9 +66,20 @@ class CatalogVersionOut(BaseModel):
     status: str
     effective_at: datetime | None = None
     published_at: datetime | None = None
+    published_by: uuid.UUID | None = None
     notes: str | None = None
     created_at: datetime | None = None
     lines: list[CatalogLineOut] = []
+
+    @computed_field
+    @property
+    def integrity_issue(self) -> str | None:
+        """A published version with no recorded publisher or time cannot have come from the
+        governed publish path. Reported on the row so the console shows it as an anomaly,
+        instead of presenting it as an ordinary published price book."""
+        if self.status == "published" and (self.published_by is None or self.published_at is None):
+            return "Published without a recorded publisher or publish time — not produced by the governed publish path."
+        return None
 
 
 # ── Service profiles ──────────────────────────────────────────────────────────────────

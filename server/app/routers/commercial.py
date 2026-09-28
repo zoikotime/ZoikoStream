@@ -296,7 +296,8 @@ def capacity_pool_utilisation(pool_id: uuid.UUID, admin: User = Depends(require_
 @router.post("/catalog-versions", response_model=CatalogVersionOut, status_code=status.HTTP_201_CREATED)
 def create_catalog_version(data: CatalogVersionCreate, admin: User = Depends(require_commercial("configure")),
                             db: Session = Depends(get_db)):
-    return crud.create_catalog_version(db, vertical=data.vertical, version_label=data.version_label, notes=data.notes)
+    return crud.create_catalog_version(db, vertical=data.vertical, version_label=data.version_label,
+                                       notes=data.notes, actor=admin)
 
 
 @router.post("/catalog-versions/{catalog_version_id}/lines", response_model=CatalogLineOut, status_code=status.HTTP_201_CREATED)
@@ -306,7 +307,7 @@ def add_catalog_line(catalog_version_id: uuid.UUID, data: CatalogLineCreate,
     if cv is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Catalog version not found")
     try:
-        return crud.add_catalog_line(db, cv, **data.model_dump())
+        return crud.add_catalog_line(db, cv, **data.model_dump(), actor=admin)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
@@ -334,7 +335,7 @@ def list_service_profiles(risk_tier: str | None = None, status_: str | None = No
 @router.post("/service-profiles", response_model=ServiceProfileOut, status_code=status.HTTP_201_CREATED)
 def create_service_profile(data: ServiceProfileCreate, admin: User = Depends(require_commercial("configure")),
                             db: Session = Depends(get_db)):
-    return crud.create_service_profile(db, **data.model_dump())
+    return crud.create_service_profile(db, actor=admin, **data.model_dump())
 
 
 @router.post("/service-profiles/{service_profile_id}/publish", response_model=ServiceProfileOut)
@@ -343,7 +344,10 @@ def publish_service_profile(service_profile_id: uuid.UUID, admin: User = Depends
     profile = db.get(ServiceProfile, service_profile_id)
     if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Service profile not found")
-    return crud.publish_service_profile(db, profile, admin)
+    try:
+        return crud.publish_service_profile(db, profile, admin)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
 
 # ── Cancellation policy (doc Section 9/E) ────────────────────────────────────────────────
@@ -357,7 +361,7 @@ def list_cancellation_policies(vertical: str | None = None, status_: str | None 
 @router.post("/cancellation-policies", response_model=CancellationPolicyOut, status_code=status.HTTP_201_CREATED)
 def create_cancellation_policy(data: CancellationPolicyCreate, admin: User = Depends(require_commercial("configure")),
                                 db: Session = Depends(get_db)):
-    return crud.create_cancellation_policy(db, **data.model_dump())
+    return crud.create_cancellation_policy(db, actor=admin, **data.model_dump())
 
 
 @router.post("/cancellation-policies/{policy_id}/publish", response_model=CancellationPolicyOut)

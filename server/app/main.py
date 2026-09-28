@@ -40,7 +40,7 @@ from .services.media_retention import run_retention_sweeper
 from .services.signing_rotation import run_signing_rotation_sweeper
 from .services.org_governance import run_governance_sweeper
 from .services.support_access import run_support_access_sweeper
-from .services.ops import request_stats, run_metric_sampler
+from .services.ops import request_stats, run_metric_sampler, run_request_stats_flusher
 from .services.webhooks import run_webhook_retries
 from .services.delivery import run_watermark_processor
 from .services.validation import run_validation_processor
@@ -134,12 +134,18 @@ async def lifespan(_: FastAPI):
     log.info("live bus startup check redis_status=%s", await bus.ping())
 
     supervisor = asyncio.create_task(_ticker_supervisor())
+    # Every process, not only the ticker leader: each one serves requests and holds its own
+    # per-minute counts, which the Command Center's API-health tile reads back per window.
+    flusher = asyncio.create_task(run_request_stats_flusher())
     try:
         yield
     finally:
         supervisor.cancel()
+        flusher.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await supervisor
+        with contextlib.suppress(asyncio.CancelledError):
+            await flusher
         await bus.shutdown()
         release_ticker_leadership()
         executor.shutdown(wait=False, cancel_futures=True)

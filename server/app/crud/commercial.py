@@ -215,9 +215,13 @@ def list_catalog_versions(db: Session, vertical: str | None = None, status: str 
     return db.scalars(stmt).all()
 
 
-def create_catalog_version(db: Session, *, vertical: str, version_label: str, notes: str | None) -> CatalogVersion:
+def create_catalog_version(db: Session, *, vertical: str, version_label: str, notes: str | None,
+                           actor: User | None = None) -> CatalogVersion:
     cv = CatalogVersion(vertical=vertical, version_label=version_label, notes=notes, status="draft")
     db.add(cv)
+    db.flush()
+    audit(db, actor=actor, action="commercial.catalog.create", target_type="catalog_version",
+          target_id=cv.id, vertical=vertical, version_label=version_label)
     db.commit()
     db.refresh(cv)
     return cv
@@ -226,7 +230,7 @@ def create_catalog_version(db: Session, *, vertical: str, version_label: str, no
 def add_catalog_line(db: Session, catalog_version: CatalogVersion, *, service_code: str, name: str,
                       unit_price: Decimal | None, currency: str | None, unit_basis: str = "per_event",
                       description: str | None = None, tax_treatment: str | None = None,
-                      is_addon: bool = False) -> CatalogLine:
+                      is_addon: bool = False, actor: User | None = None) -> CatalogLine:
     if catalog_version.status != "draft":
         raise ValueError("Only a draft catalog version can have lines added")
     line = CatalogLine(
@@ -235,6 +239,10 @@ def add_catalog_line(db: Session, catalog_version: CatalogVersion, *, service_co
         tax_treatment=tax_treatment, is_addon=is_addon,
     )
     db.add(line)
+    db.flush()
+    audit(db, actor=actor, action="commercial.catalog.line_add", target_type="catalog_version",
+          target_id=catalog_version.id, line_id=str(line.id), service_code=service_code,
+          unit_price=str(unit_price) if unit_price is not None else None, currency=currency)
     db.commit()
     db.refresh(line)
     return line
@@ -244,6 +252,15 @@ def publish_catalog_version(db: Session, catalog_version: CatalogVersion, actor:
     """doc Section 26 checklist item: 'No hard-coded fallback price, tax, discount, deposit
     percentage or service credit exists' — refuse to publish a version carrying any line
     with no price/currency, since that's exactly the invented-value failure mode."""
+    # Only a draft publishes. Re-publishing a published row would overwrite published_by /
+    # published_at / effective_at - rewriting who released a price book and when - and a
+    # retired version is withdrawn pricing, not something to revive in place.
+    if catalog_version.status != "draft":
+        raise ValueError(f"Only a draft catalog version can be published (this one is {catalog_version.status})")
+    # A published price book with nothing in it is not a release. The "unpriced" check below
+    # passes vacuously on zero lines, which is how an empty version could otherwise go live.
+    if not catalog_version.lines:
+        raise ValueError("A catalog version with no lines cannot be published")
     unpriced = [l for l in catalog_version.lines if l.unit_price is None or not l.currency]
     if unpriced:
         raise ValueError(f"{len(unpriced)} catalog line(s) have no price/currency set — cannot publish")
@@ -269,15 +286,21 @@ def list_service_profiles(db: Session, risk_tier: str | None = None, status: str
     return db.scalars(stmt).all()
 
 
-def create_service_profile(db: Session, **fields) -> ServiceProfile:
+def create_service_profile(db: Session, *, actor: User | None = None, **fields) -> ServiceProfile:
     profile = ServiceProfile(**fields, status="draft")
     db.add(profile)
+    db.flush()
+    audit(db, actor=actor, action="commercial.service_profile.create", target_type="service_profile",
+          target_id=profile.id, risk_tier=profile.risk_tier, version_label=profile.version_label)
     db.commit()
     db.refresh(profile)
     return profile
 
 
 def publish_service_profile(db: Session, profile: ServiceProfile, actor: User) -> ServiceProfile:
+    # Same rule as catalog versions: re-publishing would reset effective_at on a live profile.
+    if profile.status != "draft":
+        raise ValueError(f"Only a draft service profile can be published (this one is {profile.status})")
     profile.status = "published"
     profile.effective_at = datetime.now(timezone.utc)
     audit(db, actor=actor, action="commercial.service_profile.publish", target_type="service_profile",
@@ -298,15 +321,23 @@ def list_cancellation_policies(db: Session, vertical: str | None = None, status:
     return db.scalars(stmt).all()
 
 
-def create_cancellation_policy(db: Session, **fields) -> CancellationPolicy:
+def create_cancellation_policy(db: Session, *, actor: User | None = None, **fields) -> CancellationPolicy:
     policy = CancellationPolicy(**fields, status="draft")
     db.add(policy)
+    db.flush()
+    audit(db, actor=actor, action="commercial.cancellation_policy.create",
+          target_type="cancellation_policy", target_id=policy.id, vertical=policy.vertical,
+          version_label=policy.version_label,
+          refund_percentage=(str(policy.refund_percentage)
+                             if policy.refund_percentage is not None else None))
     db.commit()
     db.refresh(policy)
     return policy
 
 
 def publish_cancellation_policy(db: Session, policy: CancellationPolicy, actor: User) -> CancellationPolicy:
+    if policy.status != "draft":
+        raise ValueError(f"Only a draft cancellation policy can be published (this one is {policy.status})")
     if policy.refund_percentage is None:
         raise ValueError("Cannot publish a cancellation policy with no refund_percentage configured")
     policy.status = "published"

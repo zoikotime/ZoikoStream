@@ -67,6 +67,20 @@ def normalize_subscription_state(value: str | None) -> str | None:
     return v if v in SUBSCRIPTION_STATES else None
 
 
+def stored_spellings(value: str) -> tuple[str, ...]:
+    """Every spelling a row in state `value` may be STORED under, for filtering.
+
+    Legacy rows are translated on read, never rewritten (see LEGACY_SUBSCRIPTION_STATES), so a
+    filter on `trialing` that matched only that exact string silently missed every row still
+    stored as `trial` - and the reverse. An unrecognised value is returned as-is, so it
+    matches nothing rather than widening to everything.
+    """
+    canon = normalize_subscription_state(value)
+    if canon is None:
+        return (value,)
+    return (canon, *(k for k, v in LEGACY_SUBSCRIPTION_STATES.items() if v == canon))
+
+
 # §12's thirteen transitions, transcribed exactly. Two entries deserve note because they are
 # one row in the document and two edges here:
 #   * "PLAN_CHANGE_SCHEDULED -> ACTIVE(new version)" and "-> ACTIVE(old version)" are both

@@ -22,6 +22,9 @@ export default function MetricTile({
   linkLabel,
   age,
   tone,
+  // Optional one-line statement of WHAT the number covers ("Now", "Peak · last 7 days").
+  // Additive: callers that omit it render exactly as before.
+  caption,
   className = "",
 }) {
   const hasValue = value != null && value !== "";
@@ -38,7 +41,10 @@ export default function MetricTile({
       )}
     >
       <div className="flex items-start justify-between gap-2">
-        <p className={cx("text-[13px] font-medium leading-tight", CONSOLE.muted)}>{label}</p>
+        <div className="min-w-0">
+          <p className={cx("text-[13px] font-medium leading-tight", CONSOLE.muted)}>{label}</p>
+          {caption && <p className={cx("mt-0.5 text-[10px] uppercase tracking-wide", CONSOLE.faint)}>{caption}</p>}
+        </div>
         {delta != null && (
           <span
             className={cx(

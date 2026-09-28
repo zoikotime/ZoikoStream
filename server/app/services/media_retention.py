@@ -98,7 +98,162 @@ def policy(db: Session) -> dict:
     for key in ("version", "retention_days", "warning_days"):
         if stored.get(key) not in (None, ""):
             merged[key] = stored[key]
+    # Provenance of a governed change (approve_policy). None for the built-in default and for a
+    # policy stored before the governed path existed: unknown is reported as unknown.
+    for key in ("effective_at", "approved_by_email", "requested_by_email"):
+        merged[key] = stored.get(key) or None
     return merged
+
+
+# ── governed policy change (maker-checker) ──────────────────────────────────────────────
+#
+# The retention policy is a KEEP-GUARANTEE: it is the promise that a recording will not be
+# deleted before a date. It used to be reachable only through the generic PATCH
+# /admin/settings, which accepted any key — so one elevated request could set
+# retention_days to 0 and make every retained recording deletable. That path is closed
+# (routers/admin.EDITABLE_SETTING_KEYS). This is the governed replacement:
+#
+#     propose (maker)  ->  one pending proposal, validated, with a reason
+#     approve (checker)->  a DIFFERENT person; only then does the effective policy change
+#     reject           ->  proposal discarded, policy untouched
+#
+# Until approval the effective policy is exactly what it was. The proposal is stored under
+# its own key, which the generic settings endpoint cannot write either.
+PROPOSAL_KEY = "media_retention_policy_proposal"
+
+# Bounds. Zero is deliberately outside them: a zero-day retention is not a "short" policy, it
+# is the absence of one, and it must never be reachable by an input accident (an emptied
+# field, a Number("") -> 0 conversion). If the platform ever needs it, it should be an
+# explicit, separately-named mode — not the bottom of this range.
+MIN_RETENTION_DAYS = 30
+MAX_RETENTION_DAYS = 3650
+MIN_WARNING_DAYS = 1
+
+
+def validate_policy_values(retention_days, warning_days) -> tuple[int, int]:
+    """Coerce and bound-check. Raises ValueError with an operator-readable reason."""
+    if isinstance(retention_days, bool) or isinstance(warning_days, bool):
+        raise ValueError("Retention and warning periods must be whole numbers of days.")
+    try:
+        rd = int(retention_days)
+        wd = int(warning_days)
+    except (TypeError, ValueError):
+        raise ValueError("Retention and warning periods must be whole numbers of days.")
+    # int(30.5) is 30: a fractional value would otherwise be silently truncated, not refused.
+    if any(isinstance(v, float) and not v.is_integer() for v in (retention_days, warning_days)):
+        raise ValueError("Retention and warning periods must be whole numbers of days.")
+    if str(retention_days).strip() == "" or str(warning_days).strip() == "":
+        raise ValueError("Retention and warning periods are required.")
+    if not MIN_RETENTION_DAYS <= rd <= MAX_RETENTION_DAYS:
+        raise ValueError(
+            f"Retention must be between {MIN_RETENTION_DAYS} and {MAX_RETENTION_DAYS} days.")
+    if not MIN_WARNING_DAYS <= wd < rd:
+        raise ValueError(
+            f"The deletion warning must be at least {MIN_WARNING_DAYS} day and shorter "
+            "than the retention period.")
+    return rd, wd
+
+
+def policy_state(db: Session) -> dict:
+    """Effective policy, any pending proposal, and what approving it would change."""
+    effective = policy(db)
+    row = db.get(PlatformSetting, PROPOSAL_KEY)
+    proposal = row.value if row and isinstance(row.value, dict) and row.value else None
+    return {
+        "effective": effective,
+        "proposal": proposal,
+        "bounds": {"min_retention_days": MIN_RETENTION_DAYS,
+                   "max_retention_days": MAX_RETENTION_DAYS,
+                   "min_warning_days": MIN_WARNING_DAYS},
+        # Stated plainly because it is the thing an approver needs to know and would otherwise
+        # have to infer: assign_retention() stamps the policy at finalization and never
+        # shortens an existing date, so a change governs FUTURE captures only.
+        "impact": ("Applies to recordings finalized after approval. Retention dates already "
+                   "assigned to existing recordings are not changed."),
+    }
+
+
+def propose_policy(db: Session, *, actor: User, retention_days, warning_days,
+                   reason: str) -> dict:
+    """Record a proposed change. Does NOT alter the effective policy."""
+    reason = (reason or "").strip()
+    if len(reason) < 10:
+        raise ValueError("A reason of at least 10 characters is required for a retention change.")
+    rd, wd = validate_policy_values(retention_days, warning_days)
+    current = policy(db)
+    if rd == int(current["retention_days"]) and wd == int(current["warning_days"]):
+        raise ValueError("The proposed policy is identical to the effective policy.")
+    existing = db.get(PlatformSetting, PROPOSAL_KEY)
+    if existing is not None and existing.value:
+        raise ValueError("A retention policy change is already pending. Approve or reject it first.")
+    proposal = {
+        "retention_days": rd,
+        "warning_days": wd,
+        "reason": reason,
+        "requested_by": str(actor.id),
+        "requested_by_email": actor.email,
+        "requested_at": _now().isoformat(),
+        "previous": {"version": current["version"],
+                     "retention_days": int(current["retention_days"]),
+                     "warning_days": int(current["warning_days"])},
+    }
+    if existing is None:
+        db.add(PlatformSetting(key=PROPOSAL_KEY, value=proposal, category="governance",
+                               updated_by=actor.email))
+    else:
+        existing.value = proposal
+        existing.updated_by = actor.email
+    db.commit()
+    return proposal
+
+
+def approve_policy(db: Session, *, approver: User) -> dict:
+    """Apply the pending proposal. The approver must not be the requester."""
+    from ..crud.commercial import assert_distinct_maker_checker
+
+    row = db.get(PlatformSetting, PROPOSAL_KEY)
+    proposal = row.value if row and isinstance(row.value, dict) and row.value else None
+    if not proposal:
+        raise LookupError("There is no pending retention policy change.")
+    # Fails CLOSED: an unidentifiable maker or checker is a refusal, not a pass.
+    assert_distinct_maker_checker(
+        proposal.get("requested_by"), approver,
+        violation="the person who proposed a retention change cannot approve it",
+        missing_maker="the retention proposal has no recorded requester",
+    )
+    # Re-validated at approval, not trusted from the stored proposal.
+    rd, wd = validate_policy_values(proposal["retention_days"], proposal["warning_days"])
+    before = policy(db)
+    now = _now()
+    new_version = f"v{now.strftime('%Y%m%d%H%M%S')}"
+    after = {"version": new_version, "retention_days": rd, "warning_days": wd,
+             "effective_at": now.isoformat(), "approved_by_email": approver.email,
+             "requested_by_email": proposal.get("requested_by_email")}
+
+    live = db.get(PlatformSetting, POLICY_KEY)
+    if live is None:
+        db.add(PlatformSetting(key=POLICY_KEY, value=after, category="governance",
+                               updated_by=approver.email))
+    else:
+        live.value = after
+        live.updated_by = approver.email
+    row.value = {}          # cleared, not deleted: the key's history stays in the audit log
+    row.updated_by = approver.email
+    db.commit()
+    return {"before": before, "after": after, "proposal": proposal,
+            "approved_by": str(approver.id), "approved_at": now.isoformat()}
+
+
+def reject_policy(db: Session, *, actor: User, reason: str) -> dict:
+    row = db.get(PlatformSetting, PROPOSAL_KEY)
+    proposal = row.value if row and isinstance(row.value, dict) and row.value else None
+    if not proposal:
+        raise LookupError("There is no pending retention policy change.")
+    row.value = {}
+    row.updated_by = actor.email
+    db.commit()
+    return {"proposal": proposal, "rejected_by": str(actor.id),
+            "reason": (reason or "").strip() or None}
 
 
 def _claim(db: Session, row, column: str) -> bool:

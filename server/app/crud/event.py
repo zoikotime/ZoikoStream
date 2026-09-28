@@ -657,6 +657,37 @@ def list_event_recordings(db, org_id, event_id, limit: int = 50) -> list[LiveRec
 LIBRARY_STATUSES = ("stopped", "processing")
 
 
+def recording_list_state(rec: LiveRecording) -> str:
+    """The same verdict vocabulary as recording_library_state, WITHOUT a storage round trip.
+
+    For list views that cannot afford a GCS existence check per row (the Super Admin Media
+    console lists up to 200). Uses only PERSISTED evidence, and is stricter about "ready" than a
+    naive reading of the row would be:
+
+        ready        stopped + enforced + size_bytes recorded. size_bytes is written ONLY by
+                     record_egress_result from the provider's own file result, so its presence
+                     means LiveKit reported a finished file. A `file_url` string is NOT
+                     evidence: it is the key we ASKED egress to write, set before any upload.
+        unverified   stopped + enforced, but the provider never reported a file size. It may
+                     well be fine; nothing persisted proves it. Resolved on playback, which
+                     does the real existence check (recording_library_state).
+        processing / in_progress / failed   as the row says.
+
+    `unverified` exists because the alternatives were both false: calling it "ready" claims a
+    file nobody confirmed, and calling it "storage_unavailable" claims a missing file nobody
+    checked for.
+    """
+    if rec.status in ("recording", "paused"):
+        return "in_progress"
+    if rec.status == "failed" or not rec.enforced:
+        return "failed"
+    if rec.status == "processing":
+        return "processing"
+    if rec.size_bytes is not None:
+        return "ready"
+    return "unverified"
+
+
 def recording_library_state(rec: LiveRecording, url: str | None) -> str:
     """THE verdict on one recording row — ready | processing | storage_unavailable | failed.
 

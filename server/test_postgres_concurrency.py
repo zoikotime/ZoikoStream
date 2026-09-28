@@ -25,6 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 import app.db as db_mod
+from _testsupport import published_catalog_fields
 from app.crud import commercial as crud
 from app.db import engine
 from app.models import (
@@ -140,7 +141,7 @@ class TestCapacityRowLocking:
             db.flush()
             account = CommercialAccount(org_id=org.id)
             catalog = CatalogVersion(version_label="v1", vertical=f"cap-{uuid.uuid4().hex[:6]}",
-                                     status="published")
+                                     **published_catalog_fields(user.id))
             db.add_all([account, catalog])
             db.flush()
             resource_type = f"captest_{uuid.uuid4().hex[:8]}"

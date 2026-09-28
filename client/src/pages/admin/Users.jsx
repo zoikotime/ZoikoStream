@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { FiCheckCircle, FiEdit2, FiSlash, FiTrash2, FiUsers, FiSearch } from "react-icons/fi";
 import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, initials, timeAgo } from "../../components/admin";
-import api, { errMsg } from "../../api";
+import api, { diagnoseLoadError, errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import UserModal from "./UserModal";
 import { ASSIGNABLE_PLATFORM_ROLES, roleLabel } from "./roleInfo";
@@ -230,14 +230,15 @@ export default function Users() {
     </>
   );
 
-  if (error) {
-    return (
-      <div className="mx-auto max-w-[1440px] rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
-        Couldn't load users. Try refreshing the page.
-      </div>
-    );
-  }
-
+  // NO early return on error. It used to replace the entire page with one sentence, which
+  // took the filter controls with it — so an operator who had just selected a role could not
+  // select their way back out and had to reload. Worse, a filter that fails is exactly when
+  // you need to see WHICH filter is set.
+  //
+  // The banner below keeps the header, the counts and the controls on screen, and names the
+  // real failure via diagnoseLoadError instead of "try refreshing": a 422 (the request was
+  // rejected), a 401/403 (the session lapsed) and a 500 (the server broke) need different
+  // responses from the operator, and "Couldn't load users" is the same words for all three.
   return (
     <div className="mx-auto max-w-[1440px] space-y-6">
       <div>
@@ -249,6 +250,23 @@ export default function Users() {
           Platform administrators — Super Admin and Org Admin accounts, across every organization
         </p>
       </div>
+
+      {error && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="font-medium">Couldn&apos;t load users with the current filters.</span>
+            <div className="flex gap-2">
+              <Button variant="secondary" size="sm" onClick={() => { setPage(1); setQInput(""); setRole("all"); setOrg("all"); setActive("all"); }}>
+                Clear filters
+              </Button>
+              <Button variant="secondary" size="sm" onClick={reload}>Retry</Button>
+            </div>
+          </div>
+          {/* The server's own reason. Without it the page cannot tell an operator whether the
+              request was invalid, their session expired, or the backend failed. */}
+          <p className="mt-1 text-[12px] opacity-90">{diagnoseLoadError(error, "/admin/users")}</p>
+        </div>
+      )}
 
       {statsFailed && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">

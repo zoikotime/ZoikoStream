@@ -36,3 +36,15 @@ export const seriesDelta = (series) => {
   const pct = ((last - prev) / prev) * 100;
   return { pct: Math.round(Math.abs(pct) * 10) / 10, up: pct >= 0 };
 };
+
+// Byte sizes. null/undefined is UNKNOWN (for a recording, the egress_ended webhook carries the
+// size and may never have arrived) and reads as a dash. A measured 0 is a different fact and
+// reads as zero rather than hiding behind the same dash.
+export const bytes = (n) => {
+  if (n == null) return "—";
+  if (n === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${v.toFixed(1)} ${units[i]}`;
+};

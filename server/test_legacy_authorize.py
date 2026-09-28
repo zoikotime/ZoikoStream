@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from _testsupport import code_only
+from _testsupport import code_only, published_catalog_fields
 from app.crud import commercial as crud
 from app.db import engine
 from app.models import (
@@ -146,7 +146,7 @@ class TestLegacyAuthorizeHardened:
             event = Event(org_id=org.id, created_by=user.id, title="Legacy authorize test")
             account = CommercialAccount(org_id=org.id)
             catalog = CatalogVersion(version_label="v1", vertical=f"la-{uuid.uuid4().hex[:6]}",
-                                     status="published")
+                                     **published_catalog_fields(staff.id))
             db.add_all([event, account, catalog])
             db.flush()
             line = CatalogLine(catalog_version_id=catalog.id, service_code="MEM",
@@ -309,7 +309,7 @@ class TestLegacyAuthorizeHardened:
             other_account = CommercialAccount(org_id=other_org.id)
             other_catalog = CatalogVersion(version_label="v1",
                                            vertical=f"lo-{uuid.uuid4().hex[:6]}",
-                                           status="published")
+                                           **published_catalog_fields(other_user.id))
             db.add_all([other_event, other_account, other_catalog])
             db.flush()
             other_order = EventOrder(event_id=other_event.id,

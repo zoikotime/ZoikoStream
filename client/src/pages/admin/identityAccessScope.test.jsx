@@ -15,6 +15,10 @@ import { MemoryRouter } from "react-router-dom";
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
   errMsg: (e) => e?.message ?? "failed",
+  // Stands in for the real diagnoser, which names the actual HTTP failure. The page renders
+  // its output, so the mock has to provide it or the error banner cannot render at all.
+  diagnoseLoadError: (e) =>
+    `The platform API returned ${e?.response?.status}: ${e?.response?.data?.detail ?? "unknown"}`,
 }));
 
 import api from "../../api";
@@ -135,5 +139,98 @@ describe("the page says what it is showing", () => {
 
     await screen.findByText("Ada Platform");
     expect(vi.mocked(api.get).mock.calls.some(([u]) => u === "/admin/users/summary")).toBe(true);
+  });
+});
+
+// ── the role filter's wire contract ────────────────────────────────────────────────────
+//
+// The deployed console fails with "Couldn't load users" the moment Super Admin or Org Admin
+// is selected. One proposed explanation was that the dropdown sends its display label
+// ("Super Admin") rather than the canonical value. These pin that it does not, and that a
+// backend failure no longer destroys the page — because the old early return took the filter
+// controls with it, so an operator could not select their way back out.
+
+describe("the role filter sends canonical values, never display labels", () => {
+  it("sends role=super_admin for Super Admin", async () => {
+    show();
+    await screen.findByText("Ada Platform");
+
+    await userEvent.selectOptions(await screen.findByLabelText("Filter by role"), "super_admin");
+
+    await waitFor(() => expect(lastListParams().role).toBe("super_admin"));
+    // Not the label, under any capitalisation.
+    expect(lastListParams().role).not.toMatch(/\s/);
+  });
+
+  it("sends role=org_admin for Org Admin", async () => {
+    show();
+    await screen.findByText("Ada Platform");
+
+    await userEvent.selectOptions(await screen.findByLabelText("Filter by role"), "org_admin");
+
+    await waitFor(() => expect(lastListParams().role).toBe("org_admin"));
+  });
+
+  it("carries search, organization and status alongside the role", async () => {
+    show();
+    await screen.findByText("Ada Platform");
+
+    await userEvent.selectOptions(await screen.findByLabelText("Filter by status"), "inactive");
+    await userEvent.selectOptions(await screen.findByLabelText("Filter by role"), "super_admin");
+
+    await waitFor(() => {
+      const p = lastListParams();
+      expect(p.role).toBe("super_admin");
+      expect(p.is_active).toBe(false);
+    });
+  });
+
+  it("returns to page 1 when the role changes", async () => {
+    // Staying on page 9 of a result that now has 2 is an empty table reading as "no users".
+    show();
+    await screen.findByText("Ada Platform");
+
+    await userEvent.selectOptions(await screen.findByLabelText("Filter by role"), "org_admin");
+
+    await waitFor(() => expect(lastListParams().page).toBe(1));
+  });
+});
+
+describe("a failed request does not destroy the page", () => {
+  const failWith = (status, detail) =>
+    vi.mocked(api.get).mockImplementation((url) => {
+      if (url === "/admin/users") {
+        return Promise.reject(Object.assign(new Error("Request failed"), {
+          response: { status, data: { detail } },
+        }));
+      }
+      if (url === "/admin/users/summary") {
+        return Promise.resolve({ data: { total: 2, active: 2, inactive: 0, super_admins: 1 } });
+      }
+      return Promise.resolve({ data: { items: [] } });
+    });
+
+  it("keeps the filter controls on screen so the operator can undo the selection", async () => {
+    failWith(500, "boom");
+    show();
+
+    expect(await screen.findByText(/Couldn't load users with the current filters/i)).toBeInTheDocument();
+    // The controls survive — this is the whole point.
+    expect(screen.getByLabelText("Filter by role")).toBeInTheDocument();
+    expect(screen.getByLabelText("Filter by organization")).toBeInTheDocument();
+    // Two now: one in the error banner and the table's own empty-state reset. Both are
+    // legitimate ways out, which is the point — the page still offers a way back.
+    expect(screen.getAllByRole("button", { name: /Clear filters/i }).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+  });
+
+  it("names the real failure instead of saying 'try refreshing'", async () => {
+    // A 422, a 401 and a 500 need different responses from the operator; one sentence for
+    // all three is what made the deployed failure undiagnosable from the screen.
+    failWith(422, "String should match pattern");
+    show();
+
+    expect(await screen.findByText(/Couldn't load users with the current filters/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Try refreshing the page/i)).not.toBeInTheDocument();
   });
 });

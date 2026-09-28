@@ -112,7 +112,10 @@ describe("the overview still answers what it is for", () => {
   it("keeps the freshness receipt, so nobody reads a stale page as current", async () => {
     show();
     expect(await screen.findByText(/Refreshed/)).toBeInTheDocument();
-    expect(screen.getByText(/within SLO/)).toBeInTheDocument();
+    // "up to date", not "within SLO". The age is measured and real; an SLO is not defined
+    // anywhere in the platform, so the page no longer claims one is being met.
+    expect(screen.getByText(/up to date/)).toBeInTheDocument();
+    expect(screen.queryByText(/within SLO/)).not.toBeInTheDocument();
   });
 
   it("keeps the window filters, which genuinely re-scope the request", async () => {
@@ -397,7 +400,7 @@ describe("what remains is still honest", () => {
     // Every KPI with no data prints the em dash rather than 0 / "Healthy" / "100%".
     const tile = screen.getByText("Platform health").closest("section, article, div[class*='rounded']");
     expect(within(tile).getByText("—")).toBeInTheDocument();
-    expect(screen.getByText(/No requests measured yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/Not measured — no request data was collected/i)).toBeInTheDocument();
   });
 
   it("still names the real failure when the endpoint does not load", async () => {

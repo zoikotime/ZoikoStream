@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import toast from "react-hot-toast";
 import { FiClock } from "react-icons/fi";
-import api, { diagnoseLoadError } from "../../api";
+import api, { diagnoseLoadError, errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
 import { CONSOLE, cx, type } from "../../ui/tokens";
@@ -10,6 +10,7 @@ import Skeleton from "../../ui/Skeleton";
 import { ConsoleButton } from "../../ui/Button";
 import { downloadJson } from "../../utils/export";
 import CommandFilters from "../../components/admin/sections/CommandFilters";
+import { commandCenterParams } from "../../components/admin/sections/commandWindow";
 import KpiRow from "../../components/admin/sections/KpiRow";
 import SessionsAttention from "../../components/admin/sections/SessionsAttention";
 import IncidentSummary from "../../components/admin/sections/IncidentSummary";
@@ -19,7 +20,10 @@ import ConsoleFooterLinks from "../../components/admin/sections/ConsoleFooterLin
 // The console re-reads itself on a timer; an operator should never have to wonder whether
 // what they are looking at is current. The "Refreshed Ns ago" line is the receipt.
 const REFRESH_MS = 30_000;
-const SLO_SECONDS = 600; // beyond this the page says so instead of quietly going stale
+// Staleness threshold for what is on screen — not a service-level objective. The console
+// has no SLO defined for data freshness and measures none, so the age is reported and the
+// claim is not. Same reasoning as components/admin/ConsoleScreen.jsx.
+const STALE_AFTER_SECONDS = 600;
 
 // ── WHAT THIS PAGE IS ───────────────────────────────────────────────────────────────────
 // An executive overview that answers five questions and stops:
@@ -69,6 +73,11 @@ function CommandCenterSkeleton() {
   );
 }
 
+const sameParams = (a, b) => JSON.stringify(a || {}) === JSON.stringify(b || {});
+
+const fmtInstant = (iso) =>
+  iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
+
 export default function AdminDashboard() {
   const [filters, setFilters] = useState({
     range: "live",
@@ -78,26 +87,18 @@ export default function AdminDashboard() {
   });
 
   // useApi holds the latest thunk without re-running, so reload() picks up current filters.
-  const { data, loading, error, reload } = useApi(() =>
-    api
-      .get("/admin/command-center", {
-        params: {
-          range: filters.range,
-          region: filters.region || undefined,
-          scope: filters.scope,
-          include_test: filters.include_test,
-          // datetime-local has no zone; toISOString sends the operator's wall-clock as a
-          // real instant so the server and the picker agree on the window.
-          ...(filters.range === "custom" && filters.from
-            ? {
-                from: new Date(filters.from).toISOString(),
-                to: filters.to ? new Date(filters.to).toISOString() : undefined,
-              }
-            : {}),
-        },
-      })
-      .then((r) => ({ ...r.data, fetched_at: Date.now() }))
-  );
+  const { data, loading, error, reload } = useApi(() => {
+    const params = commandCenterParams(filters);
+    return api
+      .get("/admin/command-center", { params })
+      // `requested` travels with the payload: it is how the page knows WHICH filters the
+      // numbers on screen answer, after a failed or pending refetch.
+      .then((r) => ({ ...r.data, fetched_at: Date.now(), requested: params }));
+  });
+  // A refresh or filter change that FAILED leaves the previous payload on screen. That is
+  // better than a blank page, but only if it is said: otherwise a 400 for a bad custom
+  // window reads as the new window's data.
+  const matches = Boolean(data) && sameParams(data.requested, commandCenterParams(filters));
 
   const applyFilters = useCallback(
     (next) => {
@@ -120,13 +121,22 @@ export default function AdminDashboard() {
     1000,
     Boolean(data)
   );
-  const withinSlo = ageSeconds <= SLO_SECONDS;
+  const fresh = ageSeconds <= STALE_AFTER_SECONDS;
 
+  // Exactly what is on screen, with the filters that produced it. Refused while the screen
+  // does not answer the selected filters (a filter change still loading, or a failed
+  // refetch). A background refresh of the SAME filters does not block it.
+  const exportBlocked = !data || Boolean(error) || !matches;
   const exportSnapshot = useCallback(() => {
-    if (!data) return;
-    downloadJson(data, `zoikostream-command-center-${new Date().toISOString().slice(0, 19)}`);
+    if (exportBlocked) return;
+    const { requested, ...payload } = data;
+    delete payload.fetched_at;
+    downloadJson(
+      { exported_at: new Date().toISOString(), filters: requested, ...payload },
+      `zoikostream-command-center-${data.range?.mode || "window"}-${new Date().toISOString().slice(0, 19)}`
+    );
     toast.success("Snapshot exported");
-  }, [data]);
+  }, [data, exportBlocked]);
 
   const ageLabel = useMemo(
     () => (ageSeconds < 1 ? "just now" : `${ageSeconds} sec ago`),
@@ -173,12 +183,12 @@ export default function AdminDashboard() {
             Global operational, security, governance, and customer picture for ZoikoStream.
           </p>
           <p className={cx("mt-2 flex items-center gap-1.5 text-[12px]", type.mono)}>
-            <span className={withinSlo ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}>
+            <span className={fresh ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}>
               Refreshed {ageLabel}
             </span>
             <span className={CONSOLE.faint}>·</span>
-            <span className={withinSlo ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}>
-              {withinSlo ? "within SLO" : "stale — refresh"}
+            <span className={fresh ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}>
+              {fresh ? "up to date" : "stale — refresh"}
             </span>
           </p>
         </div>
@@ -200,18 +210,39 @@ export default function AdminDashboard() {
         onRefresh={reload}
         onExport={exportSnapshot}
         refreshing={loading}
+        exportDisabled={exportBlocked}
+        exportTitle={exportBlocked ? "Available once the page shows the selected filters" : "Download exactly what is shown"}
       />
 
+      {error && data && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2.5 text-[12px] text-rose-700 dark:border-rose-500/25 dark:bg-rose-500/10 dark:text-rose-300">
+          <span>
+            Couldn’t load the selected window: {errMsg(error)}. The figures below are from the last
+            successful load ({fmtInstant(data.range?.from)} – {fmtInstant(data.range?.to)}), not the
+            selected filters.
+          </span>
+          <ConsoleButton variant="secondary" size="sm" onClick={reload}>Retry</ConsoleButton>
+        </div>
+      )}
+
+      {data?.range && (
+        <p className={cx("text-[11px]", type.mono, CONSOLE.faint)} data-testid="command-window">
+          Window {fmtInstant(data.range.from)} – {fmtInstant(data.range.to)}
+          {" "}({Intl.DateTimeFormat().resolvedOptions().timeZone}) · current-state tiles read now
+          {loading && !matches ? " · loading the selected window…" : ""}
+        </p>
+      )}
+
       {/* Row 1 — the five measured KPIs */}
-      <KpiRow kpis={kpis} age={`${ageSeconds}s`} />
+      <KpiRow kpis={kpis} range={data?.range} age={`${ageSeconds}s`} />
 
       {/* Row 2 — the only thing on this page an operator acts on directly */}
       <SessionsAttention items={data?.attention || []} />
 
       {/* Row 3 — is anything burning, and is anything big coming */}
       <div className="grid gap-4 xl:grid-cols-2">
-        <IncidentSummary incidents={data?.incidents || []} />
-        <UpcomingEvents events={data?.upcoming_events || []} />
+        <IncidentSummary incidents={data?.incidents || []} summary={data?.incident_summary} />
+        <UpcomingEvents events={data?.upcoming_events || []} upcoming={data?.upcoming} />
       </div>
 
       <ConsoleFooterLinks
