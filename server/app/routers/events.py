@@ -78,6 +78,7 @@ from ..services import event_ops
 from ..services import event_planning
 from ..services import moderation as mod
 from ..services import webhooks
+from ..services import bus, event_overrun
 
 def claim_cookie_policy(request: Request) -> tuple[bool, str]:
     """`(secure, samesite)` for the one-device claim cookie on this request.
@@ -268,6 +269,12 @@ def create_event(data: EventCreate, background: BackgroundTasks, admin: User = D
 @router.get("/{event_id}", response_model=EventOut)
 def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _get_event_or_404(db, user, event_id)
+
+
+@router.get("/{event_id}/overrun")
+def get_event_overrun(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
+    return event_overrun.evaluate_event_overrun(ev.end_time)
 
 
 def registration_gate_required(ev) -> bool:
@@ -675,6 +682,17 @@ def update_event(event_id: uuid.UUID, data: EventUpdate, background: BackgroundT
         previous_timezone=previous_zone, actor_id=user.id)
     if change is not None:
         event_ops.notify_schedule_change(db, background, updated, change)
+
+    if updated.start_time != previous_start or updated.end_time != previous_end:
+        schedule_data = {
+            "event_id": str(updated.id),
+            "start_time": updated.start_time.isoformat() if updated.start_time else None,
+            "end_time": updated.end_time.isoformat() if updated.end_time else None,
+            "scheduled_start": updated.start_time.isoformat() if updated.start_time else None,
+            "scheduled_end": updated.end_time.isoformat() if updated.end_time else None,
+            "overrun": event_overrun.evaluate_event_overrun(updated.end_time),
+        }
+        background.add_task(bus.publish, updated.id, "broadcast", "event.schedule", schedule_data)
 
     # ZST-EC-001 LVE-003. is_approved() gates this on a real confirmed state (a SCHEDULED
     # event with a start time, or a CONFIRMED commercial order) - creating or merely

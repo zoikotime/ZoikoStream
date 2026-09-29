@@ -687,6 +687,16 @@ async def _end(ctx, payload, emergency: bool = False):
     out = await mod.tx(work)
     if not out:
         return "There's no broadcast to end"
+    try:
+        final_summary = await bus.session_finalize(ctx.event_id, end_time=now.timestamp())
+        if final_summary and final_summary.get("measured"):
+            def persist_summary(db):
+                sess = db.get(BroadcastSession, uuid.UUID(out[0]["id"]))
+                if sess:
+                    sess.settings = {**(sess.settings or {}), "analytics_summary": final_summary}
+            await mod.tx(persist_summary)
+    except Exception:
+        pass
     await bus.state_set(ctx.event_id, {"status": "ended"})
     await mod.tx(lambda db: webhooks.enqueue(db, ctx.org_id, "session.ended", {
         "event_id": str(ctx.event_id), "session_id": out[0]["id"], "reason": reason,
@@ -1302,11 +1312,10 @@ def _split(people: list[dict]) -> dict:
 
 
 def _watch_seconds(people: list[dict], now_ts: float) -> int | None:
-    """Mean time-in-room of everyone currently connected, from real join timestamps."""
-    stamps = [p["joined_at"] for p in people if p.get("joined_at") and not p.get("waiting")]
-    if not stamps:
-        return None
-    return int(sum(now_ts - t for t in stamps) / len(stamps))
+    """Mean time-in-room of viewers currently connected, from real join timestamps."""
+    from .watch_time import calculate_viewer_watch_time
+    res = calculate_viewer_watch_time(people, now_ts=now_ts)
+    return res.get("average_watch_seconds")
 
 
 def engagement_score(counts: dict, peak: int) -> int:
@@ -1370,11 +1379,16 @@ async def analytics_now(ctx) -> dict:
 
     counts, recent, peak, history = await mod.tx(work)
     peak = max(peak, split["viewers"], int(state.get("peak_viewers") or 0))
+    from .watch_time import calculate_viewer_watch_time
+    wt = calculate_viewer_watch_time(people, now_ts=now.timestamp())
     return {
         "analytics": {
             **split,
             "peak_viewers": peak,
-            "avg_watch_seconds": _watch_seconds(people, now.timestamp()),
+            "avg_watch_seconds": wt.get("average_watch_seconds"),
+            "average_watch_seconds": wt.get("average_watch_seconds"),
+            "total_watch_seconds": wt.get("total_watch_seconds"),
+            "watch_hours": wt.get("watch_hours"),
             "chat_per_minute": recent["messages"],
             "questions_asked": counts["questions"],
             "reactions": counts["reactions"],
@@ -1643,6 +1657,10 @@ async def _retire_stale_session(session_id: str, event_id: str, reason: str) -> 
     or re-end an event's own lifecycle.
     """
     now = datetime.now(timezone.utc)
+    try:
+        final_summary = await bus.session_finalize(event_id, end_time=now.timestamp())
+    except Exception:
+        final_summary = None
 
     def work(db):
         row = db.get(BroadcastSession, uuid.UUID(session_id))
@@ -1652,6 +1670,8 @@ async def _retire_stale_session(session_id: str, event_id: str, reason: str) -> 
         row.ended_at = now
         row.ended_reason = STALE_SESSION_REASON
         row.paused_at = None
+        if final_summary and final_summary.get("measured"):
+            row.settings = {**(row.settings or {}), "analytics_summary": final_summary}
         # Any recording still open on this session goes with it. Retiring the session and
         # leaving its LiveRecording at "recording" is what produced the reported state: an
         # event reading Ended while its Recording tab said "This recording is still running.

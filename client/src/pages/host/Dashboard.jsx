@@ -12,10 +12,13 @@
 // or a wide filmstrip from forcing the page to scroll sideways.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { FiRadio } from "react-icons/fi";
+import { FiRadio, FiAlertTriangle } from "react-icons/fi";
 import useLiveEvent from "../../hooks/useLiveEvent";
 import useMediaPreview from "../../hooks/useMediaPreview";
 import useLiveKitPublish from "../../hooks/useLiveKitPublish";
+import useEventOverrun from "../../hooks/useEventOverrun";
+import api, { errMsg } from "../../api";
+import { notify } from "../../ui/Toast";
 import Skeleton from "../../ui/Skeleton";
 import { cx } from "../../ui/tokens";
 import EmptyState from "../../components/organization/OrganizationEmptyState";
@@ -82,6 +85,31 @@ export default function HostDashboard() {
 
   const canHost = state.canHost;
   const live = state.broadcast?.status === "live";
+  const scheduledEnd = state.event?.scheduled_end || state.event?.end_time;
+  const overrun = useEventOverrun({
+    scheduledEnd,
+    isLive: live,
+  });
+
+  const [extending, setExtending] = useState(false);
+  const handleExtendSchedule = async (minutes) => {
+    if (!state.event?.id || extending) return;
+    setExtending(true);
+    try {
+      const baseMs = Math.max(
+        scheduledEnd ? new Date(scheduledEnd).getTime() : Date.now(),
+        Date.now()
+      );
+      const newEnd = new Date(baseMs + minutes * 60 * 1000);
+      await api.patch(`/events/${state.event.id}`, { end_time: newEnd.toISOString() });
+      notify.success(`Extended event by ${minutes} minutes`);
+    } catch (err) {
+      notify.error(errMsg(err, "Failed to extend event schedule"));
+    } finally {
+      setExtending(false);
+    }
+  };
+
   // From PREVIEW, not from air. A locked screen suspends the WebView, which tears down the
   // camera capture — so a host who set up their shot and then waited two minutes for their
   // slot would find the preview dead at the moment they needed to start. `previewOn ||
@@ -309,7 +337,47 @@ export default function HostDashboard() {
         ready={state.ready}
         recovering={state.recovering}
         media={media}
+        overrun={overrun}
       />
+
+      {live && overrun.isOvertime && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 border-b border-rose-500/30 bg-rose-500/10 px-4 py-2 text-xs font-medium text-rose-700 dark:text-rose-300 sm:text-sm"
+        >
+          <div className="flex items-center gap-2">
+            <FiAlertTriangle className="shrink-0 text-base text-rose-600 dark:text-rose-400" />
+            <span>
+              <strong>⚠ Event is running {overrun.overrunMinutesText} past scheduled end</strong>
+              <span className="hidden sm:inline opacity-80"> — broadcast will continue until ended</span>
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {canHost && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleExtendSchedule(15)}
+                  disabled={extending}
+                  className="rounded bg-rose-500/20 px-2.5 py-1 text-xs font-semibold text-rose-800 transition-colors hover:bg-rose-500/30 dark:text-rose-200"
+                  title="Extend scheduled end by 15 minutes"
+                >
+                  {extending ? "Extending…" : "+15m"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExtendSchedule(30)}
+                  disabled={extending}
+                  className="rounded bg-rose-500/20 px-2.5 py-1 text-xs font-semibold text-rose-800 transition-colors hover:bg-rose-500/30 dark:text-rose-200"
+                  title="Extend scheduled end by 30 minutes"
+                >
+                  {extending ? "Extending…" : "+30m"}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-1 flex-col lg:min-h-0 lg:flex-row">
         <main className="flex min-w-0 flex-1 flex-col lg:min-h-0">

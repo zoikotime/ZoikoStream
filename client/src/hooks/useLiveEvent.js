@@ -259,6 +259,18 @@ export function reducer(state, env) {
       };
     case "broadcast/settings.update":
       return { ...state, broadcast: { ...state.broadcast, settings: data.settings } };
+    case "broadcast/event.schedule":
+      return {
+        ...state,
+        event: {
+          ...state.event,
+          start_time: data.start_time,
+          end_time: data.end_time,
+          scheduled_start: data.scheduled_start || data.start_time,
+          scheduled_end: data.scheduled_end || data.end_time,
+          overrun: data.overrun,
+        },
+      };
     case "broadcast/broadcast.countdown":
       return { ...state, countdownUntil: data.until };
     case "broadcast/broadcast.health":
