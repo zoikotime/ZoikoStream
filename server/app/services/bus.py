@@ -402,32 +402,335 @@ async def shutdown() -> None:
 
 # ── presence (participants) ───────────────────────────────────────────────────
 # One record per identity: {identity, name, role, muted, speaking, hand, quality,
-# on_stage, banned, joined_at}. Identity is the LiveKit identity == user id (or
+# on_stage, banned, joined_at, last_seen}. Identity is the LiveKit identity == user id (or
 # "viewer-<uuid>" for anonymous viewers), so the console WS and the LiveKit webhook
 # update the SAME record instead of double-counting a person.
+
+_sessions_memory: dict[str, dict[str, dict]] = {}
+_summary_memory: dict[str, dict] = {}
+_sync_redis_client = None
+
+
+def sync_redis():
+    """Synchronous Redis client for read-only analytics aggregation."""
+    global _sync_redis_client
+    if not settings.REDIS_URL:
+        return None
+    if _sync_redis_client is None:
+        try:
+            import redis as _sync_redis
+            _sync_redis_client = _sync_redis.Redis.from_url(
+                settings.REDIS_URL, decode_responses=True, socket_timeout=2.0, socket_connect_timeout=2.0
+            )
+        except Exception:
+            _sync_redis_client = None
+    return _sync_redis_client
+
 
 def _pkey(event_id) -> str:
     return f"live:{eid(event_id)}:participants"
 
 
-async def presence_upsert(event_id, identity: str, patch: dict) -> dict:
-    """Merge `patch` into a participant, creating it if absent. Returns the full record."""
+def _sessions_key(event_id) -> str:
+    return f"live:{eid(event_id)}:sessions"
+
+
+def _summary_key(event_id) -> str:
+    return f"analytics:{eid(event_id)}:summary"
+
+
+async def session_record_join(event_id, identity: str, role: str = "viewer", name: str | None = None, joined_at: float | None = None) -> dict:
+    """Record a viewer join into the event session ledger."""
+    event_id = eid(event_id)
+    now = joined_at if joined_at is not None else time.time()
+    r = await redis()
+    if r is None:
+        store = _sessions_memory.setdefault(event_id, {})
+        user_record = store.get(identity, {
+            "identity": identity, "role": role, "name": name, "sessions": []
+        })
+        user_record["role"] = role
+        if name:
+            user_record["name"] = name
+        sessions = user_record.setdefault("sessions", [])
+        if sessions and sessions[-1].get("left_at") is None:
+            sessions[-1]["last_seen"] = max(sessions[-1].get("last_seen") or now, now)
+        else:
+            sessions.append({"joined_at": now, "last_seen": now, "left_at": None})
+        store[identity] = user_record
+        return user_record
+
+    raw = await r.hget(_sessions_key(event_id), identity)
+    user_record = json.loads(raw) if raw else {
+        "identity": identity, "role": role, "name": name, "sessions": []
+    }
+    user_record["role"] = role
+    if name:
+        user_record["name"] = name
+    sessions = user_record.setdefault("sessions", [])
+    if sessions and sessions[-1].get("left_at") is None:
+        sessions[-1]["last_seen"] = max(sessions[-1].get("last_seen") or now, now)
+    else:
+        sessions.append({"joined_at": now, "last_seen": now, "left_at": None})
+    await r.hset(_sessions_key(event_id), identity, json.dumps(user_record, default=str))
+    return user_record
+
+
+async def session_record_heartbeat(event_id, identity: str, timestamp: float | None = None) -> None:
+    """Update last_seen timestamp on both active presence and current session."""
+    event_id = eid(event_id)
+    now = timestamp if timestamp is not None else time.time()
+    r = await redis()
+    if r is None:
+        room = _memory.get(event_id, {})
+        if identity in room:
+            room[identity]["last_seen"] = now
+        store = _sessions_memory.get(event_id, {})
+        if identity in store:
+            sessions = store[identity].get("sessions", [])
+            if sessions and sessions[-1].get("left_at") is None:
+                sessions[-1]["last_seen"] = now
+        return
+
+    raw_p = await r.hget(_pkey(event_id), identity)
+    if raw_p:
+        rec = json.loads(raw_p)
+        rec["last_seen"] = now
+        await r.hset(_pkey(event_id), identity, json.dumps(rec, default=str))
+
+    raw_s = await r.hget(_sessions_key(event_id), identity)
+    if raw_s:
+        u_rec = json.loads(raw_s)
+        sessions = u_rec.get("sessions", [])
+        if sessions and sessions[-1].get("left_at") is None:
+            sessions[-1]["last_seen"] = now
+            await r.hset(_sessions_key(event_id), identity, json.dumps(u_rec, default=str))
+
+
+async def session_record_leave(event_id, identity: str, left_at: float | None = None) -> dict | None:
+    """Close the active session for an identity."""
+    event_id = eid(event_id)
+    now = left_at if left_at is not None else time.time()
+    r = await redis()
+    if r is None:
+        store = _sessions_memory.get(event_id, {})
+        if identity in store:
+            sessions = store[identity].get("sessions", [])
+            if sessions and sessions[-1].get("left_at") is None:
+                sessions[-1]["left_at"] = now
+                sessions[-1]["last_seen"] = now
+            return store[identity]
+        return None
+
+    raw_s = await r.hget(_sessions_key(event_id), identity)
+    if raw_s:
+        u_rec = json.loads(raw_s)
+        sessions = u_rec.get("sessions", [])
+        if sessions and sessions[-1].get("left_at") is None:
+            sessions[-1]["left_at"] = now
+            sessions[-1]["last_seen"] = now
+            await r.hset(_sessions_key(event_id), identity, json.dumps(u_rec, default=str))
+        return u_rec
+    return None
+
+
+def _extract_all_intervals(sessions_data: dict[str, dict], presence_data: dict[str, dict] | None = None) -> list[dict]:
+    out: list[dict] = []
+    seen_identities: set[str] = set()
+
+    for identity, u_rec in sessions_data.items():
+        seen_identities.add(identity)
+        role = u_rec.get("role", "viewer")
+        name = u_rec.get("name")
+        for s in u_rec.get("sessions", []):
+            out.append({
+                "identity": identity,
+                "role": role,
+                "name": name,
+                "joined_at": s.get("joined_at"),
+                "last_seen": s.get("last_seen"),
+                "left_at": s.get("left_at"),
+            })
+
+    if presence_data:
+        for identity, p in presence_data.items():
+            has_active = any(row["identity"] == identity and row["left_at"] is None for row in out)
+            if not has_active and p.get("joined_at"):
+                out.append({
+                    "identity": identity,
+                    "role": p.get("role", "viewer"),
+                    "name": p.get("name"),
+                    "joined_at": p.get("joined_at"),
+                    "last_seen": p.get("last_seen") or p.get("joined_at"),
+                    "left_at": None,
+                    "waiting": p.get("waiting", False),
+                    "on_stage": p.get("on_stage", False),
+                })
+    return out
+
+
+async def session_get_all(event_id) -> list[dict]:
     event_id = eid(event_id)
     r = await redis()
     if r is None:
+        s_data = _sessions_memory.get(event_id, {})
+        p_data = _memory.get(event_id, {})
+        return _extract_all_intervals(s_data, p_data)
+
+    raw_sessions = await r.hgetall(_sessions_key(event_id))
+    s_data = {k: json.loads(v) for k, v in raw_sessions.items()}
+    raw_presence = await r.hgetall(_pkey(event_id))
+    p_data = {k: json.loads(v) for k, v in raw_presence.items()}
+    return _extract_all_intervals(s_data, p_data)
+
+
+def session_get_all_sync(event_id) -> list[dict]:
+    event_id = eid(event_id)
+    r = sync_redis()
+    if r is None:
+        s_data = _sessions_memory.get(event_id, {})
+        p_data = _memory.get(event_id, {})
+        return _extract_all_intervals(s_data, p_data)
+    try:
+        raw_sessions = r.hgetall(_sessions_key(event_id))
+        s_data = {k: json.loads(v) for k, v in raw_sessions.items()}
+        raw_presence = r.hgetall(_pkey(event_id))
+        p_data = {k: json.loads(v) for k, v in raw_presence.items()}
+        return _extract_all_intervals(s_data, p_data)
+    except Exception:
+        s_data = _sessions_memory.get(event_id, {})
+        p_data = _memory.get(event_id, {})
+        return _extract_all_intervals(s_data, p_data)
+
+
+async def summary_get(event_id) -> dict | None:
+    event_id = eid(event_id)
+    r = await redis()
+    if r is None:
+        return _summary_memory.get(event_id)
+    raw = await r.get(_summary_key(event_id))
+    return json.loads(raw) if raw else _summary_memory.get(event_id)
+
+
+def summary_get_sync(event_id) -> dict | None:
+    event_id = eid(event_id)
+    r = sync_redis()
+    if r is None:
+        return _summary_memory.get(event_id)
+    try:
+        raw = r.get(_summary_key(event_id))
+        return json.loads(raw) if raw else _summary_memory.get(event_id)
+    except Exception:
+        return _summary_memory.get(event_id)
+
+
+async def summary_set(event_id, summary: dict) -> None:
+    event_id = eid(event_id)
+    _summary_memory[event_id] = summary
+    r = await redis()
+    if r is not None:
+        try:
+            await r.set(_summary_key(event_id), json.dumps(summary, default=str))
+        except Exception:
+            pass
+
+
+def summary_set_sync(event_id, summary: dict) -> None:
+    event_id = eid(event_id)
+    _summary_memory[event_id] = summary
+    r = sync_redis()
+    if r is not None:
+        try:
+            r.set(_summary_key(event_id), json.dumps(summary, default=str))
+        except Exception:
+            pass
+
+
+async def session_finalize(event_id, end_time: float | None = None) -> dict:
+    """Close all open sessions and calculate durable watch time summary."""
+    from app.services.watch_time import calculate_viewer_watch_time
+    event_id = eid(event_id)
+    now = end_time if end_time is not None else time.time()
+
+    # 1. Sync any active presence into sessions
+    presence_items = await presence_all(event_id)
+    for p in presence_items:
+        ident = p.get("identity")
+        if ident:
+            await session_record_join(
+                event_id, ident,
+                role=p.get("role", "viewer"),
+                name=p.get("name"),
+                joined_at=p.get("joined_at"),
+            )
+            if p.get("last_seen"):
+                await session_record_heartbeat(event_id, ident, p["last_seen"])
+
+    # 2. Close all open sessions
+    r = await redis()
+    if r is None:
+        store = _sessions_memory.get(event_id, {})
+        for u_rec in store.values():
+            for s in u_rec.get("sessions", []):
+                if s.get("left_at") is None:
+                    s["left_at"] = min(s.get("last_seen") or now, now)
+        all_sessions = _extract_all_intervals(store)
+    else:
+        raw_sessions = await r.hgetall(_sessions_key(event_id))
+        s_data = {k: json.loads(v) for k, v in raw_sessions.items()}
+        for ident, u_rec in s_data.items():
+            changed = False
+            for s in u_rec.get("sessions", []):
+                if s.get("left_at") is None:
+                    s["left_at"] = min(s.get("last_seen") or now, now)
+                    changed = True
+            if changed:
+                await r.hset(_sessions_key(event_id), ident, json.dumps(u_rec, default=str))
+        all_sessions = _extract_all_intervals(s_data)
+
+    summary = calculate_viewer_watch_time(all_sessions, now_ts=now, event_end_ts=now)
+    summary["finalized_at"] = now
+    await summary_set(event_id, summary)
+    return summary
+
+
+async def presence_upsert(event_id, identity: str, patch: dict) -> dict:
+    """Merge `patch` into a participant, creating it if absent. Returns the full record."""
+    event_id = eid(event_id)
+    now = time.time()
+    r = await redis()
+    if r is None:
         room = _memory.setdefault(event_id, {})
-        rec = {**room.get(identity, {"identity": identity, "joined_at": time.time()}), **patch}
+        base = room.get(identity, {"identity": identity, "joined_at": now, "last_seen": now})
+        rec = {**base, **patch}
+        if "last_seen" not in patch and "last_seen" not in rec:
+            rec["last_seen"] = rec.get("joined_at", now)
         room[identity] = rec
+        await session_record_join(
+            event_id, identity,
+            role=rec.get("role", "viewer"),
+            name=rec.get("name"),
+            joined_at=rec.get("joined_at"),
+        )
         return rec
     raw = await r.hget(_pkey(event_id), identity)
-    base = json.loads(raw) if raw else {"identity": identity, "joined_at": time.time()}
+    base = json.loads(raw) if raw else {"identity": identity, "joined_at": now, "last_seen": now}
     rec = {**base, **patch}
+    if "last_seen" not in patch and "last_seen" not in rec:
+        rec["last_seen"] = rec.get("joined_at", now)
     await r.hset(_pkey(event_id), identity, json.dumps(rec, default=str))
+    await session_record_join(
+        event_id, identity,
+        role=rec.get("role", "viewer"),
+        name=rec.get("name"),
+        joined_at=rec.get("joined_at"),
+    )
     return rec
 
 
 async def presence_remove(event_id, identity: str) -> dict | None:
     event_id = eid(event_id)
+    await session_record_leave(event_id, identity)
     r = await redis()
     if r is None:
         return _memory.get(event_id, {}).pop(identity, None)
@@ -449,6 +752,10 @@ async def presence_all(event_id) -> list[dict]:
 async def presence_clear(event_id) -> None:
     """Called when the room ends — presence is per-broadcast, not history."""
     event_id = eid(event_id)
+    try:
+        await session_finalize(event_id)
+    except Exception:
+        pass
     r = await redis()
     if r is None:
         _memory.pop(event_id, None)

@@ -167,11 +167,11 @@ export function BarChart({ title, subtitle, data, color = "#7c3aed", height = 25
 }
 
 // Donut + labelled legend. `data` = [{ label, value }]; `colors` cycles per slice.
-export function PieChart({ title, subtitle, data, colors, loading = false, empty = false }) {
+export function PieChart({ title, subtitle, data, colors, loading = false, empty = false, emptyText = "No data yet" }) {
   const total = data.reduce((s, d) => s + d.value, 0) || 1;
   const pct = (v) => Math.round((v / total) * 100);
   return (
-    <ChartCard title={title} subtitle={subtitle} loading={loading} empty={empty} height={160}>
+    <ChartCard title={title} subtitle={subtitle} loading={loading} empty={empty} emptyText={emptyText} height={160}>
       <div className="flex items-center gap-5">
         <div className="h-40 w-40 shrink-0">
           <ResponsiveContainer width="100%" height="100%">

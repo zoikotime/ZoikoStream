@@ -97,7 +97,7 @@ function Segmented({ value, onChange, options }) {
   );
 }
 
-function RankedBars({ title, subtitle, items, color, format, action }) {
+function RankedBars({ title, subtitle, items, color, format, action, emptyText }) {
   const max = Math.max(...items.map((i) => i.value)) || 1;
   return (
     <Card padding="md">
@@ -109,7 +109,9 @@ function RankedBars({ title, subtitle, items, color, format, action }) {
         {action}
       </div>
       {items.length === 0 ? (
-        <p className="py-6 text-center text-sm text-slate-400 dark:text-slate-500">No events with viewers in this window yet.</p>
+        <p className="py-6 text-center text-sm text-slate-400 dark:text-slate-500">
+          {emptyText || "No events with viewers in this window yet."}
+        </p>
       ) : (
         <ul className="space-y-3.5">
           {items.map((i) => (
@@ -202,18 +204,34 @@ export default function OrganizationAnalytics() {
   // Ranking is re-sorted client-side, so the metric switcher is instant. The server's
   // top_events is peak-only and capped at 5; reports[] has every event.
   const ranked = useMemo(() => {
-    const key = metric === "watch_hours" ? "watch_hours" : metric === "engagement" ? "engagement" : "viewers";
+    const isWatch = metric === "watch_hours";
+    const isEng = metric === "engagement";
     return [...reports]
-      .filter((r) => r[key] > 0)
-      .sort((a, b) => b[key] - a[key])
+      .filter((r) => {
+        if (isWatch) return (r.total_watch_seconds > 0 || r.watch_hours > 0);
+        if (isEng) return r.engagement != null && r.engagement > 0;
+        return r.viewers > 0;
+      })
+      .sort((a, b) => {
+        if (isWatch) {
+          const aSec = a.total_watch_seconds ?? ((a.watch_hours ?? 0) * 3600);
+          const bSec = b.total_watch_seconds ?? ((b.watch_hours ?? 0) * 3600);
+          return bSec - aSec;
+        }
+        if (isEng) return (b.engagement ?? 0) - (a.engagement ?? 0);
+        return (b.viewers ?? 0) - (a.viewers ?? 0);
+      })
       .slice(0, 8)
-      .map((r) => ({ label: r.event, value: r[key] }));
+      .map((r) => ({
+        label: r.event,
+        value: isWatch ? (r.watch_hours ?? 0) : isEng ? (r.engagement ?? 0) : r.viewers,
+      }));
   }, [reports, metric]);
 
-  // Engagement mix: how many events land in each band. engagement_score() is a real measure
-  // (messages/questions/reactions against peak viewers), so these buckets are measured.
+  // Engagement mix: how many events land in each band. Only events with measured engagement
+  // (engagement != null) are bucketed; unmeasured events do not falsely count as low engagement.
   const engagementMix = useMemo(() => {
-    const scored = reports.filter((r) => r.viewers > 0);
+    const scored = reports.filter((r) => r.engagement != null);
     const band = (v) => (v >= 70 ? "Strong (70%+)" : v >= 55 ? "Moderate (55–69%)" : "Low (<55%)");
     const counts = { "Strong (70%+)": 0, "Moderate (55–69%)": 0, "Low (<55%)": 0 };
     scored.forEach((r) => { counts[band(r.engagement)] += 1; });
@@ -222,13 +240,24 @@ export default function OrganizationAnalytics() {
       .map(([label, value]) => ({ label, value }));
   }, [reports]);
 
+  const hasAudience = reports.some((r) => r.viewers > 0);
+  const hasEngagement = reports.some((r) => r.engagement != null);
+
+  const engagementEmptyText = !reports.length
+    ? "No events in this window yet."
+    : !hasAudience
+    ? "No events with an audience yet."
+    : !hasEngagement
+    ? "Engagement telemetry not measured"
+    : "No data yet";
+
   // Watch hours against peak viewers, one point per event: the shape tells you whether big
   // audiences actually stayed. Two events with equal peaks can sit far apart vertically.
   const retention = useMemo(
     () =>
       reports
         .filter((r) => r.viewers > 0)
-        .map((r) => ({ x: r.viewers, y: r.watch_hours, z: r.engagement, name: r.event })),
+        .map((r) => ({ x: r.viewers, y: r.watch_hours ?? 0, z: r.engagement, name: r.event })),
     [reports]
   );
 
@@ -398,6 +427,15 @@ export default function OrganizationAnalytics() {
               color={metric === "watch_hours" ? CHART.blue : metric === "engagement" ? CHART.amber : CHART.violet}
               format={METRICS.find((m) => m.value === metric)?.format}
               action={<Segmented value={metric} onChange={setMetric} options={METRICS} />}
+              emptyText={
+                !reports.length
+                  ? "No events in this window yet."
+                  : metric === "watch_hours"
+                  ? "No events with watch time in this window yet."
+                  : metric === "engagement"
+                  ? "No events with engagement in this window yet."
+                  : "No events with viewers in this window yet."
+              }
             />
 
             <PieChart
@@ -406,6 +444,7 @@ export default function OrganizationAnalytics() {
               data={engagementMix}
               colors={[CHART.emerald, CHART.amber, CHART.rose]}
               empty={engagementMix.length === 0}
+              emptyText={engagementEmptyText}
             />
           </div>
 
@@ -416,7 +455,7 @@ export default function OrganizationAnalytics() {
               subtitle="Watch hours against peak viewers · one point per event"
               height={260}
               empty={retention.length === 0}
-              emptyText="No events with an audience yet."
+              emptyText={!reports.length ? "No events in this window yet." : "No events with an audience yet."}
             >
               <div style={{ height: 260 }}>
                 <ResponsiveContainer width="100%" height="100%">

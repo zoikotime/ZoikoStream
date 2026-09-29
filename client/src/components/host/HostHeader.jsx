@@ -21,6 +21,7 @@ import {
 } from "react-icons/fi";
 import useInterval from "../../hooks/useInterval";
 import useSystemStats from "../../hooks/useSystemStats";
+import useEventOverrun from "../../hooks/useEventOverrun";
 import { useTheme } from "../../theme/ThemeContext";
 import { cx } from "../../ui/tokens";
 import Badge from "../../ui/Badge";
@@ -125,6 +126,7 @@ export default function HostHeader({
   ready = true,
   recovering = false,
   media,                 // { actual } from useMediaPreview — measured capture, may be null
+  overrun: propOverrun,
 }) {
   const { theme, toggle } = useTheme();
   const stats = useSystemStats(true);
@@ -133,6 +135,10 @@ export default function HostHeader({
   const status = broadcast?.status || "preview";
   const live = status === "live";
   const a = analytics || {};
+
+  const scheduledEnd = event?.scheduled_end || event?.end_time;
+  const localOverrun = useEventOverrun({ scheduledEnd, isLive: live });
+  const overrun = propOverrun || localOverrun;
 
   // Elapsed live time, anchored to the server's start timestamp minus paused time — so it
   // survives a reconnect without drifting and doesn't count the pauses.
@@ -236,6 +242,27 @@ export default function HostHeader({
           );
         })()}
 
+        {live && overrun?.isOvertime && (
+          <Badge
+            tone="danger"
+            dot
+            className="animate-pulse font-bold tracking-wide"
+            title={`Scheduled end time exceeded by ${overrun.overrunMinutesText}`}
+          >
+            <FiAlertTriangle aria-hidden="true" /> OVERTIME {overrun.formattedOverrun}
+          </Badge>
+        )}
+
+        {live && overrun?.isEndingSoon && (
+          <Badge
+            tone="warning"
+            dot
+            title={`Scheduled end time is in ${overrun.formattedRemaining}`}
+          >
+            <FiClock aria-hidden="true" /> {overrun.formattedRemaining} left
+          </Badge>
+        )}
+
         {/* Same rule: canHost defaults to false in the reducer's EMPTY state, so this badge
             accused a real host of not being one whenever the snapshot had not arrived.
             Authorisation is unchanged — only the claim made while it is still UNKNOWN. */}
@@ -261,6 +288,31 @@ export default function HostHeader({
           >
             <span className={val}>{startedAt ? fmtElapsed(elapsed) : "—"}</span>
           </Readout>
+          {scheduledEnd && live && (
+            overrun?.isOvertime ? (
+              <Readout
+                icon={FiAlertTriangle}
+                srLabel="Overtime elapsed"
+                title={`Scheduled end exceeded by ${overrun.overrunMinutesText}`}
+                tone="text-rose-500 dark:text-rose-400"
+              >
+                <span className="text-[13px] font-bold leading-none tabular-nums text-rose-600 dark:text-rose-400">
+                  +{overrun.formattedOverrun.replace("+", "")}
+                </span>
+              </Readout>
+            ) : (
+              <Readout
+                icon={FiClock}
+                srLabel="Time to scheduled end"
+                title={`Scheduled end at ${new Date(scheduledEnd).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+                tone={overrun?.isEndingSoon ? "text-amber-500" : STUDIO.faint}
+              >
+                <span className={cx(valSm, overrun?.isEndingSoon && "text-amber-600 dark:text-amber-400")}>
+                  {overrun?.formattedRemaining} left
+                </span>
+              </Readout>
+            )
+          )}
           <Readout icon={FiEye} srLabel="Viewers now" title="Viewers watching now">
             <span className={val}>{(a.viewers ?? 0).toLocaleString()}</span>
           </Readout>

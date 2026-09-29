@@ -39,10 +39,30 @@ def _assigned(db, event_id, role: str) -> list[str]:
 
 
 def _audience(db, event: Event) -> dict:
+    from . import bus
+    from .watch_time import aggregate_event_watch_time
     sessions = db.scalars(select(BroadcastSession).where(BroadcastSession.event_id == event.id)).all()
     snapshots = db.scalars(select(AnalyticsSnapshot).where(AnalyticsSnapshot.event_id == event.id)).all()
     peak = max((s.peak_viewers for s in sessions), default=0)
-    watch_hours = round(sum(s.viewers for s in snapshots) * SAMPLE_HOURS, 1)
+
+    stored_summary = None
+    for bs in sessions:
+        if isinstance(bs.settings, dict) and "analytics_summary" in bs.settings:
+            stored_summary = bs.settings["analytics_summary"]
+            break
+    if not stored_summary:
+        stored_summary = bus.summary_get_sync(event.id)
+
+    agg = aggregate_event_watch_time(
+        event_id=event.id,
+        sessions=bus.session_get_all_sync(event.id),
+        snaps=snapshots,
+        event_start=event.start_time,
+        event_end=event.end_time,
+        summary_override=stored_summary,
+    )
+    watch_hours = round(agg["watch_hours"], 1) if agg["watch_hours"] is not None else None
+    peak = max(peak, agg.get("viewer_count", 0))
 
     total_registrations = db.scalar(
         select(func.count()).select_from(EventRegistration).where(EventRegistration.event_id == event.id)

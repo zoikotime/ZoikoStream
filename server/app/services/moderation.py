@@ -43,7 +43,7 @@ from ..models import (
     LiveQuestionVote,
     User,
 )
-from . import bus, livekit
+from . import bus, livekit, event_overrun
 
 # How much history a reconnecting console loads. ponytail: a fixed window, not paging —
 # an operator needs the recent room, and the full chat log is an export concern.
@@ -472,6 +472,13 @@ def _snapshot(db, ctx: Ctx) -> dict:
             "host": host.full_name if host else None,
             "recording": bool(ev.recording_enabled),
             "started_at": _iso(started),
+            "start_time": _iso(ev.start_time),
+            "end_time": _iso(ev.end_time),
+            "scheduled_start": _iso(ev.start_time),
+            "scheduled_end": _iso(ev.end_time),
+            "timezone": ev.timezone,
+            "auto_end_event": bool(ev.auto_end_event),
+            "overrun": event_overrun.evaluate_event_overrun(ev.end_time),
             "features": {
                 "chat": ev.chat_enabled, "qa": ev.qa_enabled, "polls": ev.polls_enabled,
                 "raise_hand": ev.raise_hand_enabled,
