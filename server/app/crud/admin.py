@@ -1328,6 +1328,7 @@ def resolve_plan_for_provider_price(db, price_ids) -> tuple[Plan | None, str | N
 
 def record_subscription_checkout_started(db, sub: Subscription, *, checkout_session_ref: str,
                                           billing_interval: str | None = None,
+                                          superseded_checkout_session_ref: str | None = None,
                                           actor=None) -> Subscription:
     """Bind a Checkout Session to the subscription so the eventual webhook can find it.
 
@@ -1343,11 +1344,14 @@ def record_subscription_checkout_started(db, sub: Subscription, *, checkout_sess
     sub.checkout_session_ref = checkout_session_ref
     if billing_interval:
         sub.billing_interval = billing_interval
+    meta = {"checkout_session_ref": checkout_session_ref, "plan_id": str(sub.plan_id),
+            "billing_interval": billing_interval}
+    if superseded_checkout_session_ref:
+        meta["superseded_checkout_session_ref"] = superseded_checkout_session_ref
     create_audit_log(
         db, actor=actor, action="subscription.checkout_started",
         target_type="subscription", target_id=sub.id, org_id=sub.org_id,
-        meta={"checkout_session_ref": checkout_session_ref, "plan_id": str(sub.plan_id),
-              "billing_interval": billing_interval},
+        meta=meta,
     )
     return sub
 
