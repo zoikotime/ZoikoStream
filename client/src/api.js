@@ -70,10 +70,34 @@ api.interceptors.response.use(
 
 export default api;
 
+// Cloudflare's own edge errors (HTTP 520-530). These are not answers from ZoikoStream: the
+// request died between Cloudflare and our server. Cloudflare sends API clients a JSON body
+// whose `detail` is its own prose ("The SSL/TLS handshake between Cloudflare and the origin
+// server failed ... missing shared cipher suites ..."), and errMsg used to print that verbatim
+// as if the settings themselves had been refused.
+//
+// Whether the change could have been applied depends on WHERE it failed, so the message says
+// so rather than guessing: a refused connection or TLS handshake means the request was never
+// delivered; a timeout or garbled reply after connecting means it may have been.
+const EDGE_NOT_DELIVERED = new Set([521, 522, 523, 525, 526]);
+export const edgeErrorMessage = (e) => {
+  const status = e?.response?.status;
+  if (!(status >= 520 && status <= 530)) return null;
+  if (status === 525 || status === 526) {
+    return `The secure connection to the ZoikoStream server could not be established (edge error ${status}). The request was not delivered and nothing was changed. Please try again in a moment.`;
+  }
+  if (EDGE_NOT_DELIVERED.has(status)) {
+    return `The ZoikoStream server could not be reached (edge error ${status}). The request was not delivered and nothing was changed. Please try again in a moment.`;
+  }
+  return `The ZoikoStream server did not answer normally (edge error ${status}). The change may or may not have been applied — reload the page to check before trying again.`;
+};
+
 // Turn an axios error into a readable string for toasts. Must always return a
 // string: FastAPI 422s send `detail` as an array of {loc,msg,...} objects, and
 // passing a non-string to toast.error() crashes React (blank screen).
 export const errMsg = (e, fallback = "Something went wrong") => {
+  const edge = edgeErrorMessage(e);
+  if (edge) return edge;
   const d = e?.response?.data?.detail;
   if (typeof d === "string") return d;
   if (Array.isArray(d)) return d.map((x) => x?.msg).filter(Boolean).join(", ") || fallback;

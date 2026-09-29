@@ -14,9 +14,9 @@ const SIZES = { sm: "max-w-sm", md: "max-w-md", lg: "max-w-lg", xl: "max-w-2xl" 
 // page can't scroll to reach it. Capping at the viewport minus the overlay's p-4 gutter and
 // giving the body `flex-1 overflow-y-auto` keeps the header and footer pinned and makes the
 // content scrollable instead.
-export default function Modal({ open, onClose, title, size = "md", className = "", children, footer }) {
+export default function Modal({ open, onClose, title, size = "md", className = "", closeOnBackdrop = false, children, footer }) {
   return (
-    <Overlay open={open} onClose={onClose} className="grid place-items-center p-4">
+    <Overlay open={open} onClose={onClose} closeOnBackdrop={closeOnBackdrop} className="grid place-items-center p-4">
       <div
         role="dialog"
         aria-modal="true"

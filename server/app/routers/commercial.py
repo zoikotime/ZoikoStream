@@ -1467,7 +1467,8 @@ def _handle_subscription_event(db: Session, event: dict, *, correlation_id: str,
     """
     facts = stripe_events.subscription_facts(event)
     checkout = stripe_events.checkout_subscription_facts(event) if facts is None else None
-    if facts is None and checkout is None:
+    invoice_failure = stripe_events.invoice_payment_failure_facts(event) if facts is None and checkout is None else None
+    if facts is None and checkout is None and invoice_failure is None:
         return None
 
     claim = crud.record_provider_event_evidence(
@@ -1479,7 +1480,7 @@ def _handle_subscription_event(db: Session, event: dict, *, correlation_id: str,
         # Already processed — return the stored answer, unchanged.
         return {"received": True, "stripe_event_type": event["type"], **claim}
 
-    ref = checkout or facts
+    ref = checkout or facts or invoice_failure
     sub = admin_crud.subscription_by_provider_ref(
         db,
         checkout_session_ref=(checkout or {}).get("checkout_session_ref"),
@@ -1491,8 +1492,28 @@ def _handle_subscription_event(db: Session, event: dict, *, correlation_id: str,
         _log.warning("stripe subscription event matched no subscription correlation_id=%s",
                      correlation_id)
         db.commit()
-        return {"received": True, "stripe_event_type": event["type"],
-                "applied": False, "reason": "no_matching_subscription", **claim}
+        return {**claim, "received": True, "stripe_event_type": event["type"],
+                "applied": False, "reason": "no_matching_subscription"}
+
+    if invoice_failure is not None:
+        applied, error = admin_crud.apply_subscription_provider_event(
+            db, sub, new_state="past_due",
+            reason=f"stripe:{event['type']}",
+        )
+        admin_crud.create_audit_log(
+            db, actor=None, action="subscription.invoice_payment_failed",
+            target_type="subscription", target_id=sub.id, org_id=sub.org_id,
+            meta={"invoice_ref": invoice_failure.get("invoice_id"),
+                  "attempt_count": invoice_failure.get("attempt_count"),
+                  "billing_reason": invoice_failure.get("billing_reason"),
+                  "transition_applied": applied,
+                  "entitlement": "undefined - past_due remains entitled",
+                  "dunning": "no grace period, no restriction, no suspension, no cancellation"},
+        )
+        db.commit()
+        return {**claim, "received": True, "stripe_event_type": event["type"],
+                "applied": applied, "subscription_state": sub.status,
+                "reason": "invoice_payment_failed", "error": error}
 
     if checkout is not None:
         # Correlation — binding Stripe's ids to our row. Explicitly NOT an activation:
@@ -1530,16 +1551,16 @@ def _handle_subscription_event(db: Session, event: dict, *, correlation_id: str,
                   "advanced_to_conversion_pending": advanced},
         )
         db.commit()
-        return {"received": True, "stripe_event_type": event["type"],
+        return {**claim, "received": True, "stripe_event_type": event["type"],
                 "applied": advanced, "subscription_state": sub.status,
-                "reason": "checkout_correlated", **claim}
+                "reason": "checkout_correlated"}
 
     if not facts.get("state"):
         # A Stripe status with no Section 12 counterpart (incomplete, paused, ...). Retained as
         # evidence; inventing a state for it would be a commercial rule we have no authority for.
         db.commit()
-        return {"received": True, "stripe_event_type": event["type"], "applied": False,
-                "reason": f"unmapped_provider_status:{facts.get('provider_status')}", **claim}
+        return {**claim, "received": True, "stripe_event_type": event["type"], "applied": False,
+                "reason": f"unmapped_provider_status:{facts.get('provider_status')}"}
 
     # Which plan the tenant bought, resolved from the price Stripe is ACTUALLY billing and
     # cross-checked against the operator's approved price configuration. Never from the request
@@ -1572,9 +1593,10 @@ def _handle_subscription_event(db: Session, event: dict, *, correlation_id: str,
         _log.warning("stripe subscription activated with unresolved plan correlation_id=%s "
                      "reason=%s", correlation_id, plan_error)
     db.commit()
-    return {"received": True, "stripe_event_type": event["type"], "applied": applied,
+    return {**claim, "received": True, "stripe_event_type": event["type"], "applied": applied,
             "subscription_state": sub.status, "error": error,
-            "plan_slug": plan.slug if plan else None, "plan_error": plan_error, **claim}
+            "plan_slug": plan.slug if plan else None, "plan_error": plan_error}
+
 
 
 @router.post("/webhooks/stripe", status_code=status.HTTP_200_OK)

@@ -543,6 +543,24 @@ def gcs_diagnostics() -> dict:
     }
 
 
+def gcs_upload_blocked() -> str | None:
+    """Why an egress started now could not deliver its file to OUR bucket, or None.
+
+    Only the configured-but-unusable case: a credential path IS set, yet it is a Console URL,
+    missing, not JSON, or not a service-account key. Starting egress then is a recording the
+    platform can already tell will never reach the bucket - _egress_request simply omits the
+    upload - so the host would record a whole event into nothing. Refused up front instead,
+    with the precise reason on the click.
+
+    An UNSET path is deliberately not blocked: egress may carry its own storage credentials,
+    and that is a legitimate deployment. Its outcome is judged at the end by the library's
+    object check (storage_unavailable), not guessed here.
+    """
+    if not settings.GCS_CREDENTIALS_PATH:
+        return None
+    return gcs_config_error()
+
+
 def gcs_configured() -> bool:
     """Whether recording uploads (the thing that actually needs the portable JSON key,
     not just this process's own reads) will work."""

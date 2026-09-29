@@ -333,6 +333,176 @@ def expire_due_trials(db: Session, *, actor: User | None = None) -> dict:
             "detail": {"expired": expired, "refused": refused, "no_trial_end_date": undated}}
 
 
+def reconcile_stripe_subscriptions(db: Session, *, actor: User | None = None, limit: int = 100) -> dict:
+    """Compare Stripe subscription state against our database, reporting divergences.
+
+    Reports; never resolves. Every divergence requires human review (Section 18).
+    Audit logs are created for every finding under:
+    action='commercial.maintenance.subscription_divergence'.
+    """
+    from ..config import settings
+    if not settings.STRIPE_SECRET_KEY:
+        return {"job": "reconcile_stripe_subscriptions", "skipped": "stripe_unconfigured"}
+
+    from ..crud import admin as admin_crud
+    from ..models import Plan
+    from . import payments as payment_svc
+    from .payments_stripe_events import _SUBSCRIPTION_STATUS_STATE
+
+    provider = payment_svc.get_provider("stripe")
+
+    findings: dict[str, int] = {}
+    detail: list[dict] = []
+    verified_matching = 0
+    unverified_due_to_provider_errors = 0
+
+    def record_finding(kind: str, finding_data: dict, *, org_id=None, sub_id=None):
+        findings[kind] = findings.get(kind, 0) + 1
+        entry = {"finding": kind, **finding_data}
+        detail.append(entry)
+        meta = {"reason": kind, **finding_data}
+        admin_crud.create_audit_log(
+            db, actor=actor, action="commercial.maintenance.subscription_divergence",
+            target_type="subscription", target_id=sub_id, org_id=org_id,
+            meta=meta,
+        )
+
+    # 1. Examine local subscriptions linked to Stripe
+    local_linked = db.scalars(
+        select(Subscription).where(Subscription.stripe_subscription_id.is_not(None))
+    ).all()
+    local_linked_examined = len(local_linked)
+
+    for sub in local_linked:
+        ref = sub.stripe_subscription_id
+        try:
+            remote = provider.retrieve_subscription(ref)
+        except payment_svc.ProviderInvalidRequest:
+            record_finding("stripe_subscription_missing", {
+                "subscription_id": str(sub.id),
+                "stripe_subscription_id": ref,
+            }, org_id=sub.org_id, sub_id=sub.id)
+            continue
+        except payment_svc.PaymentProviderError as exc:
+            unverified_due_to_provider_errors += 1
+            record_finding("provider_unreachable", {
+                "scope": "retrieve_subscription",
+                "stripe_subscription_id": ref,
+                "error": str(exc),
+            }, org_id=sub.org_id, sub_id=sub.id)
+            continue
+
+        has_divergence = False
+
+        # Status divergence
+        mapped_status = _SUBSCRIPTION_STATUS_STATE.get(remote.provider_status)
+        if mapped_status is None:
+            has_divergence = True
+            record_finding("provider_status_unmappable", {
+                "subscription_id": str(sub.id),
+                "provider_status": remote.provider_status,
+            }, org_id=sub.org_id, sub_id=sub.id)
+        elif mapped_status != sub.status:
+            has_divergence = True
+            record_finding("status_mismatch", {
+                "subscription_id": str(sub.id),
+                "provider_status": remote.provider_status,
+                "local_status": sub.status,
+            }, org_id=sub.org_id, sub_id=sub.id)
+
+        # Plan / Price divergence
+        plan, plan_error = admin_crud.resolve_plan_for_provider_price(db, remote.price_ids)
+        if plan is None:
+            has_divergence = True
+            record_finding("price_unresolvable", {
+                "subscription_id": str(sub.id),
+                "price_ids": list(remote.price_ids),
+                "error": plan_error,
+            }, org_id=sub.org_id, sub_id=sub.id)
+        else:
+            local_plan = db.get(Plan, sub.plan_id)
+            if local_plan is None or local_plan.id != plan.id:
+                has_divergence = True
+                record_finding("plan_mismatch", {
+                    "subscription_id": str(sub.id),
+                    "provider_plan_slug": plan.slug,
+                    "local_plan_slug": local_plan.slug if local_plan else None,
+                }, org_id=sub.org_id, sub_id=sub.id)
+
+        # Billing interval divergence
+        interval_map = {"month": "monthly", "year": "annual"}
+        as_ours = interval_map.get(remote.provider_interval, remote.provider_interval)
+        if sub.billing_interval is None:
+            has_divergence = True
+            record_finding("interval_unrecorded", {
+                "subscription_id": str(sub.id),
+                "provider_interval_as_ours": as_ours,
+            }, org_id=sub.org_id, sub_id=sub.id)
+        elif sub.billing_interval != as_ours:
+            has_divergence = True
+            record_finding("interval_mismatch", {
+                "subscription_id": str(sub.id),
+                "provider_interval_as_ours": as_ours,
+                "local_billing_interval": sub.billing_interval,
+            }, org_id=sub.org_id, sub_id=sub.id)
+
+        if not has_divergence:
+            verified_matching += 1
+
+    # 2. Check for checkouts paid without linkage
+    unlinked_checkouts = db.scalars(
+        select(Subscription).where(
+            Subscription.checkout_session_ref.is_not(None),
+            Subscription.stripe_subscription_id.is_(None),
+        )
+    ).all()
+    for sub in unlinked_checkouts:
+        try:
+            sess = provider.retrieve_subscription_checkout_session(sub.checkout_session_ref)
+            if sess.paid and sess.stripe_subscription_id:
+                record_finding("checkout_paid_without_linkage", {
+                    "subscription_id": str(sub.id),
+                    "checkout_session_ref": sub.checkout_session_ref,
+                    "stripe_subscription_id": sess.stripe_subscription_id,
+                }, org_id=sub.org_id, sub_id=sub.id)
+        except Exception:
+            pass
+
+    # 3. List provider subscriptions for orphans
+    provider_subscriptions_examined = 0
+    provider_page_truncated = False
+    try:
+        if hasattr(provider, "list_subscriptions"):
+            remote_subs = provider.list_subscriptions(limit=limit)
+            provider_subscriptions_examined = len(remote_subs)
+            if len(remote_subs) >= limit:
+                provider_page_truncated = True
+            known_refs = {s.stripe_subscription_id for s in local_linked}
+            for r in remote_subs:
+                if r.provider_status != "canceled" and r.provider_subscription_ref not in known_refs:
+                    record_finding("orphan_stripe_subscription", {
+                        "stripe_subscription_id": r.provider_subscription_ref,
+                        "provider_status": r.provider_status,
+                    })
+    except payment_svc.PaymentProviderError as exc:
+        record_finding("provider_unreachable", {
+            "scope": "list_subscriptions",
+            "error": str(exc),
+        })
+
+    db.commit()
+    return {
+        "job": "reconcile_stripe_subscriptions",
+        "findings": findings,
+        "detail": detail,
+        "verified_matching": verified_matching,
+        "local_linked_examined": local_linked_examined,
+        "provider_subscriptions_examined": provider_subscriptions_examined,
+        "unverified_due_to_provider_errors": unverified_due_to_provider_errors,
+        "provider_page_truncated": provider_page_truncated,
+    }
+
+
 JOBS = (
     expire_capacity_holds,
     release_stale_reservations,
@@ -342,6 +512,7 @@ JOBS = (
     expire_commercial_overrides,
     apply_due_plan_changes,
     expire_due_trials,
+    reconcile_stripe_subscriptions,
 )
 
 

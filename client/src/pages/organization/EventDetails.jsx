@@ -262,7 +262,12 @@ function ReportsPanel({ event }) {
 export default function EventDetails() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [tab, setTab] = useState("Overview");
+  // ?tab=Recording (from the Recordings library's failure notice) lands on that tab. Only a
+  // seed: switching tabs stays local state, as before.
+  const [tab, setTab] = useState(() => {
+    const requested = new URLSearchParams(window.location.search).get("tab");
+    return TABS.includes(requested) ? requested : "Overview";
+  });
   const [busy, setBusy] = useState(false);
   const [manageRole, setManageRole] = useState(null); // "Host" | "Speaker" | null
   const [inviteOpen, setInviteOpen] = useState(false);

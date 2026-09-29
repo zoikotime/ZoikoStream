@@ -624,3 +624,38 @@ def _refund_generic_event(charge_obj: dict) -> str:
     if isinstance(amount, int) and isinstance(refunded, int) and amount > 0:
         return "refunded" if refunded >= amount else "refund_partial"
     return "refund_partial"
+
+
+def invoice_payment_failure_facts(event: dict) -> dict | None:
+    """Extract facts from an invoice.payment_failed event.
+
+    Only invoice.payment_failed is a Ledger 1 trigger. One-off invoices and other invoice
+    event types return None so they fall through to Ledger 2.
+    """
+    if not isinstance(event, dict) or event.get("type") != "invoice.payment_failed":
+        return None
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    obj = data.get("object")
+    if not isinstance(obj, dict):
+        return None
+
+    sub_ref = obj.get("subscription")
+    if not sub_ref and isinstance(obj.get("parent"), dict):
+        sub_details = obj["parent"].get("subscription_details")
+        if isinstance(sub_details, dict):
+            sub_ref = sub_details.get("subscription")
+
+    if not isinstance(sub_ref, str) or not sub_ref.startswith("sub_"):
+        return None
+
+    return {
+        "stripe_subscription_id": sub_ref,
+        "state": "past_due",
+        "stripe_customer_id": obj.get("customer") if isinstance(obj.get("customer"), str) else None,
+        "billing_reason": obj.get("billing_reason"),
+        "attempt_count": obj.get("attempt_count"),
+        "invoice_id": obj.get("id"),
+    }
+

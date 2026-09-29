@@ -272,7 +272,7 @@ def create_subscription_checkout(data: SubscriptionCheckoutCreate,
         # path rather than showing a broken checkout.
         raise HTTPException(status.HTTP_409_CONFLICT, str(e))
 
-    sub = admin_crud._current_subs(db, [org.id]).get(org.id)
+    sub = admin_crud.current_subscription_for_update(db, org.id)
     if sub is None:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "This organization has no subscription record to upgrade")
@@ -283,56 +283,51 @@ def create_subscription_checkout(data: SubscriptionCheckoutCreate,
     # subscriptions on the same customer and was billed for both — the plan never changed, and
     # the second charge was silent. That is a money bug, not a missing feature, so it is
     # refused here rather than left to be noticed on an invoice.
-    #
-    # Changing the plan of an already-paid subscription is Section 12's PLAN_CHANGE_SCHEDULED
-    # path, which is NOT implemented: the effective-date and proration rules it needs are
-    # undefined by ZST-COM-PLAN-001 and by the Approved Price Book, so there is no correct
-    # amount to charge and no defensible date to charge it on. Until Product/Finance supply
-    # those rules this stays a sales conversation, which is what the Billing page already
-    # tells the customer — this makes the backend agree with it instead of quietly
-    # double-billing.
-    #
-    # The condition itself now lives in ONE place (models.subscription), because the console
-    # has to ask the same question to decide whether to render "Upgrade" at all — and when it
-    # asked separately, it got a different answer and offered a button that could only 409.
     if has_live_provider_subscription(sub):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "This organization already has an active subscription. Changing the plan of a "
+            "This organization already has an active subscription (already has a paid subscription). Changing the plan of a "
             "paid subscription is not self-service yet — please contact sales so the change "
             "can be scheduled without double-billing you.",
         )
 
-    base = settings.APP_URL.rstrip("/")
-    # EXPLICITLY "stripe". get_provider() defaults to the deterministic SIMULATOR, so calling it
-    # bare handed this route a MockPaymentProvider — which has no subscription-checkout method at
-    # all, so the endpoint 500'd instead of ever reaching Stripe. Every Ledger 2 call site
-    # already names its provider; this was the one that did not.
-    #
-    # Naming it is also the safer shape: get_provider("stripe") FAILS CLOSED with
-    # ProviderNotConfigured when there is no secret key, where the bare call would silently
-    # return a simulator. The stripe_configured() guard above turns that into a 503 first, so
-    # this route can never produce a fabricated checkout.
     provider = payment_svc.get_provider("stripe")
+    superseded_ref = None
+    if sub.checkout_session_ref:
+        try:
+            session = provider.retrieve_subscription_checkout_session(sub.checkout_session_ref)
+        except payment_svc.PaymentProviderError as e:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Payment provider error: {e}")
 
+        if session.paid:
+            admin_crud.create_audit_log(
+                db, actor=user, action="subscription.checkout_refused_already_paid",
+                target_type="subscription", target_id=sub.id, org_id=org.id,
+                meta={"checkout_session_ref": sub.checkout_session_ref},
+            )
+            db.commit()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This organization already has a paid subscription awaiting activation.",
+            )
+
+        if not session.paid and not session.terminal:
+            if session.checkout_url:
+                return {
+                    "checkout_url": session.checkout_url,
+                    "checkout_session_ref": session.checkout_session_ref,
+                    "reused_existing_session": True,
+                }
+            raise HTTPException(status.HTTP_409_CONFLICT, "Outstanding checkout session is unrecognised")
+
+        if session.terminal:
+            superseded_ref = sub.checkout_session_ref
+
+    base = settings.APP_URL.rstrip("/")
     success_url = f"{base}/organization/billing?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{base}/organization/billing?checkout=cancelled"
     metadata = {"org_id": str(org.id), "plan_slug": plan.slug, "subscription_id": str(sub.id)}
 
-    # Idempotency key = org + plan + a FINGERPRINT OF THE REQUEST ITSELF.
-    #
-    # It was `{org.id}:{plan.slug}` alone, which is stable forever — and Stripe rejects a reused
-    # key whose parameters have changed ("Keys for idempotent requests can only be used with the
-    # same parameters they were first used with"). So the first time anything in the session
-    # changed, that organization could never check out for that plan again: every attempt
-    # returned IdempotencyError -> 502, permanently. A changed APP_URL after a deploy, or a user
-    # changing their email address, was enough to poison it for good.
-    #
-    # Hashing the parameters makes the collision impossible by construction while keeping the
-    # property that mattered: an identical retry (the payer double-clicks, or the browser
-    # re-sends) still produces the SAME key and therefore the same Stripe session rather than a
-    # second subscription. A genuinely different request simply gets a different key, which is
-    # what Stripe's contract asks for.
     fingerprint = hashlib.sha256(json.dumps(
         {"price_id": price_id, "success_url": success_url, "cancel_url": cancel_url,
          "metadata": metadata, "customer_email": user.email},
@@ -353,10 +348,10 @@ def create_subscription_checkout(data: SubscriptionCheckoutCreate,
 
     admin_crud.record_subscription_checkout_started(
         db, sub, checkout_session_ref=result.checkout_session_ref,
-        billing_interval=data.billing_interval, actor=user)
+        billing_interval=data.billing_interval,
+        superseded_checkout_session_ref=superseded_ref,
+        actor=user)
     db.commit()
-    # The Price ID is deliberately NOT returned: the browser has no use for it and echoing it
-    # would invite a client that tries to send one back.
     return {"checkout_url": result.checkout_url,
             "checkout_session_ref": result.checkout_session_ref}
 
@@ -607,10 +602,7 @@ def list_event_recordings(
             if (rec.enforced and rec.file_url and rec.status == "stopped")
             else None
         )
-        state = (
-            "in_progress" if rec.status in ("recording", "paused")
-            else event_crud.recording_library_state(rec, url)
-        )
+        state = event_crud.recording_row_state(rec, url)
         out.append(EventRecordingOut(
             id=rec.id, event_id=event_id, status=rec.status, enforced=rec.enforced,
             state=state,
@@ -652,6 +644,20 @@ def list_recordings(
             validation_status=rec.validation_status,
         ))
     return out
+
+
+@router.get("/recordings/summary")
+def recordings_summary(
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """What happened to every recording attempt in this organization, for the library header.
+
+    The library above lists captured recordings only; this says how many attempts are still
+    running or failed to capture (and the latest failure's reason and event), so an empty
+    library is never mistaken for "nothing was attempted". Counted in SQL over all rows.
+    Org-scoped exactly like the library, and readable by the same members."""
+    return event_crud.org_recording_summary(db, org.id)
 
 
 @router.delete("/recordings/{recording_id}", status_code=status.HTTP_204_NO_CONTENT)
