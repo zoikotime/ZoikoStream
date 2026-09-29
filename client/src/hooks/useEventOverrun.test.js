@@ -4,9 +4,7 @@ import useEventOverrun, {
   computeOverrunState,
   formatDuration,
   formatOverrunMinutes,
-  REMINDER_THRESHOLDS,
 } from "./useEventOverrun";
-import { notify } from "../ui/Toast";
 
 vi.mock("../ui/Toast", () => ({
   notify: {
