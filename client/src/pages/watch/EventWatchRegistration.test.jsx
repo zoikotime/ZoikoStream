@@ -36,11 +36,14 @@ vi.mock("../../hooks/useEventStream", () => ({
 vi.mock("../../hooks/useKeepAwake", () => ({ default: () => {} }));
 // Shape matches the real hook's return (hooks/useLiveKitViewer.js) — VideoPlayer attaches
 // mediaRef to its <video>, so a stand-in has to supply a real ref object.
-vi.mock("../../hooks/useLiveKitViewer", () => {
+vi.mock("../../hooks/useLiveKitViewer", async (importOriginal) => {
   // A plain object, not useRef: React accepts one as a ref, and a hook call inside a
   // non-component factory is not a legal hook call.
   const mediaRef = { current: null };
+  // The real resolver, not a stub: VideoPlayer derives the menu's checkmark from it.
+  const { resolveQuality } = await importOriginal();
   return {
+    resolveQuality,
     default: () => ({
       mediaRef, connected: true, reconnecting: false,
       hasVideo: true, hasAudio: true, error: null,
