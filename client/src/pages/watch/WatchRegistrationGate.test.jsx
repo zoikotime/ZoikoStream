@@ -33,7 +33,11 @@ vi.mock("../../hooks/useEventStream", () => ({
   default: () => ({ status: "closed", send: vi.fn(), disconnect: vi.fn(), closeReason: null }),
 }));
 
-vi.mock("../../hooks/useLiveKitViewer", () => ({
+// Spreads the real module so only the hook itself is stubbed: VideoPlayer also imports the
+// named `resolveQuality` to decide which quality row is checked, and a factory that returned
+// `default` alone left that export undefined at import time.
+vi.mock("../../hooks/useLiveKitViewer", async (importOriginal) => ({
+  ...(await importOriginal()),
   default: () => ({
     mediaRef: { current: null },
     connected: false,

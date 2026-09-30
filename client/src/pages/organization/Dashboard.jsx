@@ -109,7 +109,10 @@ export default function OrganizationDashboard() {
   const liveCount = sessions.live ?? null;
   const startingSoon = sessions.starting_soon || 0;
 
-  const viewers = analytics.data?.summary?.viewers ?? null;
+  // `peak_viewers_summed`, not `viewers`: services/org.py::analytics renamed the key (it is
+  // the sum of each event's PEAK concurrency), and reading the old name left this card on
+  // "—" for every organization. It is not `summary.peak`, which is the single highest peak.
+  const viewers = analytics.data?.summary?.peak_viewers_summed ?? null;
   const rangeLabel = RANGES.find((r) => r.key === range)?.label.toLowerCase() ?? "";
 
   return (
