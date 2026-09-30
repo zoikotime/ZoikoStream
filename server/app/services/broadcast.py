@@ -1359,6 +1359,24 @@ def _counts(db, event_id, org_id, since=None) -> dict:
             "reactions": reactions, "polls": len(polls)}
 
 
+def _interaction_totals(counts: dict, peak: int) -> dict:
+    """The cumulative interaction tiles, shared by analytics_now (connect snapshot) and the
+    sampler's analytics.tick. The tick used to carry only `engagement`, and useLiveEvent.js
+    merges a tick over the previous block — so Questions / Reactions / Poll votes / turnout
+    stayed frozen at whatever they were when the console connected, while Engagement (from
+    the same fresh counts) moved. One builder so the two payloads cannot drift again.
+
+    Every figure here is already public to the room (poll.update carries each poll's vote
+    total; questions and message reactions are rendered in chat/Q&A), so putting them on a
+    tick that reaches every socket exposes nothing new."""
+    return {
+        "questions_asked": counts["questions"],
+        "reactions": counts["reactions"],
+        "poll_votes": counts["poll_votes"],
+        "poll_participation": round(100 * counts["poll_votes"] / peak, 1) if peak else None,
+    }
+
+
 async def analytics_now(ctx) -> dict:
     """The live analytics block: real counters, real presence, honest nulls."""
     people = await bus.presence_all(ctx.event_id)
@@ -1390,10 +1408,7 @@ async def analytics_now(ctx) -> dict:
             "total_watch_seconds": wt.get("total_watch_seconds"),
             "watch_hours": wt.get("watch_hours"),
             "chat_per_minute": recent["messages"],
-            "questions_asked": counts["questions"],
-            "reactions": counts["reactions"],
-            "poll_votes": counts["poll_votes"],
-            "poll_participation": round(100 * counts["poll_votes"] / peak, 1) if peak else None,
+            **_interaction_totals(counts, peak),
             "engagement": engagement_score(counts, peak),
             "devices": _distribution(people, "device"),
             "platforms": _distribution(people, "platform"),
@@ -1870,6 +1885,7 @@ async def _sample_once() -> list[tuple[str, dict]]:
 
         out.append((event_id, {
             **split, "peak_viewers": peak,
+            **_interaction_totals(counts, peak),
             "engagement": engagement_score(counts, peak),
             "avg_watch_seconds": _watch_seconds(people, datetime.now(timezone.utc).timestamp()),
             "health": health,

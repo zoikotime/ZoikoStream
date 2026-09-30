@@ -35,7 +35,7 @@ const OVERVIEW = {
 
 const ANALYTICS = {
   range: "30d",
-  summary: { viewers: 18000, watch_hours: 421.5, peak: 1250, engagement: 68 },
+  summary: { peak_viewers_summed: 18000, watch_hours: 421.5, peak: 1250, engagement: 68 },
   trends: {
     viewership: [
       { label: "May 1", value: 2400 },
@@ -186,6 +186,94 @@ describe("KPI cards", () => {
   });
 });
 
+// services/org.py::analytics renamed summary.viewers to peak_viewers_summed; the dashboard
+// kept reading the old key and rendered "—" / "No audience recorded yet" for every org, even
+// beside a Peak Concurrent of 1. The fixtures above used the old key too, which is why the
+// suite stayed green. These pin the real wire shape.
+describe("Total viewers reads the analytics service's real key", () => {
+  // A single ended event with one viewer: the production case that surfaced the bug.
+  const ONE_VIEWER = {
+    range: "30d",
+    summary: { peak_viewers_summed: 1, watch_hours: 0.033, peak: 1, engagement: 0 },
+    trends: { viewership: [{ label: "Sep 27", value: 1 }] },
+  };
+
+  function metric(label) {
+    // The overview panel's <dt>label</dt><dd>value</dd> pairs.
+    return screen.getByText(label, { selector: "dt" }).nextElementSibling;
+  }
+
+  it("shows the recorded audience instead of the empty state", async () => {
+    world.analytics = () => Promise.resolve({ data: ONE_VIEWER });
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    await waitFor(() => expect(within(viewers).getByText("1")).toBeInTheDocument());
+    expect(within(viewers).queryByText("—")).not.toBeInTheDocument();
+    expect(within(viewers).queryByText(/no audience recorded yet/i)).not.toBeInTheDocument();
+    expect(within(viewers).getByText(/across events · last 30 days/i)).toBeInTheDocument();
+    expect(metric("Total Viewers")).toHaveTextContent("1");
+  });
+
+  it("is the sum of per-event peaks, not the single highest peak", async () => {
+    // Two events peaking at 3 and 2: summed = 5, peak = 3. The two must not be conflated.
+    world.analytics = () =>
+      Promise.resolve({
+        data: {
+          ...ONE_VIEWER,
+          summary: { peak_viewers_summed: 5, watch_hours: 0.5, peak: 3, engagement: 12 },
+        },
+      });
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    await waitFor(() => expect(within(viewers).getByText("5")).toBeInTheDocument());
+    expect(metric("Total Viewers")).toHaveTextContent("5");
+    expect(metric("Peak Concurrent")).toHaveTextContent("3");
+  });
+
+  it("leaves the other analytics figures exactly as the API reported them", async () => {
+    world.analytics = () => Promise.resolve({ data: ONE_VIEWER });
+    renderDashboard();
+    await waitFor(() => expect(metric("Total Viewers")).toHaveTextContent("1"));
+    expect(metric("Watch Time")).toHaveTextContent("0.033 hrs");
+    expect(metric("Peak Concurrent")).toHaveTextContent("1");
+    expect(metric("Avg. Engagement")).toHaveTextContent("0%");
+    expect(within(await card("Completed events")).getByText("45")).toBeInTheDocument();
+  });
+
+  it("keeps a measured zero as 0 with the existing empty-state note", async () => {
+    world.analytics = () =>
+      Promise.resolve({
+        data: {
+          summary: { peak_viewers_summed: 0, watch_hours: null, peak: 0, engagement: null },
+          trends: { viewership: [] },
+        },
+      });
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    await waitFor(() => expect(within(viewers).getByText("0")).toBeInTheDocument());
+    expect(within(viewers).getByText(/no audience recorded yet/i)).toBeInTheDocument();
+  });
+
+  it("does not fall back to the retired `viewers` key", async () => {
+    world.analytics = () =>
+      Promise.resolve({ data: { summary: { viewers: 99, peak: 1 }, trends: { viewership: [] } } });
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    await waitFor(() => expect(within(viewers).getByText("—")).toBeInTheDocument());
+    expect(within(viewers).queryByText("99")).not.toBeInTheDocument();
+  });
+
+  it("says analytics is unavailable, not empty, when the request fails", async () => {
+    world.analytics = () => Promise.reject(new Error("nope"));
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    await waitFor(() =>
+      expect(within(viewers).getByText(/analytics unavailable/i)).toBeInTheDocument()
+    );
+    expect(within(viewers).getByText("—")).toBeInTheDocument();
+  });
+});
+
 describe("the operations console that used to be here", () => {
   it("no longer shows the six operational tiles", async () => {
     renderDashboard();
@@ -292,7 +380,7 @@ describe("analytics panel", () => {
   it("explains an empty trend instead of drawing a flat line across an empty chart", async () => {
     world.analytics = () =>
       Promise.resolve({
-        data: { summary: { viewers: 0, watch_hours: 0, peak: 0, engagement: 0 }, trends: { viewership: [] } },
+        data: { summary: { peak_viewers_summed: 0, watch_hours: 0, peak: 0, engagement: 0 }, trends: { viewership: [] } },
       });
     renderDashboard();
     expect(await screen.findByText(/no analytics yet/i)).toBeInTheDocument();

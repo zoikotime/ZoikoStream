@@ -26,7 +26,7 @@ import {
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import { initials } from "../../data/watch";
-import useLiveKitViewer from "../../hooks/useLiveKitViewer";
+import useLiveKitViewer, { resolveQuality } from "../../hooks/useLiveKitViewer";
 import useMediaQuery from "../../hooks/useMediaQuery";
 import Overlay from "../../ui/Overlay";
 import Logo from "../../ui/Logo";
@@ -310,6 +310,12 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   const showUnmutePrompt = muted && !showPlaceholder
     && ((canStream && (hasVideo || hasAudio)) || (canReplay && replayStarted));
 
+  // The quality the menu should show as chosen. Resolved through the SAME function the hook
+  // and applyQuality use, so the checkmark reports the rendition actually being requested
+  // rather than the one that was clicked: a 1080p pick against a 720p ladder reads 720p here,
+  // and a single-rendition stretch (screen share, or before layer metadata lands) reads Auto.
+  const activeQuality = resolveQuality(videoLayers, quality);
+
   // ONE definition of the three settings pages, rendered by BOTH presentations below —
   // the desktop popover and the phone sheet. Written as JSX rather than a component so it
   // closes over the state and handlers it needs instead of drilling ten props, and so the
@@ -337,7 +343,12 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                           <FiMonitor className="text-base text-white/80" />
                           <div>
                             <p className="font-medium">Quality</p>
-                            <p className="text-xs text-white/50">Auto</p>
+                            {/* Was the literal string "Auto", so this row claimed Auto no
+                                matter what the viewer had picked — the sub-page checkmark
+                                and this line disagreed. Same `activeQuality` both places. */}
+                            <p className="text-xs text-white/50">
+                              {activeQuality === "auto" ? "Auto" : activeQuality}
+                            </p>
                           </div>
                         </div>
 
@@ -399,31 +410,33 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                       </div>
 
                       {/* Built from the layers the publisher ACTUALLY sent
-                          (publication.trackInfo.layers), never a fixed list. LiveKit
-                          simulcast is three levels, and a 720p camera simply has no 1080p
-                          layer — so an option only appears when there is a real rendition
-                          behind it. Selecting one calls
-                          RemoteTrackPublication.setVideoQuality, which changes THIS viewer's
-                          subscription in-session: no reload, no reconnect, and no effect on
-                          the publisher or on anyone else watching. */}
+                          (publication.trackInfo.layers), never a fixed list — a 720p camera
+                          simply has no 1080p layer, so an option only appears when there is
+                          a real rendition behind it. Auto calls setVideoQuality(HIGH), which
+                          is the call that releases a manual cap; a rendition calls
+                          setVideoDimensions with that layer's real size, so every row is a
+                          distinct request rather than the top row being a synonym for Auto
+                          (see applyQuality). Either way it changes THIS viewer's subscription
+                          in-session: no reload, no reconnect, and no effect on the publisher
+                          or on anyone else watching. */}
                       <button
                         type="button"
                         onClick={() => { selectQuality("auto"); setSettingsPage("main"); }}
                         className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
                       >
                         <span>Auto</span>
-                        {quality === "auto" && <FiCheck className="text-emerald-400" />}
+                        {activeQuality === "auto" && <FiCheck className="text-emerald-400" />}
                       </button>
 
                       {videoLayers.map((layer) => (
                         <button
-                          key={layer.quality}
+                          key={layer.label}
                           type="button"
-                          onClick={() => { selectQuality(layer.quality); setSettingsPage("main"); }}
+                          onClick={() => { selectQuality(layer.label); setSettingsPage("main"); }}
                           className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
                         >
                           <span>{layer.label}</span>
-                          {quality === layer.quality && <FiCheck className="text-emerald-400" />}
+                          {activeQuality === layer.label && <FiCheck className="text-emerald-400" />}
                         </button>
                       ))}
 
