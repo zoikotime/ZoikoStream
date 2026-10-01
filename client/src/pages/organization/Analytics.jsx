@@ -30,6 +30,7 @@ import {
 } from "recharts";
 import { ChartCard, ChartTooltip, PieChart } from "../../ui/charts";
 import DataTable from "../../components/admin/DataTable";
+import ViewingSessionsPanel from "../../components/organization/ViewingSessionsPanel";
 import { fmtDate } from "../../data/events";
 import { formatEngagement, formatWatchTime } from "../../utils/analyticsFormat";
 
@@ -486,6 +487,9 @@ export default function OrganizationAnalytics() {
               </p>
             </Card>
           </div>
+
+          {/* Session-aware metrics: additional to everything above, which is unchanged. */}
+          <ViewingSessionsPanel summary={data.session_summary} reports={reports} />
 
           {/* Recent reports */}
           <Card padding="none" className="overflow-hidden">

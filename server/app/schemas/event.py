@@ -164,6 +164,33 @@ class WatchOut(BaseModel):
     # anything already reading it). Deliberately not a live LiveKit API call on every viewer
     # request — see routers/events.py::watch_event for why.
     media_status: str = "live"
+    # Capacity protection (services/admission.py). "waiting" means the event is live and this
+    # viewer may watch, but the infrastructure ceiling is reached: no token this time, ask
+    # again after retry_after_seconds. Viewers already admitted never get "waiting". None
+    # means admission did not apply (not live, or not entitled to a stream anyway).
+    admission: Literal["admitted", "waiting"] | None = None
+    retry_after_seconds: int | None = None
+    # What the ended page can honestly say about a replay, set only once the event is over:
+    # "available" (recording_url is set), "processing" (published but the watermarked copy is
+    # still being made, or the recording is being validated), "expired" (the replay window
+    # has closed) or "unavailable" (nothing will be served). Until when an available replay
+    # stays available, if its entitlement says.
+    replay_state: Literal["available", "processing", "expired", "unavailable"] | None = None
+    replay_available_until: datetime | None = None
+
+
+class InvitationRedeem(BaseModel):
+    """The fragment secret from an invitation link, sent once by the viewer page.
+    See services/invitation_links.py."""
+    kind: Literal["invite", "link"]
+    secret: str = Field(..., min_length=16, max_length=256)
+
+
+class InvitationRedeemed(BaseModel):
+    """The credential the EXISTING viewer flow uses: `reg` (registration token) or `link`
+    (an access-link pass), stored by the page exactly as before."""
+    credential: Literal["reg", "link"]
+    token: str
 
 
 class RegistrationCreate(BaseModel):

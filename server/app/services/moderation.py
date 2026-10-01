@@ -233,21 +233,28 @@ def resolve_ctx_from_access_link(event_id: uuid.UUID, raw_token: str) -> Ctx | N
     if not raw_token:
         return None
     from ..crud import event as event_crud
+    from . import invitation_links
 
     db = SessionLocal()
     try:
         ev = db.scalar(select(Event).where(Event.id == event_id, Event.deleted_at.is_(None)))
         if ev is None or ev.visibility != "private":
             return None
-        link = event_crud.find_access_link(db, ev.id, raw_token)
-        if link is None:
+        # A per-browser pass (services/invitation_links.py) or a legacy raw link token —
+        # the same resolution GET /watch uses, so the socket identity always matches the
+        # LiveKit identity that endpoint minted.
+        hit = event_crud.resolve_access_credential(db, ev.id, raw_token)
+        if hit is None:
             return None
-        identity = f"guest-link-{link.id}"
+        link, sub = hit
+        identity = invitation_links.link_identity(link.id, sub)
         return Ctx(
             event_id=ev.id,
             org_id=ev.org_id,
             room=livekit.room_for_event(ev.id),
-            user_id=link.id,
+            # One author id per browser for a pass, so two people on the same link get their
+            # own slow-mode budget and their own poll vote. A legacy raw link keeps the row id.
+            user_id=uuid.uuid5(link.id, sub) if sub else link.id,
             name=link.label or "Viewer",
             identity=identity,
             role="viewer",
@@ -283,10 +290,25 @@ def _actor_role(ctx: "Ctx") -> str:
 
 
 def message_out(m: LiveMessage, actor_role: str | None = None) -> dict:
+    rx = {}
+    rx_users = getattr(m, "reaction_users", None) or {}
+    for k, v in (m.reactions or {}).items():
+        if isinstance(v, (int, float)):
+            if v > 0:
+                rx[k] = int(v)
+        elif isinstance(v, dict):
+            c = v.get("count", 0)
+            if c > 0:
+                rx[k] = int(c)
+        elif isinstance(v, list):
+            if len(v) > 0:
+                rx[k] = len(v)
+
     return {
-        "id": str(m.id), "name": m.author_name, "user_id": str(m.user_id) if m.user_id else None,
+        "id": str(m.id), "message_id": str(m.id), "name": m.author_name, "user_id": str(m.user_id) if m.user_id else None,
         "text": m.text, "status": m.status, "pinned": m.pinned,
-        "flags": m.flags or [], "flagged": bool(m.flags), "reactions": m.reactions or {},
+        "flags": m.flags or [], "flagged": bool(m.flags), "reactions": rx,
+        "reaction_users": rx_users,
         "reply_to": str(m.reply_to) if m.reply_to else None, "note": m.note,
         "created_at": _iso(m.created_at), "actor_role": actor_role,
     }
@@ -531,6 +553,8 @@ async def snapshot(ctx: Ctx) -> dict:
 VIEWER_ACTIONS = frozenset({
     "chat.send", "chat.typing", "chat.react", "qa.ask", "qa.vote", "poll.vote",
     "participant.hand", "participant.state", "reaction.add", "feedback.submit",
+    # The viewer's own player reporting startup time / a failure (_playback_report).
+    "playback.report",
     # NOT a viewer action. Listed here only to bypass the dispatcher's blanket
     # can_moderate gate so that an assigned SPEAKER can answer a question routed to them;
     # _qa_respond's own first line refuses anyone who is neither a moderator nor a
@@ -661,21 +685,77 @@ async def _chat_typing(ctx, payload):
 
 
 async def _chat_react(ctx, payload):
-    emoji = _text(payload, "emoji", 8)
+    emoji = _text(payload, "emoji", 8) or _text(payload, "reaction", 8)
     if not emoji:
         return []
 
+    msg_id = payload.get("id") or payload.get("message_id")
+    if not msg_id:
+        return []
+
+    settings = await bus.state_get(ctx.event_id)
+    if not ctx.can_moderate and settings.get("chat_enabled") is False:
+        return "Chat is turned off"
+
+    remove = payload.get("remove")
+    if remove is None:
+        remove = payload.get("down")
+    action = payload.get("action")
+
+    reactor_key = str(ctx.identity or ctx.user_id)
+
     def work(db):
-        m = _row(db, LiveMessage, ctx, payload.get("id"))
+        from sqlalchemy.orm.attributes import flag_modified
+        m = _row(db, LiveMessage, ctx, msg_id)
         if not m:
             return None
-        counts = dict(m.reactions or {})
-        counts[emoji] = counts.get(emoji, 0) + 1
-        m.reactions = counts
-        return message_out(m, actor_role=_actor_role(ctx))
+
+        reactions = dict(m.reactions or {})
+        reaction_users = dict(getattr(m, "reaction_users", None) or {})
+
+        users_for_emoji = list(reaction_users.get(emoji, []))
+        already_reacted = reactor_key in users_for_emoji
+
+        should_remove = False
+        if remove is True or action == "remove":
+            should_remove = True
+        elif remove is False or action == "add":
+            should_remove = False
+        elif action == "toggle" or payload.get("toggle") is True:
+            should_remove = already_reacted
+        else:
+            # Idempotent add: if already reacted, do not double-count; if not, add.
+            should_remove = False
+
+        if should_remove:
+            if already_reacted:
+                users_for_emoji.remove(reactor_key)
+        else:
+            if not already_reacted:
+                users_for_emoji.append(reactor_key)
+
+        if users_for_emoji:
+            reaction_users[emoji] = users_for_emoji
+            reactions[emoji] = len(users_for_emoji)
+        else:
+            reaction_users.pop(emoji, None)
+            reactions.pop(emoji, None)
+
+        m.reactions = reactions
+        m.reaction_users = reaction_users
+        flag_modified(m, "reactions")
+        flag_modified(m, "reaction_users")
+
+        out = message_out(m, actor_role=_actor_role(ctx))
+        out["reaction"] = emoji
+        out["count"] = reactions.get(emoji, 0)
+        return out
 
     msg = await tx(work)
-    return [("chat", "message.update", msg)] if msg else []
+    if not msg:
+        return []
+
+    return [("chat", "message.update", msg)]
 
 
 async def _chat_moderate(ctx, payload, op: str):
@@ -1455,6 +1535,37 @@ async def _participant_action(ctx, payload, op: str):
     return out
 
 
+# playback quality -----------------------------------------------------------------
+
+# What a viewer's player may report as a failure. A closed vocabulary: the value lands in
+# analytics (services/viewing_sessions.py), so an arbitrary wire string must never reach it.
+PLAYBACK_FAILURE_KINDS = frozenset({"connect", "disconnected", "autoplay", "media", "other"})
+MAX_STARTUP_MS = 10 * 60 * 1000
+
+
+async def _playback_report(ctx, payload):
+    """A viewer's own player reporting on its playback: time to first frame (`startup_ms`)
+    and/or one playback failure (`failure`). Attached to this identity's OPEN viewing session
+    in the ledger (bus.session_record_playback). Nothing is broadcast, so the host console
+    and other viewers never see it as an event. Staff connections are ignored: they are not
+    the audience being measured."""
+    if ctx.can_moderate or ctx.can_contribute:
+        return []
+    startup = payload.get("startup_ms")
+    try:
+        startup = int(startup) if startup is not None else None
+    except (TypeError, ValueError):
+        startup = None
+    if startup is not None and not 0 <= startup <= MAX_STARTUP_MS:
+        startup = None
+    failure = payload.get("failure")
+    failure = failure if failure in PLAYBACK_FAILURE_KINDS else None
+    if startup is None and failure is None:
+        return []
+    await bus.session_record_playback(ctx.event_id, ctx.identity, startup_ms=startup, failure=failure)
+    return []
+
+
 # feedback ----------------------------------------------------------------------
 
 async def _feedback_submit(ctx, payload):
@@ -1541,6 +1652,7 @@ ACTIONS: dict[str, callable] = {
     "participant.request_unmute": _participant_request_unmute,
     "reaction.add": _reaction_add,
     "feedback.submit": _feedback_submit,
+    "playback.report": _playback_report,
 }
 
 # Broadcast-control actions, filled in by services/broadcast.py at import (which is

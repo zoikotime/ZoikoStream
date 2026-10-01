@@ -18,7 +18,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { FiSend, FiChevronUp, FiCheckCircle, FiMessageSquare, FiMapPin, FiX, FiInfo, FiSmile } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
 import { initials } from "../../data/watch";
-import { hhmm, accentFor } from "../../data/moderation";
+import { hhmm, accentFor, QUICK_REACTIONS } from "../../data/moderation";
 import IdentifyForm from "./IdentifyForm";
 
 function EmptyState({ children }) {
@@ -54,7 +54,7 @@ function EmojiPicker({ onPick }) {
         onClick={() => setOpen((v) => !v)}
         aria-label="Insert an emoji"
         aria-expanded={open}
-        className="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-slate-400 transition duration-150 hover:bg-slate-100 hover:text-slate-600 motion-reduce:transition-none dark:hover:bg-slate-800 dark:hover:text-slate-200"
+        className="grid h-12 w-12 shrink-0 place-items-center rounded-xl text-slate-400 transition duration-150 hover:bg-slate-100 hover:text-slate-600 motion-reduce:transition-none dark:hover:bg-slate-800 dark:hover:text-slate-200"
       >
         <FiSmile aria-hidden />
       </button>
@@ -65,7 +65,7 @@ function EmojiPicker({ onPick }) {
               key={e}
               type="button"
               onClick={() => { onPick(e); setOpen(false); }}
-              className="grid h-9 w-9 place-items-center rounded-lg text-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+              className="grid h-12 w-12 place-items-center rounded-lg text-lg hover:bg-slate-100 dark:hover:bg-slate-800"
             >
               {e}
             </button>
@@ -131,7 +131,7 @@ function SlowModeIndicator({ seconds }) {
 // Real chat, wired to the same live socket the host console uses. Reaching this
 // component at all means the caller (WatchPanel) has already confirmed the visitor is
 // identified — logged in or self-registered — so there's no gate to check here.
-const Chat = memo(function Chat({ messages = [], typing = {}, send, connected, slowModeSeconds = null }) {
+const Chat = memo(function Chat({ messages = [], typing = {}, send, connected, slowModeSeconds = null, currentIdentity = null }) {
   const [text, setText] = useState("");
   const [dismissedPinId, setDismissedPinId] = useState(null);
   const scroller = useRef(null);
@@ -180,6 +180,79 @@ const Chat = memo(function Chat({ messages = [], typing = {}, send, connected, s
               <span className="zk-tnum ml-auto shrink-0 text-[11px] text-slate-400">{hhmm(m.created_at)}</span>
             </div>
             <p className="ml-8 break-words text-sm text-slate-600 dark:text-slate-300">{m.text}</p>
+            {!!Object.keys(m.reactions || {}).length && (
+              <div className="ml-8 mt-1.5 flex flex-wrap gap-1">
+                {Object.entries(m.reactions).map(([emoji, val]) => {
+                  const count = typeof val === "object" ? val?.count : val;
+                  if (!count || count <= 0) return null;
+                  const reacted = Boolean(
+                    currentIdentity && (m.reaction_users?.[emoji] || []).includes(currentIdentity)
+                  );
+                  return (
+                    <button
+                      key={emoji}
+                      type="button"
+                      disabled={!connected}
+                      onClick={() => {
+                        if (!send || !connected) return;
+                        send("chat.react", {
+                          id: m.id,
+                          message_id: m.id,
+                          emoji,
+                          reaction: emoji,
+                          remove: reacted,
+                          action: reacted ? "remove" : "add",
+                        });
+                      }}
+                      className={cx(
+                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs tabular-nums transition duration-150 motion-reduce:transition-none",
+                        reacted
+                          ? "bg-violet-100 text-violet-700 ring-1 ring-violet-500/30 dark:bg-violet-500/20 dark:text-violet-300"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                      )}
+                      aria-label={`Reaction ${emoji} (${count})`}
+                      title={`React ${emoji}`}
+                    >
+                      <span>{emoji}</span>
+                      <span>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <div className="ml-8 mt-1 flex flex-wrap items-center gap-1">
+              {QUICK_REACTIONS.map((emoji) => {
+                const reacted = Boolean(
+                  currentIdentity && (m.reaction_users?.[emoji] || []).includes(currentIdentity)
+                );
+                return (
+                  <button
+                    key={emoji}
+                    type="button"
+                    disabled={!connected}
+                    onClick={() => {
+                      if (!send || !connected) return;
+                      send("chat.react", {
+                        id: m.id,
+                        message_id: m.id,
+                        emoji,
+                        reaction: emoji,
+                        remove: reacted,
+                        action: reacted ? "remove" : "add",
+                      });
+                    }}
+                    className={cx(
+                      "rounded-md px-1.5 py-0.5 text-xs transition duration-150 hover:bg-slate-100 dark:hover:bg-slate-800",
+                      reacted && "bg-violet-50 ring-1 ring-violet-500/30 dark:bg-violet-500/20"
+                    )}
+                    aria-label={`React ${emoji}`}
+                    title={`React ${emoji}`}
+                  >
+                    {emoji}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         ))}
         {messages.length === 0 && <EmptyState>No messages yet — say hello.</EmptyState>}
@@ -199,7 +272,7 @@ const Chat = memo(function Chat({ messages = [], typing = {}, send, connected, s
         <button
           type="submit"
           disabled={!connected}
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-violet-600 text-white transition duration-150 hover:bg-violet-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 motion-reduce:transition-none motion-reduce:active:scale-100"
+          className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-violet-600 text-white transition duration-150 hover:bg-violet-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 motion-reduce:transition-none motion-reduce:active:scale-100"
           aria-label="Send message"
           title={connected ? "Send" : "Reconnecting…"}
         >
@@ -245,7 +318,7 @@ const QA = memo(function QA({ questions = [], send, connected }) {
             <button
               onClick={() => toggleVote(q.id)}
               className={cx(
-                "flex h-12 w-11 shrink-0 flex-col items-center justify-center rounded-lg border text-xs font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
+                "flex h-12 w-12 shrink-0 flex-col items-center justify-center rounded-lg border text-xs font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
                 voted[q.id]
                   ? "border-emerald-500 bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400"
                   : "border-slate-200 text-slate-500 hover:border-emerald-300 hover:text-emerald-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-emerald-500/40"
@@ -299,7 +372,7 @@ const QA = memo(function QA({ questions = [], send, connected }) {
         <button
           type="submit"
           disabled={!connected}
-          className="min-h-11 shrink-0 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white transition duration-150 hover:bg-emerald-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 motion-reduce:transition-none motion-reduce:active:scale-100"
+          className="min-h-12 shrink-0 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white transition duration-150 hover:bg-emerald-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 motion-reduce:transition-none motion-reduce:active:scale-100"
         >
           Ask
         </button>
@@ -354,7 +427,7 @@ function Poll({ poll, send }) {
               <button
                 key={i}
                 onClick={() => vote(i)}
-                className="min-h-11 w-full rounded-lg border border-slate-200 px-3 py-2 text-left text-sm font-medium text-slate-700 transition duration-150 hover:border-emerald-400 hover:bg-emerald-50 active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100 dark:border-slate-700 dark:text-slate-200 dark:hover:border-emerald-500/50 dark:hover:bg-emerald-500/10"
+                className="min-h-12 w-full rounded-lg border border-slate-200 px-3 py-2 text-left text-sm font-medium text-slate-700 transition duration-150 hover:border-emerald-400 hover:bg-emerald-50 active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100 dark:border-slate-700 dark:text-slate-200 dark:hover:border-emerald-500/50 dark:hover:bg-emerald-500/10"
               >
                 {o.label}
               </button>
@@ -429,9 +502,8 @@ const WatchPanel = memo(function WatchPanel({
   // component at all in that case, but the individual flags are still honored here so a
   // non-memorial event that only disabled e.g. polls shows just Chat/Q&A, not a dead tab.
   enabledTabs = { chat: true, qa: true, polls: true },
-  // Current slow_mode_seconds off the moderator/snapshot envelope — display-only, see
-  // SlowModeIndicator above.
   slowModeSeconds = null,
+  currentIdentity = null,
 }) {
   const visibleTabs = TABS.filter((t) => enabledTabs[t.key]);
   const [tab, setTab] = useState(visibleTabs[0]?.key || "chat");
@@ -520,7 +592,7 @@ const WatchPanel = memo(function WatchPanel({
         ) : (
           <>
             {tab === "chat" && (
-              <Chat messages={messages} typing={typing} send={send} connected={connected} slowModeSeconds={slowModeSeconds} />
+              <Chat messages={messages} typing={typing} send={send} connected={connected} slowModeSeconds={slowModeSeconds} currentIdentity={currentIdentity} />
             )}
             {tab === "qa" && <QA questions={questions} send={send} connected={connected} />}
             {tab === "polls" && <Polls polls={polls} send={send} />}

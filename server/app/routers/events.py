@@ -62,7 +62,7 @@ from ..schemas.event import (
     RehearsalOutcome,
     AccessLinkCreate, AccessLinkIssued, AccessLinkOut,
     AssignmentUpdate, ContributorInvite, ContributorSessionOut, EventCreate, EventOut,
-    EventUpdate, FeedbackOut,
+    EventUpdate, FeedbackOut, InvitationRedeem, InvitationRedeemed,
     RegistrantOut, RegistrationCreate, RegistrationOut, ViewerInviteCreate, WatchOut,
 )
 from ..security import (
@@ -79,6 +79,8 @@ from ..services import event_planning
 from ..services import moderation as mod
 from ..services import webhooks
 from ..services import bus, event_overrun
+from ..services import admission as admission_svc
+from ..services import invitation_links
 
 def claim_cookie_policy(request: Request) -> tuple[bool, str]:
     """`(secure, samesite)` for the one-device claim cookie on this request.
@@ -348,7 +350,10 @@ def watch_event(
     is_org_member = bool(user and (user.role == "super_admin" or user.org_id == ev.org_id))
     reg_payload = decode_registration_payload(reg, ev.id) if reg else None
     invited = reg_payload is not None
-    link_row = crud.find_access_link(db, ev.id, link) if link else None
+    # A link PASS (exchanged from a #link= fragment, see services/invitation_links.py) or a
+    # raw link token from an older ?link= URL. Both resolve to the same row.
+    link_hit = crud.resolve_access_credential(db, ev.id, link) if link else None
+    link_row, link_sub = link_hit if link_hit else (None, None)
     link_admitted = link_row is not None
 
     claim_rejected = False
@@ -392,6 +397,7 @@ def watch_event(
     # be kept in sync by hand. Producer and viewer join one room by construction.
     room = livekit.room_for_event(ev.id)
     token = url = None
+    admission = retry_after = None
     # "degraded" (persisted by services/broadcast.py's sampler/webhook-driven
     # mark_degraded/mark_recovered when the producer's media drops mid-broadcast) still gets
     # a token — a viewer should be able to sit connected and recover automatically once the
@@ -420,7 +426,9 @@ def watch_event(
         elif invited and reg_payload:
             identity = f"guest-{reg_payload['reg']}"
         elif link_admitted and link_row:
-            identity = f"guest-link-{link_row.id}"
+            # Per browser when the viewer holds a pass, so two people on one family link do
+            # not share — and evict each other from — a single LiveKit identity.
+            identity = invitation_links.link_identity(link_row.id, link_sub)
         else:
             # No credential the live socket would accept either (see live.py's own
             # "Invalid or expired session" refusal) — this viewer can watch/listen but was
@@ -437,8 +445,17 @@ def watch_event(
         # contributor watching their own return feed ever sends monitor=True, and only when
         # they're the signed-in user the identity would otherwise collide for.
         token_identity = livekit.secondary(identity, "monitor") if (monitor and user) else identity
-        token = livekit.create_stream_token(token_identity, room, False)
-        url = livekit.settings.LIVEKIT_URL
+        # Capacity protection (services/admission.py). A NEW viewer may be asked to wait
+        # while the infrastructure ceiling is reached; anyone already admitted this broadcast
+        # is always admitted again, and nothing is ever taken away from a viewer who is
+        # watching. Event staff and a contributor's own monitor feed are exempt.
+        decision = admission_svc.decide(db, ev.id, identity, exempt=is_org_member or (monitor and bool(user)))
+        if decision.admitted:
+            admission = "admitted"
+            token = livekit.create_stream_token(token_identity, room, False)
+            url = livekit.settings.LIVEKIT_URL
+        else:
+            admission, retry_after = "waiting", decision.retry_after_seconds
 
     # Replay: same access rule as the live token (registration_required gates it the same
     # way), but independent of not_started/expired — the whole point of a replay is that it
@@ -492,6 +509,26 @@ def watch_event(
                     (source.stopped_at - source.started_at).total_seconds() - source.paused_ms / 1000
                 )
 
+    # What the ended page may truthfully say about a replay (WatchOut.replay_state). Derived
+    # from the same entitlement the gate above reads. "processing" is claimed only for a
+    # replay that IS on its way: published and being watermarked, or under automatic
+    # validation. A recording awaiting an operator's decision may never be published, so it
+    # is "unavailable", not a promise.
+    replay_state = replay_until = None
+    if ev.status == "ended":
+        ent = replay_entitlement
+        if recording_url:
+            replay_state, replay_until = "available", ent.expires_at
+        elif ent is not None and commercial_crud.replay_access_expired(ent):
+            replay_state = "expired"
+        elif ent is not None and (
+            (ent.publish_state == "published" and ent.watermark_status == "pending")
+            or ent.publish_state == "validating"
+        ):
+            replay_state = "processing"
+        else:
+            replay_state = "unavailable"
+
     org_name = ev.organization.name if ev.organization else None
     hosts = crud.list_assignees(db, ev.id, "host")
 
@@ -543,13 +580,55 @@ def watch_event(
         livekit_url=url, livekit_token=token, room=room if token else None,
         recording_url=recording_url, recording_duration_seconds=recording_duration,
         media_status=media_status,
+        admission=admission, retry_after_seconds=retry_after,
+        replay_state=replay_state, replay_available_until=replay_until,
     )
 
 
-def _registration_console_url(event_id: uuid.UUID, token: str | None = None) -> str:
-    base = settings.APP_URL.rstrip("/")
-    url = f"{base}/events/{event_id}/watch"
-    return f"{url}?reg={token}" if token else url
+@router.post("/{event_id}/invitation", response_model=InvitationRedeemed)
+def redeem_invitation(
+    event_id: uuid.UUID,
+    data: InvitationRedeem,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Exchange the secret from an invitation link's FRAGMENT for the credential the existing
+    viewer flow already uses (services/invitation_links.py explains the whole design).
+
+    The viewer page calls this exactly once, on an explicit read of `#invite=` / `#link=`,
+    and then removes the fragment from its address bar. The secret is in the POST body and
+    in no URL, so it is not in any access log. The answer goes straight back into the
+    unchanged flow: the registration token is stored as `reg`, the pass as `link`, and
+    GET /watch applies every rule it always has (private-event claim cookie, registration
+    gate, time window, capacity).
+
+    Every failure is one 404 with one message. Malformed, wrong event, expired, revoked and
+    unknown all look the same, so the endpoint says nothing about which part was wrong."""
+    invalid = HTTPException(status.HTTP_404_NOT_FOUND,
+                            "This invitation link isn't valid for this event. Ask the host to send it again.")
+    ev = crud.get_event_unscoped(db, event_id)
+    if ev is None:
+        raise invalid
+    # Never cached, and nothing on this response may send the page's URL onward.
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if data.kind == "invite":
+        reg_id = invitation_links.read_invitation_secret(data.secret, ev.id)
+        reg = crud.get_registration_by_id(db, ev.id, reg_id) if reg_id else None
+        if reg is None:
+            raise invalid
+        return InvitationRedeemed(credential="reg", token=create_registration_token(reg))
+    link = crud.find_access_link(db, ev.id, data.secret)   # counts this open as one use
+    if link is None:
+        raise invalid
+    return InvitationRedeemed(credential="link", token=invitation_links.mint_link_pass(link))
+
+
+def _registration_console_url(event_id: uuid.UUID, registration) -> str:
+    """The watch link a registrant is emailed: the opaque invitation secret rides in the
+    fragment, never the registration token itself (that one names the registrant's email,
+    and a query string is logged and sent as a Referer). See services/invitation_links.py."""
+    return invitation_links.invitation_url(event_id, invitation_links.mint_invitation_secret(registration))
 
 
 @router.post("/{event_id}/register", response_model=RegistrationOut)
@@ -613,7 +692,7 @@ def register_for_event(
         background.add_task(
             send_registration_confirmation_email,
             reg.email, reg.name, ev.title or "this event",
-            _registration_console_url(ev.id, create_registration_token(reg)),
+            _registration_console_url(ev.id, reg),
         )
     webhooks.enqueue(db, ev.org_id, "registration.created", {
         "event_id": str(ev.id), "registration_id": str(reg.id), "email": reg.email, "name": reg.name,
@@ -966,7 +1045,7 @@ def invite_viewers(
         background.add_task(
             send_viewer_invite_email,
             reg.email, reg.name, ev.title or "this event",
-            _registration_console_url(ev.id, token), user.full_name,
+            _registration_console_url(ev.id, reg), user.full_name,
         )
         out.append(RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=token))
     return out
@@ -981,8 +1060,11 @@ def _access_link_url(event_id: uuid.UUID, token: str) -> str:
     # (_invite_url, _console_url, _registration_console_url, _base_url in email.py). Since
     # CORS_ORIGINS is commonly left at its dev default of localhost origins, access-link
     # invite emails sent from a real deployment pointed viewers at http://localhost:5173.
-    base = settings.APP_URL.rstrip("/")
-    return f"{base}/events/{event_id}/watch?link={token}"
+    #
+    # The secret rides in the FRAGMENT (#link=), never the query string: a browser does not
+    # send a fragment on GET, so it never reaches an access log, a proxy or a Referer. The
+    # viewer page exchanges it once (POST /events/{id}/invitation). services/invitation_links.py.
+    return invitation_links.access_link_url(event_id, token)
 
 
 @router.get("/{event_id}/access-links", response_model=list[AccessLinkOut])

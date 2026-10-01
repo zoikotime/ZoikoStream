@@ -111,3 +111,25 @@ def audience_capacity_envelope(db: Session) -> int | None:
     row = db.get(PlatformSetting, "streaming_limits")
     value = (row.value or {}).get("audience_envelope") if row else None
     return int(value) if value is not None else None
+
+
+def viewer_admission_ceiling(db: Session) -> int | None:
+    """Infrastructure-protection ceiling on concurrent viewers per live event, or None.
+
+    When it is reached, services/admission.py holds NEW viewers in a waiting state, and only
+    new ones. Viewers already admitted to the broadcast keep watching and can always
+    reconnect (ZST-SPEC-VAP-001 §6.3 "Capacity protection", §7.1). It is NOT a commercial
+    limit. Nothing reads a plan here, and nothing anywhere disconnects a viewer because of
+    it.
+
+    Unset, blank or non-positive means no ceiling, which is the default, and admission
+    behaves exactly as before. Stored on "streaming_limits" with the other delivery-side
+    ceilings the Settings console owns.
+    """
+    row = db.get(PlatformSetting, "streaming_limits")
+    value = (row.value or {}).get("viewer_admission_ceiling") if row else None
+    try:
+        ceiling = int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    return ceiling if ceiling and ceiling > 0 else None

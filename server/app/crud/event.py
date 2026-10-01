@@ -595,6 +595,37 @@ def find_access_link(db, event_id, raw: str) -> EventAccessLink | None:
     return link
 
 
+def resolve_access_credential(db, event_id, credential: str | None) -> tuple[EventAccessLink, str | None] | None:
+    """(link, per-browser value) for whatever a viewer presents as `link`, or None.
+
+    Two forms, both accepted by GET /watch and the live socket:
+      * a link PASS (services/invitation_links.py) — what the viewer page now stores after
+        exchanging a `#link=` secret. Verified against the row: same event, not revoked,
+        not expired, minted from the link's CURRENT secret. Not counted as a use: the open
+        that minted it already was (POST /events/{id}/invitation).
+      * the raw link token itself — every link issued before the fragment URLs, and any
+        client that still sends one. Unchanged: find_access_link, which counts the use.
+    """
+    from ..services import invitation_links
+
+    if not credential:
+        return None
+    if not invitation_links.is_link_pass(credential):
+        link = find_access_link(db, event_id, credential)
+        return (link, None) if link else None
+    parsed = invitation_links.parse_link_pass(credential)
+    if parsed is None:
+        return None
+    link = get_access_link(db, event_id, parsed[0])
+    if link is None or link.revoked_at is not None:
+        return None
+    if link.expires_at and link.expires_at < datetime.now(timezone.utc):
+        return None
+    if not invitation_links.verify_link_pass(credential, link):
+        return None
+    return link, parsed[1]
+
+
 def get_org_recording(db, org_id, recording_id) -> LiveRecording | None:
     """A single recording, scoped through its event's org_id (not the recording's own
     org_id copy — see list_org_recordings)."""

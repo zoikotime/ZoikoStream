@@ -92,8 +92,13 @@ function SettingsForm({ settings, onSaved }) {
             max_gb: parseEnvelope(form.storage_limits.max_gb),
           },
           streaming_limits: {
+            // Everything already stored first: the blob is REPLACED on save, so a key this
+            // form does not edit (require_media_plane) must ride along or it is silently lost.
+            ...(settings.streaming_limits?.value || {}),
             default_hours: parseEnvelope(form.streaming_limits.default_hours),
             max_bitrate_kbps: parseEnvelope(form.streaming_limits.max_bitrate_kbps),
+            // Capacity protection (services/admission.py): blank = no ceiling, the default.
+            viewer_admission_ceiling: parseEnvelope(form.streaming_limits.viewer_admission_ceiling),
             // Explicitly included (even as null) on every save — streaming_limits is stored
             // and replaced as one JSON blob (routers/admin.py update_settings), so omitting
             // this key here would silently drop it the next time anything else in the panel
@@ -184,6 +189,24 @@ function SettingsForm({ settings, onSaved }) {
               expected audience — any number — is blocked from going live until Operations
               approves its capacity directly on the event. This is a fail-closed rule and cannot
               be bypassed here; it only decides whether that manual step is required.
+            </p>
+          </div>
+          <div className="sm:col-span-2">
+            <Label>Viewer admission ceiling (concurrent viewers per live event)</Label>
+            <Input
+              variant="console"
+              type="number"
+              min={1}
+              placeholder="No ceiling"
+              value={form.streaming_limits.viewer_admission_ceiling ?? ""}
+              onChange={(e) => setField("streaming_limits", "viewer_admission_ceiling", e.target.value)}
+            />
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Infrastructure protection only. When a live event reaches this many viewers, NEW
+              viewers wait on a "very busy" screen and are let in automatically as room frees
+              up. Nobody already watching is ever disconnected, and a viewer who drops and
+              comes back keeps their place. Event staff are never held. Leave blank for no
+              ceiling.
             </p>
           </div>
         </div>

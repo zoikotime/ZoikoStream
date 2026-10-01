@@ -183,6 +183,8 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [error, setError] = useState(null);
+  // { available, text } — see the TranscriptionReceived handler in the connect effect.
+  const [captions, setCaptions] = useState({ available: false, text: "" });
 
   // Every remote track we are currently subscribed to. The single source of truth for both
   // "what should be attached to the element" and hasVideo/hasAudio.
@@ -418,6 +420,15 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
         });
         logSubscription("participant disconnected", room, { who: p.identity });
       });
+      // Live captions, when the room actually carries them (a LiveKit transcription agent
+      // publishing segments). This platform produces none itself, so `captions.available`
+      // stays false — and the player shows no caption control — unless real segments arrive.
+      room.on(RoomEvent.TranscriptionReceived, (segments) => {
+        if (!current()) return;
+        const text = (segments || []).map((s) => s?.text || "").join(" ").trim();
+        if (!text) return;
+        setCaptions({ available: true, text: text.slice(-240) });
+      });
       room.on(RoomEvent.Reconnecting, () => {
         if (current()) setReconnecting(true);
       });
@@ -503,6 +514,7 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       clearTracks();
       setConnected(false);
       setReconnecting(false);
+      setCaptions({ available: false, text: "" });
       void disposeRoom();
       // The mic itself is a real getUserMedia capture (see the effect below) — it does
       // NOT belong to LiveKit and isn't released by room.disconnect(), so it has to be
@@ -696,5 +708,6 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
     // whether that track is currently enabled. The console learns the same fact from
     // LiveKit's own track webhook, so neither side is guessing.
     micOn, micError, toggleMic, enableMic, micLive,
+    captions,
   };
 }

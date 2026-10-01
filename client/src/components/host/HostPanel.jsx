@@ -313,6 +313,27 @@ function AnalyticsTab({ analytics, health }) {
         <Retention points={a.retention} />
       </div>
 
+      {/* Session-aware metrics (services/viewing_sessions.py) — additional to the viewer
+          figures above, which keep their meaning. One session = one join-to-leave of a
+          viewer, not a person. Shown only once the server has measured some. */}
+      {a.sessions?.measured && (
+        <div>
+          <SectionLabel>Viewing sessions</SectionLabel>
+          <div className="grid grid-cols-2 gap-1.5">
+            <Stat label="Sessions admitted" value={a.sessions.sessions_admitted.toLocaleString()} sub="This broadcast" icon={FiUsers} hint="Join-to-leave cycles of viewers — not unique people" />
+            <Stat label="Peak sessions" value={a.sessions.peak_concurrent_sessions.toLocaleString()} sub="At once" icon={FiTrendingUp} />
+            <Stat label="Median watch" value={fmtDuration(a.sessions.median_watch_seconds)} sub="Per session" icon={FiClock} />
+            <Stat
+              label="Rejoin rate"
+              value={a.sessions.rejoin_rate == null ? "—" : `${Math.round(a.sessions.rejoin_rate * 1000) / 10}%`}
+              sub="Came back"
+              icon={FiActivity}
+              hint="Sessions that were a viewer reconnecting; shared older links excluded"
+            />
+          </div>
+        </div>
+      )}
+
       <Distribution title="Devices" icon={FiSmartphone} rows={a.devices} />
       <Distribution title="Platforms" icon={FiMonitor} rows={a.platforms} />
       <Distribution title="Browsers" icon={FiGlobe} rows={a.browsers} />
@@ -547,7 +568,7 @@ export default function HostPanel({ tab, setTab, state, canModerate, send, event
         )}
 
         {tab === "chat" && (
-          <ChatTab messages={visibleMessages} typing={typing} canModerate={canModerate} send={send} />
+          <ChatTab messages={visibleMessages} typing={typing} canModerate={canModerate} send={send} currentIdentity={state.you?.identity || null} />
         )}
 
         {tab === "qa" && (

@@ -61,6 +61,7 @@ class LiveMessage(_EventScoped):
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     flags: Mapped[list | None] = mapped_column(JSON, default=list)
     reactions: Mapped[dict | None] = mapped_column(JSON, default=dict)   # emoji -> count
+    reaction_users: Mapped[dict | None] = mapped_column(JSON, default=dict)  # emoji -> list of identities
     reply_to: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     note: Mapped[str | None] = mapped_column(Text)                       # staff-only note
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

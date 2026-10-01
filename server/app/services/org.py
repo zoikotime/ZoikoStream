@@ -518,7 +518,8 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
             messages_by_event[eid_val] = messages_by_event.get(eid_val, 0) + 1
             if isinstance(reactions_json, dict):
                 reactions_by_event[eid_val] = reactions_by_event.get(eid_val, 0) + sum(
-                    reactions_json.values()
+                    v if isinstance(v, (int, float)) else (v.get("count", 0) if isinstance(v, dict) else len(v) if isinstance(v, list) else 0)
+                    for v in reactions_json.values()
                 )
 
     # Real questions directly from LiveQuestion
@@ -543,9 +544,12 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
                 (o or {}).get("votes", 0) for o in (p.options or []) if isinstance(o, dict))
 
     from . import bus
+    from .viewing_sessions import combine as combine_sessions
+    from .viewing_sessions import summarize_sessions
     from .watch_time import build_event_analytics_aggregate
 
     per_event: dict = {}
+    session_metrics_by_event: dict = {}
     for e in events:
         b_sessions = sessions_by_event.get(e.id, [])
         snaps = snapshots_by_event.get(e.id, [])
@@ -591,6 +595,17 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
             poll_votes=pv,
         )
         per_event[e.id] = agg
+
+        # Session-aware metrics, additional to everything above (services/viewing_sessions.py).
+        # Same precedence as watch time: the finalized summary wins, else the live ledger.
+        stored_sessions = stored_summary.get("sessions") if isinstance(stored_summary, dict) else None
+        if isinstance(stored_sessions, dict) and stored_sessions.get("measured"):
+            session_metrics_by_event[e.id] = stored_sessions
+        else:
+            starts = [bs.started_at for bs in b_sessions if bs.started_at]
+            session_metrics_by_event[e.id] = summarize_sessions(
+                live_sessions, broadcast_start_ts=min(starts) if starts else None,
+                now_ts=_now().timestamp(), event_end_ts=e.end_time)
 
     # Bucket in the organization's own zone, and across the WHOLE window so the chart is a
     # continuous timeline rather than isolated points. event_zone is the existing resolver
@@ -656,9 +671,15 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
              "chat_count": i["chat_count"],
              "question_count": i["question_count"],
              "reaction_count": i["reaction_count"],
+             # Additional, per broadcast: sessions admitted, peak concurrent sessions, median
+             # watch per session, join-time distribution, rejoin rate, playback QoE.
+             "sessions": session_metrics_by_event.get(eid),
             }
             for eid, i in ranked
         ],
+        # The same metrics over the whole range. The median is deliberately per event only
+        # (see viewing_sessions.combine).
+        "session_summary": combine_sessions(list(session_metrics_by_event.values())),
         "devices": None, "locations": None, "traffic_sources": None,
         "breakdowns_note": "Device, location and traffic-source breakdowns need a metering/"
                             "GeoIP pipeline that isn't integrated yet.",

@@ -9,7 +9,7 @@
 // host/moderator consoles use — see the `liveReducer` below. The header/info copy is still
 // the original mock data layer. `watchToMockEvent` below is the seam: it maps the real API
 // response onto the shape those mock-driven components already expect.
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import useInterval from "../../hooks/useInterval";
 import useEventStream from "../../hooks/useEventStream";
 import useKeepAwake from "../../hooks/useKeepAwake";
@@ -28,6 +28,14 @@ import ReactionOverlay from "../../components/live/ReactionOverlay";
 import useReactionChannel from "../../hooks/useReactionChannel";
 import RegistrationGate from "../../components/watch/RegistrationGate";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
+import CapacityWaitingNotice from "../../components/watch/CapacityWaitingNotice";
+import ViewerErrorState from "../../components/watch/ViewerErrorState";
+import InAppBrowserNotice from "../../components/watch/InAppBrowserNotice";
+import LanguagePicker from "../../components/watch/LanguagePicker";
+import AudioAssistButton from "../../components/watch/AudioAssistButton";
+import { ViewerLanguageProvider, useViewerLanguage } from "./viewerLanguage";
+import { readInvitation, redeemInvitation, stripInvitation } from "./invitationLink";
+import { detectInAppBrowser } from "../../utils/inAppBrowser";
 import FeedbackModal from "../../components/common/FeedbackModal";
 import Spinner from "../../ui/Spinner";
 import Logo from "../../ui/Logo";
@@ -71,6 +79,11 @@ function watchToMockEvent(watch) {
 }
 
 const POLL_MS = 10000; // how often a not-yet-live page checks whether the event went live
+// How often an ended page checks on a replay the server says is being prepared.
+const REPLAY_POLL_MS = 30000;
+// Statuses that come BEFORE a broadcast (schemas/event.py EventStatus). The pre-event state
+// replaces the player for these; everything after go-live keeps the player.
+const PRE_LIVE = new Set(["draft", "published", "scheduled", "rehearsal", "ready_to_arm", "armed"]);
 
 // Real chat/Q&A/polls over the same live socket the host/moderator consoles use (see
 // live.py — any authenticated attendee, OR a name+email self-registration (mustIdentify
@@ -103,6 +116,10 @@ const LIVE_EMPTY = {
   // is different until they act on it, so it carries no presence patch and clears itself
   // the moment they answer.
   unmuteRequest: null,
+  // The broadcast session's own status (services/broadcast.py session_out): "live",
+  // "paused", "ended"… From the opening snapshot and every broadcast.update. "paused" is the
+  // host's deliberate pause, which the player shows as the broadcaster-interruption state.
+  broadcastStatus: null,
 };
 
 // Exported for the reaction regression tests only (see EventWatch.reactions.test.jsx) —
@@ -149,7 +166,11 @@ function liveReducer(state, env) {
         ),
         slowModeSeconds: data.slow_mode_seconds || null,
         you: data.you || null,
+        broadcastStatus: data.broadcast?.status || null,
       };
+
+    case "broadcast/broadcast.update":
+      return data?.status ? { ...state, broadcastStatus: data.status } : state;
 
     case "session/unmute.requested":
       // Broadcast to the whole event like every other session envelope; only the matching
@@ -188,7 +209,62 @@ function liveReducer(state, env) {
     case "chat/message.new":
       return { ...state, messages: [...state.messages, data] };
     case "chat/message.update":
-      return { ...state, messages: state.messages.map((m) => (m.id === data.id ? { ...m, ...data } : m)) };
+    case "chat/reaction.updated": {
+      const targetId = String(data.id || data.message_id || "");
+      return {
+        ...state,
+        messages: state.messages.map((m) => {
+          if (String(m.id || m.message_id) !== targetId) return m;
+          const merged = {
+            ...m,
+            ...data,
+            reactions: data.reactions !== undefined ? data.reactions : (
+              data.reaction ? {
+                ...(m.reactions || {}),
+                ...(data.count > 0 ? { [data.reaction]: data.count } : {})
+              } : m.reactions
+            ),
+          };
+          if (data.reaction && data.count <= 0 && merged.reactions) {
+            const cleaned = { ...merged.reactions };
+            delete cleaned[data.reaction];
+            merged.reactions = cleaned;
+          }
+          return merged;
+        }),
+      };
+    }
+    case "local/chat.react": {
+      const targetId = String(data.id || data.message_id || "");
+      const emoji = data.emoji || data.reaction;
+      if (!emoji) return state;
+      return {
+        ...state,
+        messages: state.messages.map((m) => {
+          if (String(m.id || m.message_id) !== targetId) return m;
+          const reactions = { ...(m.reactions || {}) };
+          const reactionUsers = { ...(m.reaction_users || {}) };
+          const users = [...(reactionUsers[emoji] || [])];
+          const identity = data.identity || state.you?.identity || "me";
+          const has = users.includes(identity);
+          const isRemove = data.remove ?? has;
+          if (isRemove && has) {
+            const uIdx = users.indexOf(identity);
+            users.splice(uIdx, 1);
+          } else if (!isRemove && !has) {
+            users.push(identity);
+          }
+          if (users.length > 0) {
+            reactionUsers[emoji] = users;
+            reactions[emoji] = users.length;
+          } else {
+            delete reactionUsers[emoji];
+            delete reactions[emoji];
+          }
+          return { ...m, reactions, reaction_users: reactionUsers };
+        }),
+      };
+    }
     case "chat/message.delete":
       return { ...state, messages: state.messages.filter((m) => m.id !== data.id) };
     case "chat/typing": {
@@ -232,10 +308,25 @@ function liveReducer(state, env) {
       return state;
   }
 }
+// The page is wrapped in its own language provider: the viewer state messages, their
+// audio-assist text and <html lang> follow the viewer's language (viewerLanguage.jsx).
 export default function EventWatch() {
+  return (
+    <ViewerLanguageProvider>
+      <EventWatchPage />
+    </ViewerLanguageProvider>
+  );
+}
+
+function EventWatchPage() {
   const { eventId } = useParams();
   const { theme, toggle } = useTheme();
   const { user } = useAuth();
+  const { t, lang } = useViewerLanguage();
+  // Whatever credential the address bar carried when the page opened, read ONCE: a
+  // #invite= / #link= fragment (exchanged below, then stripped) or an older ?reg= / ?link=
+  // link. See invitationLink.js.
+  const [initialInvite] = useState(() => readInvitation());
   // The anonymous-viewer counterpart to `user`: a self-serve name+email registration
   // (RegistrationGate for a registration_required event, or IdentifyForm for chat/Q&A/polls
   // on any other event — both call the same POST /events/:id/register). Lifted to state
@@ -256,6 +347,9 @@ export default function EventWatch() {
   // session-only one. The key is per-event (`zk_reg_<eventId>`), which is what keeps a
   // credential for Event A from doing anything at all on Event B.
   const [regToken, setRegTokenState] = useState(() => {
+    // An older emailed link (?reg=) wins over a stored credential, exactly as it did when
+    // fetchWatch read it out of the URL on every call. It is persisted and stripped below.
+    if (initialInvite.legacyReg) return initialInvite.legacyReg;
     try {
       return localStorage.getItem(`zk_reg_${eventId}`)
         || sessionStorage.getItem(`zk_reg_${eventId}`);
@@ -279,7 +373,26 @@ export default function EventWatch() {
     setLinkTokenState(token);
   }, [eventId]);
 
+  // ── Secure invitation links (ZST-SPEC-VAP-001 §5.1) ──────────────────────────────────
+  // A #invite= / #link= fragment, or an older ?link= token, is exchanged ONCE for the
+  // credential the existing flow already stores (POST /events/:id/invitation), and only then
+  // is the first /watch fetched. The secret never goes into a query string, a stored value or
+  // a log; the address bar is cleaned as soon as the answer is in.
+  const [inviteExchange, setInviteExchange] = useState(() => (
+    initialInvite.fragment
+    || (initialInvite.legacyLink ? { kind: "link", secret: initialInvite.legacyLink, legacy: true } : null)
+  ));
+  const [inviteInvalid, setInviteInvalid] = useState(false);
+  const [exchangeAttempt, setExchangeAttempt] = useState(0);
+
   const [watch, setWatch] = useState(null);
+  // The latest payload, for the fetch error handler to know whether there is anything on
+  // screen to keep (a failed poll) or nothing at all (a failed first load).
+  const watchRef = useRef(null);
+  useEffect(() => {
+    watchRef.current = watch;
+  }, [watch]);
+  const [loadError, setLoadError] = useState(false);
   // The registration credential the CURRENT `watch` payload was fetched with, or null if it
   // was fetched anonymously. Only meaningful to the stale-credential check further down.
   const [watchedReg, setWatchedReg] = useState(null);
@@ -299,6 +412,7 @@ export default function EventWatch() {
     setWatch(null);
     setNotFound(false);
     setBlockedReason(null);
+    setLoadError(false);
     setLoading(true);
   }
 
@@ -310,20 +424,21 @@ export default function EventWatch() {
   // the form stayed up, and a second click — a second POST, a second attendee row — was the
   // only way in. Passing the token explicitly removes the dependency on a committed render.
   const fetchWatch = useCallback((override = {}) => {
-    // A host-invited or self-registered link carries the access token in the URL
-    // (?reg=... or ?link=...) — save it locally so a refresh (or a later visit with no
-    // query string) keeps working without the visitor needing to click the shared link again.
-    const params = new URLSearchParams(window.location.search);
-    const urlReg = params.get("reg");
-    const urlLink = params.get("link");
-    if (urlReg) setRegToken(urlReg);
-    if (urlLink) setLinkToken(urlLink);
-    const reg = override.reg || urlReg || regToken;
-    const link = override.link || urlLink || linkToken;
+    // A credential from the address bar is no longer read here: it is taken ONCE when the
+    // page opens (initialInvite above), stored, and stripped from the URL — so the stored
+    // value is the only source, and a refresh keeps working without the visitor needing to
+    // click the shared link again.
+    const reg = override.reg || regToken;
+    const link = override.link || linkToken;
     const accessParams = { ...(reg ? { reg } : {}), ...(link ? { link } : {}) };
     api
       .get(`/events/${eventId}/watch`, { params: Object.keys(accessParams).length ? accessParams : undefined })
       .then(({ data }) => {
+        // A good answer clears whatever an earlier failure left on screen. Without this a
+        // single failed request stranded the page on "could not be found" for good.
+        setNotFound(false);
+        setBlockedReason(null);
+        setLoadError(false);
         // Which credential this payload was actually judged against — read by the
         // stale-credential check below, which must never condemn a token the server was
         // not shown.
@@ -342,14 +457,25 @@ export default function EventWatch() {
         });
       })
       .catch((e) => {
+        const status = e?.response?.status;
         // A 403 here means the visitor was recognized but refused (private event, or an
         // invite link already claimed by another device) — worth a real reason, not the
         // generic "not found" a stranger with no token at all should see.
-        if (e?.response?.status === 403) setBlockedReason(errMsg(e));
-        setNotFound(true);
+        if (status === 403) {
+          setBlockedReason(errMsg(e));
+          setNotFound(true);
+        } else if (status === 404) {
+          setNotFound(true);
+        } else if (!watchRef.current) {
+          // Nothing on screen yet and no verdict from the server (network down, a 5xx):
+          // the unrecoverable-error state, with Retry and Help — not "not found".
+          setLoadError(true);
+        }
+        // Otherwise a background poll failed while the page is showing real state. Keep
+        // showing it; the next poll tries again.
       })
       .finally(() => setLoading(false));
-  }, [eventId, regToken, linkToken, setRegToken, setLinkToken]);
+  }, [eventId, regToken, linkToken]);
 
   const [panel, dispatchPanel] = useReducer(liveReducer, LIVE_EMPTY);
   // Visual "new activity" alert per WatchPanel tab — independent of the message/question/
@@ -453,12 +579,33 @@ export default function EventWatch() {
     }
     dispatchPanel(env);
   }, [fetchWatch, markAlert, panel.you, panel.participants, eventId, reactionChannel]);
+  // Capacity protection (server/app/services/admission.py): the event is live, this viewer
+  // may watch, and they are waiting for room. While they wait, the live socket stays closed
+  // as well, so a waiting viewer is not in presence and is not counted as watching.
+  const capacityWaiting = watch?.admission === "waiting";
   const {
     status: liveStatus,
     closeReason: liveCloseReason,
     send: sendLive,
     disconnect: disconnectLive,
-  } = useEventStream(eventId, onLiveEnvelope, regToken, linkToken);
+  } = useEventStream(eventId, onLiveEnvelope, regToken, linkToken, { paused: capacityWaiting });
+
+  // The viewer's own player reporting startup time / a playback failure
+  // (moderation._playback_report → the session analytics). Best effort: a report made
+  // while the socket is down waits for it, and nothing else depends on it.
+  const pendingReports = useRef([]);
+  const liveOpen = liveStatus === "open";
+  const reportPlayback = useCallback((payload) => {
+    // Queued unless the socket is open right now; the effect below sends it once it is.
+    if (!liveOpen || !sendLive("playback.report", payload)) pendingReports.current.push(payload);
+  }, [liveOpen, sendLive]);
+  const onPlaybackStart = useCallback((ms) => reportPlayback({ startup_ms: ms }), [reportPlayback]);
+  const onPlaybackFailure = useCallback((kind) => reportPlayback({ failure: kind }), [reportPlayback]);
+  useEffect(() => {
+    if (liveStatus !== "open" || !pendingReports.current.length) return;
+    const queued = pendingReports.current.splice(0, 5);
+    queued.forEach((p) => sendLive("playback.report", p));
+  }, [liveStatus, sendLive]);
 
   // The panel's send, wrapped so a poll vote also lands in reducer state at once. The server
   // answers with a public `poll.update` whose `your_vote` is blank for everybody (see
@@ -505,14 +652,85 @@ export default function EventWatch() {
     sendLive("participant.hand", { raised: !handRaised });
   }, [sendLive, handRaised]);
 
+  // An older ?reg= link: persisted where a registration always lived (this tab only, as the
+  // URL-read path did before) and taken out of the address bar.
   useEffect(() => {
+    if (!initialInvite.legacyReg) return;
+    try {
+      sessionStorage.setItem(`zk_reg_${eventId}`, initialInvite.legacyReg);
+    } catch { /* storage unavailable; the credential still works for this page load */ }
+    if (!initialInvite.fragment && !initialInvite.legacyLink) stripInvitation();
+  }, [eventId, initialInvite]);
+
+  // The exchange itself (invitationLink.js). Runs before the first /watch so that request
+  // already carries the credential.
+  useEffect(() => {
+    if (!inviteExchange) return undefined;
+    let cancelled = false;
+    redeemInvitation(eventId, inviteExchange)
+      .then(({ credential, token }) => {
+        if (cancelled) return;
+        if (credential === "reg") setRegToken(token);
+        else setLinkToken(token);
+        stripInvitation();
+        setInviteExchange(null);   // releases the first /watch below
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        const status = e?.response?.status;
+        if (status === 404 || status === 422) {
+          // A definite no. Clean the address bar, say so once, and carry on into the normal
+          // flow (a public event still offers registration; a private one explains itself).
+          stripInvitation();
+          setInviteInvalid(true);
+          setInviteExchange(null);
+        } else if (inviteExchange.legacy) {
+          // An older ?link= while the exchange is unreachable: the raw token still works as
+          // a credential, exactly as it did before this change.
+          setLinkToken(inviteExchange.secret);
+          stripInvitation();
+          setInviteExchange(null);
+        } else {
+          // Network/server trouble with a fragment secret: keep it in the address bar (a
+          // reload retries) and offer Retry.
+          setLoadError(true);
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [eventId, inviteExchange, exchangeAttempt, setRegToken, setLinkToken]);
+
+  useEffect(() => {
+    if (inviteExchange) return;   // the exchange above fetches as soon as it is done
     // fetchWatch only sets state inside its own .then/.catch/.finally (an async
-    // continuation, exactly what this rule asks for) — the lint rule's static analysis
-    // just can't see through that indirection to tell this apart from a synchronous
-    // setState call, which is the actual anti-pattern it exists to catch.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // continuation), never synchronously here.
+    fetchWatch();
+  }, [fetchWatch, inviteExchange]);
+
+  const retryLoad = useCallback(() => {
+    setLoadError(false);
+    setLoading(true);
+    if (inviteExchange) setExchangeAttempt((n) => n + 1);
+    else fetchWatch();
+  }, [inviteExchange, fetchWatch]);
+
+  // Capacity waiting: retried on a bounded backoff by CapacityWaitingNotice (keyed on the
+  // attempt, so each wait starts clean). Admission is always the server's decision.
+  const [waitAttempt, setWaitAttempt] = useState(0);
+  const retryAdmission = useCallback(() => {
+    setWaitAttempt((n) => n + 1);
     fetchWatch();
   }, [fetchWatch]);
+
+  // An embedded in-app browser (Facebook, Instagram, …): a dismissible "Open in browser" +
+  // Copy Link banner. Read once; it never blocks anything.
+  const [inApp] = useState(() => detectInAppBrowser());
+
+  // What the persistent read-aloud control says: the player's own notice (paused /
+  // reconnecting) when it has one, otherwise the page state's instruction (set below).
+  const [playerNotice, setPlayerNotice] = useState(null);
 
   // Warm up the notification chime's AudioContext on this page's first click/keypress —
   // browsers refuse to play audio before a user gesture. Mirrors useLiveEvent.js's own
@@ -538,6 +756,19 @@ export default function EventWatch() {
     return () => meta.remove();
   }, [watch]);
 
+  // Referrer-Policy: no-referrer for everything this page loads or links to (ZST-SPEC-VAP-001
+  // §5.1). The server sets the header on this route in production (main.py); the meta tag
+  // makes the same true wherever the page is served (the Vite dev server, a static host),
+  // so the page URL never travels to LiveKit, the replay file host or a link out. Put back
+  // on unmount, so the rest of the app is untouched.
+  useEffect(() => {
+    const meta = document.createElement("meta");
+    meta.name = "referrer";
+    meta.content = "no-referrer";
+    document.head.appendChild(meta);
+    return () => meta.remove();
+  }, []);
+
   // Keeps a page opened before the host goes live from needing a manual refresh. Once
   // live, polling stays off — the live socket's own broadcast.update "ended" signal
   // (onLiveEnvelope above) is what triggers the one fetchWatch() that matters, instead of
@@ -546,7 +777,18 @@ export default function EventWatch() {
   // the viewer without any socket frame (the sampler flips it server-side), and it is what
   // drives the "host's connection dropped" / recovered wording in the player. Safe now that
   // fetchWatch above preserves the LiveKit token, so a poll no longer reconnects the room.
-  useInterval(fetchWatch, POLL_MS, Boolean(watch) && watch.status !== "live" && watch.status !== "ended");
+  //
+  // Two cases this used to strand: a viewer who opened the page BEFORE start_time while the
+  // host was already live (status "live", so polling was off, and the page sat on "hasn't
+  // started" forever), and an ended event whose replay is still being prepared (polling off
+  // once ended, so a replay published minutes later needed a reload). A capacity wait is
+  // retried by its own backoff instead (CapacityWaitingNotice).
+  useInterval(
+    fetchWatch, POLL_MS,
+    Boolean(watch) && !capacityWaiting
+      && ((watch.status !== "live" && watch.status !== "ended") || (watch.status === "live" && watch.not_started)),
+  );
+  useInterval(fetchWatch, REPLAY_POLL_MS, Boolean(watch) && watch.status === "ended" && watch.replay_state === "processing");
 
   const event = watch ? watchToMockEvent(watch) : null;
   const live = event?.status === "Live";
@@ -650,7 +892,28 @@ export default function EventWatch() {
   // now`), so `expired` flips true within milliseconds of any normal "End Event" click.
   // Checked here so a real ended-with-replay event is never mistaken for an event that
   // simply expired unwatched.
-  const timeGated = Boolean(mustIdentify || (watch?.expired && !ended) || watch?.not_started);
+  const timeGated = Boolean(mustIdentify || (watch?.expired && !ended) || watch?.not_started || capacityWaiting);
+  // The pre-event state (ZST-SPEC-VAP-001 §6.3): before the scheduled start, or a scheduled
+  // event the host has not taken live yet. It used to fall through to an empty player with a
+  // PREVIEW badge.
+  const preEvent = Boolean(watch && !ended && (watch.not_started || PRE_LIVE.has(watch.status)));
+  // The host's deliberate pause, or the server's confirmation that the producer's media
+  // dropped: the broadcaster-interruption state. The player keeps its place either way.
+  const interrupted = panel.broadcastStatus === "paused" || watch?.media_status === "reconnecting";
+
+  // The instruction the persistent read-aloud control speaks — always the sentence on screen.
+  const stateInstruction = !watch ? null
+    : mustIdentify ? t("registerPrompt")
+    : capacityWaiting ? `${t("capacityTitle")}. ${t("capacityBody")}`
+    : ended ? `${t("endedTitle")}. ${
+      watch.recording_url ? t("replayAvailable")
+        : watch.replay_state === "processing" ? t("replayProcessing")
+        : watch.replay_state === "expired" ? t("replayExpired") : t("replayUnavailable")}`
+    : watch.expired ? `${t("windowClosedTitle")}. ${t("windowClosedBody")}`
+    : preEvent ? `${t("preEventTitle")}. ${t("preEventBody")}`
+    : interrupted ? t("paused")
+    : t("livePlaying");
+  const assistText = playerNotice || stateInstruction;
 
   if (loading) {
     // The registration form cannot flash before validation: `watch` is null until the
@@ -669,6 +932,8 @@ export default function EventWatch() {
       </div>
     );
   }
+
+  if (loadError && !watch) return <ViewerErrorState onRetry={retryLoad} />;
 
   if (notFound || !event)
     return (
@@ -717,22 +982,29 @@ export default function EventWatch() {
           >
             <Logo height="h-6 sm:h-7" />
           </Link>
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-3">
             {live && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-600 ring-1 ring-rose-500/20 dark:text-rose-400">
                 <FiRadio className="animate-pulse" aria-hidden /> <span className="hidden sm:inline">Live now</span><span className="sm:hidden">Live</span>
               </span>
             )}
+            {/* Language and read-aloud (ZST-SPEC-VAP-001 §6.4): always in the same place, and
+                the read-aloud speaks whatever instruction the page is showing right now.
+                In the header from sm up; on a phone they get their own row just below. */}
+            <div className="hidden items-center gap-2 sm:flex">
+              <LanguagePicker />
+              <AudioAssistButton text={assistText} lang={lang} label={t("readAloud")} stopLabel={t("stopReading")} />
+            </div>
             <button
               type="button"
               onClick={handleLeaveEvent}
-              className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
+              className="min-h-12 rounded-xl px-3 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 sm:px-4 dark:text-slate-300 dark:hover:bg-white/10 dark:hover:text-white"
             >
               Leave Event
             </button>
             <button
               onClick={toggle}
-              className="grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition duration-150 hover:bg-slate-100 hover:text-slate-900 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
+              className="grid h-12 w-12 place-items-center rounded-xl text-slate-500 transition duration-150 hover:bg-slate-100 hover:text-slate-900 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
               aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
               title={theme === "dark" ? "Switch to light" : "Switch to dark"}
             >
@@ -740,7 +1012,21 @@ export default function EventWatch() {
             </button>
           </div>
         </div>
+        <div className="flex items-center justify-end gap-2 px-4 pb-2 sm:hidden">
+          <LanguagePicker />
+          <AudioAssistButton text={assistText} lang={lang} label={t("readAloud")} stopLabel={t("stopReading")} />
+        </div>
       </header>
+
+      {inApp.inApp && (
+        <InAppBrowserNotice platform={inApp.platform} privateInvite={watch.visibility === "private"} />
+      )}
+
+      {inviteInvalid && (
+        <p role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-[13px] font-medium text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+          {t("invitationInvalid")}
+        </p>
+      )}
 
       {/* Top section: banner */}
       <WatchHeader event={event} viewers={viewers} />
@@ -776,17 +1062,30 @@ export default function EventWatch() {
                 // second click, and a second attendee record with it.
                 onRegistered={(token, remember) => { setRegToken(token, remember); fetchWatch({ reg: token }); }}
               />
+            ) : capacityWaiting ? (
+              // Capacity protection: wait for room, retried automatically. Nobody watching
+              // is affected; see server/app/services/admission.py.
+              <CapacityWaitingNotice
+                key={waitAttempt}
+                attempt={waitAttempt}
+                retryAfterSeconds={watch.retry_after_seconds}
+                onRetry={retryAdmission}
+              />
             ) : ended ? (
               <VideoPlayer event={event} viewers={viewers} watch={watch} />
             ) : watch.expired ? (
               <AccessWindowNotice variant="expired" />
-            ) : watch.not_started ? (
-              <AccessWindowNotice variant="not_started" startTime={watch.start_time} />
+            ) : preEvent ? (
+              <AccessWindowNotice variant="not_started" startTime={watch.start_time} eventTitle={event.name} />
             ) : (
               <VideoPlayer
                 event={event}
                 viewers={viewers}
                 watch={watch}
+                interrupted={interrupted}
+                onPlaybackStart={onPlaybackStart}
+                onPlaybackFailure={onPlaybackFailure}
+                onNoticeChange={setPlayerNotice}
                 onStage={isOnStage}
                 unmuteRequest={panel.unmuteRequest}
                 // participant.state is the existing action for a client reporting its OWN
@@ -849,6 +1148,7 @@ export default function EventWatch() {
               onTabView={clearAlert}
               enabledTabs={{ chat: watch.chat_enabled, qa: watch.qa_enabled, polls: watch.polls_enabled }}
               slowModeSeconds={panel.slowModeSeconds}
+              currentIdentity={panel.you?.identity}
             />
           )}
 

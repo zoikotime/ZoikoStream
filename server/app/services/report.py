@@ -53,14 +53,24 @@ def _audience(db, event: Event) -> dict:
     if not stored_summary:
         stored_summary = bus.summary_get_sync(event.id)
 
+    ledger = bus.session_get_all_sync(event.id)
     agg = aggregate_event_watch_time(
         event_id=event.id,
-        sessions=bus.session_get_all_sync(event.id),
+        sessions=ledger,
         snaps=snapshots,
         event_start=event.start_time,
         event_end=event.end_time,
         summary_override=stored_summary,
     )
+    # Session-aware metrics (services/viewing_sessions.py), additional to the figures above.
+    # The finalized summary wins, exactly as it does for watch time.
+    from .viewing_sessions import summarize_sessions
+    session_metrics = stored_summary.get("sessions") if isinstance(stored_summary, dict) else None
+    if not (isinstance(session_metrics, dict) and session_metrics.get("measured")):
+        starts = [s.started_at for s in sessions if s.started_at]
+        session_metrics = summarize_sessions(
+            ledger, broadcast_start_ts=min(starts) if starts else None,
+            now_ts=datetime.now(timezone.utc).timestamp(), event_end_ts=event.end_time)
     watch_hours = round(agg["watch_hours"], 1) if agg["watch_hours"] is not None else None
     peak = max(peak, agg.get("viewer_count", 0))
 
@@ -87,6 +97,7 @@ def _audience(db, event: Event) -> dict:
         # available at the single-event level either.
         "unique_attendees": None,
         "unique_attendees_note": "No per-person watch-duration record exists once a room ends.",
+        "sessions": session_metrics,
     }
 
 

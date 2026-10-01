@@ -132,6 +132,10 @@ _LIVE_QUESTION_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS answered_by_name VARCHAR(120)",
 ]
 
+_LIVE_MESSAGE_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS reaction_users JSONB DEFAULT '{}'",
+]
+
 # Columns whose models gained fields after the table already existed. Without these the
 # SELECT that lists them fails outright ("column does not exist") — /admin/feature-flags
 # and /admin/support-tickets were both returning 500s because of this drift.
@@ -880,6 +884,8 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE live_recordings {clause}"))
         for clause in _LIVE_QUESTION_COLUMNS:
             conn.execute(text(f"ALTER TABLE live_questions {clause}"))
+        for clause in _LIVE_MESSAGE_COLUMNS:
+            conn.execute(text(f"ALTER TABLE live_messages {clause}"))
         for clause in _FEATURE_FLAG_COLUMNS:
             conn.execute(text(f"ALTER TABLE feature_flags {clause}"))
         for clause in _SUPPORT_TICKET_COLUMNS:

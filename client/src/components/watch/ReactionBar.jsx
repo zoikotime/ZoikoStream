@@ -89,7 +89,7 @@ export default function ReactionBar({
           aria-label={r.label}
           title={r.label}
           className={cx(
-            "inline-flex h-11 w-11 items-center justify-center rounded-xl border transition duration-150 active:scale-90 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
+            "inline-flex h-12 w-12 items-center justify-center rounded-xl border transition duration-150 active:scale-90 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
             flashing
               ? "border-emerald-400 bg-emerald-50 dark:border-emerald-500/50 dark:bg-emerald-500/15"
               : "border-slate-200 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:hover:border-slate-700 dark:hover:bg-slate-800/60"
@@ -115,7 +115,7 @@ export default function ReactionBar({
           className={cx(
             // Pushed right only when there are emoji on its left to push away from.
             reactionsVisible && "ml-auto",
-            "inline-flex min-h-11 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
+            "inline-flex min-h-12 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-50",
             handRaised
               ? "border-transparent bg-violet-600 text-white hover:bg-violet-500"
               : "border-violet-300 text-violet-600 hover:bg-violet-50 dark:border-violet-500/40 dark:text-violet-400 dark:hover:bg-violet-500/10"

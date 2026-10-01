@@ -35,7 +35,11 @@ const wsUrl = (eventId, token, reg, link) => {
 // POST /events/:id/register (self-serve name+email — see RegistrationGate / IdentifyForm).
 // Either one is enough to open the socket; the server resolves whichever it gets into a
 // Ctx (routers/live.py, moderation.resolve_ctx / resolve_ctx_from_registration).
-export default function useEventStream(eventId, onEnvelope, regToken, linkToken) {
+//
+// `paused` holds the socket closed without forgetting anything (the viewer page sets it while
+// a viewer is waiting for capacity — pages/watch/EventWatch.jsx — so a waiting viewer is not
+// in presence and is not counted as watching). Clearing it connects as usual.
+export default function useEventStream(eventId, onEnvelope, regToken, linkToken, { paused = false } = {}) {
   // Read the session once at init: with no token there is nothing to connect to, and
   // starting in "unauthorized" avoids a pointless "connecting" flash.
   const [token] = useState(() => localStorage.getItem("token"));
@@ -78,7 +82,7 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken)
   });
 
   useEffect(() => {
-    if (!eventId || !authKey) return undefined;
+    if (!eventId || !authKey || paused) return undefined;
 
     let closed = false;     // component unmounted / deps changed — stop reconnecting
     manuallyClosed.current = false;
@@ -159,7 +163,7 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken)
       socket.current?.close();
       socket.current = null;
     };
-  }, [eventId, token, regToken, linkToken, authKey]);
+  }, [eventId, token, regToken, linkToken, authKey, paused]);
 
   const send = useCallback((action, payload = {}) => {
     const ws = socket.current;

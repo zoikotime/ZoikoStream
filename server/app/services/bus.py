@@ -26,6 +26,7 @@ import contextlib
 import json
 import logging
 import random
+import secrets
 import time
 
 from ..config import settings
@@ -439,7 +440,31 @@ def _summary_key(event_id) -> str:
     return f"analytics:{eid(event_id)}:summary"
 
 
-async def session_record_join(event_id, identity: str, role: str = "viewer", name: str | None = None, joined_at: float | None = None) -> dict:
+# Coarse client class recorded on each viewing session (services/broadcast.classify_ua):
+# device and browser family only, never the user-agent string, so a session can be counted
+# per browser class without anything that could fingerprint a person.
+SESSION_AGENT_FIELDS = ("device", "browser")
+
+
+def _open_or_extend(sessions: list, now: float, agent: dict | None) -> None:
+    """Extend the identity's open interval, or open a new one.
+
+    A new interval is one viewing session. It gets an opaque random id (`sid`). That id is
+    never derived from the person, so two sessions are never claimed to be the same viewer
+    by anything other than the credential-backed identity they were recorded under.
+    """
+    agent = {k: agent[k] for k in SESSION_AGENT_FIELDS if agent and agent.get(k)}
+    if sessions and sessions[-1].get("left_at") is None:
+        sessions[-1]["last_seen"] = max(sessions[-1].get("last_seen") or now, now)
+        for k, v in agent.items():
+            sessions[-1].setdefault(k, v)
+    else:
+        sessions.append({"sid": secrets.token_hex(8), "joined_at": now, "last_seen": now,
+                         "left_at": None, **agent})
+
+
+async def session_record_join(event_id, identity: str, role: str = "viewer", name: str | None = None,
+                              joined_at: float | None = None, agent: dict | None = None) -> dict:
     """Record a viewer join into the event session ledger."""
     event_id = eid(event_id)
     now = joined_at if joined_at is not None else time.time()
@@ -452,11 +477,7 @@ async def session_record_join(event_id, identity: str, role: str = "viewer", nam
         user_record["role"] = role
         if name:
             user_record["name"] = name
-        sessions = user_record.setdefault("sessions", [])
-        if sessions and sessions[-1].get("left_at") is None:
-            sessions[-1]["last_seen"] = max(sessions[-1].get("last_seen") or now, now)
-        else:
-            sessions.append({"joined_at": now, "last_seen": now, "left_at": None})
+        _open_or_extend(user_record.setdefault("sessions", []), now, agent)
         store[identity] = user_record
         return user_record
 
@@ -467,13 +488,45 @@ async def session_record_join(event_id, identity: str, role: str = "viewer", nam
     user_record["role"] = role
     if name:
         user_record["name"] = name
-    sessions = user_record.setdefault("sessions", [])
-    if sessions and sessions[-1].get("left_at") is None:
-        sessions[-1]["last_seen"] = max(sessions[-1].get("last_seen") or now, now)
-    else:
-        sessions.append({"joined_at": now, "last_seen": now, "left_at": None})
+    _open_or_extend(user_record.setdefault("sessions", []), now, agent)
     await r.hset(_sessions_key(event_id), identity, json.dumps(user_record, default=str))
     return user_record
+
+
+def _apply_playback(session: dict, startup_ms: int | None, failure: str | None) -> None:
+    # Only the FIRST startup of a session is its startup time; a later report is a re-attach.
+    if startup_ms is not None and session.get("startup_ms") is None:
+        session["startup_ms"] = startup_ms
+    if failure:
+        kinds = session.setdefault("failure_kinds", {})
+        kinds[failure] = kinds.get(failure, 0) + 1
+        session["failures"] = sum(kinds.values())
+
+
+async def session_record_playback(event_id, identity: str, startup_ms: int | None = None,
+                                  failure: str | None = None) -> bool:
+    """Attach the viewer's own playback report (time to first frame, a playback failure) to
+    their OPEN viewing session. Returns False when there is no open session to attach it to:
+    a report is never allowed to create a session."""
+    event_id = eid(event_id)
+    r = await redis()
+    if r is None:
+        rec = _sessions_memory.get(event_id, {}).get(identity)
+        sessions = rec.get("sessions", []) if rec else []
+        if not sessions or sessions[-1].get("left_at") is not None:
+            return False
+        _apply_playback(sessions[-1], startup_ms, failure)
+        return True
+    raw = await r.hget(_sessions_key(event_id), identity)
+    if not raw:
+        return False
+    rec = json.loads(raw)
+    sessions = rec.get("sessions", [])
+    if not sessions or sessions[-1].get("left_at") is not None:
+        return False
+    _apply_playback(sessions[-1], startup_ms, failure)
+    await r.hset(_sessions_key(event_id), identity, json.dumps(rec, default=str))
+    return True
 
 
 async def session_record_heartbeat(event_id, identity: str, timestamp: float | None = None) -> None:
@@ -534,6 +587,9 @@ async def session_record_leave(event_id, identity: str, left_at: float | None = 
     return None
 
 
+_SESSION_DETAIL_FIELDS = ("sid", *SESSION_AGENT_FIELDS, "startup_ms", "failures", "failure_kinds")
+
+
 def _extract_all_intervals(sessions_data: dict[str, dict], presence_data: dict[str, dict] | None = None) -> list[dict]:
     out: list[dict] = []
     seen_identities: set[str] = set()
@@ -550,6 +606,9 @@ def _extract_all_intervals(sessions_data: dict[str, dict], presence_data: dict[s
                 "joined_at": s.get("joined_at"),
                 "last_seen": s.get("last_seen"),
                 "left_at": s.get("left_at"),
+                # Per-session detail for services/viewing_sessions.py. Absent on intervals
+                # recorded before it existed, which every reader treats as "not reported".
+                **{k: s[k] for k in _SESSION_DETAIL_FIELDS if k in s},
             })
 
     if presence_data:
@@ -646,9 +705,15 @@ def summary_set_sync(event_id, summary: dict) -> None:
             pass
 
 
-async def session_finalize(event_id, end_time: float | None = None) -> dict:
-    """Close all open sessions and calculate durable watch time summary."""
+async def session_finalize(event_id, end_time: float | None = None, broadcast_start_ts: float | None = None) -> dict:
+    """Close all open sessions and calculate durable watch time summary.
+
+    The summary also carries the per-session metrics (services/viewing_sessions.py) under
+    "sessions", so they survive in BroadcastSession.settings["analytics_summary"] once the
+    in-memory ledger is gone. `broadcast_start_ts` anchors the join-time distribution; it is
+    omitted (and the distribution with it) when the caller does not know the start."""
     from app.services.watch_time import calculate_viewer_watch_time
+    from app.services.viewing_sessions import summarize_sessions
     event_id = eid(event_id)
     now = end_time if end_time is not None else time.time()
 
@@ -689,6 +754,8 @@ async def session_finalize(event_id, end_time: float | None = None) -> dict:
         all_sessions = _extract_all_intervals(s_data)
 
     summary = calculate_viewer_watch_time(all_sessions, now_ts=now, event_end_ts=now)
+    summary["sessions"] = summarize_sessions(all_sessions, broadcast_start_ts=broadcast_start_ts,
+                                             now_ts=now, event_end_ts=now)
     summary["finalized_at"] = now
     await summary_set(event_id, summary)
     return summary
@@ -711,6 +778,7 @@ async def presence_upsert(event_id, identity: str, patch: dict) -> dict:
             role=rec.get("role", "viewer"),
             name=rec.get("name"),
             joined_at=rec.get("joined_at"),
+            agent=rec,
         )
         return rec
     raw = await r.hget(_pkey(event_id), identity)
@@ -724,6 +792,7 @@ async def presence_upsert(event_id, identity: str, patch: dict) -> dict:
         role=rec.get("role", "viewer"),
         name=rec.get("name"),
         joined_at=rec.get("joined_at"),
+        agent=rec,
     )
     return rec
 
@@ -762,8 +831,82 @@ async def presence_clear(event_id) -> None:
         _state.pop(event_id, None)
         _bans.pop(event_id, None)
         _reactions.pop(event_id, None)
+        _admitted_memory.pop(event_id, None)
     else:
-        await r.delete(_pkey(event_id), _bkey(event_id), _skey(event_id), _rkey(event_id))
+        await r.delete(_pkey(event_id), _bkey(event_id), _skey(event_id), _rkey(event_id),
+                       _akey(event_id))
+
+
+# ── admission ledger (capacity protection, services/admission.py) ─────────────────────────
+# identity -> {"admitted_at", "seen"} for every viewer this broadcast has admitted. It exists
+# so a viewer who briefly drops (socket blip, page refresh, phone sleep) is recognised on the
+# way back in and never loses their place to the ceiling. Presence cannot do that: it is
+# deleted on every disconnect. Written only by GET /watch (sync) and the socket heartbeat
+# (async); cleared with presence when the room ends.
+
+_admitted_memory: dict[str, dict[str, dict]] = {}
+
+
+def _akey(event_id) -> str:
+    return f"live:{eid(event_id)}:admitted"
+
+
+def admission_decide_sync(event_id, identity: str, ceiling: int | None, hold_seconds: float,
+                          now: float | None = None) -> tuple[bool, int | None]:
+    """(admitted, occupied) for `identity` against `ceiling`.
+
+    * already admitted this broadcast -> admitted, always (and its `seen` refreshed);
+    * no ceiling                     -> admitted and recorded, so that a ceiling configured
+                                        mid-event never displaces anyone already watching;
+    * otherwise admitted only while fewer than `ceiling` admitted viewers have been seen
+      within `hold_seconds`.
+
+    Read-modify-write without a lock, like state_set: two simultaneous first-time viewers can
+    both take the last slot. The ceiling is a protective soft limit, and overshooting it by a
+    handful is the safe direction to be wrong in. Redis unreachable -> admitted (fail open).
+    Never blocking a viewer because the ledger itself is down."""
+    event_id = eid(event_id)
+    now = now if now is not None else time.time()
+    r = sync_redis()
+    if r is None:
+        store = _admitted_memory.setdefault(event_id, {})
+        return _admission_apply(store, identity, ceiling, hold_seconds, now, write=store.__setitem__)
+    try:
+        raw = r.hgetall(_akey(event_id))
+        store = {k: json.loads(v) for k, v in raw.items()}
+        return _admission_apply(
+            store, identity, ceiling, hold_seconds, now,
+            write=lambda ident, rec: r.hset(_akey(event_id), ident, json.dumps(rec)))
+    except Exception:  # noqa: BLE001 — see the docstring: the ledger failing must not block anyone
+        log.warning("admission ledger unavailable for event %s — admitting", event_id)
+        return True, None
+
+
+def _admission_apply(store: dict, identity: str, ceiling, hold_seconds, now, write):
+    occupied = sum(1 for ident, rec in store.items()
+                   if ident != identity and (rec.get("seen") or 0) >= now - hold_seconds)
+    known = store.get(identity)
+    if known is not None or ceiling is None or occupied < ceiling:
+        write(identity, {"admitted_at": (known or {}).get("admitted_at", now), "seen": now})
+        return True, occupied + 1
+    return False, occupied
+
+
+async def admission_touch(event_id, identity: str, now: float | None = None) -> None:
+    """Refresh an ADMITTED viewer's `seen` (socket heartbeat). Never admits anyone."""
+    event_id = eid(event_id)
+    now = now if now is not None else time.time()
+    r = await redis()
+    if r is None:
+        rec = _admitted_memory.get(event_id, {}).get(identity)
+        if rec is not None:
+            rec["seen"] = now
+        return
+    raw = await r.hget(_akey(event_id), identity)
+    if raw:
+        rec = json.loads(raw)
+        rec["seen"] = now
+        await r.hset(_akey(event_id), identity, json.dumps(rec))
 
 
 # ── live session state (broadcast + chat/Q&A settings) ────────────────────────
