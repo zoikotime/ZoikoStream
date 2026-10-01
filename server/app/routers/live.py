@@ -334,6 +334,9 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
                     # Round-trip latency + liveness. Answered on THIS socket only and
                     # exempt from the rate limit, so a heartbeat can't be throttled out.
                     await bus.session_record_heartbeat(ctx.event_id, ctx.identity)
+                    # Keeps an admitted viewer counted as present for capacity protection
+                    # (services/admission.py). Refreshes only; it never admits anyone.
+                    await bus.admission_touch(ctx.event_id, ctx.identity)
                     await websocket.send_json(bus.envelope("moderator", "pong", {"t": frame.get("t")}))
                     continue
 

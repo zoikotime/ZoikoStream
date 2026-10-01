@@ -46,7 +46,7 @@ function FlagChips({ flags }) {
 
 // ── chat ─────────────────────────────────────────────────────────────────────
 
-export function ChatTab({ messages, typing, canModerate, send }) {
+export function ChatTab({ messages, typing, canModerate, send, currentIdentity = null }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [picked, setPicked] = useState(() => new Set());   // bulk selection
@@ -299,11 +299,42 @@ export function ChatTab({ messages, typing, canModerate, send }) {
 
             {!!Object.keys(m.reactions || {}).length && (
               <div className="ml-8 mt-1.5 flex flex-wrap gap-1">
-                {Object.entries(m.reactions).map(([emoji, count]) => (
-                  <span key={emoji} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs tabular-nums dark:bg-slate-800">
-                    {emoji} {count}
-                  </span>
-                ))}
+                {Object.entries(m.reactions).map(([emoji, val]) => {
+                  const count = typeof val === "object" ? val?.count : val;
+                  if (!count || count <= 0) return null;
+                  const reacted = Boolean(
+                    currentIdentity && (m.reaction_users?.[emoji] || []).includes(currentIdentity)
+                  );
+                  return (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() =>
+                        send("chat.react", {
+                          id: m.id,
+                          message_id: m.id,
+                          emoji,
+                          reaction: emoji,
+                          remove: reacted,
+                          action: reacted ? "remove" : "add",
+                        })
+                      }
+                      className={cx(
+                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs tabular-nums transition duration-150 motion-reduce:transition-none",
+                        reacted
+                          ? "bg-violet-100 text-violet-700 ring-1 ring-violet-500/30 dark:bg-violet-500/20 dark:text-violet-300"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700",
+                        PANEL.t150,
+                        focusRing
+                      )}
+                      aria-label={`Reaction ${emoji} (${count})`}
+                      title={`React ${emoji}`}
+                    >
+                      <span>{emoji}</span>
+                      <span>{count}</span>
+                    </button>
+                  );
+                })}
               </div>
             )}
 
@@ -314,18 +345,37 @@ export function ChatTab({ messages, typing, canModerate, send }) {
             )}
 
             <div className="ml-8 mt-2 flex flex-wrap items-center gap-1">
-              {QUICK_REACTIONS.map((emoji) => (
-                <button
-                  key={emoji}
-                  type="button"
-                  onClick={() => send("chat.react", { id: m.id, emoji })}
-                  className={cx("rounded-md px-1 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800", PANEL.t150, focusRing)}
-                  aria-label={`React ${emoji}`}
-                  title={`React ${emoji}`}
-                >
-                  {emoji}
-                </button>
-              ))}
+              {QUICK_REACTIONS.map((emoji) => {
+                const reacted = Boolean(
+                  currentIdentity && (m.reaction_users?.[emoji] || []).includes(currentIdentity)
+                );
+                return (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() =>
+                      send("chat.react", {
+                        id: m.id,
+                        message_id: m.id,
+                        emoji,
+                        reaction: emoji,
+                        remove: reacted,
+                        action: reacted ? "remove" : "add",
+                      })
+                    }
+                    className={cx(
+                      "rounded-md px-1 py-0.5 text-xs hover:bg-slate-100 dark:hover:bg-slate-800",
+                      reacted && "bg-violet-50 ring-1 ring-violet-500/30 dark:bg-violet-500/20",
+                      PANEL.t150,
+                      focusRing
+                    )}
+                    aria-label={`React ${emoji}`}
+                    title={`React ${emoji}`}
+                  >
+                    {emoji}
+                  </button>
+                );
+              })}
               <ActionButton icon={FiCornerUpLeft} title={`Reply to ${m.name}`} onClick={() => setReplyTo(m)} />
               {canModerate && (
                 <>
@@ -687,7 +737,7 @@ export function QATab({ questions, speakers, canModerate, send }) {
 }
 
 export default function ChatQAPanel({
-  className, messages, questions, speakers = [], typing = {}, canModerate, loading, send,
+  className, messages, questions, speakers = [], typing = {}, canModerate, loading, send, currentIdentity = null,
 }) {
   const [tab, setTab] = useState("chat");
 
@@ -729,7 +779,7 @@ export default function ChatQAPanel({
           {[0, 1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-20 rounded-xl" />)}
         </div>
       ) : tab === "chat" ? (
-        <ChatTab messages={messages} typing={typing} canModerate={canModerate} send={send} />
+        <ChatTab messages={messages} typing={typing} canModerate={canModerate} send={send} currentIdentity={currentIdentity} />
       ) : (
         <QATab questions={questions} speakers={speakers} canModerate={canModerate} send={send} />
       )}

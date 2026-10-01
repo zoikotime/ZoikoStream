@@ -15,7 +15,7 @@
 // So Continue still POSTs a real registration for the CURRENT event and waits for the
 // server's answer. Nobody is counted as registered for an event they have not registered
 // for, and a token minted for event A is never presented to event B.
-import { useState } from "react";
+import { useId, useState } from "react";
 import { FiCheckCircle, FiLock, FiUser } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { cx } from "../../ui/tokens";
@@ -26,6 +26,7 @@ const field =
 const labelCls = "mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300";
 
 export default function RegistrationGate({ eventId, eventTitle, onRegistered }) {
+  const nameId = useId();
   // Read once per mount, and the gate mounts fresh for each event. Null in a private window,
   // on a new device, or for anyone who never ticked Remember me — all of which land on the
   // ordinary empty form below.
@@ -137,7 +138,7 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
                 type="button"
                 onClick={() => register(greeting)}
                 disabled={submitting}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <FiCheckCircle /> {submitting ? "Registering…" : "Continue"}
               </button>
@@ -153,11 +154,14 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
           ) : (
           <form onSubmit={submit} className="space-y-4 text-left">
             <div>
-              <label className={labelCls}>Full name</label>
+              {/* Associated with its input, so a screen reader names the field. */}
+              <label htmlFor={nameId} className={labelCls}>Full name</label>
               <div className="relative">
-                <FiUser className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <FiUser aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
-                  className={cx(field, "pl-9")}
+                  id={nameId}
+                  autoComplete="name"
+                  className={cx(field, "min-h-12 pl-9")}
                   value={form.name}
                   onChange={(e) => set("name", e.target.value)}
                   placeholder="Enter your name"
@@ -184,7 +188,7 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
             <button
               type="submit"
               disabled={!valid || submitting}
-              className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <FiCheckCircle /> {submitting ? "Continuing…" : "Continue to Watch"}
             </button>

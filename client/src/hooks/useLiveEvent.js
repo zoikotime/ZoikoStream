@@ -24,6 +24,7 @@ const EMPTY = {
   speakers: [],
   canModerate: false,
   canHost: false,
+  you: null,
   livekitEnforced: false,
   participants: [],
   // Backstage roster — every assigned speaker + their ContributorSession, if invited.
@@ -95,6 +96,7 @@ export function reducer(state, env) {
         speakers: data.speakers || [],
         canModerate: data.can_moderate,
         canHost: !!data.can_host,
+        you: data.you || null,
         livekitEnforced: data.livekit_enforced,
         participants: data.participants || [],
         contributors: data.contributors || [],
@@ -176,7 +178,63 @@ export function reducer(state, env) {
     case "chat/message.new":
       return { ...state, messages: [...state.messages, data] };
     case "chat/message.update":
-      return { ...state, messages: upsert(state.messages, data) };
+    case "chat/reaction.updated": {
+      const targetId = String(data.id || data.message_id || "");
+      const idx = state.messages.findIndex((m) => String(m.id || m.message_id) === targetId);
+      if (idx === -1) {
+        return { ...state, messages: upsert(state.messages, data) };
+      }
+      const next = state.messages.slice();
+      const current = next[idx];
+      next[idx] = {
+        ...current,
+        ...data,
+        reactions: data.reactions !== undefined ? data.reactions : (
+          data.reaction ? {
+            ...(current.reactions || {}),
+            ...(data.count > 0 ? { [data.reaction]: data.count } : {})
+          } : current.reactions
+        ),
+      };
+      if (data.reaction && data.count <= 0 && next[idx].reactions) {
+        const cleaned = { ...next[idx].reactions };
+        delete cleaned[data.reaction];
+        next[idx].reactions = cleaned;
+      }
+      return { ...state, messages: next };
+    }
+    case "local/chat.react": {
+      const targetId = String(data.id || data.message_id || "");
+      const emoji = data.emoji || data.reaction;
+      if (!emoji) return state;
+      const idx = state.messages.findIndex((m) => String(m.id || m.message_id) === targetId);
+      if (idx === -1) return state;
+      const next = state.messages.slice();
+      const msg = { ...next[idx] };
+      const reactions = { ...(msg.reactions || {}) };
+      const reactionUsers = { ...(msg.reaction_users || {}) };
+      const users = [...(reactionUsers[emoji] || [])];
+      const identity = data.identity || state.you?.identity || "me";
+      const has = users.includes(identity);
+      const isRemove = data.remove ?? has;
+      if (isRemove && has) {
+        const uIdx = users.indexOf(identity);
+        users.splice(uIdx, 1);
+      } else if (!isRemove && !has) {
+        users.push(identity);
+      }
+      if (users.length > 0) {
+        reactionUsers[emoji] = users;
+        reactions[emoji] = users.length;
+      } else {
+        delete reactionUsers[emoji];
+        delete reactions[emoji];
+      }
+      msg.reactions = reactions;
+      msg.reaction_users = reactionUsers;
+      next[idx] = msg;
+      return { ...state, messages: next };
+    }
     case "chat/message.delete":
       return { ...state, messages: drop(state.messages, data) };
     case "chat/typing": {

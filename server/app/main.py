@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -10,7 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from .routers.auth import router as auth_router
 from .routers.dashboard import router as dashboard_router
@@ -25,6 +26,7 @@ from .routers.status import router as status_router
 from .routers.trust import router as trust_router
 from .routers.wellknown import router as wellknown_router
 from .routers.privacy import router as privacy_router
+from . import log_redaction
 from .security import ALGORITHM
 from .services import bus
 from .services import platform_settings
@@ -51,6 +53,10 @@ from .db import (
 )
 
 log = logging.getLogger(__name__)
+
+# Viewer credentials travel in query strings (the browser WebSocket API cannot set headers);
+# keep them out of uvicorn's access/WebSocket log lines. See log_redaction.py.
+log_redaction.install()
 
 
 @contextlib.asynccontextmanager
@@ -270,6 +276,48 @@ _CORS_KWARGS = {
 if not settings.is_production():
     _CORS_KWARGS["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 
+class ReadableServerErrors:
+    """Turn an exception nothing else handled into a JSON 500 the BROWSER can read.
+
+    Without this, an unhandled exception reached Starlette's ServerErrorMiddleware, which
+    sits OUTSIDE CORSMiddleware: the 500 went out as text/plain with no
+    Access-Control-Allow-Origin header, the browser refused to hand it to the page, and
+    axios reported "Network Error" — for a request that had reached the API and failed
+    there. Registered BEFORE CORSMiddleware below, so it runs inside it and the JSON 500
+    carries the CORS headers.
+
+    The exception is re-raised after the response is sent, so nothing about error
+    visibility changes: uvicorn still logs the traceback, ServerErrorMiddleware sees a
+    started response and sends nothing twice, and TestClient still raises it in tests.
+    HTTP only; websocket and lifespan scopes pass straight through."""
+
+    BODY = {"detail": {"code": "server_error",
+                       "message": "Something went wrong on our side, so this request could not be "
+                                  "completed. Please try again."}}
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        started = False
+
+        async def tracking_send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception:
+            if not started:
+                await JSONResponse(status_code=500, content=self.BODY)(scope, receive, send)
+            raise
+
+
+app.add_middleware(ReadableServerErrors)
 app.add_middleware(CORSMiddleware, **_CORS_KWARGS)
 
 @app.middleware("http")
@@ -420,6 +468,30 @@ def db_unavailable(request: Request, exc: OperationalError):
     )
 
 
+# undefined_table / undefined_column / undefined_object: the code is ahead of the schema.
+_SCHEMA_DRIFT_PGCODES = frozenset({"42P01", "42703", "42704"})
+
+
+@app.exception_handler(ProgrammingError)
+def db_programming_error(request: Request, exc: ProgrammingError):
+    """A table/column the code expects is missing (an unapplied migration), or another SQL
+    programming fault. Answered as JSON inside CORS so the page can say so, instead of the
+    browser's "Network Error". Table and column names stay in the server log, not the reply."""
+    if request.scope.get("type") != "http":
+        # FastAPI runs these handlers for websocket routes too; a JSON body means nothing
+        # there. The socket's own connect-path guards (routers/live.py) close it cleanly.
+        raise exc
+    log.error("database programming error on %s %s", request.method, request.url.path, exc_info=exc)
+    if getattr(getattr(exc, "orig", None), "pgcode", None) in _SCHEMA_DRIFT_PGCODES:
+        # Deliberately no "nothing was saved": some requests commit in steps, and this
+        # handler cannot know how far a request got before it failed.
+        return JSONResponse(status_code=503, content={"detail": {
+            "code": "schema_out_of_date",
+            "message": "The database schema is not up to date, so this request could not be "
+                       "completed. Please try again later or contact support."}})
+    return JSONResponse(status_code=500, content=ReadableServerErrors.BODY)
+
+
 @app.get("/health")
 def health():
     """Liveness. Deliberately checks NOTHING external — not the database and not Redis.
@@ -455,6 +527,7 @@ async def health_redis():
 # ponytail: the catch-all is registered LAST, so every router above wins; the cost is that an
 # unknown /api-ish GET returns index.html instead of a JSON 404. That is standard SPA routing.
 DIST = Path(__file__).resolve().parents[2] / "client" / "dist"
+_VIEWER_PAGE = re.compile(r"events/[0-9a-fA-F-]{36}/watch/?")
 if DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
 
@@ -465,4 +538,9 @@ if DIST.is_dir():
         if path.startswith("api/"):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
         file = DIST / path
-        return FileResponse(file if file.is_file() else DIST / "index.html")
+        # The viewer page may hold an invitation credential in its URL for a moment (an
+        # older ?reg=/?link= link, before the page strips it). no-referrer keeps that URL out
+        # of every request the page makes — the LiveKit socket, the replay file, any link
+        # out (ZST-SPEC-VAP-001 §5.1). Scoped to the viewer route; nothing else changes.
+        headers = {"Referrer-Policy": "no-referrer"} if _VIEWER_PAGE.fullmatch(path) else None
+        return FileResponse(file if file.is_file() else DIST / "index.html", headers=headers)

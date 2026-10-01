@@ -688,7 +688,8 @@ async def _end(ctx, payload, emergency: bool = False):
     if not out:
         return "There's no broadcast to end"
     try:
-        final_summary = await bus.session_finalize(ctx.event_id, end_time=now.timestamp())
+        final_summary = await bus.session_finalize(
+            ctx.event_id, end_time=now.timestamp(), broadcast_start_ts=out[0].get("started_at"))
         if final_summary and final_summary.get("measured"):
             def persist_summary(db):
                 sess = db.get(BroadcastSession, uuid.UUID(out[0]["id"]))
@@ -1354,7 +1355,14 @@ def _counts(db, event_id, org_id, since=None) -> dict:
                                            LiveMessage.org_id == org_id,
                                            LiveMessage.reactions.isnot(None))
     ).all()
-    reactions = sum(sum(r.values()) for r in reaction_rows if isinstance(r, dict))
+    reactions = sum(
+        sum(
+            v if isinstance(v, (int, float)) else (v.get("count", 0) if isinstance(v, dict) else len(v) if isinstance(v, list) else 0)
+            for v in r.values()
+        )
+        for r in reaction_rows
+        if isinstance(r, dict)
+    )
     return {"messages": messages, "questions": questions, "poll_votes": poll_votes,
             "reactions": reactions, "polls": len(polls)}
 
@@ -1560,6 +1568,14 @@ async def snapshot_extra(ctx) -> dict:
     # The analytics block already carries the presence split, so health is derived from it
     # rather than fetching every participant a second time on the connect path.
     split = extra["analytics"]
+    if ctx.can_moderate:
+        # Staff consoles only: reading the whole session ledger on every VIEWER connect
+        # would make a crowd's joins quadratic. Viewers' consoles do not show it; the
+        # sampler's tick keeps the console's copy current from here.
+        try:
+            split["sessions"] = await sessions_now(ctx.event_id, session.get("started_at"))
+        except bus.transient_errors():
+            pass
     return {
         **extra,
         "broadcast": session,
@@ -1672,8 +1688,14 @@ async def _retire_stale_session(session_id: str, event_id: str, reason: str) -> 
     or re-end an event's own lifecycle.
     """
     now = datetime.now(timezone.utc)
+
+    def started(db):
+        row = db.get(BroadcastSession, uuid.UUID(session_id))
+        return row.started_at if row is not None else None
+
     try:
-        final_summary = await bus.session_finalize(event_id, end_time=now.timestamp())
+        final_summary = await bus.session_finalize(
+            event_id, end_time=now.timestamp(), broadcast_start_ts=await mod.tx(started))
     except Exception:
         final_summary = None
 
@@ -1883,15 +1905,32 @@ async def _sample_once() -> list[tuple[str, dict]]:
         else:
             await mark_recovered(event_id, s["org_id"])
 
-        out.append((event_id, {
+        tick = {
             **split, "peak_viewers": peak,
             **_interaction_totals(counts, peak),
             "engagement": engagement_score(counts, peak),
             "avg_watch_seconds": _watch_seconds(people, datetime.now(timezone.utc).timestamp()),
             "health": health,
             "t": datetime.now(timezone.utc).isoformat(),
-        }))
+        }
+        # Session-aware metrics (services/viewing_sessions.py), computed once per event per
+        # tick here rather than on every socket connect. Left out entirely if the ledger is
+        # unreadable, for the same reason the counters are above: the console keeps its last
+        # real numbers rather than receiving invented ones.
+        try:
+            tick["sessions"] = await sessions_now(event_id, s["started_at"])
+        except bus.transient_errors():
+            pass
+        out.append((event_id, tick))
     return out
+
+
+async def sessions_now(event_id, started_at) -> dict:
+    """The live session summary for one broadcast, straight from the ledger."""
+    from .viewing_sessions import summarize_sessions
+    rows = await bus.session_get_all(event_id)
+    return summarize_sessions(rows, broadcast_start_ts=started_at,
+                              now_ts=datetime.now(timezone.utc).timestamp())
 
 
 # How long a recording may sit un-finalised before the sampler asks LiveKit about it

@@ -179,7 +179,18 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
       // Hosts are assigned right after creation (the event needs an id first) — the
       // backend emails each newly-added host, so this alone covers "invite the host".
       if (hostIds.size) {
-        await api.patch(`/events/${data.id}/hosts`, { user_ids: [...hostIds] });
+        try {
+          await api.patch(`/events/${data.id}/hosts`, { user_ids: [...hostIds] });
+        } catch (hostError) {
+          // The event DOES exist at this point. Saying only "failed" would invite a second
+          // Schedule click and a duplicate event, so say exactly what happened, refresh the
+          // list so the event is visible, and close — hosts can be added from its page.
+          consoleTab?.close();
+          notify.error(`"${data.title || "Event"}" was created, but its hosts could not be assigned: ${errMsg(hostError)}`);
+          onCreated?.();
+          close();
+          return;
+        }
       }
       // Both awaits are behind us, so the event exists and the creator is really on it.
       // The id comes from the CREATED EVENT in the response, never from local state.
@@ -221,6 +232,13 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
       // Nothing was created, or the host assignment did not stick — so there is nothing to
       // produce. Close the tab we claimed rather than stranding a blank one.
       consoleTab?.close();
+      if (!e?.response) {
+        // No answer at all: the event MAY have been created before the connection dropped.
+        // Say so and refresh the list, so the organiser checks instead of creating it twice.
+        notify.error("Network Error — the server did not answer, so we couldn't confirm whether the event was saved. Check the Events list before trying again.");
+        onCreated?.();
+        return;
+      }
       notify.error(errMsg(e));
     } finally {
       setSaving(null);

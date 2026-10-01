@@ -23,8 +23,13 @@ import {
   FiMonitor,
   FiMic,
   FiMicOff,
+  FiPauseCircle,
+  FiWifi,
+  FiClock,
+  FiSlash,
 } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
+import { useViewerLanguage } from "../../pages/watch/viewerLanguage";
 import { initials } from "../../data/watch";
 import useLiveKitViewer, { resolveQuality } from "../../hooks/useLiveKitViewer";
 import useMediaQuery from "../../hooks/useMediaQuery";
@@ -44,9 +49,20 @@ const STAGE = {
 // match. Solid-dark in both themes on purpose — these sit on video, not on the page.
 const BADGE = "rounded-lg bg-black/55 px-2.5 py-1 text-xs font-semibold text-white shadow-sm ring-1 ring-white/10 backdrop-blur-md";
 
-// Control-bar icon button: 44px hit area for touch, quiet hover wash, brand tint on hover.
+// Control-bar icon button: a 48×48 hit area (ZST-SPEC-VAP-001 §6.4 critical controls),
+// quiet hover wash, brand tint on hover, and a focus ring that shows on video.
 const CTRL =
-  "grid h-11 w-11 place-items-center rounded-lg transition duration-150 hover:bg-white/15 hover:text-emerald-400 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100";
+  "grid h-12 w-12 place-items-center rounded-lg transition duration-150 hover:bg-white/15 hover:text-emerald-400 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400";
+// A row in the settings menu: also 48px tall.
+const MENU_ROW = "flex min-h-12 w-full items-center justify-between rounded-lg px-3 text-left hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400";
+
+// What a playback failure is called when the player reports it (moderation._playback_report
+// accepts exactly these). Classified from what the viewer hook already knows; nothing more.
+const failureKind = (message, everConnected) => {
+  const m = String(message || "").toLowerCase();
+  if (m.includes("another tab") || m.includes("removed") || m.includes("has ended")) return "disconnected";
+  return everConnected ? "media" : "connect";
+};
 
 function VolumeIcon({ muted, volume }) {
   if (muted || volume === 0) return <FiVolumeX />;
@@ -65,7 +81,9 @@ const fmtTime = (secs) => {
 
 export default function VideoPlayer({ event, viewers, watch, onStage = false,
                                      unmuteRequest = null, onAnswerUnmute, onMuteChange,
-                                     children }) {
+                                     interrupted = false, onPlaybackStart, onPlaybackFailure,
+                                     onNoticeChange, children }) {
+  const { t } = useViewerLanguage();
   const isLive = event.status === "Live";
   const isEnded = event.status === "Completed";
   // The TOKEN is the gate, not a status string. GET /events/:id/watch only issues
@@ -83,10 +101,24 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   const canStream = Boolean(watch?.livekit_token && watch?.livekit_url && !isEnded);
   const canReplay = isEnded && Boolean(watch?.recording_url);
 
+  // Starts muted: an autoplaying <video> (playing=true, no click yet) with sound is blocked
+  // outright by the browser — play() rejects with NotAllowedError and audio never starts.
+  // Muted autoplay is always allowed; unmuteButton's onClick is a real user gesture, so
+  // unmuting from there is guaranteed to work. Same reasoning every major video site uses.
+  const [muted, setMuted] = useState(true);
+  const [volume, setVolume] = useState(80);
+  // Live audio plays through the hook's own <audio> elements, not the <video>, and the player
+  // never passed its mute/volume to them — so the Mute button and the volume slider did
+  // nothing to what the viewer heard. They do now, but only once the viewer has TOUCHED one
+  // of them: until then the hook's elements keep exactly their previous behaviour (playing
+  // at full volume), so nobody who hears the stream today hears less of it on first load.
+  const [muteTouched, setMuteTouched] = useState(false);
+
   const {
     mediaRef, connected, reconnecting, hasVideo, hasAudio, error: streamError,
     micOn, micError, toggleMic, enableMic, micLive,
     videoLayers, hasVideoPublication, quality, selectQuality,
+    captions = { available: false, text: "" },
   } = useLiveKitViewer({
     enabled: canStream,
     url: watch?.livekit_url,
@@ -98,7 +130,55 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
     // Reports this speaker's OWN mute state to the server so the host renders presence
     // rather than a guess. The host console never writes this for somebody else.
     onMuteChange,
+    audioMuted: muteTouched ? muted : false,
+    audioVolume: muteTouched ? volume : 100,
   });
+  const [showCaptions, setShowCaptions] = useState(true);
+
+  // ── Broadcaster interruption (ZST-SPEC-VAP-001 §6.3) ────────────────────────────────────
+  // `interrupted` is the server's word for it (the host paused, or the producer's media was
+  // confirmed down — EventWatch.jsx). `mediaLost` is this player's own observation: it HAD the
+  // host's media, it is still connected to the room, and the media is gone. Either way the
+  // viewer is told the same calm thing and the player stays exactly where it is. "Had media"
+  // is what keeps a broadcast's normal warm-up ("Waiting for the host's camera…") from
+  // reading as an interruption.
+  const [hadMedia, setHadMedia] = useState(false);
+  if ((hasVideo || hasAudio) && !hadMedia) setHadMedia(true);
+  const mediaLost = canStream && connected && hadMedia && !hasVideo && !hasAudio && !reconnecting;
+  const showInterruption = canStream && (interrupted || mediaLost);
+  const statusNotice = showInterruption
+    ? { icon: FiPauseCircle, text: t("paused") }
+    : canStream && reconnecting ? { icon: FiWifi, text: t("reconnecting") } : null;
+  // The page's persistent read-aloud control speaks this sentence while it is showing.
+  const noticeText = statusNotice?.text || null;
+  useEffect(() => {
+    onNoticeChange?.(noticeText);
+  }, [noticeText, onNoticeChange]);
+  useEffect(() => () => onNoticeChange?.(null), [onNoticeChange]);
+
+  // ── Playback QoE, reported by the player itself (EventWatch -> playback.report) ─────────
+  // Time to first frame: from the moment this page was allowed to stream to the first remote
+  // track. Reported once. A failure: each distinct error the viewer hook surfaces, once.
+  const streamStartRef = useRef(null);
+  const startupSentRef = useRef(false);
+  const everConnectedRef = useRef(false);
+  const lastFailureRef = useRef(null);
+  useEffect(() => {
+    if (canStream && streamStartRef.current == null) streamStartRef.current = performance.now();
+  }, [canStream]);
+  useEffect(() => {
+    if (connected) everConnectedRef.current = true;
+  }, [connected]);
+  useEffect(() => {
+    if (!(hasVideo || hasAudio) || startupSentRef.current || streamStartRef.current == null) return;
+    startupSentRef.current = true;
+    onPlaybackStart?.(Math.round(performance.now() - streamStartRef.current));
+  }, [hasVideo, hasAudio, onPlaybackStart]);
+  useEffect(() => {
+    if (!canStream || !streamError || streamError === lastFailureRef.current) return;
+    lastFailureRef.current = streamError;
+    onPlaybackFailure?.(failureKind(streamError, everConnectedRef.current));
+  }, [canStream, streamError, onPlaybackFailure]);
 
   const replayRef = useRef(null);
   const [replayStarted, setReplayStarted] = useState(false); // stays true once clicked, so
@@ -108,11 +188,6 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
 
   const wrapRef = useRef(null);
   const [playing, setPlaying] = useState(isLive);
-  // Starts muted: an autoplaying <video> (playing=true, no click yet) with sound is blocked
-  // outright by the browser — play() rejects with NotAllowedError and audio never starts.
-  // Muted autoplay is always allowed; unmuteButton's onClick is a real user gesture, so
-  // unmuting from there is guaranteed to work. Same reasoning every major video site uses.
-  const [muted, setMuted] = useState(true);
   // "Not now" on the speak invitation. The dismissal is scoped to the ONE invitation it
   // answered, rather than being a boolean that something has to remember to reset: a new
   // stage grant, or the host asking again, produces a different key and so is not covered
@@ -121,7 +196,6 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   // Identifies THIS invitation: the stage grant, plus the timestamp of any explicit host
   // request. A second request from the host changes it, so a prior "Not now" stops applying.
   const inviteKey = `${onStage ? "stage" : "off"}:${unmuteRequest?.at || 0}`;
-  const [volume, setVolume] = useState(80);
   const [fs, setFs] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsPage, setSettingsPage] = useState("main");
@@ -211,11 +285,12 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
       mediaRef.current.play().catch((e) => {
         console.warn("Live video play() rejected:", e?.name || e);
         setPlaying(false);
+        if (e?.name === "NotAllowedError") onPlaybackFailure?.("autoplay");
       });
     } else {
       mediaRef.current.pause();
     }
-  }, [canStream, playing, hasVideo, mediaRef]);
+  }, [canStream, playing, hasVideo, mediaRef, onPlaybackFailure]);
 
   // livekit-client's own attachToElement() (called on every track.attach(), including a
   // reconnect's resubscribe) sets `element.muted = mediaStream.getAudioTracks().length ===
@@ -337,7 +412,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                       <button
                         type="button"
                         onClick={() => setSettingsPage("quality")}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10"
+                        className={cx(MENU_ROW, "py-3")}
                       >
                         <div className="flex items-center gap-3">
                           <FiMonitor className="text-base text-white/80" />
@@ -359,7 +434,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                       <button
                         type="button"
                         onClick={() => setSettingsPage("speed")}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10"
+                        className={cx(MENU_ROW, "py-3")}
                       >
                         <div>
                           <p className="font-medium">Playback speed</p>
@@ -383,7 +458,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                         // these is true. togglePictureInPicture itself still no-ops safely
                         // on a null ref for the brief window before the element mounts.
                         disabled={!(canStream || canReplay)}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-3 text-left hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                        className={cx(MENU_ROW, "py-3 disabled:cursor-not-allowed disabled:opacity-40")}
                       >
                         <div>
                           <p className="font-medium">Picture-in-Picture</p>
@@ -400,7 +475,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                         <button
                           type="button"
                           onClick={() => setSettingsPage("main")}
-                          className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10 hover:text-white"
+                          className="grid min-h-12 min-w-12 place-items-center rounded-md text-white/70 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
                           aria-label="Back to settings"
                         >
                           ←
@@ -422,7 +497,8 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                       <button
                         type="button"
                         onClick={() => { selectQuality("auto"); setSettingsPage("main"); }}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                        aria-pressed={activeQuality === "auto"}
+                        className={MENU_ROW}
                       >
                         <span>Auto</span>
                         {activeQuality === "auto" && <FiCheck className="text-emerald-400" />}
@@ -433,7 +509,8 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                           key={layer.label}
                           type="button"
                           onClick={() => { selectQuality(layer.label); setSettingsPage("main"); }}
-                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                          aria-pressed={activeQuality === layer.label}
+                          className={MENU_ROW}
                         >
                           <span>{layer.label}</span>
                           {activeQuality === layer.label && <FiCheck className="text-emerald-400" />}
@@ -461,7 +538,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                         <button
                           type="button"
                           onClick={() => setSettingsPage("main")}
-                          className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10 hover:text-white"
+                          className="grid min-h-12 min-w-12 place-items-center rounded-md text-white/70 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
                           aria-label="Back to settings"
                         >
                           ←
@@ -478,7 +555,8 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                             setPlaybackSpeed(speed);
                             setSettingsPage("main");
                           }}
-                          className="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left hover:bg-white/10"
+                          aria-pressed={playbackSpeed === speed}
+                          className={MENU_ROW}
                         >
                           <span>{speed === 1 ? "Normal" : `${speed}x`}</span>
 
@@ -574,14 +652,14 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
               <button
                 type="button"
                 onClick={() => { enableMic(); onAnswerUnmute?.(); }}
-                className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-400"
+                className="min-h-12 rounded-lg bg-emerald-500 px-3 text-sm font-semibold text-white hover:bg-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
               >
                 Enable microphone
               </button>
               <button
                 type="button"
                 onClick={() => { setDismissedInvite(inviteKey); onAnswerUnmute?.(); }}
-                className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white/80 hover:bg-white/20"
+                className="min-h-12 rounded-lg bg-white/10 px-3 text-sm font-semibold text-white/80 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
               >
                 Not now
               </button>
@@ -626,20 +704,38 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
             </svg>
           </div>
           {isEnded && !playing ? (
+            // The replay states of ZST-SPEC-VAP-001 §6.3, each named by the server
+            // (watch.replay_state, routers/events.py) rather than guessed from a missing URL:
+            // Available, Processing (this page polls and switches by itself) and Expired.
+            // Anything else is the honest "no recording".
             canReplay ? (
-              <div className="flex flex-col items-center gap-3">
-                <p className="text-lg font-semibold text-white">This event has ended</p>
+              <div role="status" className="flex flex-col items-center gap-3">
+                <p className="text-lg font-semibold text-white">{t("endedTitle")}</p>
                 <button
+                  type="button"
                   onClick={() => { setPlaying(true); setReplayStarted(true); }}
-                  className="inline-flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/25"
+                  className="inline-flex min-h-12 items-center gap-2 rounded-xl bg-white/15 px-5 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
                 >
-                  <FiRotateCcw /> Watch the replay
+                  <FiRotateCcw aria-hidden="true" /> {t("watchReplay")}
                 </button>
+                {watch?.replay_available_until && (
+                  <p className="text-xs text-white/75">
+                    {t("availableUntil", { date: new Date(watch.replay_available_until).toLocaleDateString(undefined, { dateStyle: "long" }) })}
+                  </p>
+                )}
               </div>
             ) : (
-              <div className="flex flex-col items-center gap-2">
-                <p className="text-lg font-semibold text-white">This event has ended</p>
-                <p className="text-xs text-white/70">No recording is available for this event.</p>
+              <div role="status" aria-live="polite" className="flex flex-col items-center gap-2" data-testid={`replay-${watch?.replay_state || "unavailable"}`}>
+                <p className="text-lg font-semibold text-white">{t("endedTitle")}</p>
+                <p className="inline-flex items-center gap-1.5 text-sm text-white/80">
+                  {watch?.replay_state === "processing" ? (
+                    <><FiClock aria-hidden="true" /> {t("replayProcessing")}</>
+                  ) : watch?.replay_state === "expired" ? (
+                    <><FiSlash aria-hidden="true" /> {t("replayExpired")}</>
+                  ) : (
+                    t("replayUnavailable")
+                  )}
+                </p>
               </div>
             )
           ) : (
@@ -653,15 +749,14 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                   {canStream && streamError
                     ? streamError
                     : canStream && reconnecting
-                      ? "Reconnecting…"
-                      // Backend-confirmed (services/broadcast.py mark_degraded, via
-                      // GET /events/:id/watch's media_status) — distinct from the transient,
-                      // client-only `reconnecting` above: this means the SERVER has verified
-                      // the producer's media actually dropped, not just this viewer's own
-                      // socket. Worth its own honest wording rather than folding into the
-                      // generic "waiting for camera" case below.
-                      : canStream && watch?.media_status === "reconnecting"
-                        ? "The host's connection dropped — waiting for them to reconnect…"
+                      ? t("reconnecting")
+                      // The broadcaster interruption (ZST-SPEC-VAP-001 §6.3): the host paused,
+                      // the SERVER confirmed the producer's media dropped (media_status, via
+                      // services/broadcast.py mark_degraded), or this player had the host's
+                      // media and lost it while still connected. One calm sentence for all
+                      // three, and the player stays put — it recovers by itself.
+                      : showInterruption || (canStream && watch?.media_status === "reconnecting")
+                        ? t("paused")
                         : canStream && connected
                           ? "Waiting for the host's camera…"
                           : isLive
@@ -680,9 +775,34 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
           pulsing rather than a small bottom pill: a muted stream with no visible sound
           control reads as "the audio is broken" to a viewer who never notices a quiet
           corner button — this has to be impossible to miss. */}
+      {/* Paused / reconnecting, OVER a player that keeps its picture (the last frame, or the
+          placeholder). Icon + text, polite live region, never a modal and never an error. */}
+      {statusNotice && !showPlaceholder && (
+        <div className="pointer-events-none absolute inset-x-0 top-12 z-30 flex justify-center px-3 sm:top-14">
+          <p role="status" aria-live="polite" data-testid="player-status-notice"
+             className="inline-flex max-w-md items-center gap-2 rounded-xl bg-slate-900/90 px-3.5 py-2.5 text-sm font-medium text-white shadow-xl ring-1 ring-white/15 backdrop-blur-md">
+            <statusNotice.icon aria-hidden="true" className="shrink-0 text-lg" />
+            {statusNotice.text}
+          </p>
+        </div>
+      )}
+      {statusNotice && showPlaceholder && (
+        // The placeholder already shows the sentence; this keeps it announced.
+        <p role="status" aria-live="polite" className="sr-only" data-testid="player-status-notice">{statusNotice.text}</p>
+      )}
+
+      {/* Live captions, when the room carries them (useLiveKitViewer captions). */}
+      {captions.available && showCaptions && captions.text && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-20 z-20 flex justify-center px-4">
+          <p data-testid="live-captions" className="max-w-2xl rounded-lg bg-black/75 px-3 py-1.5 text-center text-base font-medium leading-snug text-white">
+            {captions.text}
+          </p>
+        </div>
+      )}
+
       {showUnmutePrompt && (
         <button
-          onClick={() => setMuted(false)}
+          onClick={() => { setMuteTouched(true); setMuted(false); }}
           className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/45 text-white transition hover:bg-black/55"
         >
           <span className="grid h-16 w-16 place-items-center rounded-full bg-white/15 ring-4 ring-white/30 backdrop-blur motion-safe:animate-pulse motion-reduce:animate-none">
@@ -727,14 +847,14 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
           />
         )}
 
-        <div className="flex items-center gap-2 text-white sm:gap-3">
+        <div className="flex items-center gap-1 text-white sm:gap-3">
           <button onClick={() => setPlaying((p) => !p)} aria-label={playing ? "Pause" : "Play"} className={CTRL}>
             {playing ? <FiPause className="text-xl" /> : <FiPlay className="text-xl" />}
           </button>
 
           {/* Volume */}
           <div className="flex items-center gap-1 sm:gap-2">
-            <button onClick={() => setMuted((m) => !m)} aria-label={muted ? "Unmute" : "Mute"} className={CTRL}>
+            <button onClick={() => { setMuteTouched(true); setMuted((m) => !m); }} aria-label={muted ? "Unmute" : "Mute"} className={CTRL}>
               <VolumeIcon muted={muted} volume={volume} />
             </button>
             <input
@@ -742,7 +862,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
               min={0}
               max={100}
               value={muted ? 0 : volume}
-              onChange={(e) => { setVolume(Number(e.target.value)); setMuted(false); }}
+              onChange={(e) => { setMuteTouched(true); setVolume(Number(e.target.value)); setMuted(false); }}
               aria-label="Volume"
               className="hidden h-1 w-20 cursor-pointer accent-emerald-500 sm:block"
             />
@@ -773,6 +893,20 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
           )}
 
           <div className="ml-auto flex items-center gap-1 sm:gap-2">
+            {/* Captions at player level, not inside Settings (ZST-SPEC-VAP-001 §6.4) — and
+                only when the stream actually carries them. */}
+            {captions.available && (
+              <button
+                type="button"
+                onClick={() => setShowCaptions((v) => !v)}
+                aria-pressed={showCaptions}
+                aria-label={showCaptions ? t("captionsOff") : t("captionsOn")}
+                title={showCaptions ? t("captionsOff") : t("captionsOn")}
+                className={cx(CTRL, "text-xs font-bold", showCaptions && "text-emerald-400")}
+              >
+                CC
+              </button>
+            )}
             <div className="relative">
               <button
                 onClick={() => {
@@ -828,7 +962,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                       type="button"
                       onClick={closeSettings}
                       aria-label="Close settings"
-                      className="grid h-9 w-9 place-items-center rounded-lg text-white/70 transition hover:bg-white/10 hover:text-white"
+                      className="grid h-12 w-12 place-items-center rounded-lg text-white/70 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
                     >
                       <FiX className="text-lg" />
                     </button>
