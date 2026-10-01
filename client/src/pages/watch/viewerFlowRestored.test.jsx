@@ -20,9 +20,13 @@ vi.mock("../../hooks/useEventStream", () => ({
                     send: vi.fn(() => true), disconnect: vi.fn() }),
 }));
 vi.mock("../../hooks/useKeepAwake", () => ({ default: () => {} }));
-vi.mock("../../hooks/useLiveKitViewer", () => {
+// The REAL resolveQuality: VideoPlayer imports it from this module to decide which quality
+// row is checked, so a mock without it breaks the player (same pattern as the other tests).
+vi.mock("../../hooks/useLiveKitViewer", async (importOriginal) => {
+  const { resolveQuality } = await importOriginal();
   const mediaRef = { current: null };
   return {
+    resolveQuality,
     default: () => ({
       mediaRef, connected: true, reconnecting: false,
       hasVideo: true, hasAudio: true, error: null,

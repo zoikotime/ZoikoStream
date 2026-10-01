@@ -22,9 +22,12 @@ vi.mock("../../hooks/useEventStream", () => ({
   default: () => ({ status: "open", closeReason: null, latency: 12, attempt: 0, send: vi.fn(() => true), disconnect: vi.fn() }),
 }));
 vi.mock("../../hooks/useKeepAwake", () => ({ default: () => {} }));
-vi.mock("../../hooks/useLiveKitViewer", () => {
+// The REAL resolveQuality: VideoPlayer imports it from this module to decide which quality
+// row is checked, so a mock without it breaks the player (same pattern as the other tests).
+vi.mock("../../hooks/useLiveKitViewer", async (importOriginal) => {
+  const { resolveQuality } = await importOriginal();
   const mediaRef = { current: null };
-  return { default: () => ({ mediaRef, ...lk.state }) };
+  return { resolveQuality, default: () => ({ mediaRef, ...lk.state }) };
 });
 vi.mock("../../utils/sound", () => ({ playAlertChime: vi.fn(), unlockAudio: vi.fn() }));
 vi.mock("../../ui/Toast", () => ({ notify: { error: vi.fn(), success: vi.fn(), alert: vi.fn(), info: vi.fn() } }));

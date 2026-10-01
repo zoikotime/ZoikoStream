@@ -32,9 +32,12 @@ vi.mock("../../api", () => ({
 }));
 vi.mock("../../auth/AuthContext", () => ({ useAuth: () => ({ user: null }) }));
 vi.mock("../../hooks/useKeepAwake", () => ({ default: () => {} }));
-vi.mock("../../hooks/useLiveKitViewer", () => {
+vi.mock("../../hooks/useLiveKitViewer", async (importOriginal) => {
   const mediaRef = { current: null };
+  // The real resolver, not a stub: VideoPlayer derives the menu's checkmark from it.
+  const { resolveQuality } = await importOriginal();
   return {
+    resolveQuality,
     default: () => ({
       mediaRef, connected: true, reconnecting: false, hasVideo: true, hasAudio: true,
       error: null, videoLayers: [], hasVideoPublication: true, quality: "auto",

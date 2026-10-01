@@ -50,6 +50,33 @@ import { fatalDisconnect } from "./livekitDisconnect";
 // never advertise a rendition that does not exist. Against the publisher's h360/h720 ladder
 // a 720p webcam yields 720p/360p — there is simply no 1080p entry to offer, and inventing
 // one would be the "upscale and call it 1080p" the brief rules out.
+//
+// ── HOW MANY RENDITIONS CAN EVER APPEAR ────────────────────────────────────────────────
+// Three, at most — this list does not grow with the camera. WebRTC simulcast has exactly
+// three rids (livekit-client's `videoRids = ['q','h','f']`), and encodingsFromPresets drops
+// anything past index 2 outright. computeVideoEncodings builds [presets[0], presets[1],
+// original], where `original` is the real capture resolution, so the publisher's
+// videoSimulcastLayers contributes only its first TWO entries and the top layer is whatever
+// the camera granted.
+//
+// With the current publisher config ([h360, h720] — see useLiveKitPublish, not changed here)
+// that makes the ladder, by camera:
+//
+//     720p  ->  720p / 360p          (mid preset and capture coincide, collapsed)
+//     1080p ->  1080p / 720p / 360p
+//     4K    ->  2160p / 720p / 360p  <- NOT 2160p/1080p/720p/360p
+//
+// A 4K source therefore REPLACES 1080p rather than adding above it: there is no fourth slot,
+// and the mid preset is pinned at h720. Getting 1080p into a 4K ladder would mean giving up
+// 360p, which is a publisher decision and deliberately not taken here.
+
+// Every rendition is named by its real encoded height. 2160 carries the "(4K)" gloss because
+// "2160p" is the one rung viewers do not read as a resolution; 1440p/1080p/720p/360p are
+// self-explanatory and stay bare. The label is also the selection identifier (see
+// resolveQuality), so it has to be stable — and its leading digits are what orders a
+// step-down, which is why the gloss trails rather than leads.
+const labelFor = (height) => (height === 2160 ? "2160p (4K)" : `${height}p`);
+
 export function describeLayers(publication) {
   const layers = publication?.trackInfo?.layers;
   if (!Array.isArray(layers) || layers.length < 2) return [];
@@ -64,7 +91,7 @@ export function describeLayers(publication) {
     .forEach((l) => {
       const seen = byHeight.get(l.height);
       if (!seen || l.quality > seen.quality) {
-        byHeight.set(l.height, { quality: l.quality, width: l.width, height: l.height, label: `${l.height}p` });
+        byHeight.set(l.height, { quality: l.quality, width: l.width, height: l.height, label: labelFor(l.height) });
       }
     });
   const distinct = [...byHeight.values()].sort((a, b) => b.height - a.height);
@@ -73,33 +100,104 @@ export function describeLayers(publication) {
   return distinct.length < 2 ? [] : distinct;
 }
 
-/** Apply a preference to a publication. "auto" caps at HIGH, i.e. no cap at all, which is
- *  what hands the choice back to LiveKit's adaptive/dynacast selection.
+/** The rendition a preference ACTUALLY resolves to against a given ladder — the one place
+ *  that decides, so the menu, the checkmark and the subscription can never disagree.
  *
- *  setVideoQuality sets requestedMaxQuality, and that is a CEILING, not a pin. With adaptive
- *  streaming on, RemoteTrackPublication.emitTrackUpdate takes the SMALLER of the adaptive
- *  dimensions and the requested layer (livekit-client 2.x), so:
+ *  A manual pick is only honoured while the publisher is still sending that rendition. When
+ *  it is not — the host swapped a 1080p camera for a 720p one, or dynacast stopped
+ *  announcing the top layer — the viewer is stepped DOWN to the closest rendition still on
+ *  offer instead of being thrown back to Auto. Auto could silently hand them MORE than they
+ *  asked for, which is the opposite of what someone who picked a manual cap wanted; 1080p
+ *  therefore lands on 720p, not on "whatever adaptive feels like".
  *
- *    * picking a rendition BELOW what adaptive would choose is honoured exactly — this is
- *      the case that matters, a viewer on a metered or congested link choosing 360p;
- *    * picking the TOP rendition asks for the ceiling to be lifted, but the layer that
- *      actually arrives is still bounded by the player's rendered size x pixelDensity.
- *      A small player therefore keeps receiving the layer that fits it.
+ *  If nothing at or below the request exists (a viewer on 360p whose host moves to a
+ *  1080p/720p ladder) the lowest rendition available is the closest thing to the intent.
+ *  An empty ladder is not evidence of anything — see refreshLayers — so it stays "auto". */
+export function resolveQuality(layers, preference) {
+  if (preference === "auto" || !Array.isArray(layers) || layers.length === 0) return "auto";
+  if (layers.some((l) => l.label === preference)) return preference;
+
+  // describeLayers sorts highest-first, so the first entry at or below the requested height
+  // is the closest step down; failing that, the last entry is the lowest on offer.
+  // parseInt reads the leading digits, which is why labelFor puts "(4K)" AFTER the height:
+  // "2160p (4K)" parses to 2160 exactly as "1080p" parses to 1080, so a 4K pick whose layer
+  // has gone steps down through the same comparison as every other rung.
+  const wanted = Number.parseInt(preference, 10);
+  if (!Number.isFinite(wanted)) return "auto";
+  const stepDown = layers.find((l) => l.height <= wanted) || layers[layers.length - 1];
+  return stepDown.label;
+}
+
+/** Apply a preference to a publication. `preference` is "auto" or a layer LABEL ("720p") as
+ *  produced by describeLayers — never a raw VideoQuality, for the reason below.
+ *
+ *  ── WHY MANUAL SELECTION IS DIMENSIONS, NOT setVideoQuality ────────────────────────────
+ *  LiveKit simulcast has three levels (VideoQuality LOW/MEDIUM/HIGH), and "auto" has to cap
+ *  at HIGH because a cap at the top level is the same as no cap — that is what hands the
+ *  choice back to adaptive/dynacast. The consequence is that the TOP rendition and "auto"
+ *  both mapped to setVideoQuality(HIGH), which is the same value: livekit-client's
+ *  setVideoQuality early-returns on `requestedMaxQuality === quality`, so choosing the top
+ *  rendition from Auto emitted no UpdateTrackSettings at all and could not change anything.
+ *  The checkmark moved and the subscription did not.
+ *
+ *  The two setters write DIFFERENT fields, and each clears the other (livekit-client 2.21):
+ *
+ *    setVideoQuality(q)      -> requestedMaxQuality = q; requestedVideoDimensions = undefined
+ *    setVideoDimensions(d)   -> requestedVideoDimensions = d; requestedMaxQuality = undefined
+ *
+ *  So expressing a manual pick as DIMENSIONS of the real layer gives every option its own
+ *  distinct SDK state and its own distinct UpdateTrackSettings payload. That is what a
+ *  LOW/MEDIUM/HIGH mapping could not do: a 1080p publisher's 1080p/720p/360p ladder has three
+ *  rungs and the enum has three levels, but the TOP rung always collapses onto Auto's HIGH,
+ *  so one of the three is never independently requestable. Dimensions name the rung itself.
+ *
+ *  This buys distinctness, NOT more rungs. The ceiling is three renditions whatever the
+ *  camera does — see describeLayers for why — so a 4K source reads 2160p/720p/360p and has
+ *  no 1080p rung at all. Selecting Auto afterwards calls setVideoQuality(HIGH), which is what
+ *  actually RELEASES the manual cap by clearing requestedVideoDimensions.
+ *
+ *  ── WHAT THIS STILL CANNOT DO ──────────────────────────────────────────────────────────
+ *  It is a CEILING, not a pin. emitTrackUpdate takes the SMALLER of the adaptive dimensions
+ *  and the requested ones, so:
+ *
+ *    * picking a rendition BELOW what adaptive would choose is honoured exactly — the case
+ *      that matters, a viewer on a metered or congested link choosing 360p;
+ *    * picking a rendition ABOVE it does not lift the player-size bound. A 400px player
+ *      keeps receiving the layer that fits it.
  *
  *  That bound is deliberate — it is what stops 1080p being pushed into a 400px box — and it
- *  cannot be lifted per-track in this SDK version; setVideoDimensions is clamped the same
- *  way. Reaching the top layer is a matter of the player being large enough to warrant it
- *  (fullscreen, a wide viewport, or a HiDPI screen now that pixelDensity is "screen"), not
- *  of asking harder here. */
+ *  cannot be lifted per-track while adaptiveStream is on. Reaching a high layer is a matter
+ *  of the player being large enough to warrant it (fullscreen, a wide viewport, or a HiDPI
+ *  screen now that pixelDensity is "screen"), not of asking harder here. */
 export function applyQuality(publication, preference) {
-  if (!publication?.setVideoQuality) return;
+  if (!publication) return;
+
+  // Auto, and the fallback when the ladder offers nothing to step to: cap at the top level,
+  // which is no cap, AND clear any dimension cap left by a previous manual pick.
+  const toAdaptive = () => {
+    if (!publication.setVideoQuality) return;
+    try {
+      publication.setVideoQuality(VideoQuality.HIGH);
+    } catch {
+      // A publication that is no longer subscribed refuses the call; the next subscribe
+      // re-applies the preference anyway.
+    }
+  };
+
+  // Resolved against the layers the publisher is sending RIGHT NOW, so a standing choice can
+  // never outlive the rendition behind it: a viewer on 1080p whose host swaps to a 720p
+  // camera steps down to 720p rather than requesting a layer nobody is sending.
+  const layers = describeLayers(publication);
+  const resolved = resolveQuality(layers, preference);
+  if (resolved === "auto") return toAdaptive();
+
+  const layer = layers.find((l) => l.label === resolved);
+  if (!layer || !publication.setVideoDimensions) return toAdaptive();
+
   try {
-    publication.setVideoQuality(
-      preference === "auto" ? VideoQuality.HIGH : preference
-    );
+    publication.setVideoDimensions({ width: layer.width, height: layer.height });
   } catch {
-    // A publication that is no longer subscribed refuses the call; the next subscribe
-    // re-applies the preference anyway.
+    // Same as above: not subscribed right now, re-applied on the next subscribe.
   }
 }
 
@@ -246,9 +344,12 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
   // ── Manual video quality ────────────────────────────────────────────────────────────
   //
   // The publication is held so the quality menu can read the layers the publisher ACTUALLY
-  // sent (pub.trackInfo.layers) rather than offer a fixed list. LiveKit simulcast is three
-  // levels — VideoQuality LOW/MEDIUM/HIGH — so a hardcoded 1080p/720p/480p/360p menu could
-  // never have mapped onto it even if it had been wired up.
+  // sent (pub.trackInfo.layers) rather than offer a fixed list — a hardcoded
+  // 1080p/720p/480p/360p menu advertises renditions nobody is sending. Each offered row is
+  // requested by its real dimensions (see applyQuality), not by a LOW/MEDIUM/HIGH level, so
+  // the top row is not a synonym for Auto. It is still at most THREE rows plus Auto: WebRTC
+  // simulcast has three rids, so a 4K camera yields 2160p/720p/360p and drops 1080p rather
+  // than adding a fourth rung (see describeLayers).
   //
   // `preferenceRef` is the viewer's own choice and is re-applied whenever the publication
   // changes (host toggles camera, swaps device, switches to screen share, or the room
@@ -266,6 +367,10 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
   // Distinct from "one layer": no publication at all, which is the Starting soon / PREVIEW
   // state. Saying "single rendition" there would describe a stream that is not arriving.
   const [hasVideoPublication, setHasVideoPublication] = useState(false);
+  // "auto", or a layer label ("720p") — the same string describeLayers puts on the menu row,
+  // so the checkmark and the request are driven by one value. A label rather than a
+  // VideoQuality because the publication can be replaced underneath the control: a label
+  // still means something against a new ladder, an enum picked from the old one does not.
   const [quality, setQuality] = useState("auto");
   const preferenceRef = useRef("auto");
 
@@ -352,6 +457,27 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
             ? prev
             : next
         );
+        // A manual choice outliving its rendition is the one way this control can end up
+        // lying: the menu would offer 1080p/720p/360p, the host swaps to a 720p camera, and
+        // "1080p" stays checked over a stream that has no such layer. Step the viewer down to
+        // what IS on offer and say so, so the checkmark reports the quality actually in use.
+        //
+        // Acted on POSITIVE evidence only — a non-empty ladder that does not contain the
+        // choice. An empty list is not evidence: layers arrive by updateInfo() after the
+        // publish, so treating "none yet" as "gone" would discard the viewer's pick during
+        // the race, and on unsubscribe (camera off, reconnect) the preference must survive to
+        // be re-applied to the replacement publication.
+        if (next.length > 0) {
+          const resolved = resolveQuality(next, preferenceRef.current);
+          if (resolved !== preferenceRef.current) {
+            preferenceRef.current = resolved;
+            setQuality(resolved);
+            // The subscription has to follow the UI. applyQuality resolves the same way, so
+            // this is only re-asserting it against the publication we just read — without it
+            // a step-down could show 720p while the request still said 1080p.
+            applyQuality(pub, resolved);
+          }
+        }
       };
 
       const onSubscribed = (track, publication) => {

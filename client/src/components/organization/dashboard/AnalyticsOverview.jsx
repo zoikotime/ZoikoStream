@@ -9,11 +9,10 @@ import { RANGES } from "./dashboardConfig";
 // Four figures, all straight from analytics().summary — the SAME four the full Analytics
 // page shows, under the same labels, so the two screens can never appear to disagree.
 //
-// "Total Viewers" is that page's own wording for `summary.viewers`, which the service builds
-// as the sum of each event's peak audience. Reused deliberately rather than reworded here:
-// one number, one name, everywhere it appears.
+// "Total Viewers" reads `summary.peak_viewers_summed` — the service's name for the sum of
+// each event's peak audience (formerly `summary.viewers`; the old key no longer exists).
 const METRICS = [
-  { key: "viewers", label: "Total Viewers", format: (v) => v.toLocaleString() },
+  { key: "peak_viewers_summed", label: "Total Viewers", format: (v) => v.toLocaleString() },
   { key: "watch_hours", label: "Watch Time", format: (v) => `${v.toLocaleString()} hrs` },
   { key: "peak", label: "Peak Concurrent", format: (v) => v.toLocaleString() },
   { key: "engagement", label: "Avg. Engagement", format: (v) => `${v}%` },
