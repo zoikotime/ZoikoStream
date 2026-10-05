@@ -577,6 +577,9 @@ function EventWatchPage() {
     if (env.channel === "reactions" && env.type === "reaction.burst") {
       if (!env.data?.event_id || env.data.event_id === eventId) reactionChannel.emit(env.data);
     }
+    // Same belt-and-braces for chat: a message or reaction update that names another event
+    // is never applied to this one's chat.
+    if (env.channel === "chat" && env.data?.event_id && env.data.event_id !== eventId) return;
     dispatchPanel(env);
   }, [fetchWatch, markAlert, panel.you, panel.participants, eventId, reactionChannel]);
   // Capacity protection (server/app/services/admission.py): the event is live, this viewer

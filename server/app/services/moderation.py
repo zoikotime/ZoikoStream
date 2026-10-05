@@ -305,7 +305,9 @@ def message_out(m: LiveMessage, actor_role: str | None = None) -> dict:
                 rx[k] = len(v)
 
     return {
-        "id": str(m.id), "message_id": str(m.id), "name": m.author_name, "user_id": str(m.user_id) if m.user_id else None,
+        # event_id lets a client refuse an update that is not for the event it is showing.
+        "id": str(m.id), "message_id": str(m.id), "event_id": str(m.event_id),
+        "name": m.author_name, "user_id": str(m.user_id) if m.user_id else None,
         "text": m.text, "status": m.status, "pinned": m.pinned,
         "flags": m.flags or [], "flagged": bool(m.flags), "reactions": rx,
         "reaction_users": rx_users,
@@ -746,9 +748,14 @@ async def _chat_react(ctx, payload):
         flag_modified(m, "reactions")
         flag_modified(m, "reaction_users")
 
+        # The CONFIRMED state, broadcast to every socket on the event (host and viewers alike):
+        # `reactions` is the full per-emoji summary and `reaction_users` who reacted with
+        # what, so each client derives "did I react" from its own identity. The summary is
+        # absolute, never a delta, so a duplicate or re-delivered envelope cannot double-count.
         out = message_out(m, actor_role=_actor_role(ctx))
         out["reaction"] = emoji
-        out["count"] = reactions.get(emoji, 0)
+        out["count"] = out["reaction_count"] = reactions.get(emoji, 0)
+        out["updated_at"] = _iso(datetime.now(timezone.utc))
         return out
 
     msg = await tx(work)
