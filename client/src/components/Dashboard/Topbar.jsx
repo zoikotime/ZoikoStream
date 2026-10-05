@@ -4,7 +4,7 @@ import {
   FiMenu, FiLogOut, FiUser, FiChevronDown, FiPlus, FiRefreshCw,
 } from "react-icons/fi";
 import { useAuth } from "../../auth/AuthContext";
-import { CONSOLE, brand, brandButton, cx, focusRing } from "../../ui/tokens";
+import { CONSOLE, brand, brandButton, cx, focusRing, z } from "../../ui/tokens";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import ThemeToggle from "../../ui/ThemeToggle";
 import HealthDot from "../admin/HealthDot";
@@ -28,8 +28,10 @@ import QuickActionsMenu from "../organization/QuickActionsMenu";
 // is gone rather than lying about unread items.
 const UNKNOWN = { status: "neutral", label: "Status unavailable" };
 
-const initials = (name = "") =>
-  name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
+// `name || ""`, not a default parameter: a default only covers `undefined`, and a null name
+// from the API would otherwise throw here and take the whole topbar down.
+const initials = (name) =>
+  String(name || "").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
 
 function useClickOutside(onClose) {
   const ref = useRef(null);
@@ -55,7 +57,13 @@ export default function Topbar({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useClickOutside(() => setMenuOpen(false));
 
-  const person = state?.user || { name: user?.full_name, email: user?.email };
+  // The overview payload's user when it has loaded, falling back field by field to the signed-in
+  // account, so the menu header never shows an empty name while the account has one.
+  const person = {
+    ...(state?.user || {}),
+    name: state?.user?.name || user?.full_name,
+    email: state?.user?.email || user?.email,
+  };
 
   const iconBtn = cx(
     "grid h-9 w-9 place-items-center rounded-lg transition-colors duration-150 motion-reduce:transition-none",
@@ -68,7 +76,12 @@ export default function Topbar({
     <header
       ref={menuRef}
       className={cx(
-        "sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b px-3 backdrop-blur-xl sm:gap-3 sm:px-5",
+        // z.header, not z-20: pages have their own `sticky top-0 z-20` bars (Settings, and
+        // every OrganizationPageHeader), and at an equal z-index the later one in the DOM wins,
+        // so the account menu dropped under them and its upper half went blank. The shared
+        // scale keeps the topbar above page content and below every portalled overlay.
+        "sticky top-0 flex h-16 shrink-0 items-center gap-2 border-b px-3 backdrop-blur-xl sm:gap-3 sm:px-5",
+        z.header,
         CONSOLE.bar
       )}
     >
