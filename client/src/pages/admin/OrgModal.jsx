@@ -35,11 +35,15 @@ export default function OrgModal({ open, onClose, org, plans = [], onSaved }) {
     try {
       const payload = {
         name: form.name.trim(),
-        domain: form.domain.trim() || null,
         region: form.region.trim() || null,
         status: form.status,
         plan_slug: form.plan_slug || null,
       };
+      // The custom domain is sent only when it changed: the server then runs the full
+      // lifecycle (validation, uniqueness, a new verification token, audit), and an edit to
+      // the name alone never touches it.
+      const domain = form.domain.trim();
+      if (domain !== (org?.domain || "")) payload.domain = domain || null;
       if (org) {
         await api.patch(`/admin/organizations/${org.id}`, payload);
         notify.success(`${form.name} updated`);
@@ -75,8 +79,12 @@ export default function OrgModal({ open, onClose, org, plans = [], onSaved }) {
           <Input variant="console" value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="Acme Corp" />
         </div>
         <div>
-          <Label>Domain</Label>
-          <Input variant="console" value={form.domain} onChange={(e) => set("domain", e.target.value)} placeholder="acme.com" />
+          <Label>Custom domain</Label>
+          <Input variant="console" value={form.domain} onChange={(e) => set("domain", e.target.value)} placeholder="events.acme.com" />
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            The organization&apos;s event-page hostname. Changing it restarts verification: the
+            organization must publish new DNS records before it serves anything.
+          </p>
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div>

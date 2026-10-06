@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import html
 import logging
 import re
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 from jose import JWTError, jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
@@ -46,6 +47,9 @@ from .services.ops import request_stats, run_metric_sampler, run_request_stats_f
 from .services.webhooks import run_webhook_retries
 from .services.delivery import run_watermark_processor
 from .services.validation import run_validation_processor
+from .services.custom_domains import run_custom_domain_sweeper
+from .services.custom_domain_routing import CustomDomainMiddleware
+from .services.public_urls import platform_base_url
 from .config import settings
 from .db import (
     DB_MAX_CONNECTIONS, SessionLocal, holds_ticker_leadership,
@@ -61,7 +65,7 @@ log_redaction.install()
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Fourteen background tickers, each owning its own domain (which is also what keeps
+    """Fifteen background tickers, each owning its own domain (which is also what keeps
     moderation and broadcast from having to import each other):
       * scheduler  — fires scheduled polls/announcements, closes timed-out polls
       * sampler    — writes analytics snapshots (the retention graph) and pushes live counters
@@ -85,9 +89,12 @@ async def lifespan(_: FastAPI):
                      them (services/media_retention.py)
       * planning   — proposal expiry, event-intake reminders and rehearsal reminders
                      (services/event_planning.py)
+      * domains    — custom-domain DNS re-checks, certificate polling, expiry of unverified
+                     requests and deactivation of domains whose records disappeared
+                     (services/custom_domains.py)
     The bus releases its Redis client on the way out.
 
-    All fourteen run in the LEADER process only, elected by a Postgres advisory lock (see
+    All fifteen run in the LEADER process only, elected by a Postgres advisory lock (see
     db.try_acquire_ticker_leadership). They previously ran in every process, so a deployment
     with more than one instance fired each scheduled poll, webhook delivery and watermark burn
     once per instance. A follower serves HTTP normally and simply runs no tickers; it retries
@@ -188,6 +195,8 @@ def _start_tickers() -> list:
         # rehearsal reminders are all deadline-driven, so none has a request or a
         # webhook that could carry it.
         asyncio.create_task(run_event_planning_sweeper()),
+        # Custom domains: pending re-checks, certificate polling, grace-period deactivation.
+        asyncio.create_task(run_custom_domain_sweeper()),
     ]
 
 
@@ -387,6 +396,17 @@ async def maintenance_gate(request: Request, call_next):
     return await call_next(request)
 
 
+# The built SPA (see the catch-all at the bottom). Defined here because the custom-domain
+# middleware needs it too.
+DIST = Path(__file__).resolve().parents[2] / "client" / "dist"
+
+# Customer hostnames (services/custom_domain_routing.py). Registered LAST, so it is the
+# outermost middleware: on an active custom domain only the public viewer experience is
+# reachable and every event in the path must belong to the hostname's organization; a
+# platform hostname passes through untouched.
+app.add_middleware(CustomDomainMiddleware, dist=DIST)
+
+
 # Everything lives under /api because the SPA is served from the same origin (see the mount
 # at the bottom) and its client-side routes — /dashboard, /admin/*, /organization/* — are
 # spelled exactly like the router prefixes. Without the namespace a hard refresh on any of
@@ -456,15 +476,72 @@ for router in (organization_router, events_router, commercial_router,
     app.include_router(router, prefix="/api", dependencies=_ORG_STATE_GATE)
 
 
+_DB_CONNECTIVITY_KEYWORDS = frozenset({
+    "could not connect",
+    "connection refused",
+    "connection closed",
+    "connection reset",
+    "connection failure",
+    "connection timeout",
+    "connection timed out",
+    "timeout expired",
+    "server closed the connection",
+    "could not translate host name",
+    "name or service not known",
+    "network is unreachable",
+    "host is unreachable",
+    "queuepool",
+    "pool timeout",
+    "pool limit",
+    "remaining connection slots are reserved",
+    "database system is shutting down",
+    "database is unreachable",
+    "is unreachable",
+})
+
+_DB_CONNECTIVITY_PGCODES = frozenset({
+    "57P01", "57P02", "57P03", "53300",
+})
+
+
+def is_db_connectivity_failure(exc: OperationalError) -> bool:
+    """Classify whether an OperationalError is a genuine database outage or connectivity fault.
+
+    Returns True ONLY for:
+      - Host/network unreachable or connection refused
+      - Connection closed/reset/timeout or pool exhaustion
+      - Postgres connection exceptions (Class 08) or server shutdown (57P01-57P03, 53300)
+
+    Returns False for transaction rollbacks, aborted blocks, locks, or query failures.
+    """
+    orig = getattr(exc, "orig", None)
+    pgcode = getattr(orig, "pgcode", None)
+    if pgcode:
+        if str(pgcode).startswith("08") or pgcode in _DB_CONNECTIVITY_PGCODES:
+            return True
+        return False
+
+    err_text = str(orig or exc).lower()
+    return any(keyword in err_text for keyword in _DB_CONNECTIVITY_KEYWORDS)
+
+
 # A DB outage (e.g. Supabase paused, DNS blip) raises OperationalError. Without this,
 # it bubbles to Starlette's outermost error middleware as a 500 with NO CORS headers,
 # so the browser blocks it and axios reports a cryptic "Network Error". Handling it here
 # (inside CORSMiddleware) returns a clean 503 that keeps its CORS headers.
 @app.exception_handler(OperationalError)
 def db_unavailable(request: Request, exc: OperationalError):
+    if request.scope.get("type") != "http":
+        raise exc
+    log.error("database operational error on %s %s: %s", request.method, request.url.path, exc)
+    if is_db_connectivity_failure(exc):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Service temporarily unavailable - the database is unreachable. Please try again."},
+        )
     return JSONResponse(
-        status_code=503,
-        content={"detail": "Service temporarily unavailable - the database is unreachable. Please try again."},
+        status_code=500,
+        content=ReadableServerErrors.BODY,
     )
 
 
@@ -526,18 +603,32 @@ async def health_redis():
 # it on 5173), which is why this is conditional.
 # ponytail: the catch-all is registered LAST, so every router above wins; the cost is that an
 # unknown /api-ish GET returns index.html instead of a JSON 404. That is standard SPA routing.
-DIST = Path(__file__).resolve().parents[2] / "client" / "dist"
 _VIEWER_PAGE = re.compile(r"events/[0-9a-fA-F-]{36}/watch/?")
 if DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
 
+    _index_html: dict[str, str] = {}
+
+    def _custom_domain_index() -> HTMLResponse:
+        # index.html plus two tags: the SPA reads them (client/src/utils/hostMode.js) to
+        # render only the viewer route and to send platform links to the platform.
+        if "html" not in _index_html:
+            _index_html["html"] = (DIST / "index.html").read_text(encoding="utf-8")
+        origin = html.escape(platform_base_url(), quote=True)
+        tags = ('<meta name="zk-host-mode" content="custom-domain">'
+                f'<meta name="zk-platform-origin" content="{origin}">')
+        return HTMLResponse(_index_html["html"].replace("</head>", tags + "</head>", 1),
+                            headers={"Referrer-Policy": "no-referrer", "Cache-Control": "no-cache"})
+
     @app.get("/{path:path}")
-    def spa(path: str):
+    def spa(path: str, request: Request):
         # An unmatched /api GET is a bug, not a page: answering it with index.html would hand
         # axios 200 + HTML and turn a typo'd endpoint into an unreadable parse error.
         if path.startswith("api/"):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
         file = DIST / path
+        if (request.scope.get("state") or {}).get("custom_domain") and not file.is_file():
+            return _custom_domain_index()
         # The viewer page may hold an invitation credential in its URL for a moment (an
         # older ?reg=/?link= link, before the page strips it). no-referrer keeps that URL out
         # of every request the page makes — the LiveKit socket, the replay file, any link

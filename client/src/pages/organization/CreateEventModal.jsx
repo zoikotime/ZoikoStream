@@ -11,6 +11,7 @@ import api, { errMsg } from "../../api";
 import MemberPicker from "./MemberPicker";
 import { useAuth } from "../../auth/AuthContext";
 import { EVENT_CONSOLES } from "../../auth/destination";
+import { isValidTimezone, parseDateParts, zonedTimeToUtc, toZonedISO } from "../../data/timezones";
 
 // Category is free-form on the server (`EventCreate.category` is `str | None`, max_length=100
 // — no enum, no DB constraint), so this list is purely the UI's menu and can grow without a
@@ -71,12 +72,7 @@ function Section({ title, children }) {
   );
 }
 
-// Combine a <input type=date> + <input type=time> into an ISO datetime (or null).
-const toISO = (date, time) => {
-  if (!date) return null;
-  const d = new Date(`${date}T${time || "00:00"}`);
-  return isNaN(d) ? null : d.toISOString();
-};
+
 
 // The host console's route, from the one place that defines it.
 const HOST_CONSOLE = EVENT_CONSOLES.find((c) => c.capability === "can_host").path;
@@ -133,7 +129,22 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
     });
   };
 
-  const canSchedule = form.title.trim().length > 0;
+  // A Scheduled event has a real, future start (the server refuses anything else); a draft
+  // can be saved with neither.
+  const startUtc = form.date && form.start ? zonedTimeToUtc(form.date, form.start, form.timezone) : null;
+  const endUtc = form.date && form.end ? zonedTimeToUtc(form.date, form.end, form.timezone) : null;
+  const now = new Date();
+
+  const scheduleBlocker = !form.title.trim()
+    ? "Add a title first"
+    : !form.date || !form.start
+      ? "Select a start date and time."
+      : !isValidTimezone(form.timezone)
+        ? "Select a valid timezone."
+        : !startUtc || startUtc <= now
+          ? "Start time must be in the future."
+          : null;
+  const canSchedule = !scheduleBlocker;
 
   const close = () => {
     setForm(EMPTY);
@@ -142,10 +153,43 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
   };
 
   const submit = async (status) => {
-    const start_time = toISO(form.date, form.start);
-    const end_time = toISO(form.date, form.end);
+    if (saving) return;
+
+    if (status === "scheduled") {
+      if (!form.title.trim()) {
+        return notify.error("Add a title first");
+      }
+      if (!form.date || !form.start) {
+        return notify.error("Select a start date and time.");
+      }
+      if (!isValidTimezone(form.timezone)) {
+        return notify.error("Select a valid timezone.");
+      }
+      const sUtc = zonedTimeToUtc(form.date, form.start, form.timezone);
+      if (!sUtc || sUtc <= new Date()) {
+        return notify.error("Start time must be in the future.");
+      }
+      if (form.end) {
+        const eUtc = zonedTimeToUtc(form.date, form.end, form.timezone);
+        if (!eUtc || eUtc <= sUtc) {
+          return notify.error("End time must be after the start time.");
+        }
+      }
+    } else if (status === "draft") {
+      if (form.start && form.end) {
+        const sUtc = form.date ? zonedTimeToUtc(form.date, form.start, form.timezone) : null;
+        const eUtc = form.date ? zonedTimeToUtc(form.date, form.end, form.timezone) : null;
+        if (sUtc && eUtc && eUtc <= sUtc) {
+          return notify.error("End time must be after the start time.");
+        }
+      }
+    }
+
+    const start_time = form.date && form.start ? toZonedISO(form.date, form.start, form.timezone) : null;
+    // No end time means none. An empty time will not be converted to midnight.
+    const end_time = form.date && form.end ? toZonedISO(form.date, form.end, form.timezone) : null;
     if (start_time && end_time && new Date(end_time) <= new Date(start_time)) {
-      return notify.error("End time must be after start time");
+      return notify.error("End time must be after the start time.");
     }
     // Decided BEFORE any await, from the same state the click saw: scheduled (not a draft)
     // and the signed-in account explicitly on the host list. Nothing else opens a tab.
@@ -239,7 +283,7 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
         onCreated?.();
         return;
       }
-      notify.error(errMsg(e));
+      notify.error(errMsg(e, "We couldn't schedule this event. Please try again."));
     } finally {
       setSaving(null);
     }
@@ -262,7 +306,7 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
             onClick={() => submit("scheduled")}
             loading={saving === "scheduled"}
             disabled={!canSchedule || !!saving}
-            title={canSchedule ? undefined : "Add a title first"}
+            title={scheduleBlocker || undefined}
           >
             Schedule Event
           </Button>
@@ -299,7 +343,15 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <Label>Date</Label>
-              <Input variant="console" type="date" value={form.date} onChange={(e) => set("date", e.target.value)} />
+              <Input
+                variant="console"
+                type="date"
+                value={form.date}
+                onChange={(e) => {
+                  const parts = parseDateParts(e.target.value);
+                  set("date", parts ? parts.iso : e.target.value);
+                }}
+              />
             </div>
             <div>
               <Label htmlFor="event-timezone">Timezone</Label>

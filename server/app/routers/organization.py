@@ -106,6 +106,7 @@ from ..schemas.organization import (
     OrgDomainUpdate,
     OrgMeOut,
     OrgNotifications,
+    OrgNotificationsUpdate,
     OrgProfileOut,
     OrgProfileUpdate,
     OrgSecurity,
@@ -124,7 +125,7 @@ from ..schemas.organization import (
     WebhookVerifyIn,
     WebhookSecretOut,
 )
-from ..security import create_access_token, get_current_user, hash_password, require_org_admin
+from ..security import client_ip, create_access_token, get_current_user, hash_password, require_org_admin
 from ..services import delivery as delivery_svc
 from ..services import livekit, org as org_svc
 from ..services import credential_lifecycle
@@ -146,6 +147,7 @@ from ..services import org_comms
 from ..services import org_governance as governance
 from ..services import support_access as support_svc
 from ..services import report as report_svc
+from ..services import custom_domains, public_urls
 
 # Roles an org admin may assign/invite. Excludes super_admin (platform-only, never via this API).
 ORG_ASSIGNABLE_ROLES = ("org_admin", "host", "speaker", "viewer")
@@ -637,6 +639,7 @@ def list_recordings(
         url = livekit.signed_url(rec.file_url) if rec.status == "stopped" else None
         out.append(RecordingOut(
             id=rec.id, event_id=ev.id, title=ev.title, category=ev.category,
+            public_watch_url=public_urls.event_watch_url(ev.id, org),
             started_at=rec.started_at, duration_seconds=duration, size_bytes=rec.size_bytes,
             url=url,
             state=event_crud.recording_library_state(rec, url),
@@ -1391,7 +1394,7 @@ def notification_catalog(org: Organization = Depends(get_my_org)):
 
 @router.patch("/notifications", response_model=OrgNotifications)
 def update_notifications(
-    data: OrgNotifications,
+    data: OrgNotificationsUpdate,
     background: BackgroundTasks,
     admin: User = Depends(require_org_admin),
     org: Organization = Depends(get_my_org_admin),
@@ -1404,19 +1407,26 @@ def update_notifications(
     is already durable.
     """
     previous = notif_svc.effective(org)
-    incoming = data.model_dump(exclude_unset=True)
+    incoming = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
 
     # Normalize BEFORE persisting. A client may still send `security_alerts: false` for
     # backward compatibility; it is pinned back to True here rather than rejected, so old
-    # clients keep working and the mandatory guarantee still holds in the database.
+    # clients keep working and the mandatory guarantee still holds. Each key is its own
+    # switch: only the keys sent move, and every other preference keeps its value.
     proposed = notif_svc.normalize({**previous, **incoming})
 
     if proposed == previous:
         # A no-op is not a change: no event, no email.
         return OrgNotifications(**previous)
 
-    merged = crud.merge_json(db, org, "notifications", proposed)
-    current = notif_svc.normalize(merged)
+    # Store exactly the configurable switches. Mandatory and not-yet-available keys are
+    # facts about the platform, not organization choices, so they are never written (a
+    # stored value for an email that does not exist would be a fake preference). Any such
+    # legacy keys already in the column are dropped here; effective() never read them.
+    org.notifications = notif_svc.stored_form(proposed)
+    db.commit()
+    db.refresh(org)
+    current = notif_svc.effective(org)
 
     effective_at = datetime.now(timezone.utc)
     event = NotificationPreferenceEvent(
@@ -1495,24 +1505,64 @@ def update_security(
 
 # ── Domain ────────────────────────────────────────────────────────────────────
 
+# Every write goes through services/custom_domains.py: validation, uniqueness, the lifecycle,
+# certificate provisioning and the custom_domain.* audit trail live there and nowhere else.
+
+def _domain_call(fn, *args, **kw):
+    try:
+        return fn(*args, **kw)
+    except custom_domains.DomainError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from None
+
+
 @router.get("/domain", response_model=OrgDomainOut)
-def get_domain(org: Organization = Depends(get_my_org)):
-    return org
+def get_domain(org: Organization = Depends(get_my_org), user: User = Depends(get_current_user)):
+    """Any member may read the status (the Profile security score uses it). The DNS records
+    carry the verification token, which only the people who manage the domain need."""
+    view = custom_domains.public_view(org)
+    if user.role not in ("org_admin", "super_admin"):
+        view["dns_records"] = []
+    return view
 
 
 @router.patch("/domain", response_model=OrgDomainOut)
 def update_domain(
     data: OrgDomainUpdate,
+    request: Request,
     org: Organization = Depends(get_my_org_admin),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Changing the domain drops it back to unverified — a real DNS-verification flow
-    # (later phase) is the only thing that sets domain_verified = True. Only react to a
-    # domain the client actually sent (exclude_unset), not the None default of an empty body.
-    fields = data.model_dump(exclude_unset=True)
-    if "domain" in fields and fields["domain"] != org.domain:
-        org.domain_verified = False
-    return crud.apply_fields(db, org, data)
+    """Request, change (restarts verification with a new token) or clear (null) the domain.
+    Only a domain the client actually sent is acted on, not the None default of an empty body."""
+    if "domain" in data.model_fields_set:
+        _domain_call(custom_domains.set_domain, db, org, data.domain, actor=user, ip=client_ip(request))
+    return custom_domains.public_view(org)
+
+
+@router.delete("/domain", response_model=OrgDomainOut)
+def delete_domain(
+    request: Request,
+    org: Organization = Depends(get_my_org_admin),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Stop serving event pages from the custom domain. Links fall back to the platform URL."""
+    custom_domains.remove_domain(db, org, actor=user, ip=client_ip(request))
+    return custom_domains.public_view(org)
+
+
+@router.post("/domain/verify", response_model=OrgDomainOut)
+def verify_domain(
+    request: Request,
+    org: Organization = Depends(get_my_org_admin),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """"Verify now": check the TXT and CNAME records immediately and, when both are in place,
+    continue to certificate provisioning. The organization is always the caller's own."""
+    org = _domain_call(custom_domains.verify, db, org.id, actor=user, ip=client_ip(request))
+    return custom_domains.public_view(org)
 
 
 # ── Members (users) ────────────────────────────────────────────────────────────
@@ -1564,7 +1614,14 @@ def update_org_user(user_id: uuid.UUID, data: UserUpdate, background: Background
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid role")
     # Self-lockout guard: an admin can't demote or deactivate their own account.
     if u.id == admin.id and (data.is_active is False or (data.role and data.role != admin.role)):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot demote or deactivate yourself")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "SELF_ROLE_CHANGE_FORBIDDEN",
+                "message": "You cannot demote or deactivate yourself",
+                "detail": "You cannot demote or deactivate yourself",
+            },
+        )
     was_active = u.is_active
     # ORG-003 high-risk control. Handing someone administrative control of the Organization
     # requires proof the acting admin is present RIGHT NOW, not that they signed in earlier.
@@ -1615,7 +1672,14 @@ def delete_org_user(user_id: uuid.UUID, background: BackgroundTasks,
     if u is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if u.id == admin.id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot delete your own account")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "SELF_DELETE_FORBIDDEN",
+                "message": "You cannot delete your own account",
+                "detail": "You cannot delete your own account",
+            },
+        )
     if u.role == "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot delete a super admin")
     previous_access = org_comms.describe_access(role=u.role, org=admin.organization,

@@ -199,6 +199,8 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   const [fs, setFs] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsPage, setSettingsPage] = useState("main");
+  const settingsBtnRef = useRef(null);
+  const settingsRef = useRef(null);
   // Phones get a bottom sheet instead of the in-player popover. A media query, not a `sm:`
   // class, because the two presentations render in DIFFERENT PLACES in the DOM — the sheet
   // is portalled to <body> so it escapes the player's `overflow-hidden` — and rendering
@@ -209,6 +211,43 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
     setSettingsPage("main");
   }, []);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
+
+  // Dismiss desktop Settings popover on outside pointer/click or Escape.
+  // Phone sheet dismissal is handled by <Overlay> (backdrop click + Escape stack).
+  useEffect(() => {
+    if (!showSettings || isPhone) return undefined;
+
+    const handleOutside = (e) => {
+      if (
+        settingsRef.current?.contains(e.target) ||
+        settingsBtnRef.current?.contains(e.target)
+      ) {
+        return;
+      }
+      closeSettings();
+    };
+
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeSettings();
+        settingsBtnRef.current?.focus();
+      }
+    };
+
+    document.addEventListener("pointerdown", handleOutside);
+    document.addEventListener("mousedown", handleOutside);
+    document.addEventListener("click", handleOutside);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", handleOutside);
+      document.removeEventListener("mousedown", handleOutside);
+      document.removeEventListener("click", handleOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showSettings, isPhone, closeSettings]);
 
   const progress =
     canReplay && replayDuration
@@ -232,22 +271,31 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   }
 
   useEffect(() => {
-    const onFs = () => setFs(Boolean(document.fullscreenElement));
+    const onFs = () => {
+      setFs(Boolean(document.fullscreenElement));
+      closeSettings();
+    };
 
     document.addEventListener("fullscreenchange", onFs);
 
     return () => {
       document.removeEventListener("fullscreenchange", onFs);
     };
-  }, []);
+  }, [closeSettings]);
 
   useEffect(() => {
     const video = canStream ? mediaRef.current : replayRef.current;
 
     if (!video) return undefined;
 
-    const onWebkitBeginFullscreen = () => setFs(true);
-    const onWebkitEndFullscreen = () => setFs(false);
+    const onWebkitBeginFullscreen = () => {
+      setFs(true);
+      closeSettings();
+    };
+    const onWebkitEndFullscreen = () => {
+      setFs(false);
+      closeSettings();
+    };
 
     video.addEventListener(
       "webkitbeginfullscreen",
@@ -909,10 +957,17 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
             )}
             <div className="relative">
               <button
+                ref={settingsBtnRef}
+                type="button"
                 onClick={() => {
                   setShowSettings((v) => !v);
-                  setSettingsPage("main");
+                  if (!showSettings) {
+                    setSettingsPage("main");
+                  }
                 }}
+                aria-expanded={showSettings}
+                aria-haspopup="menu"
+                aria-controls={showSettings && !isPhone ? "video-player-settings-menu" : undefined}
                 aria-label="Settings"
                 title="Settings"
                 className={CTRL}
@@ -920,10 +975,16 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
                 <FiSettings className="text-lg" />
               </button>
 
-              {/* DESKTOP: the popover, exactly as it was. Anchored to the gear, inside
-                  the player, closed by clicking the gear again. Untouched. */}
+              {/* DESKTOP: the popover. Anchored to the gear, inside the player.
+                  Dismissed on outside click, toggle click, Escape, or fullscreen change. */}
               {showSettings && !isPhone && (
-                <div className="absolute bottom-12 right-0 z-50 w-56 overflow-hidden rounded-xl bg-slate-900 p-2 text-sm text-white shadow-2xl ring-1 ring-white/10">
+                <div
+                  ref={settingsRef}
+                  id="video-player-settings-menu"
+                  role="menu"
+                  aria-label="Settings menu"
+                  className="absolute bottom-12 right-0 z-50 w-56 overflow-hidden rounded-xl bg-slate-900 p-2 text-sm text-white shadow-2xl ring-1 ring-white/10"
+                >
                   {settingsBody}
                 </div>
               )}

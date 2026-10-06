@@ -65,8 +65,8 @@ def get_current_user(
     unauthorized = HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
     try:
         payload = jwt.decode(creds.credentials, settings.SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload["sub"]
-    except (JWTError, KeyError):
+        user_id = uuid.UUID(str(payload["sub"]))
+    except (JWTError, KeyError, ValueError):
         raise unauthorized
     user = db.get(User, user_id)
     if user is None or not user.is_active:
@@ -85,8 +85,8 @@ def get_current_user_optional(
         return None
     try:
         payload = jwt.decode(creds.credentials, settings.SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload["sub"]
-    except (JWTError, KeyError):
+        user_id = uuid.UUID(str(payload["sub"]))
+    except (JWTError, KeyError, ValueError):
         return None
     user = db.get(User, user_id)
     return user if user and user.is_active else None

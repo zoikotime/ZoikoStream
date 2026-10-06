@@ -130,3 +130,113 @@ export function tzShort(zone) {
   const offset = tzOffset(zone);
   return offset ? `${entry[0]} · ${offset}` : entry[0];
 }
+
+/**
+ * Validate that a string is a recognized IANA timezone identifier.
+ */
+export function isValidTimezone(zone) {
+  if (!zone || typeof zone !== "string") return false;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Safely parse date input in canonical YYYY-MM-DD or DD-MM-YYYY format without
+ * ambiguous native Date parsing.
+ */
+export function parseDateParts(dateStr) {
+  if (!dateStr || typeof dateStr !== "string") return null;
+  const s = dateStr.trim();
+  const isoMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
+  if (isoMatch) {
+    const [, y, m, d] = isoMatch.map(Number);
+    return { year: y, month: m, day: d, iso: `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` };
+  }
+  const dmyMatch = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(s);
+  if (dmyMatch) {
+    const [, d, m, y] = dmyMatch.map(Number);
+    return { year: y, month: m, day: d, iso: `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` };
+  }
+  return null;
+}
+
+/**
+ * Parse time input in HH:mm format.
+ */
+export function parseTimeParts(timeStr) {
+  if (!timeStr || typeof timeStr !== "string") return null;
+  const match = /^(\d{1,2}):(\d{2})/.exec(timeStr.trim());
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+}
+
+/**
+ * Convert a date (YYYY-MM-DD or DD-MM-YYYY) and time (HH:mm) in a specific IANA timeZone
+ * to a UTC Date object.
+ *
+ * Fully authoritative on the selected timeZone, completely independent of the
+ * browser's local timezone.
+ */
+export function zonedTimeToUtc(dateStr, timeStr, timeZone = "UTC") {
+  const dateParts = parseDateParts(dateStr);
+  if (!dateParts) return null;
+  const { year, month, day } = dateParts;
+  const timeParts = parseTimeParts(timeStr);
+  const hour = timeParts ? timeParts.hour : 0;
+  const minute = timeParts ? timeParts.minute : 0;
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, 0);
+
+  const getTzParts = (timestamp) => {
+    try {
+      const dObj = new Date(timestamp);
+      const formatter = new Intl.DateTimeFormat("en-US", {
+        timeZone: timeZone || "UTC",
+        year: "numeric",
+        month: "numeric",
+        day: "numeric",
+        hour: "numeric",
+        minute: "numeric",
+        second: "numeric",
+        hour12: false,
+      });
+      const parts = {};
+      for (const p of formatter.formatToParts(dObj)) {
+        if (p.type !== "literal") parts[p.type] = p.value;
+      }
+      const h = parts.hour === "24" ? 0 : Number(parts.hour);
+      return Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), h, Number(parts.minute), Number(parts.second));
+    } catch {
+      return timestamp;
+    }
+  };
+
+  let guess = naiveUtc;
+  for (let i = 0; i < 3; i++) {
+    const tzWallClock = getTzParts(guess);
+    const diff = naiveUtc - tzWallClock;
+    guess += diff;
+    if (diff === 0) break;
+  }
+  const result = new Date(guess);
+  return isNaN(result.getTime()) ? null : result;
+}
+
+/**
+ * Return the ISO string (UTC) corresponding to a zoned date and time.
+ */
+export function toZonedISO(dateStr, timeStr, timeZone = "UTC") {
+  if (!dateStr || !timeStr) return null;
+  const d = zonedTimeToUtc(dateStr, timeStr, timeZone);
+  return d ? d.toISOString() : null;
+}
+

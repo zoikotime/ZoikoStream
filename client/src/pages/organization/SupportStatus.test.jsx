@@ -249,7 +249,7 @@ describe("regions", () => {
     await heading();
 
     expect(screen.getByText(/configured region · us east/i)).toBeInTheDocument();
-    expect(screen.getByText(/no regional delivery telemetry yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/your organization is configured for the us east delivery region/i)).toBeInTheDocument();
   });
 
   it("does not repeat the org's region on every service row", async () => {
@@ -267,6 +267,7 @@ describe("regions", () => {
     await heading();
 
     expect(screen.getByText(/no region configured/i)).toBeInTheDocument();
+    expect(screen.getByText(/no delivery region has been configured/i)).toBeInTheDocument();
   });
 });
 

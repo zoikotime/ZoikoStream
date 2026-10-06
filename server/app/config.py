@@ -288,6 +288,39 @@ class Settings(BaseSettings):
     # email preheader and body, so changing it changes the copy automatically.
     EMAIL_VERIFICATION_TTL_MINUTES: int = 30
 
+    # ── CUSTOM DOMAINS (services/custom_domains.py) ──────────────────────────────────────
+    # Fail closed: the feature is offered only when ALL of the following are set AND the CNAME
+    # target actually resolves. Until then the Settings panel says "temporarily unavailable"
+    # instead of handing customers DNS instructions that point nowhere.
+    #
+    # CUSTOM_DOMAIN_PROVIDER    "cloudflare" (Cloudflare for SaaS custom hostnames: the API
+    #                           creates the hostname and Cloudflare issues its certificate) or
+    #                           "external" (TLS is terminated by infrastructure outside this
+    #                           app). Either way a domain only becomes Active after an HTTPS
+    #                           probe proves a valid certificate AND that the request reached
+    #                           this app for the right organization.
+    # CUSTOM_DOMAIN_CNAME_TARGET  the hostname customers CNAME to (e.g. cname.zoikostream.com).
+    #                           It must exist in DNS and route to this deployment's ingress.
+    # CUSTOM_DOMAIN_PLATFORM_HOSTS  every hostname that serves the FULL platform
+    #                           (get.zoikostream.com, zoikostream.com, the Cloud Run URL...).
+    #                           Required, because once custom domains are on, a hostname that
+    #                           is neither a platform host nor an active custom domain is refused.
+    CUSTOM_DOMAIN_PROVIDER: str = ""
+    CUSTOM_DOMAIN_CNAME_TARGET: str = ""
+    CUSTOM_DOMAIN_PLATFORM_HOSTS: str = ""
+    # Public resolvers, so a check is not answered from this host's own cache or split-horizon
+    # view. A pass needs every resolver that answered to agree.
+    CUSTOM_DOMAIN_DNS_RESOLVERS: str = "1.1.1.1,8.8.8.8"
+    # How long a saved domain is re-checked automatically before it is marked failed.
+    CUSTOM_DOMAIN_PENDING_DAYS: int = 7
+    # How long an ACTIVE domain keeps serving after its DNS records disappear, before it is
+    # deactivated. Long enough to survive a DNS provider migration; short enough that an
+    # abandoned hostname stops serving.
+    CUSTOM_DOMAIN_GRACE_HOURS: int = 72
+    # Cloudflare for SaaS. Server-side only; never returned by any API or logged.
+    CLOUDFLARE_ZONE_ID: str = ""
+    CLOUDFLARE_API_TOKEN: str = ""
+
     def is_production(self) -> bool:
         """Whether this process is a real deployment serving real users.
 

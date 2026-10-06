@@ -90,6 +90,10 @@ async function fillTitle(user) {
   // <Input> no id, so the two are not associated and getByLabelText cannot find it. That is
   // a real accessibility gap in the component, noted rather than quietly worked around.
   await user.type(screen.getByPlaceholderText(/Q3 Product Launch/i), "Launch");
+  // Scheduling needs a real future start (crud.event.schedule_error).
+  const dialog = screen.getByRole("dialog");
+  await user.type(dialog.querySelector('input[type="date"]'), `${new Date().getFullYear() + 2}-06-15`);
+  await user.type(dialog.querySelectorAll('input[type="time"]')[0], "10:00");
 }
 
 async function pickHost(user, person) {

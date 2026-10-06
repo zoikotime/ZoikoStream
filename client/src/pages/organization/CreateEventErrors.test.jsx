@@ -52,8 +52,15 @@ function renderModal() {
   );
 }
 
+// Scheduling needs a real future start (the server refuses a Scheduled event without one,
+// crud.event.schedule_error), so every scheduled create in this file picks a date and time.
+const FUTURE_DATE = `${new Date().getFullYear() + 2}-06-15`;
+
 async function fill(user) {
   await user.type(screen.getByPlaceholderText(/Q3 Product Launch/i), "Launch");
+  const dialog = screen.getByRole("dialog");
+  await user.type(dialog.querySelector('input[type="date"]'), FUTURE_DATE);
+  await user.type(dialog.querySelectorAll('input[type="time"]')[0], "10:00");
 }
 const schedule = (user) => user.click(screen.getByRole("button", { name: /schedule event/i }));
 const saveDraft = (user) => user.click(screen.getByRole("button", { name: /save draft/i }));

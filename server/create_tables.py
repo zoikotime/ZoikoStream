@@ -7,6 +7,7 @@ from app.db import engine, Base
 
 # Import the models package so every model is registered on Base.metadata before create_all.
 import app.models  # noqa: F401
+from app.models.event import EVENT_STATUSES  # noqa: E402
 
 # create_all only CREATES missing tables — it never alters existing ones. The admin module
 # added columns to the pre-existing `organizations` table, so add them idempotently here.
@@ -43,6 +44,109 @@ _ORG_COLUMNS = [
 # Slug lookups are indexed; NULLs are allowed (many unset orgs), uniqueness is enforced in crud.
 _ORG_INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_organizations_slug ON organizations (slug)",
+]
+
+# ── Custom domain lifecycle (services/custom_domains.py) ─────────────────────────────────
+# Before this, a custom domain was a bare `domain` string plus a `domain_verified` flag that
+# nothing in the application ever set to true, no ownership proof, and no uniqueness: two
+# organizations could save the same hostname. Every column is additive with a safe default.
+_CUSTOM_DOMAIN_COLUMNS = [
+    "ADD COLUMN IF NOT EXISTS domain_status VARCHAR(20) NOT NULL DEFAULT 'not_configured'",
+    "ADD COLUMN IF NOT EXISTS domain_verification_token VARCHAR(64)",
+    "ADD COLUMN IF NOT EXISTS domain_requested_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS domain_status_changed_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS domain_verified_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS domain_activated_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS domain_last_checked_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS domain_check_started_at TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS domain_failing_since TIMESTAMPTZ",
+    "ADD COLUMN IF NOT EXISTS domain_error VARCHAR(40)",
+    "ADD COLUMN IF NOT EXISTS domain_check JSONB",
+    "ADD COLUMN IF NOT EXISTS custom_domain_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+    "ADD COLUMN IF NOT EXISTS custom_hostname_id VARCHAR(64)",
+    "ADD COLUMN IF NOT EXISTS custom_hostname_status VARCHAR(30)",
+    "ADD COLUMN IF NOT EXISTS certificate_status VARCHAR(30)",
+]
+
+# The hostname rule from schemas/organization.py, in Postgres regex form.
+_HOSTNAME_SQL = r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+
+# Run in order, each idempotent (the backfills only match rows still in a pre-lifecycle shape).
+_CUSTOM_DOMAIN_STATEMENTS = [
+    # 1. Normalize what is stored: "Events.Example.COM. " -> "events.example.com". The org
+    #    endpoint always normalized; the super-admin editor stored raw text.
+    """
+    UPDATE organizations
+       SET domain = NULLIF(lower(rtrim(btrim(domain), '.')), '')
+     WHERE domain IS NOT NULL
+       AND domain IS DISTINCT FROM NULLIF(lower(rtrim(btrim(domain), '.')), '')
+    """,
+    # 2. Refuse to go further while any hostname is claimed by more than one organization.
+    #    Picking a winner here would silently take a customer's domain away, so the run fails
+    #    with the hostnames named and a human decides. Nothing is deleted or changed.
+    """
+    DO $$
+    DECLARE dup text;
+    BEGIN
+        SELECT string_agg(d, ', ') INTO dup FROM (
+            SELECT lower(domain) AS d FROM organizations
+             WHERE domain IS NOT NULL GROUP BY lower(domain) HAVING count(*) > 1
+        ) claimed_twice;
+        IF dup IS NOT NULL THEN
+            RAISE EXCEPTION USING MESSAGE =
+                'Custom domain claimed by more than one organization: ' || dup ||
+                '. Resolve these before uq_organizations_domain can be created.';
+        END IF;
+    END $$;
+    """,
+    # 3. Two organizations can never hold the same hostname again.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_organizations_domain ON organizations (lower(domain))",
+    # 4. Only these states exist.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_organizations_domain_status') THEN
+            ALTER TABLE organizations ADD CONSTRAINT ck_organizations_domain_status CHECK (
+                domain_status IN ('not_configured', 'pending_dns', 'verifying', 'verified',
+                                  'active', 'failed', 'disabled'));
+        END IF;
+    END $$;
+    """,
+    # 5. No hostname means nothing is configured, whatever the old flag said.
+    """
+    UPDATE organizations
+       SET domain_status = 'not_configured', domain_verified = FALSE,
+           custom_domain_enabled = FALSE, domain_verification_token = NULL
+     WHERE domain IS NULL
+       AND (domain_status <> 'not_configured' OR domain_verified OR custom_domain_enabled
+            OR domain_verification_token IS NOT NULL)
+    """,
+    # 6. A legacy value that is not a usable hostname (the super-admin editor accepted any
+    #    text) is kept exactly as stored, and marked failed so the owner is asked to change it.
+    f"""
+    UPDATE organizations
+       SET domain_status = 'failed', domain_error = 'invalid_hostname',
+           domain_verified = FALSE, custom_domain_enabled = FALSE,
+           domain_requested_at = COALESCE(domain_requested_at, now()),
+           domain_status_changed_at = now()
+     WHERE domain IS NOT NULL AND domain_status = 'not_configured'
+       AND (domain !~ '{_HOSTNAME_SQL}' OR domain = 'zoikostream.com'
+            OR right(domain, 16) = '.zoikostream.com')
+    """,
+    # 7. Every other saved hostname starts the real lifecycle. `domain_verified` drops to
+    #    false: nothing ever proved ownership of a legacy value, so it must be proven now
+    #    before it can serve anything. gen_random_uuid() is cryptographically random
+    #    (pg_strong_random); two of them give a 64-hex-character token.
+    """
+    UPDATE organizations
+       SET domain_status = 'pending_dns', domain_verified = FALSE, custom_domain_enabled = FALSE,
+           domain_verification_token = COALESCE(
+               domain_verification_token,
+               replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '')),
+           domain_requested_at = COALESCE(domain_requested_at, now()),
+           domain_status_changed_at = now()
+     WHERE domain IS NOT NULL AND domain_status = 'not_configured'
+    """,
 ]
 
 # Soft-delete marker on the pre-existing users table (Phase 3). The `invitations` table is
@@ -105,7 +209,74 @@ _EVENT_COLUMNS = [
     # Present on the model (models/event.py) but never in this list, so an events table that
     # predates the field could not self-heal — create_all() only creates missing TABLES.
     "ADD COLUMN IF NOT EXISTS auto_start_recording BOOLEAN NOT NULL DEFAULT FALSE",
+    # The status an archived event returns to on unarchive (models/event.py).
+    "ADD COLUMN IF NOT EXISTS previous_status VARCHAR(20)",
 ]
+
+# ── Event lifecycle: retire the statuses nothing in the product ever produced ──────────────
+# models/event.py EVENT_STATUSES is the canonical set. Five values that used to be accepted
+# were never written by any product path (only by a raw PATCH) and are retired:
+#   rehearsal                     -> scheduled when it has a start time, else published
+#                                    (still pre-live and visible, exactly as before)
+#   ending, processing, replay_ready -> ended (the broadcast is over; recordings and replays
+#                                    keep their own lifecycles, untouched)
+#   blocked                       -> NOT mapped. Someone set it on purpose and the safe
+#                                    replacement is a human decision, so the run stops and
+#                                    names the events instead of guessing.
+# Any other unknown value stops the run the same way. Nothing is deleted.
+_CANONICAL_EVENT_STATUSES = EVENT_STATUSES       # the one definition, models/event.py
+_EVENT_STATUS_STATEMENTS = [
+    """
+    UPDATE events SET status = CASE WHEN start_time IS NOT NULL THEN 'scheduled' ELSE 'published' END
+     WHERE status = 'rehearsal'
+    """,
+    """
+    UPDATE events SET status = 'ended', end_time = COALESCE(end_time, updated_at, now())
+     WHERE status IN ('ending', 'processing', 'replay_ready')
+    """,
+    f"""
+    DO $$
+    DECLARE unknown text;
+    BEGIN
+        SELECT string_agg(status || ' x' || n || ' (e.g. ' || example || ')', ', ') INTO unknown FROM (
+            SELECT status, count(*) AS n, min(id::text) AS example FROM events
+             WHERE status NOT IN ({", ".join(f"'{v}'" for v in _CANONICAL_EVENT_STATUSES)})
+             GROUP BY status
+        ) leftover;
+        IF unknown IS NOT NULL THEN
+            RAISE EXCEPTION USING MESSAGE =
+                'Events hold statuses with no safe automatic mapping: ' || unknown ||
+                '. Decide each one (e.g. cancelled or scheduled) before ck_events_status can be added.';
+        END IF;
+    END $$;
+    """,
+    f"""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_events_status') THEN
+            ALTER TABLE events ADD CONSTRAINT ck_events_status CHECK (
+                status IN ({", ".join(f"'{v}'" for v in _CANONICAL_EVENT_STATUSES)}));
+        END IF;
+    END $$;
+    """,
+]
+
+
+def _report_event_statuses() -> None:
+    """Say, before changing anything, which retired or unknown statuses are present."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT status, count(*) FROM events GROUP BY status")).all()
+    except Exception as exc:  # noqa: BLE001 - a fresh database has nothing to report
+        print(f"  (event status report skipped: {str(exc).splitlines()[0][:120]})")
+        return
+    legacy = {status: n for status, n in rows if status not in _CANONICAL_EVENT_STATUSES}
+    if legacy:
+        print("  events with retired/unknown statuses before migration: "
+              + ", ".join(f"{k}={v}" for k, v in sorted(legacy.items())))
+    else:
+        print("  every event already holds a canonical status")
+
 
 # Commercial recording fields (doc Section 14/J — R2/R3 independent dual recording).
 _LIVE_RECORDING_COLUMNS = [
@@ -860,6 +1031,10 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE organizations {clause}"))
         for stmt in _ORG_INDEXES:
             conn.execute(text(stmt))
+        for clause in _CUSTOM_DOMAIN_COLUMNS:
+            conn.execute(text(f"ALTER TABLE organizations {clause}"))
+        for stmt in _CUSTOM_DOMAIN_STATEMENTS:
+            conn.execute(text(stmt))
         for clause in _USER_COLUMNS:
             conn.execute(text(f"ALTER TABLE users {clause}"))
         for clause in _IDENTITY_CHALLENGE_COLUMNS:
@@ -880,6 +1055,9 @@ def ensure_schema():
             conn.execute(text(stmt))
         for clause in _EVENT_COLUMNS:
             conn.execute(text(f"ALTER TABLE events {clause}"))
+        _report_event_statuses()
+        for stmt in _EVENT_STATUS_STATEMENTS:
+            conn.execute(text(stmt))
         for clause in _LIVE_RECORDING_COLUMNS:
             conn.execute(text(f"ALTER TABLE live_recordings {clause}"))
         for clause in _LIVE_QUESTION_COLUMNS:

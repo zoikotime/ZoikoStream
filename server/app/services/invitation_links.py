@@ -5,8 +5,11 @@ a client that hands the secret over only on an explicit request and then removes
 address bar. This module is that and nothing more: it does not create accounts, sessions or
 access policies, and everything after the exchange is the existing registration/viewer flow.
 
-    {APP_URL}/events/{event_id}/watch#invite=<secret>   personal emailed invitation
-    {APP_URL}/events/{event_id}/watch#link=<secret>     host-issued shareable access link
+    {base}/events/{event_id}/watch#invite=<secret>   personal emailed invitation
+    {base}/events/{event_id}/watch#link=<secret>     host-issued shareable access link
+
+{base} is the organization's ACTIVE custom domain when it has one, else APP_URL
+(services/public_urls.py).
 
 The path carries only the event id, a random UUID that names nobody. The fragment is never
 part of an HTTP request, so it cannot reach uvicorn's access log, a proxy or a Referer header.
@@ -41,6 +44,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from ..config import settings
+from . import public_urls
 
 INVITE_LIFETIME = timedelta(days=90)     # same as a registration token (security.py)
 PASS_LIFETIME = timedelta(days=90)
@@ -150,13 +154,9 @@ def link_identity(link_id, sub: str | None = None) -> str:
 
 # ── URLs ─────────────────────────────────────────────────────────────────────────────────
 
-def _watch_url(event_id) -> str:
-    return f"{settings.APP_URL.rstrip('/')}/events/{event_id}/watch"
+def invitation_url(event_id, secret: str, org=None) -> str:
+    return f"{public_urls.event_watch_url(event_id, org)}#invite={secret}"
 
 
-def invitation_url(event_id, secret: str) -> str:
-    return f"{_watch_url(event_id)}#invite={secret}"
-
-
-def access_link_url(event_id, secret: str) -> str:
-    return f"{_watch_url(event_id)}#link={secret}"
+def access_link_url(event_id, secret: str, org=None) -> str:
+    return f"{public_urls.event_watch_url(event_id, org)}#link={secret}"

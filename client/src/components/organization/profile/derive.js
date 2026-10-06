@@ -82,10 +82,11 @@ export const SECURITY_CHECKS = [
   },
   {
     key: "domain_verified",
-    label: "Organization domain verified",
+    label: "Custom domain ownership verified",
     weight: 10,
+    // True only after the DNS TXT record proved ownership (server/app/services/custom_domains.py).
     passed: ({ domain }) => Boolean(domain?.domain_verified),
-    fix: "Verify your domain in Settings › General.",
+    fix: "Add your custom domain in Settings › General, publish the two DNS records shown there, then select Verify now.",
   },
 ];
 

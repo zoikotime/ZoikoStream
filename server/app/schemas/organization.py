@@ -5,14 +5,14 @@ counts/plan). These describe an org managing *itself*. Update schemas use exclud
 in the router so only supplied fields are patched.
 """
 
-import re
 import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StrictBool, field_validator
 
 from ..config import BILLING_INTERVALS, MONTHLY
+from ..domain_names import normalize_custom_hostname
 
 
 # ── Profile ──────────────────────────────────────────────────────────────────
@@ -191,7 +191,9 @@ class OrgNotifications(BaseModel):
     """
     event_scheduled: bool = True
     event_starting: bool = False
-    recording_ready: bool = False
+    # True, matching services/notifications.defaults(): MED-008 READY was sent before the
+    # preference existed, so an organization that never saved one keeps receiving it.
+    recording_ready: bool = True
     weekly_summary: bool = False
     billing: bool = True
     mentions: bool = False
@@ -199,6 +201,28 @@ class OrgNotifications(BaseModel):
     member_joined: bool = True
     # Class A. Always true on read and on write; see NotificationCatalogItem.mandatory.
     security_alerts: bool = True
+
+
+class OrgNotificationsUpdate(BaseModel):
+    """PATCH /organization/notifications. Only the three configurable keys can change
+    anything (services/notifications.CONFIGURABLE_KEYS).
+
+    Strict: a value must be a real JSON boolean ("false", 0 and "no" are refused, not
+    coerced), and an unknown key is a 422 rather than silently dropped. The five
+    non-configurable keys are still ACCEPTED so an older client that posts the whole form
+    keeps working, but they cannot change anything: mandatory ones are pinned on and
+    unavailable ones off by the server, and neither is stored.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    event_scheduled: StrictBool | None = None
+    member_joined: StrictBool | None = None
+    recording_ready: StrictBool | None = None
+    billing: StrictBool | None = None
+    security_alerts: StrictBool | None = None
+    event_starting: StrictBool | None = None
+    weekly_summary: StrictBool | None = None
+    mentions: StrictBool | None = None
 
 
 class NotificationCatalogItem(BaseModel):
@@ -232,46 +256,58 @@ class OrgSecurity(BaseModel):
 
 # ── Domain ────────────────────────────────────────────────────────────────────
 
-class OrgDomainOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class DomainDnsRecordOut(BaseModel):
+    type: Literal["CNAME", "TXT"]
+    name: str
+    value: str
+    purpose: str
 
+
+class DomainErrorOut(BaseModel):
+    code: str
+    message: str
+
+
+class DomainCheckOut(BaseModel):
+    cname_ok: bool = False
+    cname_found: str | None = None
+    txt_ok: bool = False
+    txt_present: bool = False
+
+
+class OrgDomainOut(BaseModel):
+    """The caller's own custom domain and what to do next (services/custom_domains.py
+    public_view). The verification token appears only here, only for its own organization."""
     domain: str | None = None
     domain_verified: bool = False
-
-
-# A fully-qualified hostname: dot-separated labels of 1-63 letters, digits or hyphens (no
-# leading/trailing hyphen), ending in an alphabetic TLD, 253 characters at most.
-_HOSTNAME = re.compile(r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+    status: str = "not_configured"
+    available: bool = False
+    cname_target: str | None = None
+    dns_records: list[DomainDnsRecordOut] = []
+    error: DomainErrorOut | None = None
+    check: DomainCheckOut | None = None
+    certificate_status: str | None = None
+    public_url: str | None = None
+    requested_at: datetime | None = None
+    verified_at: datetime | None = None
+    activated_at: datetime | None = None
+    last_checked_at: datetime | None = None
+    failing_since: datetime | None = None
+    deactivates_at: datetime | None = None
+    can_verify: bool = False
 
 
 class OrgDomainUpdate(BaseModel):
-    # Setting/changing the domain resets verification (handled in the router).
+    # Changing the hostname restarts the lifecycle (services/custom_domains.set_domain).
     domain: str | None = Field(None, max_length=255)
 
     @field_validator("domain", mode="before")
     @classmethod
     def _hostname(cls, value):
-        """Hostname FORMAT only, and only when the field is actually sent - an omitted field is
-        never validated, so saving any other setting cannot fail on the domain.
-
-        This is not verification. Nothing here resolves DNS or contacts the host: ownership and
-        TLS readiness are checked by support (the router drops `domain_verified` whenever the
-        value changes). An empty string clears the domain, like an explicit null.
-        """
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise ValueError("Domain must be text.")
-        host = value.strip().lower().rstrip(".")
-        if not host:
-            return None
-        if "://" in host or any(ch in host for ch in "/:@?# "):
-            raise ValueError("Enter the hostname only, like events.yourcompany.com — no https://, path or port.")
-        if not _HOSTNAME.match(host):
-            raise ValueError("Enter a valid hostname, like events.yourcompany.com.")
-        if host == "zoikostream.com" or host.endswith(".zoikostream.com"):
-            raise ValueError("Use a domain your organization owns, not a zoikostream.com address.")
-        return host
+        """Hostname FORMAT only (app/domain_names.py, shared with the super-admin editor), and
+        only when the field is actually sent. Ownership is proven by the DNS TXT record, never
+        here. An empty string clears the domain, like an explicit null."""
+        return normalize_custom_hostname(value)
 
 
 # ── Invitations ───────────────────────────────────────────────────────────────
@@ -368,6 +404,8 @@ class RecordingOut(BaseModel):
     category: str | None = None
     started_at: datetime | None = None
     duration_seconds: int | None = None
+    # The replay's attendee link (services/public_urls.py): active custom domain, else APP_URL.
+    public_watch_url: str | None = None
     size_bytes: int | None = None
     # True on the recording's own column, or when its event has an open legal-hold
     # governance record (crud.admin.event_under_legal_hold) — either blocks deletion.

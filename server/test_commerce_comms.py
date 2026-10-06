@@ -394,6 +394,32 @@ def test_processor_references_are_masked(w):
         db.close()
 
 
+def test_billing_receipts_ignore_every_notification_preference(w):
+    """Settings -> Notifications shows "Billing and receipts" as Always on. That is enforced
+    here, server-side: with every preference forced off in the column - including a legacy
+    `billing: false` - a payment receipt and a payment-failure notice are still sent."""
+    db = SessionLocal()
+    try:
+        w.org(db).notifications = {"billing": False, "security_alerts": False, "event_scheduled": False,
+                                   "member_joined": False, "recording_ready": False}
+        db.commit()
+    finally:
+        db.close()
+    iid = w.invoice()
+    paid = w.payment(state="paid", invoice_id=iid)
+    failed = w.payment(state="failed", invoice_id=w.invoice(), captured=False, failure="card_declined")
+    db = SessionLocal()
+    try:
+        cap, ctx = _capture()
+        with ctx:
+            assert cc.notify_payment_received(db, _Bg(), db.get(Payment, paid)) is True
+            assert cc.notify_payment_failed(db, _Bg(), db.get(Payment, failed)) is True
+        assert RECEIVED in cap.subjects, cap.subjects
+        assert FAILED in cap.subjects, cap.subjects
+    finally:
+        db.close()
+
+
 def test_pending_payment_is_never_reported_as_received(w):
     """9, 10."""
     iid = w.invoice()

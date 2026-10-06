@@ -661,7 +661,7 @@ def test_cancellation_is_never_inferred(w):
         incident = event_ops.open_incident(db, ev, state="delayed",
                                            reason_category="technical")
         # Every ordinary end-of-broadcast condition, none of which is a cancellation.
-        for status_ in ("live", "ending", "processing", "ended"):
+        for status_ in ("live", "degraded", "ended"):
             ev.status = status_
             db.commit()
             assert event_ops.cancel_incident(

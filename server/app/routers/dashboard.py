@@ -55,7 +55,13 @@ def get_org_stats(
         "organization_name": org.name,
         "upcoming_events": event_counts.get("scheduled", 0),
         "live_events": event_counts.get("live", 0),
-        "completed_events": event_counts.get("ended", 0) + event_counts.get("archived", 0),
+        # Ended, plus archived events that HAD ended — an archived draft or cancellation was
+        # never completed.
+        "completed_events": event_counts.get("ended", 0) + (db.scalar(
+            select(func.count(Event.id)).where(
+                Event.org_id == user.org_id, Event.deleted_at.is_(None), Event.status == "archived",
+                func.coalesce(Event.previous_status, "ended") == "ended")
+        ) or 0),
         # Real peak audience across this org's broadcasts. BroadcastSession.peak_viewers is
         # written by the analytics sampler from actual presence records, so this is a
         # measurement — it replaces a hardcoded 12530 that shipped as if it were real.

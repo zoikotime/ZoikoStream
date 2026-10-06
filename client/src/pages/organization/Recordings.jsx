@@ -455,7 +455,8 @@ export default function OrganizationRecordings() {
     window.open(r.url, "_blank", "noopener");
   };
   const onShare = (r) => {
-    const url = `${window.location.origin}/events/${r.event_id}/watch`;
+    // The server's link (custom domain when active), not whatever origin this console is on.
+    const url = r.public_watch_url || `${window.location.origin}/events/${r.event_id}/watch`;
     navigator.clipboard?.writeText(url);
     notify.success("Replay link copied to clipboard");
   };

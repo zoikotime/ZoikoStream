@@ -187,6 +187,15 @@ def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:
         db.close()
 
 
+def _guest_may_join(ev) -> bool:
+    """A guest (registration or access link, never an org member) has nothing to join on an
+    unpublished draft or a cancelled event — the same rule GET /events/{id}/watch and
+    POST /register apply (crud.event.viewer_status_of)."""
+    from ..crud.event import viewer_status_of
+
+    return viewer_status_of(ev) not in ("draft", "cancelled")
+
+
 def resolve_ctx_from_registration(event_id: uuid.UUID, registration: EventRegistration) -> Ctx | None:
     """The anonymous-viewer counterpart to resolve_ctx: a self-serve name+email
     registration (routers/events.py register_for_event) takes the place of a User login for
@@ -199,7 +208,7 @@ def resolve_ctx_from_registration(event_id: uuid.UUID, registration: EventRegist
     db = SessionLocal()
     try:
         ev = db.scalar(select(Event).where(Event.id == event_id, Event.deleted_at.is_(None)))
-        if ev is None:
+        if ev is None or not _guest_may_join(ev):
             return None
         return Ctx(
             event_id=ev.id,
@@ -238,7 +247,7 @@ def resolve_ctx_from_access_link(event_id: uuid.UUID, raw_token: str) -> Ctx | N
     db = SessionLocal()
     try:
         ev = db.scalar(select(Event).where(Event.id == event_id, Event.deleted_at.is_(None)))
-        if ev is None or ev.visibility != "private":
+        if ev is None or ev.visibility != "private" or not _guest_may_join(ev):
             return None
         # A per-browser pass (services/invitation_links.py) or a legacy raw link token —
         # the same resolution GET /watch uses, so the socket identity always matches the

@@ -9,7 +9,6 @@ import { ConsoleButton } from "../../ui/Button";
 import Skeleton from "../../ui/Skeleton";
 import Panel from "../../components/admin/Panel";
 import HealthDot from "../../components/admin/HealthDot";
-import LifecycleRail from "../../components/admin/sections/LifecycleRail";
 import { activeIncidents, incidentFreeCell, monitoredServices } from "../../data/supportStatus";
 
 // Support & Status — this organization's view of platform availability.
@@ -205,28 +204,20 @@ export default function SupportStatus() {
         eyebrow="Global delivery regions"
         title={region === "Global" ? "No region configured" : `Configured region · ${region}`}
       >
-        <div className={cx("grid place-items-center rounded-lg px-4 py-10 text-center", CONSOLE.inset)}>
-          <p className={cx("text-[13px]", CONSOLE.muted)}>No regional delivery telemetry yet</p>
-          <p className={cx("mt-1 max-w-md text-[12px]", CONSOLE.faint)}>
-            A per-region availability trend needs an edge-delivery metering pipeline, which this
-            deployment does not have. Stage-level availability below is measured.
+        <div className={cx("grid place-items-center rounded-lg px-4 py-6 text-center", CONSOLE.inset)}>
+          <p className={cx("text-[13px]", CONSOLE.muted)}>
+            {region === "Global"
+              ? "No delivery region has been configured for this organization."
+              : `Your organization is configured for the ${region} delivery region.`}
           </p>
         </div>
       </Panel>
 
-      {/* ── Service health by lifecycle stage ──────────────────────────────── */}
+      {/* ── Service health ─────────────────────────────────────────────────── */}
       <section className="space-y-4">
         <h2 className={cx("text-[20px] font-semibold tracking-tight", CONSOLE.heading)}>
-          Service health by lifecycle stage
+          Service health
         </h2>
-
-        {/* dimUnused moved here with the rail: this is now the org console's only platform-health
-            surface, and a confident tick for a stage this org never touches is noise. */}
-        <LifecycleRail
-          stages={stages}
-          eyebrow="Contribute → Preserve, plus cross-cutting Platform"
-          dimUnused
-        />
 
         <Panel flush>
           <div className="overflow-x-auto">

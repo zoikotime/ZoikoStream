@@ -34,10 +34,11 @@ const STATUS_CHIP = {
   armed: "border-amber-200 bg-amber-50 text-amber-800",
   scheduled: "border-sky-200 bg-sky-50 text-sky-800",
   published: "border-sky-200 bg-sky-50 text-sky-800",
-  processing: "border-sky-200 bg-sky-50 text-sky-800",
-  replay_ready: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  ready_to_arm: "border-sky-200 bg-sky-50 text-sky-800",
+  draft: "border-slate-200 bg-slate-100 text-slate-600",
   ended: "border-slate-200 bg-slate-100 text-slate-600",
   cancelled: "border-slate-200 bg-slate-100 text-slate-600",
+  archived: "border-slate-200 bg-slate-100 text-slate-600",
 };
 
 // The two counters worth a tap without opening the console. Everything else on the

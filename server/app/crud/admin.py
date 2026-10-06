@@ -159,7 +159,7 @@ def list_organizations(db, q=None, status=None, plan=None, page=1, page_size=20)
 def _org_out(o, users, events, subs) -> OrgOut:
     sub = subs.get(o.id)
     return OrgOut(
-        id=o.id, name=o.name, domain=o.domain, status=o.status, region=o.region,
+        id=o.id, name=o.name, domain=o.domain, domain_status=o.domain_status, status=o.status, region=o.region,
         storage_used_gb=o.storage_used_gb, bandwidth_gb=o.bandwidth_gb, created_at=o.created_at,
         users_count=users.get(o.id, 0), events_count=events.get(o.id, 0),
         plan=sub.plan.name if sub else None,
@@ -259,7 +259,9 @@ def provision_initial_subscription(db, org: Organization, *, plan_slug: str | No
 
 def create_organization(db, data) -> Organization:
     org = Organization(
-        name=data.name, domain=data.domain, region=data.region or "US East",
+        # The domain is NOT set here: the router hands it to services/custom_domains.set_domain
+        # after creation, so it gets the same uniqueness check, token and audit as any request.
+        name=data.name, region=data.region or "US East",
         status=data.status or "active",
     )
     db.add(org)
@@ -274,7 +276,9 @@ def create_organization(db, data) -> Organization:
 
 
 def update_organization(db, org: Organization, data) -> Organization:
-    for field in ("name", "domain", "region", "status", "storage_used_gb", "bandwidth_gb"):
+    # `domain` is deliberately absent: the router routes it through services/custom_domains so a
+    # super-admin edit gets the same validation, uniqueness, lifecycle reset and audit trail.
+    for field in ("name", "region", "status", "storage_used_gb", "bandwidth_gb"):
         val = getattr(data, field, None)
         if val is not None:
             setattr(org, field, val)

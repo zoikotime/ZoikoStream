@@ -32,6 +32,7 @@ vi.mock("../../auth/AuthContext", () => ({
 }));
 
 import api from "../../api";
+import { notify } from "../../ui/Toast";
 import { ThemeProvider } from "../../theme/ThemeContext";
 import Settings from "./Settings";
 
@@ -200,5 +201,61 @@ describe("the panel settles after saving", () => {
     fireEvent.click(saveButton());
     await waitFor(() => expect(patches()).toHaveLength(2));
     expect(patches()[1]).toEqual(["/organization/notifications", { member_joined: true }]);
+  });
+});
+
+describe("confirmation comes from the server, never before it", () => {
+  it("says the exact success message only after the PATCH resolves", async () => {
+    let resolve;
+    vi.mocked(api.patch).mockImplementation((url, body) =>
+      new Promise((r) => { resolve = () => r({ data: { ...PAYLOADS[url], ...body } }); }));
+    open();
+    const [scheduled] = await switches();
+    fireEvent.click(scheduled);
+    fireEvent.click(saveButton());
+    // In flight: Save is disabled and nothing has claimed success yet.
+    await waitFor(() => expect(saveButton()).toBeDisabled());
+    expect(saveButton()).toHaveTextContent("Saving…");
+    expect(notify.success).not.toHaveBeenCalled();
+    resolve();
+    await waitFor(() => expect(notify.success).toHaveBeenCalledWith("Notification preferences updated successfully."));
+  });
+
+  it("a refused save shows the error, keeps the toggle, and claims nothing", async () => {
+    vi.mocked(api.patch).mockRejectedValue({ response: { status: 403, data: { detail: "org_admin access required" } } });
+    open();
+    const [scheduled] = await switches();
+    fireEvent.click(scheduled);
+    fireEvent.click(saveButton());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Notifications not saved: org_admin access required");
+    expect(notify.success).not.toHaveBeenCalled();
+    expect((await switches())[0]).not.toBeChecked();      // what the admin chose is still shown
+    expect(saveButton()).toBeEnabled();                    // and can be retried
+  });
+});
+
+describe("a reload shows exactly what was saved", () => {
+  it("renders each switch from the stored values, independently", async () => {
+    const saved = { ...STORED, event_scheduled: false, member_joined: true, recording_ready: false };
+    vi.mocked(api.get).mockImplementation((url) =>
+      url === "/organization/notifications" ? Promise.resolve({ data: saved })
+        : url in PAYLOADS ? Promise.resolve({ data: PAYLOADS[url] }) : Promise.reject(new Error("404")));
+    open();
+    const [scheduled, joined, recording] = await switches();
+    expect(scheduled).not.toBeChecked();
+    expect(joined).toBeChecked();
+    expect(recording).not.toBeChecked();
+  });
+});
+
+describe("without the server's catalog there are no switches", () => {
+  it("says the settings could not be loaded instead of inventing a list", async () => {
+    vi.mocked(api.get).mockImplementation((url) =>
+      url === "/organization/notifications/catalog" ? Promise.reject(new Error("503"))
+        : url in PAYLOADS ? Promise.resolve({ data: PAYLOADS[url] }) : Promise.reject(new Error("404")));
+    open();
+    expect(await screen.findByText(/Notification settings couldn.t be loaded/)).toBeInTheDocument();
+    expect(screen.queryAllByRole("switch")).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "Save notifications" })).toBeNull();
   });
 });

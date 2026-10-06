@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   FiArrowLeft, FiCalendar, FiClock, FiEye, FiUsers, FiMic, FiMail,
   FiUploadCloud, FiLink, FiTrash2, FiVideo, FiBarChart2, FiUserCheck, FiUserPlus, FiX, FiStar,
-  FiShield, FiPhoneOff, FiSend, FiFileText, FiPlus, FiCopy,
+  FiShield, FiPhoneOff, FiSend, FiFileText, FiPlus, FiCopy, FiXCircle, FiArchive,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
@@ -20,7 +20,7 @@ import Badge from "../../ui/Badge";
 import Modal from "../../ui/Modal";
 import { Input, Label } from "../../ui/forms";
 import { cx, focusRing } from "../../ui/tokens";
-import { statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
+import { ARCHIVABLE_STATUSES, ON_AIR_STATUSES, PRE_LIVE_STATUSES, statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 import AssignPeopleModal from "./AssignPeopleModal";
 import { ROLE_PATH } from "./roleConfig";
 import ContributorInviteModal from "./ContributorInviteModal";
@@ -315,7 +315,7 @@ export default function EventDetails() {
   // The link is built by utils/viewerLink so this screen, the events list and Playback &
   // Access cannot drift from one another.
   const copyLink = async () => {
-    if (await copyViewerLink(event.id)) notify.success("Viewer link copied");
+    if (await copyViewerLink(event)) notify.success("Viewer link copied");
     // A clipboard that refuses (insecure origin, denied permission, older browser) used to
     // fail silently and still claim success.
     else notify.error("Unable to copy viewer link.");
@@ -323,8 +323,10 @@ export default function EventDetails() {
 
   const STATUS_TOAST = {
     published: "Event published",
+    scheduled: "Event scheduled",
     ready_to_arm: "Marked ready to arm",
     armed: "Event armed",
+    cancelled: "Event cancelled",
   };
 
   const setStatus = async (status) => {
@@ -374,8 +376,36 @@ export default function EventDetails() {
     }
   };
 
-  const canPublish = ["draft", "scheduled"].includes(event.status);
-  const canEnd = ["live", "degraded"].includes(event.status);
+  // Every action below is one the backend's transition table allows from this status
+  // (server/app/crud/event.py EVENT_TRANSITIONS); the server re-checks each one.
+  const startsInFuture = Boolean(event.start_time) && new Date(event.start_time) > new Date();
+  const canPublish = event.status === "draft";
+  // Publishing an event that already has a future start time schedules it.
+  const publishTarget = startsInFuture ? "scheduled" : "published";
+  const canEnd = ON_AIR_STATUSES.includes(event.status);
+  const canCancel = PRE_LIVE_STATUSES.includes(event.status);
+  const canArchive = ARCHIVABLE_STATUSES.includes(event.status);
+  const canUnarchive = event.status === "archived";
+
+  const cancelEvent = () => {
+    if (!window.confirm(`Cancel "${event.title || "this event"}"? It can't go live afterwards, and new registrations are refused.`)) return;
+    setStatus("cancelled");
+  };
+
+  // Archive takes the event out of the working list; nothing is deleted, viewers still see
+  // what it was, and Unarchive puts it back.
+  const archiveAction = async (action) => {
+    setBusy(true);
+    try {
+      await api.post(`/events/${event.id}/${action}`);
+      notify.success(action === "archive" ? "Event archived" : "Event restored");
+      reload();
+    } catch (e) {
+      notify.error(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // Progressive arm step: one button whose label/target advances the event through the
   // optional v1.1 canonical pre-live chain (published/scheduled/rehearsal -> ready_to_arm ->
@@ -384,10 +414,15 @@ export default function EventDetails() {
   const ARM_STEP = {
     published: { label: "Mark Ready to Arm", next: "ready_to_arm" },
     scheduled: { label: "Mark Ready to Arm", next: "ready_to_arm" },
-    rehearsal: { label: "Mark Ready to Arm", next: "ready_to_arm" },
     ready_to_arm: { label: "Arm Event", next: "armed" },
   };
   const armStep = ARM_STEP[event.status];
+  // The way back out of the pre-live chain, one step at a time.
+  const BACK_STEP = {
+    ready_to_arm: { label: "Mark Not Ready", next: startsInFuture ? "scheduled" : "published" },
+    armed: { label: "Disarm", next: "ready_to_arm" },
+  };
+  const backStep = BACK_STEP[event.status];
 
   const ROLE_LIST = { Host: hosts, Speaker: speakers };
 
@@ -428,15 +463,29 @@ export default function EventDetails() {
         </div>
         <div className="mt-6 flex flex-wrap gap-2 border-t border-slate-100 pt-5 dark:border-slate-800">
           {canPublish && (
-            <Button variant="primary" size="sm" leftIcon={FiUploadCloud} loading={busy} onClick={() => setStatus("published")}>Publish</Button>
+            <Button variant="primary" size="sm" leftIcon={FiUploadCloud} loading={busy} onClick={() => setStatus(publishTarget)}>Publish</Button>
           )}
           {armStep && (
             <Button variant="secondary" size="sm" leftIcon={FiShield} loading={busy} onClick={() => setStatus(armStep.next)}>
               {armStep.label}
             </Button>
           )}
+          {backStep && (
+            <Button variant="secondary" size="sm" loading={busy} onClick={() => setStatus(backStep.next)}>
+              {backStep.label}
+            </Button>
+          )}
           {canEnd && (
             <Button variant="danger" size="sm" leftIcon={FiPhoneOff} loading={busy} onClick={endEvent}>End Event</Button>
+          )}
+          {canCancel && (
+            <Button variant="secondary" size="sm" leftIcon={FiXCircle} loading={busy} onClick={cancelEvent}>Cancel Event</Button>
+          )}
+          {canArchive && (
+            <Button variant="secondary" size="sm" leftIcon={FiArchive} loading={busy} onClick={() => archiveAction("archive")}>Archive</Button>
+          )}
+          {canUnarchive && (
+            <Button variant="secondary" size="sm" leftIcon={FiArchive} loading={busy} onClick={() => archiveAction("unarchive")}>Unarchive</Button>
           )}
           <Button variant="secondary" size="sm" leftIcon={FiLink} onClick={copyLink}>Copy Viewer Link</Button>
           <Button variant="danger" size="sm" leftIcon={FiTrash2} disabled={busy} onClick={del}>Delete</Button>

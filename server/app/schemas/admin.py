@@ -4,9 +4,10 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, field_validator
 
 from ..config import BILLING_INTERVALS
+from ..domain_names import normalize_custom_hostname
 from ..models.user import ROLES
 
 # ── Generic ────────────────────────────────────────────────────────────────
@@ -26,12 +27,21 @@ class SeriesPoint(BaseModel):
 
 # ── Organizations ────────────────────────────────────────────────────────────
 
+# The super-admin editor writes the SAME custom-domain column as the organization's own
+# Settings, so it validates with the same rule (app/domain_names.py). It used to accept any
+# text, and the router now routes the value through services/custom_domains.set_domain for
+# uniqueness, the lifecycle reset and the audit trail.
 class OrgCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     domain: str | None = Field(None, max_length=255)
     region: str | None = Field(None, max_length=40)
     status: str = "active"
     plan_slug: str | None = None  # optional: create a trial subscription to this plan
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def _domain(cls, value):
+        return normalize_custom_hostname(value)
 
 
 class OrgUpdate(BaseModel):
@@ -47,6 +57,11 @@ class OrgUpdate(BaseModel):
     bandwidth_gb: float | None = None
     plan_slug: str | None = None  # switch the org's active subscription plan
 
+    @field_validator("domain", mode="before")
+    @classmethod
+    def _domain(cls, value):
+        return normalize_custom_hostname(value)
+
 
 class OrgOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -54,6 +69,7 @@ class OrgOut(BaseModel):
     id: uuid.UUID
     name: str
     domain: str | None = None
+    domain_status: str | None = None
     status: str
     region: str | None = None
     storage_used_gb: float

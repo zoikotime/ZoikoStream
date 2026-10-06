@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..crud import commercial as commercial_crud
 from ..crud import event as crud
+from ..models.event import ON_AIR_STATUSES, PRE_LIVE_STATUSES
 from ..db import get_db
 from ..services import notifications as notif_svc
 from ..email import (
@@ -48,6 +49,7 @@ from ..models import (
 )
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
+    EventStatus,
     ContributorAccept,
     ContributorInvite,
     ContributorRevoke,
@@ -160,7 +162,10 @@ def _user_out(u: User) -> AdminUserOut:
 @router.get("", response_model=Page)
 def list_events(
     q: str | None = None,
-    status_: str | None = Query(None, alias="status"),
+    # Validated against the one status definition: an unknown or retired value is a 422,
+    # never an empty page that looks like "no events". Omitted = every status except
+    # archived (archiving is how an organization takes an event out of its working list).
+    status_: EventStatus | None = Query(None, alias="status"),
     host: uuid.UUID | None = Query(None, description="filter by created_by (event owner)"),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
@@ -184,6 +189,14 @@ def list_events(
         row.registered_count = counts.get(e.id, 0)
         out.append(row)
     return Page(items=out, total=total, page=page, page_size=page_size)
+
+
+@router.get("/status-counts")
+def event_status_counts(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """How many of the caller's organization's events are in each status, over the WHOLE
+    organization (the Events page counters used to count only the first 100 rows it had
+    loaded). Every status in EVENT_STATUSES is present, zero included."""
+    return {"counts": crud.status_counts(db, user.org_id)}
 
 
 # ── console access (ZST post-login routing) ─────────────────────────────────────────────
@@ -237,9 +250,19 @@ def my_assignment(event_id: uuid.UUID, user: User = Depends(get_current_user),
 
 @router.post("", response_model=EventOut, status_code=status.HTTP_201_CREATED)
 def create_event(data: EventCreate, background: BackgroundTasks, admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
+    if data.timezone and not crud.is_valid_timezone(data.timezone):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"'{data.timezone}' is not a valid timezone")
     if data.start_time and data.end_time and data.end_time <= data.start_time:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "end_time must be after start_time")
-    err = crud.status_transition_error("draft", data.status, data.title)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "End time must be after the start time.")
+    if data.status == "scheduled":
+        if not (data.title and data.title.strip()):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot schedule an event without a title")
+        if not data.start_time:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Select a start date and time.")
+        err = crud.schedule_error(data.start_time)
+        if err:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
+    err = crud.status_transition_error("draft", data.status, data.title, start_time=data.start_time)
     if err:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
     if data.slug:
@@ -348,6 +371,13 @@ def watch_event(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
 
     is_org_member = bool(user and (user.role == "super_admin" or user.org_id == ev.org_id))
+    # What a viewer is shown. Archiving is the organization tidying its own list, so an
+    # archived event reads to viewers as what it was (an ended event keeps its replay).
+    viewer_status = crud.viewer_status_of(ev)
+    # An unpublished draft does not exist outside its own organization: same 404 as an event
+    # that was never created, so a draft's link reveals nothing (title, time, host).
+    if viewer_status == "draft" and not is_org_member:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
     reg_payload = decode_registration_payload(reg, ev.id) if reg else None
     invited = reg_payload is not None
     # A link PASS (exchanged from a #link= fragment, see services/invitation_links.py) or a
@@ -515,7 +545,7 @@ def watch_event(
     # validation. A recording awaiting an operator's decision may never be published, so it
     # is "unavailable", not a promise.
     replay_state = replay_until = None
-    if ev.status == "ended":
+    if viewer_status == "ended":
         ent = replay_entitlement
         if recording_url:
             replay_state, replay_until = "available", ent.expires_at
@@ -539,7 +569,7 @@ def watch_event(
         media_status = "live"
     elif ev.status == "degraded":
         media_status = "reconnecting"
-    elif ev.status == "ended" or expired:
+    elif viewer_status == "ended" or expired:
         media_status = "ended"
     elif not_started:
         media_status = "waiting_for_host"
@@ -547,7 +577,7 @@ def watch_event(
         media_status = "unavailable"
 
     return WatchOut(
-        id=ev.id, title=ev.title, description=ev.description, status=ev.status,
+        id=ev.id, title=ev.title, description=ev.description, status=viewer_status,
         visibility=ev.visibility, start_time=ev.start_time,
         organization_name=org_name, host_name=hosts[0].full_name if hosts else org_name,
         chat_enabled=ev.chat_enabled, qa_enabled=ev.qa_enabled, polls_enabled=ev.polls_enabled,
@@ -624,11 +654,12 @@ def redeem_invitation(
     return InvitationRedeemed(credential="link", token=invitation_links.mint_link_pass(link))
 
 
-def _registration_console_url(event_id: uuid.UUID, registration) -> str:
+def _registration_console_url(event_id: uuid.UUID, registration, org=None) -> str:
     """The watch link a registrant is emailed: the opaque invitation secret rides in the
     fragment, never the registration token itself (that one names the registrant's email,
     and a query string is logged and sent as a Referer). See services/invitation_links.py."""
-    return invitation_links.invitation_url(event_id, invitation_links.mint_invitation_secret(registration))
+    return invitation_links.invitation_url(
+        event_id, invitation_links.mint_invitation_secret(registration), org)
 
 
 @router.post("/{event_id}/register", response_model=RegistrationOut)
@@ -647,6 +678,13 @@ def register_for_event(
     ev = crud.get_event_unscoped(db, event_id)
     if ev is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    # Registration follows what a viewer is shown (crud.viewer_status_of): an unpublished
+    # draft does not exist to them, and a cancelled event takes no new attendees.
+    shown = crud.viewer_status_of(ev)
+    if shown == "draft":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    if shown == "cancelled":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This event was cancelled")
     if ev.visibility == "private":
         # Self-serve registration must never become a side-door into a private event — that
         # access is host-granted only, via invite_viewers below.
@@ -692,7 +730,7 @@ def register_for_event(
         background.add_task(
             send_registration_confirmation_email,
             reg.email, reg.name, ev.title or "this event",
-            _registration_console_url(ev.id, reg),
+            _registration_console_url(ev.id, reg, ev.organization),
         )
     webhooks.enqueue(db, ev.org_id, "registration.created", {
         "event_id": str(ev.id), "registration_id": str(reg.id), "email": reg.email, "name": reg.name,
@@ -735,7 +773,13 @@ def update_event(event_id: uuid.UUID, data: EventUpdate, background: BackgroundT
         err = crud.status_transition_error(
             ev.status, target, title_after,
             readiness_ready=readiness_ready, readiness_reasons=readiness_reasons,
+            start_time=fields.get("start_time", ev.start_time),
         )
+        if err:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
+    elif ev.status == "scheduled" and "start_time" in fields:
+        # Rescheduling a Scheduled event: it stays Scheduled only with a real, future start.
+        err = crud.schedule_error(fields["start_time"])
         if err:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
 
@@ -799,7 +843,7 @@ async def end_event(event_id: uuid.UUID, user: User = Depends(get_current_user),
     ev = _get_event_or_404(db, user, event_id)
     if not _can_edit(db, ev, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only end events you host")
-    if ev.status not in ("live", "degraded"):
+    if ev.status not in ON_AIR_STATUSES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event is not live")
 
     ctx = mod.Ctx(
@@ -811,15 +855,48 @@ async def end_event(event_id: uuid.UUID, user: User = Depends(get_current_user),
     await broadcast_svc._end(ctx, {}, emergency=True)
     db.refresh(ev)
 
-    if ev.status in ("live", "degraded") and not crud.status_transition_error(ev.status, "ended", ev.title):
+    if ev.status in ON_AIR_STATUSES and not crud.status_transition_error(ev.status, "ended", ev.title,
+                                                                       actor="platform"):
         ev = crud.update_event(db, ev, {"status": "ended"})
     return ev
+
+
+# ── Archive (draft / ended / cancelled <-> archived) ─────────────────────────────────────
+# Archiving takes an event out of the organization's working list without deleting
+# anything: registrations, recordings, replays and analytics are untouched, viewers still
+# see what the event was, and Unarchive puts it back exactly where it was.
+
+@router.post("/{event_id}/archive", response_model=EventOut)
+def archive_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only archive events you host")
+    if ev.status == "archived":
+        return ev                                  # a second click changes nothing
+    err = crud.status_transition_error(ev.status, "archived", ev.title, actor="archive")
+    if err:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
+    return crud.update_event(db, ev, {"status": "archived", "previous_status": ev.status}, actor=user)
+
+
+@router.post("/{event_id}/unarchive", response_model=EventOut)
+def unarchive_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ev = _get_event_or_404(db, user, event_id)
+    if not _can_edit(db, ev, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only unarchive events you host")
+    if ev.status != "archived":
+        return ev                                  # already restored
+    restore = crud.viewer_status_of(ev)            # what it was archived from
+    err = crud.status_transition_error("archived", restore, ev.title, actor="archive")
+    if err:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
+    return crud.update_event(db, ev, {"status": restore, "previous_status": None}, actor=user)
 
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, admin, event_id)
-    if ev.status in ("live", "paused"):
+    if ev.status in ON_AIR_STATUSES:
         # A soft delete alone would orphan the running broadcast_session at "live" forever —
         # nothing can ever reach it again to end it once the event is gone. Force-end first.
         ctx = mod.Ctx(
@@ -1045,7 +1122,7 @@ def invite_viewers(
         background.add_task(
             send_viewer_invite_email,
             reg.email, reg.name, ev.title or "this event",
-            _registration_console_url(ev.id, reg), user.full_name,
+            _registration_console_url(ev.id, reg, ev.organization), user.full_name,
         )
         out.append(RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=token))
     return out
@@ -1053,7 +1130,7 @@ def invite_viewers(
 
 # ── Access links (revocable, shareable — link-based counterpart to invite-viewers) ────────
 
-def _access_link_url(event_id: uuid.UUID, token: str) -> str:
+def _access_link_url(event_id: uuid.UUID, token: str, org=None) -> str:
     # THE BUG THIS FIXES: this used to read settings.CORS_ORIGINS (a comma-separated list
     # of allowed browser origins, meant for CORS — not a "public URL" setting) instead of
     # settings.APP_URL, which every other email link builder in this app uses
@@ -1064,7 +1141,8 @@ def _access_link_url(event_id: uuid.UUID, token: str) -> str:
     # The secret rides in the FRAGMENT (#link=), never the query string: a browser does not
     # send a fragment on GET, so it never reaches an access log, a proxy or a Referer. The
     # viewer page exchanges it once (POST /events/{id}/invitation). services/invitation_links.py.
-    return invitation_links.access_link_url(event_id, token)
+    # The organization's active custom domain when it has one (services/public_urls.py).
+    return invitation_links.access_link_url(event_id, token, org)
 
 
 @router.get("/{event_id}/access-links", response_model=list[AccessLinkOut])
@@ -1082,7 +1160,7 @@ def create_access_link(
     if not _can_edit(db, ev, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
     link, raw = crud.create_access_link(db, event_id, ev.org_id, user.id, data.label, data.expires_in_days)
-    return AccessLinkIssued(**AccessLinkOut.model_validate(link).model_dump(), url=_access_link_url(event_id, raw))
+    return AccessLinkIssued(**AccessLinkOut.model_validate(link).model_dump(), url=_access_link_url(event_id, raw, ev.organization))
 
 
 @router.post("/{event_id}/access-links/{link_id}/rotate", response_model=AccessLinkIssued)
@@ -1097,7 +1175,7 @@ def rotate_access_link(
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
     link, raw = crud.rotate_access_link(db, link, data.expires_in_days)
-    return AccessLinkIssued(**AccessLinkOut.model_validate(link).model_dump(), url=_access_link_url(event_id, raw))
+    return AccessLinkIssued(**AccessLinkOut.model_validate(link).model_dump(), url=_access_link_url(event_id, raw, ev.organization))
 
 
 @router.post("/{event_id}/access-links/{link_id}/revoke", response_model=AccessLinkOut)
