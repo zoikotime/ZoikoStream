@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func,
+    Boolean, CheckConstraint, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -14,15 +14,48 @@ if TYPE_CHECKING:
     from .organization import Organization
     from .user import User
 
-# Lifecycle. Guarded transitions (crud.status_transition_error): publish needs a title,
-# live only from published/scheduled/armed, ended only from live/degraded/replay_ready,
-# archive not while active. rehearsal/ready_to_arm/armed/degraded/ending/processing/
-# replay_ready/blocked are the v1.1 canonical-spec states (ZS-PRD-LE-01 Sec. 13) — optional:
-# an event that skips straight from published/scheduled to live never touches them.
+# ── Event lifecycle: the ONE definition of what Event.status can hold ───────────────────
+#
+#   draft ──publish──> published ──(start time set)──> scheduled
+#     │                    │                              │
+#     │                    └──────────┬───────────────────┘
+#     │                               v
+#     │                     ready_to_arm <──disarm── armed      (Arm needs readiness to pass)
+#     │                               └──arm──────────> armed
+#     │          published / scheduled / armed ──Go Live──> live <──recovered── degraded
+#     │                                                     │  └──media dropped──> degraded
+#     │                                                     └──End──> ended <──End── degraded
+#     ├──cancel── published / scheduled / ready_to_arm / armed ──> cancelled
+#     └──archive── draft / ended / cancelled ──> archived ──unarchive──> (previous status)
+#
+# Who moves what (crud.event.status_transition_error enforces both halves):
+#   * people (PATCH /events/{id}, the archive endpoints): publish, schedule, mark ready,
+#     arm/disarm, cancel, archive/unarchive;
+#   * the platform only: live (Go Live opens a real broadcast), degraded and its recovery
+#     (the media sampler measures the producer), ended (the End teardown stops recording
+#     and closes the room). A status write alone can never claim a broadcast.
+#
+# Retired values, each never written by anything in the product: "rehearsal" (no host
+# rehearsal mode exists; planned rehearsals are their own records), "ending" (End is one
+# synchronous teardown, live -> ended), "processing" and "replay_ready" (recordings and
+# replays have their own lifecycles: LiveRecording.status and ReplayEntitlement, which the
+# viewer reads as replay_state), and "blocked" (restriction lives on the Organization,
+# ORG-010, and in the readiness verdict, LVE-006, both of which already refuse go-live).
+# create_tables.py maps or refuses any row still holding one; ck_events_status keeps them out.
 EVENT_STATUSES = (
-    "draft", "published", "scheduled", "rehearsal", "ready_to_arm", "armed", "live",
-    "degraded", "ending", "processing", "replay_ready", "ended", "cancelled", "archived", "blocked",
+    "draft", "published", "scheduled", "ready_to_arm", "armed", "live", "degraded",
+    "ended", "cancelled", "archived",
 )
+RETIRED_EVENT_STATUSES = ("rehearsal", "ending", "processing", "replay_ready", "blocked")
+
+# Before a broadcast. Every one can be cancelled; none hands a viewer a stream.
+PRE_LIVE_STATUSES = ("draft", "published", "scheduled", "ready_to_arm", "armed")
+# A broadcast is running.
+ON_AIR_STATUSES = ("live", "degraded")
+# Only the platform enters these (see above).
+SYSTEM_STATUSES = ("live", "degraded", "ended")
+# What can be archived, and so what an unarchive can restore.
+ARCHIVABLE_STATUSES = ("draft", "ended", "cancelled")
 EVENT_VISIBILITY = ("public", "private", "unlisted")
 ASSIGNMENT_ROLES = ("host", "speaker")
 
@@ -57,6 +90,12 @@ class Event(Base):
     derived from start/end at read time, not stored."""
 
     __tablename__ = "events"
+    # The database refuses any status outside EVENT_STATUSES (create_tables.py adds the same
+    # constraint to existing databases after mapping retired values).
+    __table_args__ = (
+        CheckConstraint("status IN (" + ", ".join(f"'{s}'" for s in EVENT_STATUSES) + ")",
+                        name="ck_events_status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
@@ -99,6 +138,8 @@ class Event(Base):
     auto_end_event: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
+    # The status an archived event returns to on unarchive (one of ARCHIVABLE_STATUSES).
+    previous_status: Mapped[str | None] = mapped_column(String(20))
     # Blast-radius class: standard | high | unrepeatable. Decides which readiness gates are
     # mandatory (see services.ops.event_readiness) and what reaches the Command Center's
     # high-impact list. "unrepeatable" = cannot be re-run (memorial, results broadcast).
@@ -137,6 +178,14 @@ class Event(Base):
     organization: Mapped["Organization"] = relationship()
     creator: Mapped["User"] = relationship(foreign_keys=[created_by])
     assignments: Mapped[list["EventAssignment"]] = relationship(back_populates="event", cascade="all, delete-orphan")
+
+    @property
+    def public_watch_url(self) -> str:
+        """The attendee link, on the organization's active custom domain when it has one
+        (services/public_urls.py is the single builder)."""
+        from app.services.public_urls import event_watch_url
+
+        return event_watch_url(self.id, self.organization)
 
 
 class EventAssignment(Base):

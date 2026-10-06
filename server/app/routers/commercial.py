@@ -77,6 +77,7 @@ from ..services import commerce_comms
 from ..services import event_closeout
 from ..services import event_comms
 from ..services import event_ops
+from ..services import public_urls
 from ..services import replay_comms
 from ..schemas.commercial import (
     CancelOrderRequest, CancellationPolicyCreate, CancellationPolicyOut, CancellationResult,
@@ -1260,7 +1261,7 @@ def publish_replay(entitlement_id: uuid.UUID, background: BackgroundTasks,
         order = crud.get_current_order(db, ent.event_id)
         contact = _order_contact(db, order) if order else None
         if contact and ev:
-            watch_url = f"{settings.APP_URL.rstrip('/')}/events/{ent.event_id}/watch"
+            watch_url = public_urls.event_watch_url(ent.event_id, ev.organization)
             background.add_task(send_replay_available_email, contact[0], contact[1], ev.title, watch_url)
     # ZST-EC-001 MED-009. A DIFFERENT audience from the purchaser notice above: the asset
     # owner and the people authorized to publish learn that a decision was taken on an asset

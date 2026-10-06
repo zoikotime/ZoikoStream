@@ -14,8 +14,6 @@ export const orgProfile = {
 export const INDUSTRIES = ["Technology", "Media & Entertainment", "Education", "Finance", "Healthcare", "Retail", "Nonprofit", "Other"];
 export const COMPANY_SIZES = ["1–10", "11–50", "51–200", "201–500", "500+"];
 
-export const domain = { custom: "events.zoikotech.com", status: "Verified" };
-
 // Keys into the app's ACCENT token map (Branding color picker).
 // "emerald" is deliberately absent: index.css remaps the emerald scale onto the brand purple
 // (--color-emerald-600: #7c3aed), which is byte-identical to violet-600. Offering both drew two
@@ -49,31 +47,6 @@ export const permissionDefaults = {
   Admin: ["events", "recordings", "analytics", "users", "billing", "settings"],
   Host: ["events", "recordings", "analytics"],
   Member: ["analytics"],
-};
-
-export const notificationGroups = [
-  {
-    title: "Email",
-    items: [
-      { key: "eventScheduled", label: "New event scheduled", desc: "When a teammate schedules an event" },
-      { key: "eventStarting", label: "Event starting soon", desc: "30 minutes before an event goes live" },
-      { key: "recordingReady", label: "Recording ready", desc: "When a recording finishes processing" },
-      { key: "weeklySummary", label: "Weekly analytics summary", desc: "A digest of last week's performance" },
-      { key: "billing", label: "Billing & invoices", desc: "Receipts and payment reminders" },
-    ],
-  },
-  {
-    title: "Product",
-    items: [
-      { key: "mentions", label: "Mentions in chat & Q&A", desc: "When someone @mentions your team" },
-      { key: "memberJoined", label: "New team member joined", desc: "When an invite is accepted" },
-      { key: "securityAlerts", label: "Security alerts", desc: "New sign-ins and permission changes" },
-    ],
-  },
-];
-export const notificationDefaults = {
-  eventScheduled: true, eventStarting: true, recordingReady: true, weeklySummary: false,
-  billing: true, mentions: true, memberJoined: false, securityAlerts: true,
 };
 
 export const apiKeysSeed = [

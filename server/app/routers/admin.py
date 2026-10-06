@@ -113,6 +113,7 @@ from .. import security
 from ..security import require_elevation, require_super_admin
 from ..services import admin as svc
 from ..services import broadcast as broadcast_svc
+from ..services import custom_domains
 from ..services import livekit
 from ..services import moderation as mod
 from ..services import ops as ops_svc
@@ -540,9 +541,16 @@ def get_organization(org_id: uuid.UUID, db: Session = Depends(get_db),
 @router.post("/organizations", response_model=OrgOut, status_code=status.HTTP_201_CREATED)
 def create_organization(data: OrgCreate, request: Request,
                         db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    # Refuse an unusable domain BEFORE creating anything, so a 409/503 never leaves a
+    # half-made organization behind.
+    if data.domain:
+        _domain_call(custom_domains.check_claimable, db, data.domain)
     org = crud.create_organization(db, data)
     _audit(db, admin, request, "organization.create", target_type="organization",
            target_id=org.id, org_id=org.id, meta={"name": org.name})
+    if data.domain:
+        _domain_call(custom_domains.set_domain, db, org, data.domain, actor=admin,
+                     ip=security.client_ip(request), source="super_admin")
     return crud.get_organization(db, org.id)
 
 
@@ -553,8 +561,17 @@ def update_organization(org_id: uuid.UUID, data: OrgUpdate, request: Request,
     org = db.get(Organization, org_id)
     if not org:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+    domain_sent = "domain" in data.model_fields_set and data.domain != org.domain
+    if domain_sent and data.domain:
+        _domain_call(custom_domains.check_claimable, db, data.domain, exclude_org_id=org.id)
     previous_state = org.status
     crud.update_organization(db, org, data)
+    if domain_sent:
+        # Same path as the organization's own Settings: validation already ran in OrgUpdate;
+        # uniqueness, the lifecycle reset (new token, verification restarts) and the
+        # custom_domain.* audit row happen in the service.
+        _domain_call(custom_domains.set_domain, db, org, data.domain, actor=admin,
+                     ip=security.client_ip(request), source="super_admin")
     _audit(db, admin, request, "organization.update", target_type="organization",
            target_id=org.id, org_id=org.id, meta=data.model_dump(exclude_none=True))
 
@@ -566,6 +583,80 @@ def update_organization(org_id: uuid.UUID, data: OrgUpdate, request: Request,
         reason_category=data.reason_category,
     )
     return crud.get_organization(db, org.id)
+
+
+# ── Custom domains (support console) ─────────────────────────────────────────────────────
+# Staff can SEE every claim and its evidence, re-run the checks, and stop a domain serving.
+# There is deliberately no action that marks a domain verified or active: those states come
+# only from the DNS records, the certificate provider and the HTTPS probe
+# (services/custom_domains.py). Every action writes a custom_domain.* audit row.
+
+def _domain_call(fn, *args, **kw):
+    try:
+        return fn(*args, **kw)
+    except custom_domains.DomainError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from None
+
+
+def _domain_org(db: Session, org_id: uuid.UUID) -> Organization:
+    org = db.get(Organization, org_id)
+    if org is None or not org.domain:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No custom domain for this organization")
+    return org
+
+
+class CustomDomainReason(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.get("/custom-domains")
+def list_custom_domains(db: Session = Depends(get_db)):
+    avail = custom_domains.availability()
+    return {
+        "availability": {"available": avail.available, "reason": avail.reason,
+                         "cname_target": avail.cname_target, "provider": avail.provider},
+        "items": [custom_domains.admin_view(o, avail) for o in custom_domains.list_for_support(db)],
+    }
+
+
+@router.post("/custom-domains/{org_id}/verify")
+def verify_custom_domain(org_id: uuid.UUID, request: Request, db: Session = Depends(get_db),
+                         admin: User = Depends(require_super_admin)):
+    """Re-run the DNS checks now and retry certificate provisioning when they pass."""
+    org = _domain_org(db, org_id)
+    org = _domain_call(custom_domains.verify, db, org.id, actor=admin,
+                       ip=security.client_ip(request), trigger="support")
+    return custom_domains.admin_view(org)
+
+
+@router.post("/custom-domains/{org_id}/disable")
+def disable_custom_domain(org_id: uuid.UUID, data: CustomDomainReason, request: Request,
+                          _elevated: User = Depends(require_elevation("platform")),
+                          db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    org = _domain_org(db, org_id)
+    org = _domain_call(custom_domains.disable, db, org, actor=admin,
+                       ip=security.client_ip(request), reason=data.reason)
+    return custom_domains.admin_view(org)
+
+
+@router.post("/custom-domains/{org_id}/enable")
+def enable_custom_domain(org_id: uuid.UUID, request: Request, db: Session = Depends(get_db),
+                         admin: User = Depends(require_super_admin)):
+    """Lift a disable. The domain restarts at pending DNS and must verify again."""
+    org = _domain_org(db, org_id)
+    org = _domain_call(custom_domains.enable, db, org, actor=admin, ip=security.client_ip(request))
+    return custom_domains.admin_view(org)
+
+
+@router.post("/custom-domains/{org_id}/release", status_code=status.HTTP_204_NO_CONTENT)
+def release_custom_domain(org_id: uuid.UUID, data: CustomDomainReason, request: Request,
+                          _elevated: User = Depends(require_elevation("platform")),
+                          db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    """Remove an organization's claim, freeing the hostname - for a claim that was never
+    verified and is blocking the domain's real owner."""
+    org = _domain_org(db, org_id)
+    custom_domains.remove_domain(db, org, actor=admin, ip=security.client_ip(request),
+                                 source="support", reason=data.reason)
 
 
 @router.delete("/organizations/{org_id}", status_code=status.HTTP_204_NO_CONTENT)

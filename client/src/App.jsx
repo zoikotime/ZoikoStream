@@ -31,6 +31,8 @@ import EventRegistration from "./pages/EventRegistration";
 import CustomerDelivery from "./pages/CustomerDelivery";
 import HostDashboard from "./pages/host/Dashboard";
 import EventWatch from "./pages/watch/EventWatch";
+import CustomDomainNotFound from "./pages/watch/CustomDomainNotFound";
+import { isCustomDomain } from "./utils/hostMode";
 import SpeakerBackstage from "./pages/speaker/Backstage";
 import Landing from "./pages/Landing";
 import MyEvents from "./pages/MyEvents";
@@ -64,6 +66,7 @@ const IdentityAccess = /* @__PURE__ */ lazy(() => import("./pages/admin/mergedPa
 const OrganizationsConsole = /* @__PURE__ */ lazy(() => import("./pages/admin/mergedPages").then((m) => ({ default: m.OrganizationsConsole })));
 const SystemStatusConsole = /* @__PURE__ */ lazy(() => import("./pages/admin/mergedPages").then((m) => ({ default: m.SystemStatusConsole })));
 const LiveEvents = /* @__PURE__ */ lazy(() => import("./pages/admin/LiveEvents"));
+const CustomDomains = /* @__PURE__ */ lazy(() => import("./pages/admin/CustomDomains"));
 const AdminEventDetail = /* @__PURE__ */ lazy(() => import("./pages/admin/EventDetail"));
 const Subscriptions = /* @__PURE__ */ lazy(() => import("./pages/admin/Subscriptions"));
 const Analytics = /* @__PURE__ */ lazy(() => import("./pages/admin/Analytics"));
@@ -150,7 +153,26 @@ const legacyStubs = [
   ["invitations", "Invitations"], ["billing", "Billing"], ["settings", "Settings"],
 ];
 
+// On an organization's ACTIVE custom domain (utils/hostMode.js) the app is the event page and
+// nothing else: the server refuses every other route on that hostname, and this router matches
+// it, so no platform page (login, dashboards, admin) can render there client-side either.
+function CustomDomainApp() {
+  return (
+    <ThemeProvider>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            <Route path="/events/:eventId/watch" element={<EventWatch />} />
+            <Route path="*" element={<CustomDomainNotFound />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </ThemeProvider>
+  );
+}
+
 export default function App() {
+  if (isCustomDomain()) return <CustomDomainApp />;
   return (
     <ThemeProvider>
       {/* BrowserRouter wraps AuthProvider (not the other way round) so the provider can
@@ -316,6 +338,7 @@ export default function App() {
                 <Route element={<AdminLayout />}>
                   <Route path="/admin/dashboard" element={<AdminDashboard />} />
                   <Route path="/admin/organizations" element={<OrganizationsConsole />} />
+                  <Route path="/admin/custom-domains" element={<CustomDomains />} />
                   <Route path="/admin/live-events" element={<LiveEvents />} />
                   <Route path="/admin/live-events/:eventId" element={<AdminEventDetail />} />
                   <Route path="/admin/users" element={<IdentityAccess />} />

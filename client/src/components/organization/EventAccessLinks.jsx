@@ -258,7 +258,7 @@ export default function EventAccessLinks({ event, canManage }) {
                 size="sm"
                 leftIcon={FiLink}
                 onClick={async () => {
-                  if (await copyViewerLink(eventId)) notify.success("Viewer link copied");
+                  if (await copyViewerLink(event)) notify.success("Viewer link copied");
                   else notify.error("Unable to copy viewer link.");
                 }}
               >

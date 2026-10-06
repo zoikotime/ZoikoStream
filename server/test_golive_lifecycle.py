@@ -271,7 +271,7 @@ def _poll_db_state(event_id, settle=2.0, interval=0.1):
     return state
 
 
-@pytest.mark.parametrize("pre_status", ["draft", "rehearsal", "ready_to_arm"])
+@pytest.mark.parametrize("pre_status", ["draft", "ready_to_arm", "cancelled"])
 def test_go_live_from_a_non_publishable_status_is_refused_not_silently_half_live(
         host_event, pre_status):
     """The silent "host is live, every viewer is dark" desync.
@@ -293,9 +293,9 @@ def test_go_live_from_a_non_publishable_status_is_refused_not_silently_half_live
       2. NO BroadcastSession is opened — a refused go-live must not leave a half-started
          broadcast behind for the host to publish into.
 
-    Parametrised over the real reachable pre-live states rather than one example: rehearsal
-    and ready_to_arm are ordinary points on the v1.1 canonical chain (models/event.py
-    EVENT_STATUSES), so a host sitting on either is not an exotic case.
+    Parametrised over real statuses Go Live must refuse rather than one example: an
+    unpublished draft, ready_to_arm (it must be armed first) and a cancelled event
+    (models/event.py EVENT_STATUSES; "rehearsal" was retired as a status nothing set).
     """
     db = SessionLocal()
     try:

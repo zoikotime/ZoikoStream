@@ -19,6 +19,8 @@ import { FiRadio, FiSun, FiMoon } from "react-icons/fi";
 import { useTheme } from "../../theme/ThemeContext";
 import { useAuth } from "../../auth/AuthContext";
 import api, { errMsg } from "../../api";
+import { isCustomDomain } from "../../utils/hostMode";
+import { PRE_LIVE_STATUSES } from "../../data/events";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
 import WatchPanel from "../../components/watch/WatchPanel";
@@ -81,9 +83,9 @@ function watchToMockEvent(watch) {
 const POLL_MS = 10000; // how often a not-yet-live page checks whether the event went live
 // How often an ended page checks on a replay the server says is being prepared.
 const REPLAY_POLL_MS = 30000;
-// Statuses that come BEFORE a broadcast (schemas/event.py EventStatus). The pre-event state
-// replaces the player for these; everything after go-live keeps the player.
-const PRE_LIVE = new Set(["draft", "published", "scheduled", "rehearsal", "ready_to_arm", "armed"]);
+// Statuses that come BEFORE a broadcast (data/events.js, mirroring server/app/models/event.py).
+// The pre-event state replaces the player for these; everything after go-live keeps the player.
+const PRE_LIVE = new Set(PRE_LIVE_STATUSES);
 
 // Real chat/Q&A/polls over the same live socket the host/moderator consoles use (see
 // live.py — any authenticated attendee, OR a name+email self-registration (mustIdentify
@@ -945,9 +947,31 @@ function EventWatchPage() {
           <p className="text-sm text-slate-500 dark:text-slate-400">
             {blockedReason || "This event could not be found."}
           </p>
-          <Link to="/" className="mt-2 inline-block text-sm font-medium text-emerald-600 hover:text-emerald-500 dark:text-emerald-400">
-            Back to home
-          </Link>
+          {/* On an organization's custom domain there is no "home" to go back to. */}
+          {!isCustomDomain() && (
+            <Link to="/" className="mt-2 inline-block text-sm font-medium text-emerald-600 hover:text-emerald-500 dark:text-emerald-400">
+              Back to home
+            </Link>
+          )}
+        </div>
+      </div>
+    );
+
+  // A cancelled event has nothing to play and takes no registrations (the server refuses
+  // both); say so plainly instead of rendering an empty player.
+  if (watch?.status === "cancelled")
+    return (
+      <div className="grid min-h-screen place-items-center bg-slate-50 px-4 dark:bg-slate-950">
+        <div className="max-w-sm text-center" role="status">
+          <p className="text-lg font-semibold text-slate-900 dark:text-white">This event was cancelled</p>
+          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+            {event.name ? `${event.name} won't take place. ` : ""}There&apos;s nothing to watch here.
+          </p>
+          {!isCustomDomain() && (
+            <Link to="/" className="mt-4 inline-block text-sm font-medium text-emerald-600 hover:text-emerald-500 dark:text-emerald-400">
+              Back to home
+            </Link>
+          )}
         </div>
       </div>
     );
@@ -963,12 +987,14 @@ function EventWatchPage() {
         <div className="max-w-sm text-center">
           <p className="text-lg font-semibold text-slate-900 dark:text-white">You&apos;ve left this event</p>
           <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{panel.removed.reason}</p>
-          <Link
-            to="/"
-            className="mt-4 inline-block rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
-          >
-            Back to home
-          </Link>
+          {!isCustomDomain() && (
+            <Link
+              to="/"
+              className="mt-4 inline-block rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
+            >
+              Back to home
+            </Link>
+          )}
         </div>
       </div>
     );
@@ -978,13 +1004,17 @@ function EventWatchPage() {
       {/* Brand bar — the real wordmark asset (ui/Logo), not a text stand-in. */}
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/75 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/75">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
-          <Link
-            to="/"
-            aria-label="ZoikoStream home"
-            className="shrink-0 rounded-xl transition duration-150 hover:opacity-85 motion-reduce:transition-none"
-          >
-            <Logo height="h-6 sm:h-7" />
-          </Link>
+          {isCustomDomain() ? (
+            <span className="shrink-0"><Logo height="h-6 sm:h-7" /></span>
+          ) : (
+            <Link
+              to="/"
+              aria-label="ZoikoStream home"
+              className="shrink-0 rounded-xl transition duration-150 hover:opacity-85 motion-reduce:transition-none"
+            >
+              <Logo height="h-6 sm:h-7" />
+            </Link>
+          )}
           <div className="flex items-center gap-1.5 sm:gap-3">
             {live && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-600 ring-1 ring-rose-500/20 dark:text-rose-400">

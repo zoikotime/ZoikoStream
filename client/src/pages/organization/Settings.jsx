@@ -7,7 +7,7 @@ import { useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   FiUser, FiImage, FiShield, FiBell, FiCode, FiAlertTriangle,
-  FiUploadCloud, FiGlobe, FiCheck, FiCopy, FiSave, FiLock,
+  FiUploadCloud, FiCheck, FiSave, FiLock,
   FiVideo, FiCloud,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
@@ -15,18 +15,17 @@ import useApi from "../../hooks/useApi";
 import { cx, ACCENT } from "../../ui/tokens";
 import Card from "../../ui/Card";
 import Button from "../../ui/Button";
-import Badge from "../../ui/Badge";
 import { Input, Textarea, Select, Switch } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import ApiCredentials from "../../components/organization/ApiCredentials";
 import ChangePasswordForm from "../../components/organization/profile/ChangePasswordForm";
 import BrandingPreview from "../../components/organization/BrandingPreview";
+import CustomDomainPanel from "../../components/organization/CustomDomainPanel";
 import {
   INDUSTRIES, COMPANY_SIZES, ACCENTS,
   SESSION_TIMEOUTS, PASSWORD_LENGTHS,
   ROLES, PERMISSIONS, permissionDefaults,
-  notificationGroups,
 } from "../../data/orgSettings";
 
 const TABS = [
@@ -106,9 +105,10 @@ function SectionFooter({ id, label, dirty, saving, error, onSave }) {
 
 // ── API ⇄ form-state mapping ──────────────────────────────────────────────────
 // The form keeps its camelCase shape; these translate at the network boundary so the
-// JSX below is untouched. Only profile / branding-color / security / notifications /
-// domain have a backend — permissions, API keys, integrations, domain-verify and the
-// danger zone stay local (no endpoint yet) and are marked at their call sites.
+// JSX below is untouched. Only profile / branding-color / security / notifications have a
+// backend here — permissions, API keys, integrations and the danger zone stay local (no
+// endpoint yet) and are marked at their call sites. The custom domain is its own component
+// (CustomDomainPanel) with its own lifecycle actions; this page only hands it the first GET.
 // GET /organization/security is the one call on this page that requires org_admin; the other
 // five are readable by any member. Under a plain Promise.all a host's 403 rejected the whole
 // batch, so General, Branding, Notifications and Domain — all of which had returned 200 — were
@@ -135,8 +135,10 @@ const loadSettings = async () => {
     // The notification catalog is the server's description of what each preference actually
     // controls — its message class, whether it is mandatory, and whether a send path for it
     // exists at all. Rendering the panel from this instead of a hardcoded list is what stops
-    // the page offering a switch for an email Zoiko Steam never sends. Tolerant like the key
-    // list above: an older API 404s here and the panel falls back to the static grouping.
+    // the page offering a switch for an email Zoiko Steam never sends. Tolerant: if it fails,
+    // the rest of Settings still loads and the Notifications panel says it could not load
+    // (it used to fall back to a hardcoded list with working-looking switches for billing,
+    // security and emails that do not exist).
     api.get("/organization/notifications/catalog").then((r) => r.data).catch(() => null),
   ]);
   return {
@@ -199,10 +201,6 @@ const profileFrom = (p) => ({
     size: p.company_size ?? COMPANY_SIZES[0], description: p.description ?? "",
   },
 });
-const domainFrom = (d) => ({
-  customDomain: d.domain ?? "",
-  domainStatus: d.domain_verified ? "Verified" : "Pending",
-});
 // primary_color stores an ACCENT key; anything else (a hex from another surface) falls back
 // rather than indexing ACCENT[undefined] and crashing the picker.
 const brandingFrom = (b) => ({
@@ -220,17 +218,18 @@ const securityFrom = (s0) => ({
     allowedDomains: s0?.allowed_domains ?? "",
   },
 });
+// Keyed by the API's own preference names ("event_scheduled"), because the panel indexes it
+// with the key on each catalog row. It used to be re-keyed to camelCase ("eventScheduled"),
+// so every switch read `undefined` and drew itself OFF whatever was stored, and a toggle wrote
+// a key the save payload never read: Save stayed dead and nothing reached the database.
 const notifsFrom = (n) => ({
-  notifs: {
-    eventScheduled: n.event_scheduled, eventStarting: n.event_starting,
-    recordingReady: n.recording_ready, weeklySummary: n.weekly_summary,
-    billing: n.billing, mentions: n.mentions, memberJoined: n.member_joined,
-    securityAlerts: n.security_alerts,
-  },
+  notifs: Object.fromEntries(
+    Object.entries(n || {}).filter(([, v]) => typeof v === "boolean")
+  ),
 });
 
-const fromApi = ({ profile, security, notifs, domain, branding }) => ({
-  ...profileFrom(profile), ...domainFrom(domain), ...brandingFrom(branding),
+const fromApi = ({ profile, security, notifs, branding }) => ({
+  ...profileFrom(profile), ...brandingFrom(branding),
   ...securityFrom(security), ...notifsFrom(notifs),
 });
 
@@ -250,10 +249,6 @@ const SECTIONS = {
       company_size: f.profile.size || null, support_email: f.profile.supportEmail || null,
     }),
   },
-  domain: {
-    label: "Custom domain", url: "/organization/domain", from: domainFrom,
-    payload: (f) => ({ domain: f.customDomain.trim() || null }),
-  },
   branding: {
     label: "Branding", url: "/organization/branding", from: brandingFrom,
     payload: (f) => ({ primary_color: f.accent, logo_url: f.logoUrl.trim() || null }),
@@ -266,14 +261,13 @@ const SECTIONS = {
       session_timeout: f.security.sessionTimeout, allowed_domains: f.security.allowedDomains,
     }),
   },
+  // The same keys the server sent. Only a switch can change a value, and switches exist only
+  // for the catalog's configurable rows, so a PATCH only ever carries the configurable
+  // preferences that actually moved (the server refuses unknown keys and pins the rest).
   notifs: {
     label: "Notifications", url: "/organization/notifications", from: notifsFrom,
-    payload: (f) => ({
-      event_scheduled: f.notifs.eventScheduled, event_starting: f.notifs.eventStarting,
-      recording_ready: f.notifs.recordingReady, weekly_summary: f.notifs.weeklySummary,
-      billing: f.notifs.billing, mentions: f.notifs.mentions,
-      member_joined: f.notifs.memberJoined, security_alerts: f.notifs.securityAlerts,
-    }),
+    payload: (f) => ({ ...f.notifs }),
+    saved: "Notification preferences updated successfully.",
   },
 };
 
@@ -374,10 +368,6 @@ export default function OrganizationSettings() {
     patch("profile", (s) => ({ ...s, profile: { ...s.profile, [k]: v } }));
   };
   const setSec = (k, v) => patch("security", (s) => ({ ...s, security: { ...s.security, [k]: v } }));
-  const setDomain = (v) => {
-    setErrors((e) => (e.domain ? { ...e, domain: undefined } : e));
-    patch("domain", (s) => ({ ...s, customDomain: v, domainStatus: "Pending" }));
-  };
   const toggleNotif = (k) => patch("notifs", (s) => ({ ...s, notifs: { ...s.notifs, [k]: !s.notifs[k] } }));
 
   const isDirty = (key) => Object.keys(changedFields(key, settings, baseline)).length > 0;
@@ -405,12 +395,12 @@ export default function OrganizationSettings() {
     try {
       const { data: saved } = await api.patch(section.url, body);
       // The server's answer becomes the new baseline for THIS section only - a normalised
-      // slug, a domain dropping back to unverified - and every other panel keeps its edits.
+      // slug, say - and every other panel keeps its edits.
       const fresh = section.from(saved);
       setBaseline((b) => ({ ...b, ...fresh }));
       setSettings((f) => ({ ...f, ...fresh }));
       setSectionErrors((e) => ({ ...e, [key]: undefined }));
-      notify.success(`${section.label} saved`);
+      notify.success(section.saved || `${section.label} saved`);
     } catch (err) {
       const fields = fieldErrors(err);
       setErrors((e) => ({ ...e, ...fields }));
@@ -432,14 +422,6 @@ export default function OrganizationSettings() {
       onSave={() => saveSection(key)}
     />
   );
-  const copyText = async (t, label) => {
-    try {
-      await navigator.clipboard.writeText(t);
-      notify.success(`${label} copied`);
-    } catch {
-      notify.error("Clipboard is blocked — copy it manually.");
-    }
-  };
 
 
 
@@ -548,30 +530,7 @@ export default function OrganizationSettings() {
                 {footer("profile")}
               </Panel>
 
-              <Panel title="Custom Domain" desc="Serve your event pages from your own domain">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                  <Field label="Domain" className="flex-1" error={errors.domain}>
-                    <div className="relative">
-                      <FiGlobe className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-                      <Input variant="form" className="pl-9" maxLength={255} error={errors.domain} value={settings.customDomain} onChange={(e) => setDomain(e.target.value)} placeholder="events.yourcompany.com" />
-                    </div>
-                  </Field>
-                  {/* Was a "Verify" button that flipped the badge locally and toasted success.
-                      Nothing checked DNS, and the next page load read Pending again from the
-                      server. Copying the record you actually have to add is the real help. */}
-                  <Button variant="secondary" onClick={() => copyText("cname.zoikostream.com", "CNAME target")}>
-                    <FiCopy className="text-base" /> Copy CNAME
-                  </Button>
-                </div>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <Badge status={settings.domainStatus === "Verified" ? "success" : "warning"} dot>{settings.domainStatus}</Badge>
-                  <span className="text-xs text-slate-400">
-                    Point a CNAME at <code className="font-mono">cname.zoikostream.com</code>, then save. Verification is
-                    completed by support — automatic DNS checks aren't live yet.
-                  </span>
-                </div>
-                {footer("domain")}
-              </Panel>
+              <CustomDomainPanel initial={data.domain} />
             </>
           )}
 
@@ -880,19 +839,14 @@ export default function OrganizationSettings() {
                   </p>
                 </>
               ) : (
-                // Fallback for an API build without the catalog endpoint.
-                notificationGroups.map((g) => (
-                  <div key={g.title} className="mb-6 last:mb-0">
-                    <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">{g.title}</h3>
-                    {g.items.map((it) => (
-                      <SettingRow key={it.key} title={it.label} desc={it.desc}>
-                        <Switch checked={settings.notifs[it.key]} onChange={() => toggleNotif(it.key)} />
-                      </SettingRow>
-                    ))}
-                  </div>
-                ))
+                // No catalog, no switches: without the server's description of what each
+                // preference controls, a switch could claim to govern an email that is
+                // mandatory or that is never sent.
+                <p role="alert" className="rounded-xl bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+                  Notification settings couldn&apos;t be loaded. Refresh the page to try again.
+                </p>
               )}
-              {footer("notifs")}
+              {catalog && footer("notifs")}
             </Panel>
           )}
 

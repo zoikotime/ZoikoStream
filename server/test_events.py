@@ -8,95 +8,121 @@ from app.crud import event as crud
 from app.schemas.event import EventOut
 
 
+FUTURE = datetime.now(timezone.utc) + timedelta(days=2)
+PAST = datetime.now(timezone.utc) - timedelta(days=2)
+
+
+def t(current, new, title="t", **kw):
+    return crud.status_transition_error(current, new, title, **kw)
+
+
 def test_publish_requires_title():
-    assert crud.status_transition_error("draft", "published", None)
-    assert crud.status_transition_error("draft", "published", "   ")   # whitespace-only
-    assert crud.status_transition_error("draft", "scheduled", "")
-    assert crud.status_transition_error("draft", "published", "My Event") is None
+    assert t("draft", "published", None)
+    assert t("draft", "published", "   ")   # whitespace-only
+    assert t("draft", "scheduled", "", start_time=FUTURE)
+    assert t("draft", "published", "My Event") is None
 
 
-def test_live_only_from_published():
-    assert crud.status_transition_error("published", "live", "t") is None
-    assert crud.status_transition_error("scheduled", "live", "t") is None
-    assert crud.status_transition_error("draft", "live", "t")            # not published
-    assert crud.status_transition_error("ended", "live", "t")
+def test_scheduling_needs_a_real_future_start():
+    assert "start date" in t("draft", "scheduled")
+    assert "past" in t("draft", "scheduled", start_time=PAST)
+    assert t("draft", "scheduled", start_time=FUTURE) is None
+    assert t("published", "scheduled", start_time=FUTURE) is None
+    assert crud.schedule_error(None) and crud.schedule_error(PAST)
+    assert crud.schedule_error(datetime.now(timezone.utc) - timedelta(seconds=20)) is None   # clock skew
 
 
-def test_end_only_from_live():
-    assert crud.status_transition_error("live", "ended", "t") is None
-    assert crud.status_transition_error("published", "ended", "t")
-    assert crud.status_transition_error("draft", "ended", "t")
+def test_only_the_broadcast_itself_enters_live_degraded_ended():
+    """A status write alone can never claim a broadcast is running or over."""
+    for target in ("live", "degraded", "ended"):
+        assert t("published" if target == "live" else "live", target), target
+    assert t("published", "live", actor="platform") is None
+    assert t("scheduled", "live", actor="platform") is None
+    assert t("armed", "live", actor="platform") is None
+    assert t("live", "degraded", actor="platform") is None
+    assert t("degraded", "live", actor="platform") is None
+    assert t("live", "ended", actor="platform") is None
+    assert t("degraded", "ended", actor="platform") is None
 
 
-def test_cannot_archive_live():
-    assert crud.status_transition_error("live", "archived", "t")
-    assert crud.status_transition_error("ended", "archived", "t") is None
-    assert crud.status_transition_error("cancelled", "archived", "t") is None
+def test_live_only_from_published_scheduled_or_armed():
+    for before in ("draft", "ready_to_arm", "ended", "cancelled", "archived"):
+        assert t(before, "live", actor="platform"), before
 
 
-def test_noop_and_cancel_allowed():
-    assert crud.status_transition_error("live", "live", "t") is None       # no-op
-    assert crud.status_transition_error("live", "cancelled", "t") is None   # cancel unrestricted
-    assert crud.status_transition_error("draft", "cancelled", None) is None
+def test_invalid_transitions_from_the_requirement_are_refused():
+    assert t("ended", "live", actor="platform")
+    assert t("cancelled", "live", actor="platform")
+    assert t("archived", "armed", actor="archive")
+    assert t("draft", "ending")                       # retired: not a status at all
+    assert t("blocked", "live", actor="platform")     # retired: must be migrated first
+    assert t("processing", "rehearsal")
 
 
-def test_ready_to_arm_predecessors():
-    assert crud.status_transition_error("published", "ready_to_arm", "t") is None
-    assert crud.status_transition_error("scheduled", "ready_to_arm", "t") is None
-    assert crud.status_transition_error("rehearsal", "ready_to_arm", "t") is None
-    assert crud.status_transition_error("draft", "ready_to_arm", "t")        # not published yet
-    assert crud.status_transition_error("live", "ready_to_arm", "t")
+def test_retired_statuses_are_not_statuses():
+    for retired in ("rehearsal", "ending", "processing", "replay_ready", "blocked"):
+        assert retired not in crud.EVENT_TRANSITIONS
+        assert t("scheduled", retired) == f"'{retired}' is not an event status"
 
 
-def test_armed_requires_readiness():
-    # Wrong predecessor, even with readiness satisfied.
-    assert crud.status_transition_error("published", "armed", "t", readiness_ready=True)
-    # Right predecessor, but readiness not (yet) confirmed True.
-    assert crud.status_transition_error("ready_to_arm", "armed", "t")
-    assert crud.status_transition_error("ready_to_arm", "armed", "t", readiness_ready=False)
-    err = crud.status_transition_error(
-        "ready_to_arm", "armed", "t", readiness_ready=False, readiness_reasons=["capacity not reserved"],
-    )
+def test_noop_is_always_allowed():
+    for status in crud.EVENT_TRANSITIONS:
+        assert t(status, status) is None
+
+
+def test_cancel_only_before_going_live():
+    for before in ("draft", "published", "scheduled", "ready_to_arm", "armed"):
+        assert t(before, "cancelled", title=None) is None, before
+    assert "End the broadcast" in t("live", "cancelled")
+    assert "End the broadcast" in t("degraded", "cancelled")
+    assert t("ended", "cancelled")
+    assert t("cancelled", "scheduled", start_time=FUTURE) == "A cancelled event can't be reopened"
+
+
+def test_ready_to_arm_predecessors_and_way_back():
+    assert t("published", "ready_to_arm") is None
+    assert t("scheduled", "ready_to_arm") is None
+    assert t("draft", "ready_to_arm")                 # not published yet
+    assert t("ready_to_arm", "scheduled", start_time=FUTURE) is None   # mark not ready
+    assert t("ready_to_arm", "published") is None
+
+
+def test_armed_requires_readiness_and_can_be_disarmed():
+    assert t("published", "armed", readiness_ready=True)          # wrong predecessor
+    assert t("ready_to_arm", "armed")                             # readiness not confirmed
+    assert t("ready_to_arm", "armed", readiness_ready=False)
+    err = t("ready_to_arm", "armed", readiness_ready=False, readiness_reasons=["capacity not reserved"])
     assert "capacity not reserved" in err
-    # Right predecessor + confirmed readiness -> allowed.
-    assert crud.status_transition_error("ready_to_arm", "armed", "t", readiness_ready=True) is None
+    assert t("ready_to_arm", "armed", readiness_ready=True) is None
+    assert t("armed", "ready_to_arm") is None                     # disarm
+    assert t("ready_to_arm", "live", actor="platform")            # must arm first
 
 
-def test_live_from_armed():
-    assert crud.status_transition_error("armed", "live", "t") is None
-    assert crud.status_transition_error("published", "live", "t") is None   # unchanged path
-    assert crud.status_transition_error("ready_to_arm", "live", "t")        # must arm first
+def test_archive_and_unarchive_only_through_their_own_actions():
+    for before in ("draft", "ended", "cancelled"):
+        assert t(before, "archived", actor="archive") is None
+        assert "Use Archive" in t(before, "archived")             # not via PATCH
+        assert t("archived", before, actor="archive") is None
+    assert "Use Unarchive" in t("archived", "ended")
+    for active in ("published", "scheduled", "ready_to_arm", "armed", "live", "degraded"):
+        assert t(active, "archived", actor="archive"), active
+    assert t("archived", "live", actor="archive")
+    assert t("live", "ended", actor="archive")                    # archive actor moves nothing else
 
 
-def test_degraded_only_from_live():
-    assert crud.status_transition_error("live", "degraded", "t") is None
-    assert crud.status_transition_error("armed", "degraded", "t")
-    assert crud.status_transition_error("published", "degraded", "t")
+def test_viewer_status_of_an_archived_event_is_what_it_was():
+    ev = types.SimpleNamespace(status="archived", previous_status="cancelled")
+    assert crud.viewer_status_of(ev) == "cancelled"
+    ev.previous_status = None                                     # legacy archived row
+    assert crud.viewer_status_of(ev) == "ended"
+    assert crud.viewer_status_of(types.SimpleNamespace(status="live", previous_status=None)) == "live"
 
 
-def test_ending_processing_replay_chain():
-    assert crud.status_transition_error("live", "ending", "t") is None
-    assert crud.status_transition_error("degraded", "ending", "t") is None
-    assert crud.status_transition_error("armed", "ending", "t")
-    assert crud.status_transition_error("ending", "processing", "t") is None
-    assert crud.status_transition_error("live", "processing", "t")
-    assert crud.status_transition_error("processing", "replay_ready", "t") is None
-    assert crud.status_transition_error("ending", "replay_ready", "t")
-
-
-def test_ended_allows_degraded_and_replay_ready():
-    assert crud.status_transition_error("live", "ended", "t") is None       # unchanged path
-    assert crud.status_transition_error("degraded", "ended", "t") is None
-    assert crud.status_transition_error("replay_ready", "ended", "t") is None
-    assert crud.status_transition_error("published", "ended", "t")
-    assert crud.status_transition_error("draft", "ended", "t")
-
-
-def test_archived_blocks_active_states():
-    for active in ("live", "armed", "degraded", "ending", "processing"):
-        assert crud.status_transition_error(active, "archived", "t")
-    assert crud.status_transition_error("ended", "archived", "t") is None
-    assert crud.status_transition_error("cancelled", "archived", "t") is None
+def test_transition_table_covers_exactly_the_canonical_statuses():
+    from app.models.event import EVENT_STATUSES
+    assert set(crud.EVENT_TRANSITIONS) == set(EVENT_STATUSES)
+    for targets in crud.EVENT_TRANSITIONS.values():
+        assert set(targets) <= set(EVENT_STATUSES)
 
 
 def test_category_risk_tier_floor():
@@ -263,6 +289,77 @@ def test_the_commercial_risk_floor_survives():
     # Still a floor, never a ceiling.
     assert crud.elevated_risk_tier("Funeral / Memorial", "r3") == "r3"
     assert crud.elevated_risk_tier("Webinar", "r0") == "r0"
+
+
+def test_valid_and_invalid_timezones():
+    assert crud.is_valid_timezone("UTC") is True
+    assert crud.is_valid_timezone("Asia/Kolkata") is True
+    assert crud.is_valid_timezone("America/New_York") is True
+    assert crud.is_valid_timezone("Europe/London") is True
+    assert crud.is_valid_timezone(None) is True
+    assert crud.is_valid_timezone("") is True
+    assert crud.is_valid_timezone("Invalid/Fake_Zone") is False
+    assert crud.is_valid_timezone("NotATimezone") is False
+
+
+def test_schedule_validation_enforces_title_and_future_start():
+    # Missing title
+    assert "without a title" in crud.status_transition_error("draft", "scheduled", "", start_time=FUTURE)
+    assert "without a title" in crud.status_transition_error("draft", "scheduled", "   ", start_time=FUTURE)
+    # Missing start time
+    assert "start date" in crud.status_transition_error("draft", "scheduled", "Valid Title", start_time=None)
+    # Past start time
+    assert "past" in crud.status_transition_error("draft", "scheduled", "Valid Title", start_time=PAST)
+    # Valid schedule
+    assert crud.status_transition_error("draft", "scheduled", "Valid Title", start_time=FUTURE) is None
+
+
+def test_draft_allows_empty_start_and_empty_title():
+    # Draft does not require title or future start
+    assert crud.status_transition_error("draft", "draft", "", start_time=None) is None
+    assert crud.status_transition_error("draft", "draft", "Draft Event", start_time=PAST) is None
+
+
+def test_create_event_preserves_timezone_and_schedule_fields():
+    import uuid
+    from types import SimpleNamespace
+    from app.models import Event
+
+    class _StubDb:
+        def __init__(self):
+            self.added = []
+        def add(self, o):
+            self.added.append(o)
+            if isinstance(o, Event) and o.id is None:
+                o.id = uuid.uuid4()
+        def flush(self): pass
+        def commit(self): pass
+        def refresh(self, o): pass
+
+    start = datetime(2026, 10, 6, 10, 26, tzinfo=timezone.utc)
+    end = datetime(2026, 10, 6, 10, 36, tzinfo=timezone.utc)
+    data = SimpleNamespace(model_dump=lambda exclude=None: {
+        "title": "Scheduled Kolkata Event",
+        "category": "Sports",
+        "timezone": "Asia/Kolkata",
+        "start_time": start,
+        "end_time": end,
+        "status": "scheduled",
+        "visibility": "public",
+        "chat_enabled": False,
+        "polls_enabled": False,
+        "qa_enabled": False,
+        "recording_enabled": True,
+    })
+    actor = SimpleNamespace(id=uuid.uuid4(), email="admin@zoikostream.com")
+    db = _StubDb()
+    ev = crud.create_event(db, uuid.uuid4(), actor.id, data, "scheduled-kolkata-event", actor=actor)
+
+    assert ev.title == "Scheduled Kolkata Event"
+    assert ev.status == "scheduled"
+    assert ev.timezone == "Asia/Kolkata"
+    assert ev.start_time == start
+    assert ev.end_time == end
 
 
 if __name__ == "__main__":

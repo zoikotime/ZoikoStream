@@ -27,7 +27,8 @@ from decimal import Decimal
 from sqlalchemy import func as sa_func, select, text
 from sqlalchemy.orm import Session
 
-from .event import elevated_risk_tier
+from .event import elevated_risk_tier, viewer_status_of
+from ..models.event import ON_AIR_STATUSES
 from ..models import (
     AuditLog,
     CancellationPolicy,
@@ -839,8 +840,12 @@ def activate_order(db: Session, order: EventOrder, *, actor: User | None = None)
 # CONFIRMED is to satisfy the facts CONFIRMED is defined as.
 
 # Event lifecycle states that mean the commercial engagement is over, one way or another.
-_EVENT_STATES_COMPLETED = ("processing", "replay_ready", "ended", "archived")
-_EVENT_STATES_LIVE = ("live", "degraded", "ending")
+# Read through crud.event.viewer_status_of, so an ARCHIVED event counts as whatever it was
+# archived from: an archived cancellation is still a cancellation, an archived draft never
+# delivered. ("archived" stays for SQL callers that cannot resolve it, as the conservative
+# reading: its records are left alone.)
+_EVENT_STATES_COMPLETED = ("ended", "archived")
+_EVENT_STATES_LIVE = ON_AIR_STATUSES
 
 
 def commercial_lifecycle_state(db: Session, event: Event, order: EventOrder | None = None, *,
@@ -857,13 +862,14 @@ def commercial_lifecycle_state(db: Session, event: Event, order: EventOrder | No
     paying for it twice — the go-live path does exactly that.
     """
     # ── Terminal states first: nothing below can override a cancelled or delivered event ──
-    if (order is not None and order.status in ("canceled", "terminated")) or event.status == "cancelled":
+    lifecycle = viewer_status_of(event)
+    if (order is not None and order.status in ("canceled", "terminated")) or lifecycle == "cancelled":
         return {"state": "canceled", "financial_state": None, "capacity_satisfied": None,
                 "capacity_held": False, "blocking_reasons": [], "readiness_verdict": None}
-    if (order is not None and order.status == "completed") or event.status in _EVENT_STATES_COMPLETED:
+    if (order is not None and order.status == "completed") or lifecycle in _EVENT_STATES_COMPLETED:
         return {"state": "completed", "financial_state": None, "capacity_satisfied": None,
                 "capacity_held": False, "blocking_reasons": [], "readiness_verdict": None}
-    if event.status in _EVENT_STATES_LIVE:
+    if lifecycle in _EVENT_STATES_LIVE:
         return {"state": "live", "financial_state": None, "capacity_satisfied": None,
                 "capacity_held": False, "blocking_reasons": [], "readiness_verdict": None}
 
@@ -3268,7 +3274,7 @@ def reschedule_event(db: Session, event: Event, order: EventOrder | None, actor:
             f"Cannot reschedule an event that is '{event.status}' — it is delivering now. End it, "
             "then cancel or credit the order (doc Section 9)"
         )
-    if event.status in _EVENT_STATES_COMPLETED or event.status == "cancelled":
+    if viewer_status_of(event) in _EVENT_STATES_COMPLETED + ("cancelled",):
         raise ValueError(f"Cannot reschedule a '{event.status}' event")
     if order is not None and order.status in ("canceled", "terminated", "completed"):
         raise ValueError(f"Cannot reschedule against a '{order.status}' order")

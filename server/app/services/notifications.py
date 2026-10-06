@@ -397,11 +397,23 @@ def defaults() -> dict:
 
 
 def effective(org) -> dict:
-    """The organization's preferences, normalized. The only correct way to read them."""
+    """The organization's preferences, normalized. The only correct way to read them.
+
+    Only a stored REAL boolean for a configurable key counts. Anything else in the column —
+    a legacy mandatory/unavailable key, a string such as "false" (truthy in Python), a
+    null — falls back to the default instead of being coerced into a decision.
+    """
     stored = getattr(org, "notifications", None) or {}
+    if not isinstance(stored, dict):
+        stored = {}
     merged = defaults()
-    merged.update({k: v for k, v in stored.items() if k in CATALOG_BY_KEY})
+    merged.update({k: v for k, v in stored.items() if k in CONFIGURABLE_KEYS and isinstance(v, bool)})
     return normalize(merged)
+
+
+def stored_form(prefs: dict) -> dict:
+    """What is written to organizations.notifications: the configurable switches only."""
+    return {key: bool(prefs[key]) for key in sorted(CONFIGURABLE_KEYS) if key in prefs}
 
 
 # ── the enforcement point ───────────────────────────────────────────────────────────────

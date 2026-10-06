@@ -624,3 +624,108 @@ it did. `health_of` reports `unknown` ("Live media state unavailable") rather th
 when the signals it judges from could not be read, and reaches no verdict in either
 direction: it neither marks an event degraded nor marks one recovered. Auth, events, billing
 and every other Postgres-backed surface are unaffected.
+
+---
+
+## Custom Domains Setup
+
+An organization can serve its event pages from its own hostname (for example
+`events.customer.com`). The application side is implemented (`server/app/services/custom_domains.py`
+and friends); **the feature stays switched off, and the Settings panel says "Custom domains are
+temporarily unavailable", until the infrastructure below exists.** Nothing in the application can
+create DNS records or edge configuration on its own.
+
+### Lifecycle
+
+```
+not_configured -> pending_dns -> verified -> active
+                       |            |
+                       +-> failed <-+         active -> (records removed, 72h grace) -> failed
+any -> disabled (support)            any -> not_configured (removed)
+```
+
+* **pending_dns**: the organization saved a hostname and received two records to publish.
+* **verified**: BOTH records were found on public resolvers: the CNAME routes the hostname to the
+  platform, and the TXT record carries this organization's own random token (ownership proof).
+* **active**: the certificate provider reports the hostname live AND an HTTPS request to
+  `https://<hostname>/.well-known/zoikostream-domain-check` came back with a valid certificate and
+  a value only this platform can compute for that organization. Only then do event links use it.
+* Pending domains are re-checked every 10 minutes (hourly after a day) for 7 days; certificate-
+  pending domains every 2 minutes; active domains every 6 hours.
+
+### 1. DNS: the CNAME target must exist
+
+Create the record customers will point at. With the zone on Cloudflare (it is today):
+
+| Type  | Name                      | Content                         | Proxy   |
+|-------|---------------------------|---------------------------------|---------|
+| CNAME | `cname.zoikostream.com`   | the platform origin hostname    | Proxied |
+
+Verify: `nslookup cname.zoikostream.com 1.1.1.1` must return addresses. The app also checks this
+itself and keeps the feature unavailable while the target does not resolve.
+
+### 2. Certificates: Cloudflare for SaaS (custom hostnames)
+
+1. Cloudflare dashboard -> the `zoikostream.com` zone -> **SSL/TLS -> Custom Hostnames** -> enable
+   Cloudflare for SaaS (plan-dependent).
+2. Set the **fallback origin** to the platform origin record (the same one `cname.zoikostream.com`
+   points at).
+3. Create an API token scoped to **Zone -> SSL and Certificates -> Edit** on this zone only.
+4. Note the zone ID.
+
+Each verified hostname is then created as a custom hostname with HTTP DV validation; Cloudflare
+issues and renews its certificate. Turn on **Always Use HTTPS** for the zone. The app also
+redirects any request that arrives as plain HTTP (`X-Forwarded-Proto: http`) on a customer hostname.
+
+If TLS is terminated elsewhere instead (for example a reverse proxy with on-demand certificates),
+use `CUSTOM_DOMAIN_PROVIDER=external`. Activation is still gated on the HTTPS probe.
+
+### 3. Environment variables (server only; never VITE_)
+
+```bash
+CUSTOM_DOMAIN_PROVIDER=cloudflare              # or "external"; blank = feature off
+CUSTOM_DOMAIN_CNAME_TARGET=cname.zoikostream.com
+CUSTOM_DOMAIN_PLATFORM_HOSTS=get.zoikostream.com,zoikostream.com,<cloud-run-or-vm-hostnames>
+CLOUDFLARE_ZONE_ID=...
+CLOUDFLARE_API_TOKEN=...                       # secret: never in the repo, logs or API responses
+# optional
+CUSTOM_DOMAIN_DNS_RESOLVERS=1.1.1.1,8.8.8.8
+CUSTOM_DOMAIN_PENDING_DAYS=7
+CUSTOM_DOMAIN_GRACE_HOURS=72
+```
+
+`CUSTOM_DOMAIN_PLATFORM_HOSTS` must list **every** hostname that serves the full platform. Once
+it is set, any hostname that is neither a platform host nor an active custom domain gets a 404
+(`/health` always answers). Missing a real platform hostname here takes it offline.
+
+### 4. Deploy order
+
+1. Run `python create_tables.py` against the target database **before** the new code serves
+   traffic (the Cloud Build `migrate` step does this when that trigger is in use; the VM path
+   must run it too). It adds the lifecycle columns and the unique index
+   `uq_organizations_domain`, and it **stops with an error naming the hostnames** if two
+   organizations already hold the same domain; nothing is deleted, a person decides.
+   Legacy saved domains become `pending_dns` with a fresh token (nothing ever proved ownership
+   of them); values that are not valid hostnames are kept and marked `failed`.
+2. Deploy the application.
+3. Set the environment variables above and restart.
+
+### 5. Production check (required before calling the feature live)
+
+With a real test hostname, e.g. `stream-test.<a-domain-you-control>`:
+
+1. Settings -> General -> Custom Domain: add the hostname; copy the CNAME and TXT records.
+2. Publish both records at that domain's DNS provider (CNAME **DNS only** if it is on Cloudflare).
+3. Select **Verify now** -> status becomes *DNS verified - certificate pending*.
+4. Wait for *Active* (the sweeper keeps checking). `https://stream-test.../events/<event-id>/watch`
+   must load with a valid certificate; "Copy viewer link" must produce that address.
+5. Another organization's event id on that hostname must return 404.
+6. Remove the domain: links fall back to `get.zoikostream.com`, and the hostname stops serving.
+
+### Support console
+
+Super admins: **Organizations -> Custom Domains** (`/admin/custom-domains`) lists every request
+with its CNAME/TXT result, certificate state, dates and failure reason, and can re-run checks,
+disable (elevation required), re-enable (restarts verification) or release an unverified claim
+(elevation required). There is no action that marks a domain verified; every action is audited
+as `custom_domain.*`.

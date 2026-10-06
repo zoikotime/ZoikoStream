@@ -13,6 +13,7 @@ Only the words. A creator who puts themselves on the host list now receives a co
 a decision made elsewhere ("You've been assigned"). Same write, same dedup, same timing.
 """
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -148,9 +149,12 @@ def w():
 
 
 def create_event(w, title="Launch", status="scheduled"):
+    # A Scheduled event needs a real, future start (crud.event.schedule_error).
+    body = {"title": title, "status": status}
+    if status == "scheduled":
+        body["start_time"] = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
     with capture()[1]:
-        r = client.post("/api/events", json={"title": title, "status": status},
-                        headers=w.headers(w.creator_email))
+        r = client.post("/api/events", json=body, headers=w.headers(w.creator_email))
     assert r.status_code in (200, 201), r.text
     return r.json()["id"]
 

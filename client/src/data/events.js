@@ -11,17 +11,22 @@ export const fmtDate = (iso) => {
   return isNaN(d) ? "—" : d.toLocaleDateString("en-US", DTF_DATE);
 };
 
-// "May 20, 2024 · 10:00 AM"
-export const fmtDateTime = (iso) => {
+// "May 20, 2024 · 10:00 AM", formatted in the event's configured timeZone or viewer default
+export const fmtDateTime = (iso, timeZone) => {
   if (!iso) return "—";
   const d = new Date(iso);
-  return isNaN(d) ? "—" : `${d.toLocaleDateString("en-US", DTF_DATE)} · ${d.toLocaleTimeString("en-US", DTF_TIME)}`;
+  if (isNaN(d.getTime())) return "—";
+  const dateOpts = timeZone ? { ...DTF_DATE, timeZone } : DTF_DATE;
+  const timeOpts = timeZone ? { ...DTF_TIME, timeZone } : DTF_TIME;
+  return `${d.toLocaleDateString("en-US", dateOpts)} · ${d.toLocaleTimeString("en-US", timeOpts)}`;
 };
 
-export const fmtTime = (iso) => {
+export const fmtTime = (iso, timeZone) => {
   if (!iso) return "—";
   const d = new Date(iso);
-  return isNaN(d) ? "—" : d.toLocaleTimeString("en-US", DTF_TIME);
+  if (isNaN(d.getTime())) return "—";
+  const timeOpts = timeZone ? { ...DTF_TIME, timeZone } : DTF_TIME;
+  return d.toLocaleTimeString("en-US", timeOpts);
 };
 
 export const fmtDuration = (mins) => {
@@ -31,24 +36,28 @@ export const fmtDuration = (mins) => {
   return h ? `${h}h${m ? ` ${m}m` : ""}` : `${m}m`;
 };
 
-// Backend EventStatus -> display label + admin Badge tone (+ pulse dot for live).
+// The event lifecycle, mirroring server/app/models/event.py EVENT_STATUSES exactly and in its
+// order: every key here is a status the platform can really produce, and nothing else is.
+// Five values that used to be listed (Rehearsal, Ending, Processing, Replay Ready, Blocked)
+// were never set by anything in the product and are retired there; recordings and replays
+// carry their own states on the Recordings page and the viewer's replay notice.
 export const EVENT_STATUS = {
   draft: { label: "Draft", tone: "neutral" },
-  scheduled: { label: "Scheduled", tone: "info" },
   published: { label: "Published", tone: "info" },
-  rehearsal: { label: "Rehearsal", tone: "info" },
+  scheduled: { label: "Scheduled", tone: "info" },
   ready_to_arm: { label: "Ready to Arm", tone: "info" },
   armed: { label: "Armed", tone: "warning" },
   live: { label: "Live", tone: "brand", pulse: true },
   degraded: { label: "Degraded", tone: "warning", pulse: true },
-  ending: { label: "Ending", tone: "warning" },
-  processing: { label: "Processing", tone: "info" },
-  replay_ready: { label: "Replay Ready", tone: "success" },
   ended: { label: "Ended", tone: "neutral" },
   cancelled: { label: "Cancelled", tone: "danger" },
   archived: { label: "Archived", tone: "neutral" },
-  blocked: { label: "Blocked", tone: "danger" },
 };
+// Before a broadcast (each can be cancelled), and on air.
+export const PRE_LIVE_STATUSES = ["draft", "published", "scheduled", "ready_to_arm", "armed"];
+export const ON_AIR_STATUSES = ["live", "degraded"];
+// What can be archived (and so what Unarchive restores).
+export const ARCHIVABLE_STATUSES = ["draft", "ended", "cancelled"];
 export const statusMeta = (s) => EVENT_STATUS[s] || { label: s || "—", tone: "neutral" };
 
 export const VISIBILITY_LABEL = { public: "Public", private: "Private", unlisted: "Unlisted" };

@@ -39,6 +39,26 @@ describe("the URL it builds", () => {
   });
 });
 
+describe("the server's link wins", () => {
+  // server/app/services/public_urls.py: the organization's ACTIVE custom domain, else APP_URL.
+  // The console's own origin (localhost, a preview URL) must never be what gets shared.
+  it("uses public_watch_url when the event carries one", () => {
+    const event = { id: EVENT_ID, public_watch_url: `https://events.acme.com/events/${EVENT_ID}/watch` };
+    expect(viewerLinkFor(event)).toBe(`https://events.acme.com/events/${EVENT_ID}/watch`);
+  });
+
+  it("copies the custom-domain link, not this origin", async () => {
+    const event = { id: EVENT_ID, public_watch_url: `https://events.acme.com/events/${EVENT_ID}/watch` };
+    await expect(copyViewerLink(event)).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledWith(`https://events.acme.com/events/${EVENT_ID}/watch`);
+    expect(writeText.mock.calls[0][0]).not.toContain(window.location.origin);
+  });
+
+  it("falls back to this origin only for an older API without the field", () => {
+    expect(viewerLinkFor({ id: EVENT_ID })).toBe(`${window.location.origin}/events/${EVENT_ID}/watch`);
+  });
+});
+
 describe("copying", () => {
   it("writes exactly that URL to the clipboard", async () => {
     await expect(copyViewerLink(EVENT_ID)).resolves.toBe(true);

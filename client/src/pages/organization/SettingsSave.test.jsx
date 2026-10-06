@@ -28,8 +28,20 @@ const PAYLOADS = {
   "/organization/profile": { name: "Acme", slug: "acme", website: "", support_email: "", industry: null, company_size: null, description: "" },
   "/organization/security": { require_2fa: false, enforce_sso: false, min_password_length: 8, session_timeout: "8 hours", allowed_domains: "" },
   "/organization/notifications": { event_scheduled: true, event_starting: false, recording_ready: false, weekly_summary: false, billing: true, mentions: false, member_joined: false, security_alerts: true },
-  "/organization/domain": { domain: "events.acme.com", domain_verified: true },
+  // The custom domain is its own component with its own lifecycle actions
+  // (CustomDomainPanel.test.jsx); here it is only a neighbour that must not be disturbed.
+  "/organization/domain": {
+    domain: "events.acme.com", domain_verified: true, status: "active", available: true,
+    cname_target: "cname.zoikostream.com", dns_records: [], error: null, check: null,
+    public_url: "https://events.acme.com", can_verify: true,
+  },
   "/organization/branding": { primary_color: "violet", logo_url: null },
+  // The Notifications panel renders only from the server's catalog (no catalog, no switches),
+  // so it is supplied here exactly as production serves it: the three configurable rows.
+  "/organization/notifications/catalog": ["event_scheduled", "member_joined", "recording_ready"].map((key) => ({
+    key, label: key, description: "", message_class: "B", mandatory: false, configurable: true,
+    available: true, scope: "organization", channel: "email", value: true,
+  })),
 };
 
 const CLOUDFLARE_525 = {
@@ -88,20 +100,24 @@ describe("each section saves only itself", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save organization profile" }));
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect(patches()[0]).toEqual(["/organization/profile", { description: "We stream things" }]);
-    expect(screen.getByRole("button", { name: "Save custom domain" })).toBeDisabled();
+    expect(patches().some(([url]) => url === "/organization/domain")).toBe(false);
   });
 
   it("a changed custom domain is sent to the domain endpoint alone", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     open("general");
-    fireEvent.change(await screen.findByPlaceholderText("events.yourcompany.com"), { target: { value: "stream.acme.com" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save custom domain" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Change domain/ }));
+    fireEvent.change(screen.getByPlaceholderText("events.yourcompany.com"), { target: { value: "stream.acme.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save new domain" }));
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect(patches()[0]).toEqual(["/organization/domain", { domain: "stream.acme.com" }]);
+    window.confirm.mockRestore();
   });
 
-  it("an unchanged custom domain cannot be re-submitted", async () => {
+  it("an empty custom domain cannot be submitted", async () => {
     open("general");
-    const save = await screen.findByRole("button", { name: "Save custom domain" });
+    fireEvent.click(await screen.findByRole("button", { name: /Change domain/ }));
+    const save = screen.getByRole("button", { name: "Save new domain" });
     expect(save).toBeDisabled();
     fireEvent.click(save);
     expect(patches()).toHaveLength(0);
@@ -122,15 +138,18 @@ describe("a failure stays in its own section", () => {
       url === "/organization/domain"
         ? Promise.reject({ response: { status: 422, data: { detail: [{ loc: ["body", "domain"], msg: "Value error, Enter a valid hostname, like events.yourcompany.com." }] } } })
         : Promise.resolve({ data: { ...PAYLOADS[url], ...body } }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     open("general");
-    const domain = await screen.findByPlaceholderText("events.yourcompany.com");
+    fireEvent.click(await screen.findByRole("button", { name: /Change domain/ }));
+    const domain = screen.getByPlaceholderText("events.yourcompany.com");
     fireEvent.change(domain, { target: { value: "not a host" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save custom domain" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save new domain" }));
 
-    expect(await within(status("domain")).findByRole("alert")).toHaveTextContent("Custom domain not saved");
-    expect(screen.getByText(/Enter a valid hostname/)).toBeInTheDocument();       // on the field
+    // On the field, in the server's words, without the pydantic prefix.
+    expect(await screen.findByText("Enter a valid hostname, like events.yourcompany.com.")).toBeInTheDocument();
     expect(within(status("profile")).queryByRole("alert")).toBeNull();
     expect(domain).toHaveValue("not a host");                                       // input kept
+    window.confirm.mockRestore();
 
     // Switch to Branding (tab state is the URL; the Settings component stays mounted).
     fireEvent.click(screen.getByRole("button", { name: /Branding/ }));

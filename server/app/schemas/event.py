@@ -8,12 +8,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
+from ..models.event import EVENT_STATUSES
+
 Visibility = Literal["public", "private", "unlisted"]
 CreateStatus = Literal["draft", "published", "scheduled"]  # other states only via transitions
-EventStatus = Literal[
-    "draft", "published", "scheduled", "rehearsal", "ready_to_arm", "armed", "live",
-    "degraded", "ending", "processing", "replay_ready", "ended", "cancelled", "archived", "blocked",
-]
+# Derived from the one definition (models/event.py EVENT_STATUSES), never re-typed here. A
+# retired value ("rehearsal", "processing", ...) is a 422, not a status anyone can set.
+EventStatus = Literal[EVENT_STATUSES]
 
 _SLUG = r"^[a-z0-9][a-z0-9-]*$"
 
@@ -108,6 +109,11 @@ class EventOut(BaseModel):
     # page had no source for this at all, so it printed an em dash for events that really did
     # have registrations.
     registered_count: int | None = None
+
+    # The attendee link to share (Event.public_watch_url): the organization's ACTIVE custom
+    # domain when it has one, else APP_URL. The console copies this instead of assembling a URL
+    # from whatever origin the organizer happens to be browsing (localhost, a preview URL).
+    public_watch_url: str | None = None
 
     @computed_field
     @property

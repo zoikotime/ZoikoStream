@@ -98,20 +98,31 @@ export const edgeErrorMessage = (e) => {
 export const errMsg = (e, fallback = "Something went wrong") => {
   const edge = edgeErrorMessage(e);
   if (edge) return edge;
-  const d = e?.response?.data?.detail;
+  const data = e?.response?.data;
+  const d = data?.detail;
   if (typeof d === "string") return d;
   if (Array.isArray(d)) return d.map((x) => x?.msg).filter(Boolean).join(", ") || fallback;
   // Structured detail: endpoints that need the client to branch send
-  // {code, message, ...} — see /auth/login and /auth/verify-email.
-  if (d && typeof d === "object" && typeof d.message === "string") return d.message;
+  // {code, message, ...} — see /auth/login, /auth/verify-email, and /organization/users.
+  if (d && typeof d === "object") {
+    if (typeof d.message === "string") return d.message;
+    if (typeof d.detail === "string") return d.detail;
+  }
+  if (data && typeof data === "object") {
+    if (typeof data.message === "string") return data.message;
+    if (typeof data.error === "string") return data.error;
+  }
   return e?.message || fallback;
 };
 
 // The structured `code` from an error response, or null. Lets a caller branch on the
 // machine-readable outcome instead of matching prose.
 export const errCode = (e) => {
-  const d = e?.response?.data?.detail;
-  return d && typeof d === "object" && !Array.isArray(d) && d.code ? d.code : null;
+  const data = e?.response?.data;
+  const d = data?.detail;
+  if (d && typeof d === "object" && !Array.isArray(d) && d.code) return d.code;
+  if (data && typeof data === "object" && data.code) return data.code;
+  return null;
 };
 
 // A failed console load needs a diagnosis, not just "couldn't load X": a 404 means the

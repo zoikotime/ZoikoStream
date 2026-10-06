@@ -8,6 +8,15 @@ import { FiAlertTriangle, FiRefreshCw, FiLifeBuoy, FiActivity } from "react-icon
 import { useViewerLanguage } from "../../pages/watch/viewerLanguage";
 import { STATE_ACTION } from "./ViewerStateCard";
 import AudioAssistButton from "./AudioAssistButton";
+import { isCustomDomain, platformHref } from "../../utils/hostMode";
+
+// Help and Status live on the platform. On an organization's custom domain those routes do
+// not exist, so the links become absolute platform URLs there (utils/hostMode.js).
+function PlatformLink({ to, className, children }) {
+  if (isCustomDomain())
+    return <a href={platformHref(to)} target="_blank" rel="noreferrer" className={className}>{children}</a>;
+  return <Link to={to} target="_blank" rel="noreferrer" className={className}>{children}</Link>;
+}
 
 export default function ViewerErrorState({ onRetry }) {
   const { t, lang } = useViewerLanguage();
@@ -23,12 +32,12 @@ export default function ViewerErrorState({ onRetry }) {
           <button type="button" onClick={onRetry} className={`${STATE_ACTION} bg-emerald-600 text-white hover:bg-emerald-500`}>
             <FiRefreshCw aria-hidden="true" /> {t("retry")}
           </button>
-          <Link to="/contact" target="_blank" rel="noreferrer" className={`${STATE_ACTION} text-slate-700 ring-1 ring-slate-200 hover:bg-slate-100 dark:text-slate-200 dark:ring-white/15 dark:hover:bg-white/10`}>
+          <PlatformLink to="/contact" className={`${STATE_ACTION} text-slate-700 ring-1 ring-slate-200 hover:bg-slate-100 dark:text-slate-200 dark:ring-white/15 dark:hover:bg-white/10`}>
             <FiLifeBuoy aria-hidden="true" /> {t("help")}
-          </Link>
-          <Link to="/status" target="_blank" rel="noreferrer" className={`${STATE_ACTION} text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-white/10`}>
+          </PlatformLink>
+          <PlatformLink to="/status" className={`${STATE_ACTION} text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-white/10`}>
             <FiActivity aria-hidden="true" /> {t("status")}
-          </Link>
+          </PlatformLink>
           <AudioAssistButton text={`${t("errorTitle")}. ${t("errorBody")}`} lang={lang}
                              label={t("readAloud")} stopLabel={t("stopReading")} />
         </div>

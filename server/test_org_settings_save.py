@@ -4,6 +4,9 @@ The console used to PATCH all five settings sections on every Save, so a failure
 surfaced against panels nobody had touched. The server side of that contract is pinned here:
 an omitted field is preserved, an explicit null clears, the domain is validated only when it
 is sent, and changing branding never touches the domain or its verification.
+
+The custom domain's own lifecycle (DNS proof, certificates, routing) is pinned in
+test_custom_domain_lifecycle.py; here it is only one more section that must not be disturbed.
 """
 import uuid
 
@@ -14,6 +17,7 @@ import app.main as m
 from app.db import SessionLocal
 from app.models import AuditLog, NotificationPreferenceEvent, Organization, User
 from app.security import create_access_token, hash_password
+from custom_domain_support import feature  # noqa: F401  (pytest fixture)
 
 
 @pytest.fixture
@@ -38,11 +42,16 @@ def world():
         made_users.append(u.id)
         return u
 
-    mine = org(domain="events.acme.com", domain_verified=True, logo_url="https://cdn.acme.com/l.png",
-               primary_color="violet")
-    other = org(domain="live.other.com", domain_verified=True, primary_color="violet")
+    # Hostnames are unique per run: organizations.domain is a unique index now, so a fixed
+    # name would collide with any row an interrupted earlier run left behind.
+    tag = uuid.uuid4().hex[:8]
+    verified = dict(domain_verified=True, domain_status="verified", domain_verification_token="t" * 64)
+    mine = org(domain=f"events-{tag}.acme.com", logo_url="https://cdn.acme.com/l.png",
+               primary_color="violet", **verified)
+    other = org(domain=f"live-{tag}.other.com", primary_color="violet", **verified)
     ns = type("W", (), {})()
-    ns.db, ns.org, ns.other = db, mine, other
+    ns.db, ns.org, ns.other, ns.tag = db, mine, other, tag
+    ns.domain = mine.domain
     ns.admin, ns.host, ns.other_admin = user(mine, "org_admin"), user(mine, "host"), user(other, "org_admin")
     db.commit()
     try:
@@ -77,7 +86,7 @@ def test_branding_patch_changes_only_the_sent_field_and_never_the_domain(world):
     o = fresh(world)
     assert o.primary_color == "emerald"
     assert o.logo_url == "https://cdn.acme.com/l.png", "an omitted field is preserved"
-    assert (o.domain, o.domain_verified) == ("events.acme.com", True), \
+    assert (o.domain, o.domain_verified) == (world.domain, True), \
         "saving branding must not touch the custom domain or its verification"
 
 
@@ -93,19 +102,22 @@ def test_an_empty_domain_patch_changes_nothing(world):
     r = client_for(world.admin).patch("/api/organization/domain", json={})
     assert r.status_code == 200, r.text
     o = fresh(world)
-    assert (o.domain, o.domain_verified) == ("events.acme.com", True)
+    assert (o.domain, o.domain_verified) == (world.domain, True)
 
 
 def test_resaving_the_same_domain_keeps_its_verification(world):
-    r = client_for(world.admin).patch("/api/organization/domain", json={"domain": "Events.ACME.com."})
+    r = client_for(world.admin).patch("/api/organization/domain", json={"domain": world.domain.upper() + "."})
     assert r.status_code == 200, r.text
-    assert r.json() == {"domain": "events.acme.com", "domain_verified": True}
+    body = r.json()
+    assert (body["domain"], body["domain_verified"], body["status"]) == (world.domain, True, "verified")
 
 
-def test_changing_the_domain_drops_verification(world):
-    r = client_for(world.admin).patch("/api/organization/domain", json={"domain": "stream.acme.com"})
-    assert r.status_code == 200
-    assert r.json() == {"domain": "stream.acme.com", "domain_verified": False}
+def test_changing_the_domain_drops_verification(world, feature):
+    new = f"stream-{world.tag}.acme.com"
+    r = client_for(world.admin).patch("/api/organization/domain", json={"domain": new})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["domain"], body["domain_verified"], body["status"]) == (new, False, "pending_dns")
 
 
 @pytest.mark.parametrize("bad", [
@@ -118,7 +130,7 @@ def test_an_invalid_hostname_is_refused_on_the_domain_field(world, bad):
     locs = [tuple(d["loc"]) for d in r.json()["detail"]]
     assert ("body", "domain") in locs, "the error must name the domain field"
     o = fresh(world)
-    assert (o.domain, o.domain_verified) == ("events.acme.com", True), "a refusal changes nothing"
+    assert (o.domain, o.domain_verified) == (world.domain, True), "a refusal changes nothing"
 
 
 def test_clearing_the_domain_is_allowed(world):
@@ -132,7 +144,7 @@ def test_notifications_patch_leaves_branding_and_domain_alone(world):
     assert r.status_code == 200, r.text
     o = fresh(world)
     assert o.primary_color == "violet" and o.logo_url == "https://cdn.acme.com/l.png"
-    assert (o.domain, o.domain_verified) == ("events.acme.com", True)
+    assert (o.domain, o.domain_verified) == (world.domain, True)
 
 
 def test_profile_patch_leaves_branding_and_domain_alone(world):
@@ -140,7 +152,7 @@ def test_profile_patch_leaves_branding_and_domain_alone(world):
     assert r.status_code == 200, r.text
     o = fresh(world)
     assert o.description == "Hello"
-    assert (o.domain, o.domain_verified, o.primary_color) == ("events.acme.com", True, "violet")
+    assert (o.domain, o.domain_verified, o.primary_color) == (world.domain, True, "violet")
 
 
 def test_only_an_org_admin_can_change_settings(world):
@@ -150,12 +162,13 @@ def test_only_an_org_admin_can_change_settings(world):
                       ("/api/organization/profile", {"description": "no"})):
         assert host.patch(url, json=body).status_code == 403, url
     o = fresh(world)
-    assert (o.primary_color, o.domain) == ("violet", "events.acme.com")
+    assert (o.primary_color, o.domain) == ("violet", world.domain)
 
 
-def test_an_admin_changes_only_their_own_organization(world):
-    r = client_for(world.other_admin).patch("/api/organization/domain", json={"domain": "new.other.com"})
+def test_an_admin_changes_only_their_own_organization(world, feature):
+    r = client_for(world.other_admin).patch("/api/organization/domain",
+                                            json={"domain": f"new-{world.tag}.other.com"})
     assert r.status_code == 200
     o = fresh(world)
-    assert (o.domain, o.domain_verified) == ("events.acme.com", True), \
+    assert (o.domain, o.domain_verified) == (world.domain, True), \
         "the organization comes from the caller's session, never from the request"

@@ -13,6 +13,7 @@ import SystemStatus from "./SystemStatus";
 const Roles = /* @__PURE__ */ lazy(() => import("./Roles"));
 const Developers = /* @__PURE__ */ lazy(() => import("./Developers"));
 const Infrastructure = /* @__PURE__ */ lazy(() => import("./Infrastructure"));
+const CustomDomains = /* @__PURE__ */ lazy(() => import("./CustomDomains"));
 
 // /admin/users — the accounts, plus the read-only reference for the roles being assigned.
 // services/admin.roles() derives that list from security._ROLE_RANK; it was never editable,
@@ -32,7 +33,9 @@ export function IdentityAccess() {
 }
 
 // /admin/organizations — Developer Platform is a view OF the organizations (it fetched
-// /admin/organizations and nothing else), so it belongs beside them.
+// /admin/organizations and nothing else), so it belongs beside them. Custom Domains is the
+// same: one property of each organization, with the support actions on it (also reachable
+// directly at /admin/custom-domains).
 export function OrganizationsConsole() {
   return (
     <ConsoleTabs
@@ -41,6 +44,7 @@ export function OrganizationsConsole() {
       tabs={[
         { key: "organizations", label: "Organizations", render: () => <Organizations /> },
         { key: "developers", label: "Developer Platform", render: () => <Developers /> },
+        { key: "domains", label: "Custom Domains", render: () => <CustomDomains /> },
       ]}
     />
   );

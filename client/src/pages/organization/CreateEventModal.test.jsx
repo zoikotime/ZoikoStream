@@ -56,8 +56,18 @@ const sectionTitles = () =>
     .getAllByRole("heading")
     .map((h) => h.textContent.trim());
 
+// Scheduling needs a real future start (the server refuses a Scheduled event without one,
+// crud.event.schedule_error), so every scheduled create in this file picks a date and time.
+const FUTURE_DATE = `${new Date().getFullYear() + 2}-06-15`;
+
+async function fillWhen() {
+  await userEvent.type(dialog().querySelector('input[type="date"]'), FUTURE_DATE);
+  await userEvent.type(dialog().querySelectorAll('input[type="time"]')[0], "10:00");
+}
+
 async function fillTitleAndSubmit(buttonName) {
   await userEvent.type(screen.getByPlaceholderText(/q3 product launch/i), "Launch");
+  await fillWhen();
   await userEvent.click(screen.getByRole("button", { name: buttonName }));
 }
 
@@ -112,6 +122,15 @@ describe("the create payload", () => {
     });
   });
 
+  it("an empty end time is no end time, not midnight before the start", async () => {
+    open();
+    await fillTitleAndSubmit(/schedule event/i);
+    expect(notify.error).not.toHaveBeenCalled();
+    const [, body] = vi.mocked(api.post).mock.calls[0];
+    expect(body.end_time).toBeNull();
+    expect(new Date(body.start_time) > new Date()).toBe(true);
+  });
+
   it("Save Draft still posts, as a draft", async () => {
     open();
     await fillTitleAndSubmit(/save draft/i);
@@ -133,6 +152,7 @@ describe("what must not have regressed", () => {
   it("still applies a chosen visibility", async () => {
     open();
     await userEvent.type(screen.getByPlaceholderText(/q3 product launch/i), "Launch");
+    await fillWhen();
     await userEvent.click(within(dialog()).getByText(/^private$/i));
     await userEvent.click(screen.getByRole("button", { name: /schedule event/i }));
     expect(vi.mocked(api.post).mock.calls[0][1].visibility).toBe("private");
@@ -141,6 +161,20 @@ describe("what must not have regressed", () => {
   it("still blocks scheduling without a title", () => {
     open();
     expect(screen.getByRole("button", { name: /schedule event/i })).toBeDisabled();
+  });
+
+  it("blocks scheduling until there is a future date and start time, and says why", async () => {
+    open();
+    const schedule = screen.getByRole("button", { name: /schedule event/i });
+    await userEvent.type(screen.getByPlaceholderText(/q3 product launch/i), "Launch");
+    expect(schedule).toBeDisabled();
+    expect(schedule).toHaveAttribute("title", "Select a start date and time.");
+    await userEvent.type(dialog().querySelector('input[type="date"]'), "2020-01-01");
+    await userEvent.type(dialog().querySelectorAll('input[type="time"]')[0], "10:00");
+    expect(schedule).toBeDisabled();
+    expect(schedule).toHaveAttribute("title", "Start time must be in the future.");
+    // A draft needs neither.
+    expect(screen.getByRole("button", { name: /save draft/i })).toBeEnabled();
   });
 
   it("still rejects an end time before the start time, without posting", async () => {
@@ -158,7 +192,7 @@ describe("what must not have regressed", () => {
     await userEvent.type(times[1], "09:00");
     await userEvent.click(screen.getByRole("button", { name: /schedule event/i }));
 
-    expect(notify.error).toHaveBeenCalledWith("End time must be after start time");
+    expect(notify.error).toHaveBeenCalledWith("End time must be after the start time.");
     expect(api.post).not.toHaveBeenCalled();
   });
 });

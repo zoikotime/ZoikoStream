@@ -12,6 +12,7 @@ from ..models import (
     ContributorSession, Event, EventAccessLink, EventAssignment, EventFeedback,
     EventRegistration, LiveIngressEndpoint, LiveRecording, User,
 )
+from ..models.event import ARCHIVABLE_STATUSES, EVENT_STATUSES, ON_AIR_STATUSES
 
 # Sortable columns for GET /events, as an explicit map. A whitelist rather than
 # getattr(Event, name): the value arrives from the browser, and a map can only ever yield a
@@ -33,47 +34,136 @@ _SORT_REGISTERED = "registered"
 
 
 # ── Lifecycle validation (pure — unit-testable without a DB) ──────────────────
+#
+# An explicit allow-list (models/event.py draws the same graph). It used to be a short list
+# of refusals with "other transitions are permitted", which let a raw PATCH move an event
+# anywhere nobody had thought to forbid: processing -> rehearsal, cancelled -> scheduled,
+# live -> cancelled with the room still running, or straight to "live" with no broadcast.
+
+EVENT_TRANSITIONS = {
+    "draft": ("published", "scheduled", "cancelled", "archived"),
+    "published": ("scheduled", "ready_to_arm", "live", "cancelled"),
+    "scheduled": ("ready_to_arm", "live", "cancelled"),
+    # "Mark not ready" steps back to the announced state; arming needs readiness.
+    "ready_to_arm": ("armed", "published", "scheduled", "cancelled"),
+    # Disarm steps back to ready_to_arm.
+    "armed": ("ready_to_arm", "live", "cancelled"),
+    "live": ("degraded", "ended"),
+    "degraded": ("live", "ended"),
+    "ended": ("archived",),
+    "cancelled": ("archived",),
+    # Unarchive restores the status the event was archived from, and only that.
+    "archived": ARCHIVABLE_STATUSES,
+}
+
+_SYSTEM_ONLY = {
+    "live": "An event goes live only when its broadcast starts. Use Go Live in the host console.",
+    "degraded": "Degraded is set by the platform when a live broadcast's media drops.",
+    "ended": "An event ends when its broadcast is ended. Use End Event.",
+}
+
+# Why a target is unreachable from where the event is now, by target.
+_WRONG_PREDECESSOR = {
+    "published": "Only a draft can be published",
+    "scheduled": "Only a draft or published event can be scheduled",
+    "ready_to_arm": "Must be published or scheduled before marking ready to arm",
+    "armed": "Must be ready_to_arm before arming",
+    "live": "Cannot go live unless the event is published, scheduled or armed",
+    "degraded": "Only a live event can be marked degraded",
+    "ended": "Cannot end an event that is not live",
+    "archived": "Only a draft, ended or cancelled event can be archived",
+}
+
+# A scheduled start this far in the past is a clock difference, not a past event.
+SCHEDULE_CLOCK_SKEW = timedelta(minutes=1)
+
+
+def is_valid_timezone(tz: str | None) -> bool:
+    if not tz:
+        return True
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz)
+        return True
+    except Exception:
+        return False
+
+
+def schedule_error(start_time, now: datetime | None = None) -> str | None:
+    """Why `start_time` cannot be a Scheduled event's start, or None."""
+    if start_time is None:
+        return "Set a start date and time before scheduling the event"
+    now = now or datetime.now(timezone.utc)
+    when = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
+    if when < now - SCHEDULE_CLOCK_SKEW:
+        return "The start time is in the past. Choose a future start time to schedule the event"
+    return None
+
 
 def status_transition_error(
     current: str, new: str, title,
     *, readiness_ready: bool | None = None, readiness_reasons: list[str] | None = None,
+    start_time=None, actor: str = "person", now: datetime | None = None,
 ) -> str | None:
     """Return an error message if current -> new is not allowed, else None.
-    Encodes the base spec rules plus the optional v1.1 canonical-spec chain
-    (rehearsal -> ready_to_arm -> armed -> live -> degraded -> ending -> processing ->
-    replay_ready -> ended); other transitions are permitted. Ordinary events that skip
-    straight from published/scheduled to live are unaffected — that path is untouched.
+
+    `actor` is who is asking: "person" (the PATCH lifecycle route), "platform" (Go Live, the
+    media sampler, the End teardown — the only callers that may enter live/degraded/ended,
+    because only they actually start, measure or stop a broadcast) or "archive" (the
+    archive/unarchive endpoints, which also record the status to restore).
 
     `readiness_ready` gates armed and MUST be explicitly True (not just not-False) for the
     caller to arm — this is the spec's "non-waivable" guard, so an omitted/None value blocks
-    rather than silently passing."""
+    rather than silently passing. `start_time` is required (and must not be past) to enter
+    scheduled."""
     if new == current:
         return None
+    if new not in EVENT_STATUSES:
+        return f"'{new}' is not an event status"
+    allowed = EVENT_TRANSITIONS.get(current)
+    if allowed is None:
+        return f"This event has a retired status ('{current}') and must be migrated first"
+    if new not in allowed:
+        if new == "live" and current in ("cancelled", "ended", "archived"):
+            return {"cancelled": "A cancelled event can't go live",
+                    "ended": "An event that has ended can't go live again",
+                    "archived": "An archived event can't go live"}[current]
+        if new == "cancelled":
+            return ("A live event can't be cancelled. End the broadcast instead"
+                    if current in ON_AIR_STATUSES else "Only an event that hasn't gone live can be cancelled")
+        if current == "cancelled":
+            return "A cancelled event can't be reopened"
+        if current == "ended":
+            return "An event that has ended can't be moved back"
+        if current == "archived":
+            return "An archived event can only be restored to the status it was archived from"
+        return _WRONG_PREDECESSOR.get(new, f"Cannot move an event from {current} to {new}")
+    if actor == "archive":
+        if "archived" not in (new, current):
+            return "Archive and Unarchive only move events in and out of the archive"
+    elif "archived" in (new, current):
+        return ("Use Unarchive to restore an archived event" if current == "archived"
+                else "Use Archive to archive an event")
+    elif actor != "platform" and new in _SYSTEM_ONLY:
+        return _SYSTEM_ONLY[new]
     if new in ("published", "scheduled") and not (title and str(title).strip()):
-        return "Cannot publish an event without a title"
-    if new == "ready_to_arm" and current not in ("published", "scheduled", "rehearsal"):
-        return "Must be published or rehearsed before marking ready to arm"
-    if new == "armed":
-        if current != "ready_to_arm":
-            return "Must be ready_to_arm before arming"
-        if readiness_ready is not True:
-            reasons = f": {'; '.join(readiness_reasons)}" if readiness_reasons else ""
-            return f"Cannot arm — readiness checks have not passed{reasons}"
-    if new == "live" and current not in ("published", "scheduled", "armed"):
-        return "Cannot go live unless the event is published or armed"
-    if new == "degraded" and current != "live":
-        return "Only a live event can be marked degraded"
-    if new == "ending" and current not in ("live", "degraded"):
-        return "Can only end from live or degraded"
-    if new == "processing" and current != "ending":
-        return "Must be ending before processing"
-    if new == "replay_ready" and current != "processing":
-        return "Must be processing before replay is ready"
-    if new == "ended" and current not in ("live", "degraded", "replay_ready"):
-        return "Cannot end an event that is not live"
-    if new == "archived" and current in ("live", "armed", "degraded", "ending", "processing"):
-        return "Cannot archive an active event"
+        return "Cannot schedule an event without a title" if new == "scheduled" else "Cannot publish an event without a title"
+    if new == "scheduled":
+        err = schedule_error(start_time, now)
+        if err:
+            return err
+    if new == "armed" and readiness_ready is not True:
+        reasons = f": {'; '.join(readiness_reasons)}" if readiness_reasons else ""
+        return f"Cannot arm — readiness checks have not passed{reasons}"
     return None
+
+
+def viewer_status_of(ev) -> str:
+    """The status a viewer is shown. Archiving tidies the organization's own list; to anyone
+    following a link the event is still what it was (an ended event keeps its replay)."""
+    if ev.status == "archived":
+        return ev.previous_status if ev.previous_status in ARCHIVABLE_STATUSES else "ended"
+    return ev.status
 
 
 # Category -> minimum risk tier (doc Sec. 4.1/4.2: "Category sets the minimum risk class...
@@ -158,9 +248,12 @@ def list_events(db, org_id, q=None, status=None, host_id=None, date_from=None, d
     if q:
         like = f"%{q.lower()}%"
         stmt = stmt.where(or_(func.lower(Event.title).like(like),
-                              func.lower(Event.description).like(like)))
+                              func.lower(Event.description).like(like),
+                              func.lower(Event.slug).like(like)))
     if status:
         stmt = stmt.where(Event.status == status)
+    else:
+        stmt = stmt.where(Event.status != "archived")
     if host_id:
         stmt = stmt.where(Event.created_by == host_id)
     if date_from:
@@ -188,6 +281,16 @@ def list_events(db, org_id, q=None, status=None, host_id=None, date_from=None, d
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
     return items, total
+
+
+def status_counts(db, org_id) -> dict:
+    """{status: n} for one organization's live (not deleted) events, every status present."""
+    rows = db.execute(
+        select(Event.status, func.count()).where(Event.org_id == org_id, Event.deleted_at.is_(None))
+        .group_by(Event.status)
+    ).all()
+    found = dict(rows)
+    return {status: int(found.get(status, 0)) for status in EVENT_STATUSES}
 
 
 def registration_counts(db, event_ids) -> dict:

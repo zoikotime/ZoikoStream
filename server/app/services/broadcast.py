@@ -496,7 +496,9 @@ def _golive_gate(db, ctx) -> str | None:
     # knows how to render (the host/broadcast.error envelope, useLiveEvent.js's goLiveError).
     # It also makes work()'s whitelist total rather than partial: past this point the status
     # is necessarily one it handles.
-    transition = status_transition_error(ev.status, "live", ev.title)
+    # actor="platform": Go Live is the one path that may enter "live", because it really opens
+    # the broadcast; the transition table still decides FROM where (published/scheduled/armed).
+    transition = status_transition_error(ev.status, "live", ev.title, actor="platform")
     if transition:
         return transition
 

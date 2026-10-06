@@ -129,20 +129,39 @@ export default function OrganizationMembers() {
     return members.filter((m) => (m.full_name || "").toLowerCase().includes(q) || (m.email || "").toLowerCase().includes(q));
   }, [members, query]);
 
+  const [roleOverrides, setRoleOverrides] = useState({});
+  const [updatingMemberId, setUpdatingMemberId] = useState(null);
+
   const kpis = [
     { label: "Members", value: members.length },
     { label: "Active", value: members.filter((m) => m.is_active).length },
-    { label: "Admins", value: members.filter((m) => m.role === "org_admin").length },
+    { label: "Admins", value: members.filter((m) => (roleOverrides[m.id] ?? m.role) === "org_admin").length },
     { label: "Pending invites", value: pending.length },
   ];
 
-  const changeRole = async (m, role) => {
+  const changeRole = async (m, newRole) => {
+    if (!m?.id || updatingMemberId === m.id) return;
+    const currentRole = roleOverrides[m.id] ?? m.role;
+    if (newRole === currentRole) return;
+
+    setUpdatingMemberId(m.id);
+    setRoleOverrides((prev) => ({ ...prev, [m.id]: newRole }));
+
     try {
-      await api.patch(`/organization/users/${m.id}`, { role });
-      notify.success(`${m.full_name} is now ${roleLabel(role)}`);
+      await api.patch(`/organization/users/${m.id}`, { role: newRole });
+      notify.success(`${m.full_name} is now ${roleLabel(newRole)}`);
+      setRoleOverrides((prev) => {
+        const next = { ...prev };
+        delete next[m.id];
+        return next;
+      });
       reload();
     } catch (e) {
+      // Revert the role dropdown immediately so it is not stuck visually
+      setRoleOverrides((prev) => ({ ...prev, [m.id]: m.role }));
       notify.error(errMsg(e));
+    } finally {
+      setUpdatingMemberId(null);
     }
   };
 
@@ -202,18 +221,23 @@ export default function OrganizationMembers() {
       key: "role",
       header: "Role",
       sortable: true,
-      render: (r) => (
-        <select
-          value={r.role}
-          onChange={(e) => changeRole(r, e.target.value)}
-          disabled={r.role === "super_admin"}
-          aria-label={`Role for ${r.full_name}`}
-          className={cx(control, "h-8 w-full max-w-[9rem] disabled:opacity-60")}
-        >
-          {r.role === "super_admin" && <option value="super_admin">Super Admin</option>}
-          {ROLES.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}
-        </select>
-      ),
+      sortValue: (r) => roleLabel(roleOverrides[r.id] ?? r.role),
+      render: (r) => {
+        const currentRole = roleOverrides[r.id] ?? r.role;
+        const isUpdating = updatingMemberId === r.id;
+        return (
+          <select
+            value={currentRole}
+            onChange={(e) => changeRole(r, e.target.value)}
+            disabled={r.role === "super_admin" || isUpdating}
+            aria-label={`Role for ${r.full_name}`}
+            className={cx(control, "h-8 w-full max-w-[9rem] disabled:opacity-60")}
+          >
+            {r.role === "super_admin" && <option value="super_admin">Super Admin</option>}
+            {ROLES.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}
+          </select>
+        );
+      },
     },
     {
       key: "is_active",
