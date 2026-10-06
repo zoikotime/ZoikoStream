@@ -83,19 +83,27 @@ _CUSTOM_DOMAIN_STATEMENTS = [
     """,
     # 2. Refuse to go further while any hostname is claimed by more than one organization.
     #    Picking a winner here would silently take a customer's domain away, so the run fails
-    #    with the hostnames named and a human decides. Nothing is deleted or changed.
+    #    with the hostnames and conflicting organization IDs named and a human decides.
+    #    Nothing is deleted or changed.
     """
     DO $$
-    DECLARE dup text;
+    DECLARE dup_details text;
     BEGIN
-        SELECT string_agg(d, ', ') INTO dup FROM (
-            SELECT lower(domain) AS d FROM organizations
-             WHERE domain IS NOT NULL GROUP BY lower(domain) HAVING count(*) > 1
+        SELECT string_agg(
+            d || E'\n' || org_list,
+            E'\n\n'
+        ) INTO dup_details FROM (
+            SELECT lower(domain) AS d,
+                   string_agg('  - org_id: ' || id::text, E'\n' ORDER BY id) AS org_list
+              FROM organizations
+             WHERE domain IS NOT NULL
+             GROUP BY lower(domain)
+            HAVING count(*) > 1
         ) claimed_twice;
-        IF dup IS NOT NULL THEN
+        IF dup_details IS NOT NULL THEN
             RAISE EXCEPTION USING MESSAGE =
-                'Custom domain claimed by more than one organization: ' || dup ||
-                '. Resolve these before uq_organizations_domain can be created.';
+                E'Duplicate custom domains found:\n\n' || dup_details ||
+                E'\n\nResolve these conflicts before uq_organizations_domain can be created.';
         END IF;
     END $$;
     """,
