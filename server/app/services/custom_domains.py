@@ -70,8 +70,7 @@ SWEEP_BATCH = 20
 TARGET_CACHE_SECONDS = 600.0
 
 UNAVAILABLE_MESSAGE = "Custom domains are temporarily unavailable."
-TAKEN_MESSAGE = ("This domain is already registered to another ZoikoStream organization. "
-                 "If your organization owns it, contact support.")
+TAKEN_MESSAGE = "This custom domain is already registered to another organization."
 DISABLED_MESSAGE = "This domain was disabled by ZoikoStream support. Contact support to re-enable it."
 
 # Every code that can be stored in organizations.domain_error, in words a customer can act on.
