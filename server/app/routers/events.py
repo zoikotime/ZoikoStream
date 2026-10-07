@@ -580,6 +580,9 @@ def watch_event(
         id=ev.id, title=ev.title, description=ev.description, status=viewer_status,
         visibility=ev.visibility, start_time=ev.start_time,
         organization_name=org_name, host_name=hosts[0].full_name if hosts else org_name,
+        # Only this event's own organization — the same row org_name comes from.
+        organization_logo_url=ev.organization.logo_url if ev.organization else None,
+        organization_logo_url_dark=ev.organization.logo_url_dark if ev.organization else None,
         chat_enabled=ev.chat_enabled, qa_enabled=ev.qa_enabled, polls_enabled=ev.polls_enabled,
         # Category no longer decides either of these. The Funeral / Memorial restriction was
         # retired by product decision and removed from crud.event (create/update) and from

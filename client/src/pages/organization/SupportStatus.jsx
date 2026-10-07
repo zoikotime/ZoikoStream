@@ -43,13 +43,12 @@ const SERVICE_NAME = {
   platform: "Management API",
 };
 
-// Trust surfaces. Informational by design — the source documents live outside this app, so
-// nothing here links to a route that doesn't exist.
+// Trust surfaces. Nothing here links to a route that doesn't exist.
 const TRUST = [
-  // Both land on the Security panel — the governance surface these two describe. Without the
-  // ?tab= they opened the General profile form, which answers neither question.
-  { icon: FiShield, title: "Security overview", desc: "Practices, certifications, and reporting.", to: "/organization/settings?tab=security" },
-  { icon: FiGlobe, title: "Data residency", desc: "Where data is processed and stored.", to: "/organization/settings?tab=security" },
+  // Each opens its own detail page (pages/organization/TrustEvidence). Both used to land on
+  // Settings → Security, which is the change-password form and answers neither question.
+  { icon: FiShield, title: "Security overview", desc: "Practices, certifications, and reporting.", to: "/organization/support/security" },
+  { icon: FiGlobe, title: "Data residency", desc: "Where data is processed and stored.", to: "/organization/support/data-residency" },
   { icon: FiFileText, title: "Compliance documents", desc: "Request access under NDA." },
   { icon: FiAlertOctagon, title: "Report a vulnerability", desc: "Coordinated disclosure and security.txt." },
 ];
@@ -358,7 +357,15 @@ export default function SupportStatus() {
             );
             const cls = cx("flex items-start gap-3 rounded-xl border p-4", CONSOLE.panel);
             return to ? (
-              <Link key={title} to={to} className={cx(cls, CONSOLE.panelHover, "transition-colors duration-150 motion-reduce:transition-none", focusRing)}>
+              // `state.from` lets the detail page's Back return through history instead of
+              // pushing a second copy of this page.
+              <Link
+                key={title}
+                to={to}
+                state={{ from: "/organization/support" }}
+                aria-label={`${title}: ${desc}`}
+                className={cx(cls, "cursor-pointer", CONSOLE.panelHover, "transition-colors duration-150 motion-reduce:transition-none", focusRing)}
+              >
                 {body}
               </Link>
             ) : (
@@ -387,7 +394,9 @@ export default function SupportStatus() {
           {["Privacy", "Terms"].map((label) => (
             <span key={label} className={cx("text-[12px]", CONSOLE.faint)}>{label}</span>
           ))}
-          <Link to="/organization/settings?tab=security" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
+          {/* The public Trust Center (pages/Trust.jsx), not Settings → Security — that is the
+              change-password form, the same wrong destination the trust cards had. */}
+          <Link to="/trust" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
             Trust Center
           </Link>
           <Link to="/organization/dashboard" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>

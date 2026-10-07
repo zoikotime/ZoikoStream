@@ -24,9 +24,9 @@ from starlette.testclient import TestClient
 import app.main as m
 from app.config import settings
 from app.crud import commercial as commercial_crud
-from app.db import SessionLocal
-from app.models import (AuditLog, BroadcastSession, Event, EventAssignment, EventRegistration, LiveActivity,
-                        LiveMessage, MediaAssetEvent, Organization, User)
+from app.db import Base, SessionLocal
+from app.models import (AuditLog, BroadcastSession, Event, EventRegistration, MediaAssetEvent, Organization,
+                        User)
 from app.models.event import EVENT_STATUSES
 from app.security import create_access_token, hash_password
 from app.services import broadcast, bus, livekit
@@ -117,8 +117,14 @@ class World:
         db = SessionLocal()
         try:
             ids = [e for (e,) in db.query(Event.id).filter(Event.org_id.in_(self.orgs)).all()]
-            for model in (BroadcastSession, LiveActivity, LiveMessage, EventRegistration, EventAssignment):
-                db.query(model).filter(model.event_id.in_(ids)).delete(synchronize_session=False)
+            # Every table with a foreign key to events: the lifecycle writes rows into several of
+            # them (readiness state, schedule changes, sessions, ...), and Postgres refuses the
+            # event delete below while any remain (SQLite never enforced those keys). Reverse
+            # dependency order, so a child table is emptied before anything it points at.
+            for table in reversed(Base.metadata.sorted_tables):
+                for fk in table.foreign_keys:
+                    if fk.column.table.name == "events" and table.name != "events":
+                        db.execute(table.delete().where(fk.parent.in_(ids)))
             db.query(MediaAssetEvent).filter(MediaAssetEvent.org_id.in_(self.orgs)).delete(synchronize_session=False)
             db.query(AuditLog).filter(AuditLog.org_id.in_(self.orgs)).delete(synchronize_session=False)
             db.query(Event).filter(Event.id.in_(ids)).delete(synchronize_session=False)

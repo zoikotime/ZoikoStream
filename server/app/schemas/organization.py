@@ -8,11 +8,38 @@ in the router so only supplied fields are patched.
 import uuid
 from datetime import datetime
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StrictBool, field_validator
 
 from ..config import BILLING_INTERVALS, MONTHLY
 from ..domain_names import normalize_custom_hostname
+
+
+# ── Logo URLs ────────────────────────────────────────────────────────────────
+# A logo is hotlinked by every viewer's browser on the public watch page, so only an https
+# link to an image is accepted. A path without a file extension is allowed (CDNs commonly
+# serve images from extensionless keys); a path WITH one must be an image type. Blank clears.
+# client/src/utils/orgLogo.js mirrors these rules so the field says what is wrong before Save.
+LOGO_EXTENSIONS = frozenset({"png", "svg", "jpg", "jpeg", "webp", "gif", "avif"})
+
+
+def normalize_logo_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if any(ch.isspace() for ch in value):
+        raise ValueError("A logo URL cannot contain spaces.")
+    parts = urlsplit(value)
+    if parts.scheme.lower() != "https" or not parts.hostname:
+        raise ValueError("Use an https:// link to the image.")
+    last = parts.path.rsplit("/", 1)[-1]
+    ext = last.rpartition(".")[2].lower() if "." in last else ""
+    if ext and ext not in LOGO_EXTENSIONS:
+        raise ValueError("Link to an image file: PNG, SVG, JPG, WebP, GIF or AVIF.")
+    return value
 
 
 # ── Profile ──────────────────────────────────────────────────────────────────
@@ -44,6 +71,12 @@ class OrgProfileUpdate(BaseModel):
     timezone: str | None = Field(None, max_length=60)
     country: str | None = Field(None, max_length=80)
 
+    @field_validator("logo_url")
+    @classmethod
+    def _logo(cls, value):
+        """Same column as Branding's light logo, so the same rules."""
+        return normalize_logo_url(value)
+
 
 class OrgMeOut(OrgProfileOut):
     """The logged-in organization: profile plus identity/account fields."""
@@ -58,7 +91,8 @@ class OrgMeOut(OrgProfileOut):
 class OrgBrandingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    logo_url: str | None = None
+    logo_url: str | None = None        # light / default logo
+    logo_url_dark: str | None = None   # dark-theme logo; null means "use logo_url"
     primary_color: str | None = None
     secondary_color: str | None = None
     theme: str | None = None
@@ -66,9 +100,17 @@ class OrgBrandingOut(BaseModel):
 
 class OrgBrandingUpdate(BaseModel):
     logo_url: str | None = Field(None, max_length=500)
+    logo_url_dark: str | None = Field(None, max_length=500)
     primary_color: str | None = Field(None, max_length=20)
     secondary_color: str | None = Field(None, max_length=20)
     theme: str | None = Field(None, pattern=r"^(light|dark|system)$")
+
+    @field_validator("logo_url", "logo_url_dark")
+    @classmethod
+    def _logos(cls, value):
+        """Both logos, validated the same way. A field that is not sent is never validated —
+        the router patches only supplied fields — so a stored legacy value is left alone."""
+        return normalize_logo_url(value)
 
 
 # ── Developer (read-only this phase) ──────────────────────────────────────────

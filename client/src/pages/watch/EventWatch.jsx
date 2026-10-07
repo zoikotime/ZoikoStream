@@ -40,7 +40,7 @@ import { readInvitation, redeemInvitation, stripInvitation } from "./invitationL
 import { detectInAppBrowser } from "../../utils/inAppBrowser";
 import FeedbackModal from "../../components/common/FeedbackModal";
 import Spinner from "../../ui/Spinner";
-import Logo from "../../ui/Logo";
+import OrgLogo from "../../ui/OrgLogo";
 import { notify } from "../../ui/Toast";
 import { playAlertChime, unlockAudio } from "../../utils/sound";
 
@@ -999,20 +999,31 @@ function EventWatchPage() {
       </div>
     );
 
+  const brandLogo = (
+    <OrgLogo
+      light={watch?.organization_logo_url}
+      dark={watch?.organization_logo_url_dark}
+      name={watch?.organization_name}
+      height="h-6 sm:h-7"
+    />
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
-      {/* Brand bar — the real wordmark asset (ui/Logo), not a text stand-in. */}
+      {/* Brand bar — the organization's logo for the viewer's theme (dark logo, then light,
+          then the ZoikoStream wordmark: ui/OrgLogo). Before the payload arrives, or for an
+          organization with no logo, it is the ZoikoStream mark exactly as before. */}
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/75 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/75">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
           {isCustomDomain() ? (
-            <span className="shrink-0"><Logo height="h-6 sm:h-7" /></span>
+            <span className="shrink-0">{brandLogo}</span>
           ) : (
             <Link
               to="/"
               aria-label="ZoikoStream home"
               className="shrink-0 rounded-xl transition duration-150 hover:opacity-85 motion-reduce:transition-none"
             >
-              <Logo height="h-6 sm:h-7" />
+              {brandLogo}
             </Link>
           )}
           <div className="flex items-center gap-1.5 sm:gap-3">
