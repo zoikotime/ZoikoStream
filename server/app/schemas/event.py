@@ -142,6 +142,10 @@ class WatchOut(BaseModel):
     end_time: datetime | None = None
     category: str | None = None
     organization_name: str | None = None
+    # The organization's logos for the viewer page's brand bar. The client picks by the
+    # viewer's theme: dark -> logo_dark, then logo; light -> logo; neither -> ZoikoStream.
+    organization_logo_url: str | None = None
+    organization_logo_url_dark: str | None = None
     host_name: str | None = None
     chat_enabled: bool
     qa_enabled: bool

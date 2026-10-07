@@ -98,6 +98,8 @@ const StreamingSessions = /* @__PURE__ */ lazy(() => import("./pages/organizatio
 const PlaybackAccess = /* @__PURE__ */ lazy(() => import("./pages/organization/PlaybackAccess"));
 const AudienceAccess = /* @__PURE__ */ lazy(() => import("./pages/organization/AudienceAccess"));
 const SupportStatus = /* @__PURE__ */ lazy(() => import("./pages/organization/SupportStatus"));
+const SecurityOverview = /* @__PURE__ */ lazy(() => import("./pages/organization/TrustEvidence").then((m) => ({ default: m.SecurityOverview })));
+const DataResidency = /* @__PURE__ */ lazy(() => import("./pages/organization/TrustEvidence").then((m) => ({ default: m.DataResidency })));
 
 // ponytail: one placeholder for routes not built yet — replace each with a real page as it lands
 function Placeholder({ title }) {
@@ -426,6 +428,9 @@ export default function App() {
                   <Route path="/organization/audience" element={<AudienceAccess />} />
                   {/* Manage */}
                   <Route path="/organization/support" element={<SupportStatus />} />
+                  {/* Trust & evidence details, opened from the Support & Status cards. */}
+                  <Route path="/organization/support/security" element={<SecurityOverview />} />
+                  <Route path="/organization/support/data-residency" element={<DataResidency />} />
                 </Route>
               </Route>
               </>

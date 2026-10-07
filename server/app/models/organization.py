@@ -52,6 +52,9 @@ class Organization(Base):
     timezone: Mapped[str | None] = mapped_column(String(60))
     country: Mapped[str | None] = mapped_column(String(80))
     logo_url: Mapped[str | None] = mapped_column(String(500))  # shared by Profile + Branding
+    # The logo for dark backgrounds. Optional: when empty, every surface falls back to
+    # `logo_url`, so an organization that only ever set one logo keeps it in both themes.
+    logo_url_dark: Mapped[str | None] = mapped_column(String(500))
     # Branding
     primary_color: Mapped[str | None] = mapped_column(String(20))
     secondary_color: Mapped[str | None] = mapped_column(String(20))

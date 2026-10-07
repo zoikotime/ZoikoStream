@@ -7,7 +7,7 @@ import { useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   FiUser, FiImage, FiShield, FiBell, FiCode, FiAlertTriangle,
-  FiUploadCloud, FiCheck, FiSave, FiLock,
+  FiCheck, FiSave, FiLock,
   FiVideo, FiCloud,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
@@ -17,10 +17,12 @@ import Card from "../../ui/Card";
 import Button from "../../ui/Button";
 import { Input, Textarea, Select, Switch } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
+import { logoUrlError } from "../../utils/orgLogo";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import ApiCredentials from "../../components/organization/ApiCredentials";
 import ChangePasswordForm from "../../components/organization/profile/ChangePasswordForm";
 import BrandingPreview from "../../components/organization/BrandingPreview";
+import LogoField from "../../components/organization/LogoField";
 import CustomDomainPanel from "../../components/organization/CustomDomainPanel";
 import {
   INDUSTRIES, COMPANY_SIZES, ACCENTS,
@@ -181,7 +183,9 @@ const fieldErrors = (err) => {
   const pairs = detail
     .map((d) => {
       const key = String(d?.loc?.[d.loc.length - 1] ?? "");
-      return [API_TO_FORM[key] || key, d?.msg];
+      // A pydantic validator's message arrives as "Value error, <message>"; the prefix is
+      // noise to the reader of the field.
+      return [API_TO_FORM[key] || key, String(d?.msg ?? "").replace(/^Value error,\s*/, "")];
     })
     .filter(([k, v]) => k && v);
   return Object.fromEntries(pairs);
@@ -206,7 +210,22 @@ const profileFrom = (p) => ({
 const brandingFrom = (b) => ({
   accent: ACCENTS.includes(b.primary_color) ? b.primary_color : "violet",
   logoUrl: b.logo_url ?? "",
+  logoUrlDark: b.logo_url_dark ?? "",
 });
+
+// Both logo fields, with the server's rules (utils/orgLogo mirrors schemas/organization.py).
+// Keyed by the API field names, so a server 422 and this check land on the same control.
+// Only a logo that CHANGED is checked — the server validates only what is sent, and a stored
+// logo from before these rules must not block saving, say, the brand color.
+const validateBranding = (s, base) => {
+  const e = {};
+  for (const [form, api] of [["logoUrl", "logo_url"], ["logoUrlDark", "logo_url_dark"]]) {
+    if (s[form].trim() === (base?.[form] ?? "").trim()) continue;
+    const message = logoUrlError(s[form]);
+    if (message) e[api] = message;
+  }
+  return e;
+};
 const securityFrom = (s0) => ({
   security: {
     require2fa: s0?.require_2fa ?? false,
@@ -251,7 +270,12 @@ const SECTIONS = {
   },
   branding: {
     label: "Branding", url: "/organization/branding", from: brandingFrom,
-    payload: (f) => ({ primary_color: f.accent, logo_url: f.logoUrl.trim() || null }),
+    // Blank is sent as null: clearing the dark logo restores the fallback to the light one.
+    payload: (f) => ({
+      primary_color: f.accent,
+      logo_url: f.logoUrl.trim() || null,
+      logo_url_dark: f.logoUrlDark.trim() || null,
+    }),
   },
   security: {
     label: "Security policy", url: "/organization/security", from: securityFrom,
@@ -379,11 +403,11 @@ export default function OrganizationSettings() {
   const saveSection = async (key) => {
     if (inFlight.current.has(key)) return;
     const section = SECTIONS[key];
-    if (key === "profile") {
-      const found = validate(settings);
+    if (key === "profile" || key === "branding") {
+      const found = key === "profile" ? validate(settings) : validateBranding(settings, baseline);
       if (Object.keys(found).length) {
         setErrors((e) => ({ ...e, ...found }));
-        setSectionErrors((e) => ({ ...e, profile: "check the highlighted fields." }));
+        setSectionErrors((e) => ({ ...e, [key]: "check the highlighted fields." }));
         return;
       }
     }
@@ -538,39 +562,42 @@ export default function OrganizationSettings() {
           {tab === "branding" && (
             <Panel title="Branding" desc="Personalize how ZoikoStream looks for your audience">
               {/* Was a file picker that only remembered the filename — there is no upload
-                  endpoint, so nothing left the browser. logo_url IS a real stored field, so
-                  the honest control is the URL, and it saves with everything else. */}
-              <Field
-                label="Logo URL"
-                error={errors.logo_url}
-                hint="Direct link to a square PNG or SVG. Stored on your organization — nothing displays it yet; event pages and emails still show the ZoikoStream mark."
-              >
-                <div className="flex flex-wrap items-center gap-4">
-                  <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-xl border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800">
-                    <img
-                      src={settings.logoUrl.trim() || "/zoiko-logo.png"}
-                      alt="Organization logo"
-                      className="max-h-full max-w-full object-contain"
-                      // A bad URL falls back to the platform mark instead of a broken image.
-                      onError={(e) => { e.currentTarget.src = "/zoiko-logo.png"; }}
-                    />
-                  </div>
-                  <div className="min-w-[240px] flex-1">
-                    <div className="relative">
-                      <FiUploadCloud className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-                      <Input
-                        variant="form"
-                        className="pl-9"
-                        maxLength={500}
-                        error={errors.logo_url}
-                        placeholder="https://cdn.yourcompany.com/logo.png"
-                        value={settings.logoUrl}
-                        onChange={(e) => { setErrors((x) => (x.logo_url ? { ...x, logo_url: undefined } : x)); patch("branding", (s) => ({ ...s, logoUrl: e.target.value })); }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </Field>
+                  endpoint, so nothing left the browser. The logos ARE real stored fields, so
+                  the honest control is the URL. One logo used to serve both themes, so a
+                  logo drawn for light backgrounds vanished in dark mode; each theme now has
+                  its own, previewed on its own background (components/organization/LogoField). */}
+              <div className="space-y-5">
+                {[
+                  ["logoUrl", "logo_url", "light", "Light mode logo", "Used on light backgrounds."],
+                  ["logoUrlDark", "logo_url_dark", "dark", "Dark mode logo", "Used on dark backgrounds. Falls back to the light logo when not provided."],
+                ].map(([form, api, surface, label, hint]) => (
+                  <LogoField
+                    key={form}
+                    id={`branding-${api.replace(/_/g, "-")}`}
+                    surface={surface}
+                    label={label}
+                    hint={hint}
+                    value={settings[form]}
+                    fallbackUrl={surface === "dark" ? settings.logoUrl : undefined}
+                    orgName={settings.profile.name}
+                    error={errors[api]}
+                    onChange={(v) => {
+                      setErrors((x) => (x[api] ? { ...x, [api]: undefined } : x));
+                      patch("branding", (s) => ({ ...s, [form]: v }));
+                    }}
+                    // Say what is wrong when the reader leaves the field, not only at Save.
+                    onBlur={() => {
+                      const message = logoUrlError(settings[form]);
+                      if (message) setErrors((x) => ({ ...x, [api]: message }));
+                    }}
+                  />
+                ))}
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Your logo replaces the ZoikoStream mark in the header of your events&apos; viewer
+                  pages, in the version for each viewer&apos;s light or dark theme. Emails keep the
+                  ZoikoStream mark.
+                </p>
+              </div>
 
               <div className="mt-6">
                 <Field
@@ -641,6 +668,7 @@ export default function OrganizationSettings() {
                   }}
                   accent={settings.accent}
                   logoUrl={settings.logoUrl}
+                  logoUrlDark={settings.logoUrlDark}
                   orgName={settings.profile.name}
                 />
               </div>

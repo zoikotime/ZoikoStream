@@ -28,6 +28,9 @@ _ORG_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS timezone VARCHAR(60)",
     "ADD COLUMN IF NOT EXISTS country VARCHAR(80)",
     "ADD COLUMN IF NOT EXISTS logo_url VARCHAR(500)",
+    # Dark-theme logo. Nullable with no default and no backfill: NULL means "use logo_url",
+    # so existing organizations need no data rewrite.
+    "ADD COLUMN IF NOT EXISTS logo_url_dark VARCHAR(500)",
     "ADD COLUMN IF NOT EXISTS primary_color VARCHAR(20)",
     "ADD COLUMN IF NOT EXISTS secondary_color VARCHAR(20)",
     "ADD COLUMN IF NOT EXISTS theme VARCHAR(20)",
@@ -730,6 +733,40 @@ _SEC_SUPPORT_ACCESS_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS breakglass_ended_notified_at TIMESTAMPTZ",
     "ADD COLUMN IF NOT EXISTS review_overdue_notified_at TIMESTAMPTZ",
 ]
+# The column above was added without the foreign key models/support_access.py declares, so
+# only a FRESH database (create_all) had it. Added NOT VALID — new and updated rows are
+# enforced immediately, and existing rows are never rejected — then validated only when no
+# row points at a missing user. A legacy orphan therefore leaves the constraint unvalidated
+# (visible as convalidated = false) instead of failing this run or touching the row.
+_SEC_SUPPORT_ACCESS_STATEMENTS = [
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint c
+              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+             WHERE c.conrelid = 'support_access_requests'::regclass AND c.contype = 'f'
+               AND a.attname = 'reviewed_by_id'
+        ) THEN
+            ALTER TABLE support_access_requests
+                ADD CONSTRAINT support_access_requests_reviewed_by_id_fkey
+                FOREIGN KEY (reviewed_by_id) REFERENCES users(id) NOT VALID;
+        END IF;
+    END $$;
+    """,
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname = 'support_access_requests_reviewed_by_id_fkey' AND NOT convalidated)
+           AND NOT EXISTS (SELECT 1 FROM support_access_requests r
+                            WHERE r.reviewed_by_id IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = r.reviewed_by_id)) THEN
+            ALTER TABLE support_access_requests VALIDATE CONSTRAINT support_access_requests_reviewed_by_id_fkey;
+        END IF;
+    END $$;
+    """,
+]
 
 
 # ZST-EC-001 SUP-001 .. SUP-004 - support case lifecycle on the EXISTING support_tickets
@@ -757,6 +794,10 @@ _SUP_TICKET_COLUMNS = [
 _SUP_TICKET_STATEMENTS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_support_tickets_case_reference "
     "ON support_tickets (case_reference)",
+    # models/support_case.py declares both columns index=True; the ADD COLUMNs above never
+    # created the indexes, so only a fresh database had them. Same names create_all uses.
+    "CREATE INDEX IF NOT EXISTS ix_support_tickets_requester_id ON support_tickets (requester_id)",
+    "CREATE INDEX IF NOT EXISTS ix_support_tickets_incident_id ON support_tickets (incident_id)",
 ]
 
 
@@ -767,6 +808,10 @@ _CON_SESSION_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ",
     "ADD COLUMN IF NOT EXISTS end_reason VARCHAR(20)",
     "ADD COLUMN IF NOT EXISTS ended_notified_at TIMESTAMPTZ",
+]
+# models/live.py declares grant_id index=True; same gap as the support_tickets indexes above.
+_CON_SESSION_STATEMENTS = [
+    "CREATE INDEX IF NOT EXISTS ix_contributor_sessions_grant_id ON contributor_sessions (grant_id)",
 ]
 
 
@@ -800,6 +845,23 @@ _LVE_QUOTE_COLUMNS = [
 # Only auto_start_recording: models/event.py still declares auto_end_event, so it keeps
 # supplying a value and its NOT NULL is still doing real work.
 _EVENT_RELAX_NOT_NULL = ("auto_start_recording",)
+
+# An earlier version of this file also relaxed auto_end_event, so databases migrated with it
+# still have the column nullable although the model requires a value. Restored only when no
+# row holds NULL: a NULL is never rewritten here, it just leaves the column as it is.
+_EVENT_RESTORE_NOT_NULL = [
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'events'
+                      AND column_name = 'auto_end_event' AND is_nullable = 'YES')
+           AND NOT EXISTS (SELECT 1 FROM events WHERE auto_end_event IS NULL) THEN
+            ALTER TABLE events ALTER COLUMN auto_end_event SET NOT NULL;
+        END IF;
+    END $$;
+    """,
+]
 
 
 def _relax_not_null(table: str, column: str) -> str:
@@ -1093,8 +1155,12 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE event_incidents {clause}"))
         for clause in _CON_SESSION_COLUMNS:
             conn.execute(text(f"ALTER TABLE contributor_sessions {clause}"))
+        for stmt in _CON_SESSION_STATEMENTS:
+            conn.execute(text(stmt))
         for clause in _SEC_SUPPORT_ACCESS_COLUMNS:
             conn.execute(text(f"ALTER TABLE support_access_requests {clause}"))
+        for stmt in _SEC_SUPPORT_ACCESS_STATEMENTS:
+            conn.execute(text(stmt))
         for clause in _SUP_TICKET_COLUMNS:
             conn.execute(text(f"ALTER TABLE support_tickets {clause}"))
         for stmt in _SUP_TICKET_STATEMENTS:
@@ -1114,6 +1180,8 @@ def ensure_schema():
             # via its own separate pass: same table, same guard, and this tuple is a strict
             # superset (it also covers `auto_end_event`), so the events relax happens once here.
             conn.execute(text(_relax_not_null("events", col)))
+        for stmt in _EVENT_RESTORE_NOT_NULL:
+            conn.execute(text(stmt))
         for clause in _CUSTOMER_DELIVERY_COLUMNS:
             conn.execute(text(f"ALTER TABLE customer_deliveries {clause}"))
         for clause in _REPLAY_ENTITLEMENT_COLUMNS:
