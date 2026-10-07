@@ -4,7 +4,7 @@ import axios from "axios";
 // so nothing has to be baked in at build time. VITE_API_URL still overrides, and dev falls
 // back to the local API on 8001 because Vite serves the client on a different port.
 export const API_BASE =
-  import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8001" : window.location.origin);
+  import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin);
 
 // /api namespace: the SPA's own routes (/dashboard, /admin/*, /organization/*) are spelled
 // like the server's router prefixes, and same-origin serving makes that a collision.
