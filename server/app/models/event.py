@@ -260,6 +260,10 @@ class EventRegistration(Base):
     invited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     claim_token_hash: Mapped[str | None] = mapped_column(String(64))
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Optional ISO 3166-1 alpha-2 country the viewer chose at registration (app/countries.py),
+    # for aggregate audience geography only. Country level by design: never a region, city,
+    # address, or anything inferred from the request.
+    country_code: Mapped[str | None] = mapped_column(String(2))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped["Event"] = relationship()

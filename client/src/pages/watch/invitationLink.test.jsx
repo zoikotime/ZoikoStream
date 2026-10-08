@@ -141,7 +141,8 @@ describe("an invalid invitation", () => {
     expect(await screen.findByText(/This invitation link isn't valid/)).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: /enter your name/i })).toBeInTheDocument();
     expect(window.location.hash).toBe("");
-    expect(watchCalls().at(-1)[1]).toEqual({ params: undefined });
+    // No credential at all — only the page's own client hint (web / mobile / embedded).
+    expect(watchCalls().at(-1)[1]).toEqual({ params: { client: "web" } });
   });
 });
 

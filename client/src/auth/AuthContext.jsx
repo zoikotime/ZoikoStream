@@ -1,7 +1,21 @@
 /* eslint-disable react-refresh/only-export-components -- context module exports hooks alongside the provider */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import api, { AUTH_EXPIRED_EVENT } from "../api";
+import SessionExpiryWarning from "./SessionExpiryWarning";
+import {
+  answerTokenRequests,
+  broadcast,
+  clearToken,
+  hasScopedHint,
+  markSessionEnded,
+  onBroadcast,
+  readToken as readStoredToken,
+  requestTokenFromOtherTabs,
+  sessionEndReasonOf,
+  storeToken,
+} from "./sessionStore";
+import { useSessionKeeper } from "./useSessionKeeper";
 
 const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
@@ -30,8 +44,14 @@ export const useAuth = () => useContext(AuthContext);
 // server rejects is cleared, along with any other stale auth keys.
 //
 // The backend does the real work: /api/auth/me runs get_current_user, which decodes the JWT
-// against SECRET_KEY, checks expiry, loads the user and requires `is_active`. Anything else
-// is a 401.
+// against SECRET_KEY, loads the user, requires `is_active`, and checks the token's
+// SERVER-SIDE SESSION — unrevoked, inside its absolute lifetime, and not idle for longer than
+// the idle timeout (server/app/services/auth_sessions.py). Anything else is a 401, so a token
+// left in a browser that was closed hours ago is refused here and the user signs in again.
+//
+// Sessions: useSessionKeeper reports genuine activity and schedules the inactivity warning;
+// sessionStore keeps the credential where "Remember me" says (localStorage, or this browser
+// session only) and keeps tabs in step — one tab's sign-out or expiry signs out the rest.
 
 const TOKEN_KEY = "token";
 // `user` is legacy: previous builds stored the whole profile here and trusted it. It is no
@@ -48,14 +68,9 @@ const STALE_AUTH_KEYS = [
   "lastRoute", "returnTo", "redirectTo", "pendingRedirect", "intendedRoute",
 ];
 
-export const readToken = () => {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    // Private mode / blocked site data. No token means no session, which is the safe answer.
-    return null;
-  }
-};
+// The stored credential, wherever "Remember me" put it. Private mode / blocked site data reads
+// as no token, which is the safe answer.
+export const readToken = () => readStoredToken();
 
 /** Drop the legacy keys, leaving the credential alone. */
 const clearStaleKeys = () => {
@@ -72,12 +87,7 @@ const clearStaleKeys = () => {
 /** Remove every trace of a session from this browser. Safe to call when there is none. */
 export const clearStoredAuth = () => {
   clearStaleKeys();
-  try {
-    localStorage.removeItem(TOKEN_KEY);
-    sessionStorage.removeItem(TOKEN_KEY);
-  } catch {
-    // Nothing to do: if storage is unavailable there is nothing stored to clear.
-  }
+  clearToken();
 };
 
 // api.js dispatches this when any request comes back 401 — a session that expires or is
@@ -100,9 +110,14 @@ export function AuthProvider({ children }) {
   // (LandingOrDashboard and every guard wait on `loading`). The dangerous direction — a
   // stored blob being treated as proof — is still impossible: `user` only ever comes from
   // /auth/me.
+  //
+  // The one other reason to start loading: a browser-session sign-in ("Remember me" off)
+  // lives in ONE tab's sessionStorage, so a new tab asks the open ones for it first
+  // (sessionStore.requestTokenFromOtherTabs). The hint that makes that worth asking holds no
+  // credential, and without it a signed-out visitor still gets an immediate first paint.
   const [state, setState] = useState(() =>
-    (readToken() ? { status: "loading", user: null }
-                 : { status: "unauthenticated", user: null }));
+    (readToken() || hasScopedHint() ? { status: "loading", user: null }
+                                    : { status: "unauthenticated", user: null }));
   // Guards against a late /auth/me response overwriting a newer login/logout.
   const generation = useRef(0);
   const navigate = useNavigate();
@@ -123,6 +138,13 @@ export function AuthProvider({ children }) {
    */
   const validate = useCallback(async () => {
     const mine = ++generation.current;
+    if (!readToken() && hasScopedHint()) {
+      // A browser-session sign-in held by another open tab of this browser. With every tab
+      // closed nobody answers, and sign-in is required — which is what "Remember me" off means.
+      const handed = await requestTokenFromOtherTabs();
+      if (mine !== generation.current) return null;
+      if (handed) storeToken(handed, { remember: false });
+    }
     if (!readToken()) {
       // No credential to present. Clear any legacy keys a previous build may have left.
       if (mine === generation.current) applyUnauthenticated();
@@ -141,6 +163,10 @@ export function AuthProvider({ children }) {
       if (mine !== generation.current) return null;
       const status = error?.response?.status;
       if (status === 401 || status === 403) {
+        // A reopened browser whose session expired while it was closed lands on /login with
+        // the reason, not a bare sign-in form.
+        const reason = sessionEndReasonOf(error);
+        if (reason) markSessionEnded(reason);
         applyUnauthenticated();
       } else {
         setState({ status: "unauthenticated", user: null });
@@ -156,11 +182,32 @@ export function AuthProvider({ children }) {
   }, [validate]);
 
   // A 401 anywhere in the app ends the session here too, so one expired request cannot
-  // leave the rest of the console believing it is still signed in.
+  // leave the rest of the console believing it is still signed in — and the other tabs are
+  // told, so none of them keeps showing privileged data on a session the server has ended.
   useEffect(() => {
-    const onExpired = () => applyUnauthenticated();
+    const onExpired = (event) => {
+      broadcast({ type: "ended", reason: event?.detail?.reason || "reauth" });
+      applyUnauthenticated();
+    };
     window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  }, [applyUnauthenticated]);
+
+  // Another tab signed out, or found the session ended: this tab ends too (sessionStorage
+  // credentials never fire `storage`, so the channel is what reaches them). And this tab
+  // hands its browser-session credential to a new tab that asks.
+  useEffect(() => {
+    const offAnswer = answerTokenRequests();
+    const offEnded = onBroadcast((message) => {
+      if (message.type !== "ended") return;
+      generation.current += 1;   // discard any /auth/me still in flight
+      markSessionEnded(message.reason || "reauth");
+      applyUnauthenticated();
+    });
+    return () => {
+      offAnswer();
+      offEnded();
+    };
   }, [applyUnauthenticated]);
 
   // Signing out in one tab signs out the others. `storage` fires only in OTHER tabs, so
@@ -182,12 +229,13 @@ export function AuthProvider({ children }) {
    * the client happens to hold. `response.user` is used only as the immediate answer for the
    * caller's redirect.
    */
-  const setSession = useCallback(async ({ access_token, user }) => {
-    try {
-      localStorage.setItem(TOKEN_KEY, access_token);
-    } catch {
-      // Storage blocked: the session cannot survive a reload, but this visit still works.
-    }
+  //
+  // `remember` ("Remember me") decides only where the credential is kept: across browser
+  // restarts, or for this browser session. The server's idle and absolute limits apply
+  // either way — remembering never makes a session last longer.
+  const setSession = useCallback(async ({ access_token, user }, { remember = true } = {}) => {
+    // Storage blocked: the session cannot survive a reload, but this visit still works.
+    storeToken(access_token, { remember });
     // Clear anything a previous build left behind, now that a real session exists.
     for (const key of STALE_AUTH_KEYS) {
       try {
@@ -200,22 +248,52 @@ export function AuthProvider({ children }) {
   }, [validate]);
 
   /**
-   * Sign out. Clears the credential and every stale key, then resolves to unauthenticated —
-   * which makes the route guards send a protected page to /login on the next render.
+   * Sign out. Revokes THIS session on the server (POST /auth/logout), so the token is refused
+   * from now on even if a copy survives somewhere; then clears the credential and every stale
+   * key and resolves to unauthenticated — which makes the route guards send a protected page
+   * to /login on the next render. The other tabs are told; the user's other devices are not
+   * affected (each sign-in is its own session).
    *
-   * There is deliberately no server call: the platform issues a stateless JWT with an
-   * expiry (security.create_access_token, shortened by the tenant's session_timeout policy)
-   * and has no revocation list, so there is nothing to invalidate server-side. That is a
-   * real limitation and is reported rather than papered over with a no-op request.
+   * The server call is sent with the token in hand, because local state is cleared at once:
+   * signing out must not wait on the network, and a session the server has already ended
+   * needs no revoking.
    */
   const logout = useCallback(() => {
     generation.current += 1;      // discard any /auth/me still in flight
+    const token = readToken();
     applyUnauthenticated();
+    broadcast({ type: "ended", reason: "logout" });
+    if (token) {
+      Promise.resolve(api.post("/auth/logout", null, { headers: { Authorization: `Bearer ${token}` } }))
+        .catch(() => { /* already ended, or offline: local sign-out stands */ });
+    }
     // Explicit, rather than relying on the guard to bounce the current page: a signed-out
     // user should land on the sign-in screen from wherever they were, including from a
     // public page where no guard would fire at all.
     navigate("/login", { replace: true });
   }, [applyUnauthenticated, navigate]);
+
+  // The SERVER said this session is over (idle, maximum length, signed out elsewhere): say why
+  // on the sign-in page, end it in every tab, and let the route guards send protected pages
+  // to /login. Public pages simply carry on signed out.
+  const endSession = useCallback((reason) => {
+    generation.current += 1;
+    markSessionEnded(reason);
+    broadcast({ type: "ended", reason });
+    applyUnauthenticated();
+  }, [applyUnauthenticated]);
+
+  const keeper = useSessionKeeper({ authenticated: state.status === "authenticated", onEnded: endSession });
+
+  // Moving around the app is activity. The first render is not (loading a page is not).
+  const location = useLocation();
+  const seenPath = useRef(location.pathname);
+  const { noteNavigation } = keeper;
+  useEffect(() => {
+    if (seenPath.current === location.pathname) return;
+    seenPath.current = location.pathname;
+    noteNavigation();
+  }, [location.pathname, noteNavigation]);
 
   const value = useMemo(() => ({
     user: state.user,
@@ -227,5 +305,16 @@ export function AuthProvider({ children }) {
     refresh: validate,
   }), [state, setSession, logout, validate]);
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+      {keeper.warning && state.status === "authenticated" && (
+        <SessionExpiryWarning
+          expiresAt={keeper.warning.expiresAt}
+          onStay={keeper.staySignedIn}
+          onSignOut={logout}
+        />
+      )}
+    </AuthContext.Provider>
+  );
 }

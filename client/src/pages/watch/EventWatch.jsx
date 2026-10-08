@@ -20,6 +20,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import { useAuth } from "../../auth/AuthContext";
 import api, { errMsg } from "../../api";
 import { isCustomDomain } from "../../utils/hostMode";
+import { IS_NATIVE } from "../../platform";
 import { PRE_LIVE_STATUSES } from "../../data/events";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
@@ -29,6 +30,7 @@ import ReactionBar from "../../components/watch/ReactionBar";
 import ReactionOverlay from "../../components/live/ReactionOverlay";
 import useReactionChannel from "../../hooks/useReactionChannel";
 import RegistrationGate from "../../components/watch/RegistrationGate";
+import CountryPrompt from "../../components/watch/CountryPrompt";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import CapacityWaitingNotice from "../../components/watch/CapacityWaitingNotice";
 import ViewerErrorState from "../../components/watch/ViewerErrorState";
@@ -86,6 +88,20 @@ const REPLAY_POLL_MS = 30000;
 // Statuses that come BEFORE a broadcast (data/events.js, mirroring server/app/models/event.py).
 // The pre-event state replaces the player for these; everything after go-live keeps the player.
 const PRE_LIVE = new Set(PRE_LIVE_STATUSES);
+
+// What this page is running inside, for the organizer's device and player mix (server/app/
+// services/audience.py). Only things the page itself knows: the mobile app build, or being
+// framed by another site's page. Device, browser and OS come from the request, never asked.
+function viewerClient() {
+  if (IS_NATIVE) return "mobile";
+  try {
+    if (window.self !== window.top) return "embedded";
+  } catch {
+    return "embedded";   // a cross-origin parent refuses even the comparison
+  }
+  return "web";
+}
+const VIEWER_CLIENT = viewerClient();
 
 // Real chat/Q&A/polls over the same live socket the host/moderator consoles use (see
 // live.py — any authenticated attendee, OR a name+email self-registration (mustIdentify
@@ -434,7 +450,7 @@ function EventWatchPage() {
     const link = override.link || linkToken;
     const accessParams = { ...(reg ? { reg } : {}), ...(link ? { link } : {}) };
     api
-      .get(`/events/${eventId}/watch`, { params: Object.keys(accessParams).length ? accessParams : undefined })
+      .get(`/events/${eventId}/watch`, { params: { ...accessParams, client: VIEWER_CLIENT } })
       .then(({ data }) => {
         // A good answer clears whatever an earlier failure left on screen. Without this a
         // single failed request stranded the page on "could not be found" for good.
@@ -1167,6 +1183,9 @@ function EventWatchPage() {
                 raiseHandVisible={Boolean(watch.raise_hand_enabled)}
               />
             )}
+            {/* A host-invited viewer never saw the registration form's optional Country /
+                Region, so it is offered once here (server decides: watch.country_prompt). */}
+            {watch.country_prompt && regToken && <CountryPrompt eventId={eventId} regToken={regToken} />}
           </div>
 
           {/* row-span-2 so the panel's grid area covers the player AND the info card —

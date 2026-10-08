@@ -232,6 +232,16 @@ describe("previews survive bad images", () => {
 });
 
 describe("the branding preview dialog follows the theme", () => {
+  it("shows a dark logo that has been typed but not saved", async () => {
+    const user = userEvent.setup();
+    open("dark");
+    await user.type(await darkInput(), "https://cdn.acme.com/unsaved-dark.svg");
+    fireEvent.click(screen.getByRole("button", { name: "Go Live — open branding preview" }));
+    const dialog = await screen.findByRole("dialog", { name: "Branding preview" });
+    expect(within(dialog).getByAltText("Acme Live logo")).toHaveAttribute("src", "https://cdn.acme.com/unsaved-dark.svg");
+    expect(api.patch).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["light", LIGHT],
     ["dark", DARK],

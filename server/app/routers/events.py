@@ -65,10 +65,11 @@ from ..schemas.event import (
     AccessLinkCreate, AccessLinkIssued, AccessLinkOut,
     AssignmentUpdate, ContributorInvite, ContributorSessionOut, EventCreate, EventOut,
     EventUpdate, FeedbackOut, InvitationRedeem, InvitationRedeemed,
-    RegistrantOut, RegistrationCreate, RegistrationOut, ViewerInviteCreate, WatchOut,
+    RegistrantOut, RegistrationCountryUpdate, RegistrationCreate, RegistrationOut, ViewerInviteCreate,
+    WatchOut,
 )
 from ..security import (
-    create_registration_token, decode_registration_payload,
+    client_ip, create_registration_token, decode_registration_payload,
     get_current_user, get_current_user_optional, org_scoped, require_org_admin,
 )
 from ..services import broadcast as broadcast_svc
@@ -82,6 +83,7 @@ from ..services import moderation as mod
 from ..services import webhooks
 from ..services import bus, event_overrun
 from ..services import admission as admission_svc
+from ..services import audience as audience_svc
 from ..services import invitation_links
 
 def claim_cookie_policy(request: Request) -> tuple[bool, str]:
@@ -338,6 +340,11 @@ def watch_event(
         description="Set by client/src/pages/speaker/Backstage.jsx's return-feed monitor "
                      "only — see services/livekit.py's secondary()/primary() docstring.",
     ),
+    client: str | None = Query(
+        None, max_length=12,
+        description="What the viewer page runs in (web, mobile, embedded), for the Audience "
+                    "page's device and player mix. Anything else reads as web.",
+    ),
     user: User | None = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
@@ -374,9 +381,14 @@ def watch_event(
     # What a viewer is shown. Archiving is the organization tidying its own list, so an
     # archived event reads to viewers as what it was (an ended event keeps its replay).
     viewer_status = crud.viewer_status_of(ev)
+    # Refused attempts feed the Audience page's "Blocked join attempts" (services/audience.py):
+    # event, normalized reason and time only. `requester` de-duplicates retries in memory and is
+    # never stored; no token, invitation or address is ever written.
+    requester = audience_svc.requester(client_ip(request), request.headers.get("user-agent"))
     # An unpublished draft does not exist outside its own organization: same 404 as an event
     # that was never created, so a draft's link reveals nothing (title, time, host).
     if viewer_status == "draft" and not is_org_member:
+        audience_svc.record_denial(db, ev, "event_unavailable", requester=requester)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
     reg_payload = decode_registration_payload(reg, ev.id) if reg else None
     invited = reg_payload is not None
@@ -411,11 +423,25 @@ def watch_event(
 
     registered = is_org_member or invited or link_admitted
 
+    # A host-invited viewer never meets the registration form, so the page offers its optional
+    # Country / Region field once (WatchOut.country_prompt). Self-registered viewers already saw it.
+    country_prompt = False
+    if invited and not is_org_member:
+        try:
+            invitee = crud.get_registration_by_id(db, ev.id, uuid.UUID(str(reg_payload.get("reg"))))
+        except ValueError:
+            invitee = None
+        country_prompt = bool(invitee and invitee.invited_by is not None and invitee.country_code is None)
+
     if ev.visibility == "private" and not is_org_member and not invited and not link_admitted:
         detail = (
             "This invite has already been used on another device — ask the host to resend it"
             if claim_rejected else "This event is private"
         )
+        # Why, for the organizer — the viewer still gets the same answer as before.
+        reason = ("invite_used_elsewhere" if claim_rejected
+                  else "invalid_invite" if reg else "invalid_link" if link else "not_invited")
+        audience_svc.record_denial(db, ev, reason, requester=requester)
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail)
 
     now = datetime.now(timezone.utc)
@@ -484,8 +510,21 @@ def watch_event(
             admission = "admitted"
             token = livekit.create_stream_token(token_identity, room, False)
             url = livekit.settings.LIVEKIT_URL
+            # The viewer is joining the live stream: one audience row per event and viewer
+            # (services/audience.py). Staff of the organizing organization are never audience,
+            # and the anonymous disposable identity is skipped inside (it cannot be told apart
+            # from the next request's).
+            if not is_org_member and not monitor:
+                audience_svc.record_join(
+                    db, ev, identity,
+                    registration_id=uuid.UUID(reg_payload["reg"]) if invited and reg_payload else None,
+                    user_agent=request.headers.get("user-agent"), client_hint=client,
+                )
         else:
             admission, retry_after = "waiting", decision.retry_after_seconds
+            # Keyed on the viewer, so their automatic retries while waiting are one attempt.
+            audience_svc.record_denial(db, ev, "at_capacity",
+                                       requester=identity if audience_svc.identified(identity) else requester)
 
     # Replay: same access rule as the live token (registration_required gates it the same
     # way), but independent of not_started/expired — the whole point of a replay is that it
@@ -615,6 +654,7 @@ def watch_event(
         media_status=media_status,
         admission=admission, retry_after_seconds=retry_after,
         replay_state=replay_state, replay_available_until=replay_until,
+        country_prompt=country_prompt,
     )
 
 
@@ -622,6 +662,7 @@ def watch_event(
 def redeem_invitation(
     event_id: uuid.UUID,
     data: InvitationRedeem,
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
 ):
@@ -645,14 +686,19 @@ def redeem_invitation(
     # Never cached, and nothing on this response may send the page's URL onward.
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
+    # A refused redemption is one blocked join for the organizer's Audience page — recorded
+    # without the secret (services/audience.py). The visitor's answer is unchanged: one 404.
+    requester = audience_svc.requester(client_ip(request), request.headers.get("user-agent"))
     if data.kind == "invite":
         reg_id = invitation_links.read_invitation_secret(data.secret, ev.id)
         reg = crud.get_registration_by_id(db, ev.id, reg_id) if reg_id else None
         if reg is None:
+            audience_svc.record_denial(db, ev, "invalid_invite", requester=requester)
             raise invalid
         return InvitationRedeemed(credential="reg", token=create_registration_token(reg))
     link = crud.find_access_link(db, ev.id, data.secret)   # counts this open as one use
     if link is None:
+        audience_svc.record_denial(db, ev, "invalid_link", requester=requester)
         raise invalid
     return InvitationRedeemed(credential="link", token=invitation_links.mint_link_pass(link))
 
@@ -670,6 +716,7 @@ def register_for_event(
     event_id: uuid.UUID,
     data: RegistrationCreate,
     background: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """Self-serve, anonymous registration — no auth, mirrors watch_event's public reach.
@@ -684,13 +731,19 @@ def register_for_event(
     # Registration follows what a viewer is shown (crud.viewer_status_of): an unpublished
     # draft does not exist to them, and a cancelled event takes no new attendees.
     shown = crud.viewer_status_of(ev)
+    # Refusals are recorded for the Audience page (services/audience.py) — reason and time
+    # only; the requester (address and browser) de-duplicates retries in memory and is never stored.
+    requester = audience_svc.requester(client_ip(request), request.headers.get("user-agent"))
     if shown == "draft":
+        audience_svc.record_denial(db, ev, "event_unavailable", requester=requester)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
     if shown == "cancelled":
+        audience_svc.record_denial(db, ev, "event_cancelled", requester=requester)
         raise HTTPException(status.HTTP_409_CONFLICT, "This event was cancelled")
     if ev.visibility == "private":
         # Self-serve registration must never become a side-door into a private event — that
         # access is host-granted only, via invite_viewers below.
+        audience_svc.record_denial(db, ev, "not_invited", requester=requester)
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This event is private — ask the host for an invite")
 
     # ── NAME-ONLY REGISTRATION ────────────────────────────────────────────────────────────
@@ -717,15 +770,20 @@ def register_for_event(
     if not anonymous:
         existing = crud.get_registration(db, event_id, email)
         if existing is not None:
+            # A returning viewer may update their (optional) country; leaving it blank keeps
+            # whatever they chose before.
+            if data.country and data.country != existing.country_code:
+                audience_svc.set_registration_country(db, existing, data.country)
             return RegistrationOut(
                 id=existing.id, name=existing.name, email=existing.email,
-                token=create_registration_token(existing),
+                token=create_registration_token(existing), country_code=existing.country_code,
             )
 
     if ev.registration_limit is not None and crud.count_registrations(db, event_id) >= ev.registration_limit:
+        audience_svc.record_denial(db, ev, "event_full", requester=requester)
         raise HTTPException(status.HTTP_409_CONFLICT, "This event is full")
 
-    reg = crud.create_registration(db, event_id, data.name, email)
+    reg = crud.create_registration(db, event_id, data.name, email, country_code=data.country)
     # Only where there is somewhere to send it. Posting a `.invalid` address to the mail
     # provider would bounce every single time, which costs sender reputation and buries real
     # delivery failures in noise.
@@ -738,7 +796,40 @@ def register_for_event(
     webhooks.enqueue(db, ev.org_id, "registration.created", {
         "event_id": str(ev.id), "registration_id": str(reg.id), "email": reg.email, "name": reg.name,
     })
-    return RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=create_registration_token(reg))
+    return RegistrationOut(id=reg.id, name=reg.name, email=reg.email,
+                           token=create_registration_token(reg), country_code=reg.country_code)
+
+
+@router.put("/{event_id}/registration/country")
+def set_registration_country(
+    event_id: uuid.UUID,
+    data: RegistrationCountryUpdate,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """The holder of a registration token sets or clears their own optional Country / Region
+    (an invited viewer never sees the registration form, so the viewer page asks once). Same
+    credential rules as GET /watch: the token must be for this event, and a claimed private
+    invitation only from the browser that claimed it. Every refusal is the same 404."""
+    response.headers["Cache-Control"] = "no-store"
+    missing = HTTPException(status.HTTP_404_NOT_FOUND, "Registration not found")
+    payload = decode_registration_payload(data.token, event_id)
+    if not payload or not payload.get("reg"):
+        raise missing
+    try:
+        reg_id = uuid.UUID(payload["reg"])
+    except ValueError:
+        raise missing
+    reg = crud.get_registration_by_id(db, event_id, reg_id)
+    ev = crud.get_event_unscoped(db, event_id)
+    if reg is None or ev is None:
+        raise missing
+    if (ev.visibility == "private" and reg.claim_token_hash is not None
+            and not crud.claim_matches(reg, request.cookies.get(f"zk_claim_{reg.id}"))):
+        raise missing
+    audience_svc.set_registration_country(db, reg, data.country)
+    return {"country_code": reg.country_code}
 
 
 @router.patch("/{event_id}", response_model=EventOut)

@@ -36,9 +36,15 @@ import { downloadCsv } from "../../utils/export";
 // The Attendance panel on the right reads GET /organization/audience-attendance
 // (services/org.py::audience_attendance). Not every figure there is a true measurement —
 // see that function's own docstring — `unique_attendees_estimated`/`avg_watch_minutes_estimated`
-// flag which ones are derived from 15s concurrent-viewer sampling rather than counted, and
-// `show_rate_basis` says the show-rate is private/invited events only. The panel below
-// renders those caveats rather than hiding them, same as the "Not measured" panel beside it.
+// flag which ones are derived from 15s concurrent-viewer sampling rather than counted. The
+// panel renders those caveats rather than hiding them.
+//
+// Registration → attendance and the Audience insights panel read GET
+// /organization/audience-insights (server/app/services/audience.py), which counts recorded
+// viewers: one per event and viewer admitted to the live stream, never staff or hosts, never a
+// reconnect. Geography is only what viewers chose to give at registration; device and player
+// classes are detected by the server. Nothing here is estimated or filled in — an empty window
+// says so.
 const RANGES = [
   ["7d", "7 days"],
   ["30d", "30 days"],
@@ -68,6 +74,138 @@ const SORT_FIELD = {
   registered: "registered",
   pct: "registration_limit",
 };
+
+const GEO_TOP = 5;   // countries listed by name; the rest share one "Other countries" row
+const viewersText = (n) => `${n} ${n === 1 ? "viewer" : "viewers"}`;
+
+// Registration → attendance, from the insights payload. "Not applicable" when nobody registered
+// in the window — a rate over nothing is not 0%.
+function attendanceFact(insights) {
+  const label = "Registration → attendance";
+  if (insights.loading) return { label, value: null, reason: "Loading" };
+  const ra = insights.data?.registration_attendance;
+  if (!ra) return { label, value: null, reason: "Couldn't load audience insights" };
+  if (!ra.applicable || !ra.registered) {
+    return { label, value: "Not applicable", tone: CONSOLE.faint, detail: "No registrations in this window" };
+  }
+  return { label, value: `${ra.rate}%`, detail: `${ra.attended} of ${ra.registered} registered viewers attended` };
+}
+
+function geographyRows(geography, known) {
+  const top = geography.slice(0, GEO_TOP).map((g) => ({
+    key: g.country_code, label: g.country_name, viewers: g.viewers, percentage: g.percentage ?? 0,
+  }));
+  const rest = geography.slice(GEO_TOP);
+  if (rest.length) {
+    const viewers = rest.reduce((sum, g) => sum + g.viewers, 0);
+    top.push({
+      key: "other", label: `Other countries (${rest.length})`, viewers,
+      percentage: known ? Math.round((100 * viewers) / known) : 0,
+    });
+  }
+  return top;
+}
+
+// Label, viewers and share, with a bar carrying the same share for anyone scanning.
+function ShareList({ rows, label }) {
+  return (
+    <ul className="space-y-2.5" aria-label={label}>
+      {rows.map((r) => (
+        <li key={r.key}>
+          <div className="flex items-baseline justify-between gap-3 text-[13px]">
+            <span className={cx("truncate", CONSOLE.heading)}>{r.label}</span>
+            <span className={cx("shrink-0 tabular-nums", CONSOLE.muted)}>
+              {viewersText(r.viewers)} · {r.percentage}%
+            </span>
+          </div>
+          <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-white/10" aria-hidden="true">
+            <span className="block h-full rounded-full bg-emerald-500" style={{ width: `${Math.min(r.percentage, 100)}%` }} />
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+const shareLine = (rows) => rows.map((r) => `${r.label} ${r.percentage}%`).join(" · ");
+
+function InsightBlock({ title, children }) {
+  return (
+    <section className="min-w-0" aria-label={title}>
+      <h3 className={cx("mb-3 text-[13px] font-semibold", CONSOLE.heading)}>{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+function Empty({ children }) {
+  return <p className={cx("text-[13px]", CONSOLE.faint)}>{children}</p>;
+}
+
+function AudienceInsights({ data }) {
+  const geography = data.geography || [];
+  const devices = (data.device_mix || []).map((d) => ({
+    key: d.device_type, label: d.label, viewers: d.viewers, percentage: d.percentage ?? 0,
+  }));
+  const breakdown = data.device_breakdown || {};
+  const blocked = data.blocked_join_attempts || { total: 0, reasons: [] };
+  return (
+    <div className="grid gap-6 lg:grid-cols-3">
+      <InsightBlock title="Audience geography">
+        {geography.length ? (
+          <>
+            <ShareList rows={geographyRows(geography, data.geography_known)} label="Viewers by country" />
+            {data.geography_unknown > 0 && (
+              <p className={cx("mt-3 text-[12px]", CONSOLE.faint)}>
+                {viewersText(data.geography_unknown)} did not share a country.
+              </p>
+            )}
+          </>
+        ) : (
+          <Empty>No geography data collected yet</Empty>
+        )}
+      </InsightBlock>
+
+      <InsightBlock title="Device and player mix">
+        {devices.length ? (
+          <>
+            <ShareList rows={devices} label="Viewers by device" />
+            <dl className={cx("mt-3 space-y-1 text-[12px]", CONSOLE.faint)}>
+              {[
+                ["Browsers", breakdown.browsers],
+                ["Operating systems", breakdown.operating_systems],
+                ["Players", breakdown.clients],
+              ].filter(([, rows]) => rows?.length).map(([name, rows]) => (
+                <div key={name}>
+                  <dt className="inline">{name}: </dt>
+                  <dd className="inline">{shareLine(rows)}</dd>
+                </div>
+              ))}
+            </dl>
+          </>
+        ) : (
+          <Empty>No viewer device data yet</Empty>
+        )}
+      </InsightBlock>
+
+      <InsightBlock title="Blocked join attempts">
+        <p className={cx("text-[20px] font-semibold tabular-nums", CONSOLE.heading)}>{blocked.total}</p>
+        {blocked.reasons.length ? (
+          <ul className="mt-2 space-y-1.5" aria-label="Blocked join attempts by reason">
+            {blocked.reasons.map((r) => (
+              <li key={r.reason} className="flex items-baseline justify-between gap-3 text-[13px]">
+                <span className={cx("truncate", CONSOLE.muted)}>{r.label}</span>
+                <span className={cx("shrink-0 tabular-nums", CONSOLE.heading)}>{r.count}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <Empty>No blocked join attempts in this window</Empty>
+        )}
+      </InsightBlock>
+    </div>
+  );
+}
 
 export default function AudienceAccess() {
   const [range, setRange] = useState("30d");
@@ -114,6 +252,11 @@ export default function AudienceAccess() {
     api.get("/organization/audience-attendance", { params: { range } }).then((r) => r.data)
   );
   const a = attendance.data || {};
+  // Same window as the rest of the page, across the organization's events. (The endpoint also
+  // takes an event_id for one event's figures.)
+  const insights = useApi(() =>
+    api.get("/organization/audience-insights", { params: { range } }).then((r) => r.data)
+  );
 
   // useApi fetches on mount and on reload() only, so every server-decided input refetches
   // explicitly. Guarded-render refetch is this repo's idiom in place of an effect.
@@ -122,7 +265,7 @@ export default function AudienceAccess() {
   if (inputs !== lastInputs) {
     setLastInputs(inputs);
     events.reload();
-    if (!lastInputs.startsWith(range)) { summary.reload(); attendance.reload(); }
+    if (!lastInputs.startsWith(range)) { summary.reload(); attendance.reload(); insights.reload(); }
   }
 
   // Narrowing the result must return to its first page.
@@ -408,38 +551,37 @@ export default function AudienceAccess() {
                 attendance.loading || a.avg_watch_minutes == null ? null : `${a.avg_watch_minutes}m`,
               reason: "No sampled viewer data for this window",
             },
-            {
-              label: "Registration → attendance",
-              value: attendance.loading || a.show_rate == null ? null : `${a.show_rate}%`,
-              reason: "No private-event registrations in this window",
-            },
+            // Counted, not estimated: distinct registrations for registration-gated or
+            // private events in the window whose registrant was admitted to the live stream.
+            attendanceFact(insights),
           ]}
         />
         {/* Honest, not hidden: unique_attendees/avg_watch_minutes are derived from 15s
             concurrent-viewer sampling, not counted per person — see
-            services/org.py::audience_attendance's docstring for exactly why no true
-            per-person duration exists in this stack. */}
+            services/org.py::audience_attendance's docstring. */}
         {!attendance.loading && (a.unique_attendees_estimated || a.avg_watch_minutes_estimated) && (
           <p className={cx("mt-4 border-t pt-3 text-[12px] leading-relaxed", CONSOLE.divider, CONSOLE.faint)}>
             Attendees and watch time are estimated from sampled concurrent viewers, not counted
-            per person. Show rate only covers private, invite-only events.
+            per person. Registration → attendance counts registered viewers who joined the live stream.
           </p>
         )}
       </Panel>
 
-      <Panel title="Not measured">
-        <FactGrid
-          columns={3}
-          facts={[
-            { label: "Audience geography", value: null, reason: "Per-viewer location is not collected" },
-            { label: "Device and player mix", value: null, reason: "Client-side playback telemetry is not ingested" },
-            { label: "Blocked join attempts", value: null, reason: "Refused playback attempts are not recorded" },
-          ]}
-        />
-        <p className={cx("mt-4 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
-          Deliberate: this platform records registration and presence, not per-person
-          profiling. These stay “—” until something is actually collected.
-        </p>
+      <Panel
+        title="Audience insights"
+        eyebrow={`Last ${range}`}
+        description="Viewers who joined a live stream, counted once per event. Hosts and staff are not included."
+      >
+        {insights.error ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+            <span className={CONSOLE.muted}>Couldn&apos;t load audience insights.</span>
+            <ConsoleButton size="sm" variant="secondary" onClick={insights.reload}>Retry</ConsoleButton>
+          </div>
+        ) : insights.loading || !insights.data ? (
+          <p className={cx("text-[13px]", CONSOLE.faint)}>Loading audience insights…</p>
+        ) : (
+          <AudienceInsights data={insights.data} />
+        )}
       </Panel>
 
       <Panel title="Controls that shape the audience">

@@ -188,7 +188,9 @@ describe("a validated session", () => {
     // Same browser, fresh page load.
     renderApp("/organization/dashboard");
     expect(await screen.findByText("Organization dashboard")).toBeInTheDocument();
-    expect(api.get).toHaveBeenCalledTimes(2);
+    // One identity check per page load. (The session keeper's own status read,
+    // GET /auth/session, is a separate call and not what this pins.)
+    expect(api.get.mock.calls.filter(([url]) => url === "/auth/me")).toHaveLength(2);
   });
 
   it("sends / to the role's own home, not a hardcoded organization dashboard", async () => {

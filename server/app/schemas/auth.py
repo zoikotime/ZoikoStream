@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -129,6 +130,19 @@ class UserOut(BaseModel):
     organization_name: str | None = None
     platform_role: str | None = None
     organization_role: str | None = None
+
+
+class SessionStatusOut(BaseModel):
+    """The current sign-in session's deadlines, on the SERVER clock (services/auth_sessions).
+
+    `server_now` lets the client correct for a skewed local clock when it schedules its
+    inactivity warning; the deadlines themselves are only ever enforced server-side."""
+    idle_timeout_seconds: int
+    last_activity_at: datetime
+    idle_expires_at: datetime
+    absolute_expires_at: datetime
+    server_now: datetime
+    remember: bool
 
 
 class TokenOut(BaseModel):

@@ -6,8 +6,9 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, field_validator
 
+from ..countries import normalize_country
 from ..models.event import EVENT_STATUSES
 
 Visibility = Literal["public", "private", "unlisted"]
@@ -187,6 +188,26 @@ class WatchOut(BaseModel):
     # stays available, if its entitlement says.
     replay_state: Literal["available", "processing", "expired", "unavailable"] | None = None
     replay_available_until: datetime | None = None
+    # True only for a viewer the HOST invited (a `reg` token for a registration the host
+    # created) who has not given a country: they never pass through the registration form, so
+    # the page offers the same optional Country / Region field once. Nothing else is revealed
+    # about the registration.
+    country_prompt: bool = False
+
+
+class RegistrationCountryUpdate(BaseModel):
+    """PUT /events/{id}/registration/country — the holder of a registration token setting
+    (or clearing) their own optional Country / Region. The token travels in the body, never
+    the URL."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    token: str = Field(..., min_length=16, max_length=4096)
+    country: str | None = Field(None, max_length=2)
+
+    @field_validator("country")
+    @classmethod
+    def _country(cls, value):
+        return normalize_country(value)
 
 
 class InvitationRedeem(BaseModel):
@@ -217,6 +238,14 @@ class RegistrationCreate(BaseModel):
     # so the NOT NULL column and the UNIQUE(event_id, email) key are still satisfied — see
     # routers/events.register_for_event for why that is done there and not here.
     email: EmailStr | None = None
+    # OPTIONAL Country / Region (ISO 3166-1 alpha-2, app/countries.py), for aggregate audience
+    # geography only. Blank means "not given"; anything outside the list is refused.
+    country: str | None = Field(None, max_length=2)
+
+    @field_validator("country")
+    @classmethod
+    def _country(cls, value):
+        return normalize_country(value)
 
 
 class RegistrationOut(BaseModel):
@@ -224,6 +253,8 @@ class RegistrationOut(BaseModel):
     name: str
     email: str
     token: str
+    # What is stored for this registration, so a returning viewer's form can show it.
+    country_code: str | None = None
 
 
 class RegistrantOut(BaseModel):

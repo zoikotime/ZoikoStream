@@ -49,8 +49,38 @@ const ATTENDANCE = {
   show_rate_basis: "private_invited_events_only",
 };
 
+// GET /organization/audience-insights with real-looking counts (server/app/services/audience.py).
+const INSIGHTS = {
+  range: "30d", viewers: 10,
+  geography: [
+    { country_code: "IN", country_name: "India", viewers: 4, percentage: 50 },
+    { country_code: "US", country_name: "United States", viewers: 2, percentage: 25 },
+    { country_code: "GB", country_name: "United Kingdom", viewers: 1, percentage: 13 },
+    { country_code: "DE", country_name: "Germany", viewers: 1, percentage: 13 },
+  ],
+  geography_known: 8, geography_unknown: 2,
+  device_mix: [
+    { device_type: "desktop", label: "Desktop", viewers: 6, percentage: 60 },
+    { device_type: "mobile", label: "Mobile", viewers: 4, percentage: 40 },
+  ],
+  device_breakdown: {
+    browsers: [{ browser: "chrome", label: "Chrome", viewers: 7, percentage: 70 },
+               { browser: "safari", label: "Safari", viewers: 3, percentage: 30 }],
+    operating_systems: [{ os: "windows", label: "Windows", viewers: 10, percentage: 100 }],
+    clients: [{ client_type: "web", label: "Web browser", viewers: 10, percentage: 100 }],
+  },
+  registration_attendance: { applicable: true, registered: 4, attended: 2, rate: 50 },
+  blocked_join_attempts: {
+    total: 3,
+    reasons: [{ reason: "invalid_invite", label: "Invalid or expired invitation", count: 2 },
+              { reason: "event_full", label: "Registration full", count: 1 }],
+  },
+};
+
 let failSummary = false;
 let eventsTotal = 3;
+let insights = INSIGHTS;
+let failInsights = false;
 
 const serve = () => {
   vi.mocked(api.get).mockImplementation((url, cfg) => {
@@ -60,6 +90,11 @@ const serve = () => {
         : Promise.resolve({ data: { ...SUMMARY, range: cfg?.params?.range } });
     }
     if (url === "/organization/audience-attendance") return Promise.resolve({ data: ATTENDANCE });
+    if (url === "/organization/audience-insights") {
+      return failInsights
+        ? Promise.reject(new Error("boom"))
+        : Promise.resolve({ data: { ...insights, range: cfg?.params?.range } });
+    }
     if (url === "/events") {
       const q = cfg?.params?.q;
       const items = q
@@ -97,8 +132,16 @@ beforeEach(() => {
   downloadCsv.mockClear();
   failSummary = false;
   eventsTotal = 3;
+  insights = INSIGHTS;
+  failInsights = false;
   serve();
 });
+
+const insightsParams = () => {
+  const calls = vi.mocked(api.get).mock.calls.filter(([u]) => u === "/organization/audience-insights");
+  return calls[calls.length - 1]?.[1]?.params;
+};
+const block = (title) => screen.getByRole("region", { name: title });
 
 // ── the KPI row ────────────────────────────────────────────────────────────────────────
 
@@ -355,6 +398,109 @@ describe("the Playback & Access entry points are gone", () => {
     await screen.findByText("Full House");
     const hrefs = [...container.querySelectorAll("a")].map((a) => a.getAttribute("href"));
     expect(hrefs.some((h) => h && h.includes("/organization/playback"))).toBe(false);
+  });
+});
+
+// ── audience insights ─────────────────────────────────────────────────────────────────────
+
+describe("audience insights", () => {
+  it("lists viewers by country with their share, and says how many gave none", async () => {
+    renderPage();
+    const geo = await screen.findByRole("list", { name: "Viewers by country" });
+    expect(within(geo).getByText("India")).toBeInTheDocument();
+    expect(within(geo).getByText("4 viewers · 50%")).toBeInTheDocument();
+    expect(within(geo).getByText("United States")).toBeInTheDocument();
+    expect(within(block("Audience geography")).getByText("2 viewers did not share a country.")).toBeInTheDocument();
+  });
+
+  it("folds countries past the top five into one Other row", async () => {
+    const many = ["AA", "BB", "CC", "DD", "EE", "FF", "GG"].map((code, i) => ({
+      country_code: code, country_name: `Country ${code}`, viewers: 7 - i, percentage: 10,
+    }));
+    insights = { ...INSIGHTS, geography: many, geography_known: 28, geography_unknown: 0 };
+    renderPage();
+    const geo = await screen.findByRole("list", { name: "Viewers by country" });
+    expect(within(geo).getAllByRole("listitem")).toHaveLength(6);
+    // FF (2) + GG (1) = 3 of 28 known.
+    expect(within(geo).getByText("Other countries (2)")).toBeInTheDocument();
+    expect(within(geo).getByText("3 viewers · 11%")).toBeInTheDocument();
+  });
+
+  it("shows the device mix and the detected browser, OS and player classes", async () => {
+    renderPage();
+    const devices = await screen.findByRole("list", { name: "Viewers by device" });
+    expect(within(devices).getByText("Desktop")).toBeInTheDocument();
+    expect(within(devices).getByText("6 viewers · 60%")).toBeInTheDocument();
+    expect(within(devices).getByText("Mobile")).toBeInTheDocument();
+    const mix = block("Device and player mix");
+    expect(within(mix).getByText("Chrome 70% · Safari 30%")).toBeInTheDocument();
+    expect(within(mix).getByText("Web browser 100%")).toBeInTheDocument();
+  });
+
+  it("totals blocked join attempts with their reasons", async () => {
+    renderPage();
+    const reasons = await screen.findByRole("list", { name: "Blocked join attempts by reason" });
+    expect(within(block("Blocked join attempts")).getByText("3")).toBeInTheDocument();
+    expect(within(reasons).getByText("Invalid or expired invitation")).toBeInTheDocument();
+    expect(within(reasons).getByText("Registration full")).toBeInTheDocument();
+  });
+
+  it("states registration → attendance as counted registrations who attended", async () => {
+    renderPage();
+    expect(await screen.findByText("2 of 4 registered viewers attended")).toBeInTheDocument();
+    expect(within(screen.getByText("Registration → attendance").closest("div")).getByText("50%")).toBeInTheDocument();
+  });
+
+  it("says Not applicable, never 0%, when nobody registered in the window", async () => {
+    insights = { ...INSIGHTS, registration_attendance: { applicable: false, registered: 0, attended: 0, rate: null } };
+    renderPage();
+    expect(await screen.findByText("No registrations in this window")).toBeInTheDocument();
+    const fact = screen.getByText("Registration → attendance").closest("div");
+    expect(within(fact).getByText("Not applicable")).toBeInTheDocument();
+    expect(within(fact).queryByText("0%")).not.toBeInTheDocument();
+  });
+
+  it("shows a counted 0% when registrants exist and none attended", async () => {
+    insights = { ...INSIGHTS, registration_attendance: { applicable: true, registered: 3, attended: 0, rate: 0 } };
+    renderPage();
+    expect(await screen.findByText("0 of 3 registered viewers attended")).toBeInTheDocument();
+  });
+
+  it("shows empty states when nothing has been collected", async () => {
+    insights = {
+      ...INSIGHTS, viewers: 0, geography: [], geography_known: 0, geography_unknown: 0, device_mix: [],
+      device_breakdown: { browsers: [], operating_systems: [], clients: [] },
+      blocked_join_attempts: { total: 0, reasons: [] },
+    };
+    renderPage();
+    expect(await screen.findByText("No geography data collected yet")).toBeInTheDocument();
+    expect(screen.getByText("No viewer device data yet")).toBeInTheDocument();
+    expect(screen.getByText("No blocked join attempts in this window")).toBeInTheDocument();
+  });
+
+  it("says it could not load, with a retry, instead of showing zeros", async () => {
+    failInsights = true;
+    renderPage();
+    expect(await screen.findByText("Couldn't load audience insights.")).toBeInTheDocument();
+    expect(screen.queryByText("No geography data collected yet")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("follows the page's date range", async () => {
+    const u = userEvent.setup();
+    renderPage();
+    await screen.findByText("Full House");
+    await waitFor(() => expect(insightsParams().range).toBe("30d"));
+    await u.click(screen.getByRole("button", { name: "7 days" }));
+    await waitFor(() => expect(insightsParams().range).toBe("7d"));
+    expect(insightsParams()).not.toHaveProperty("org_id");
+  });
+
+  it("no longer claims these figures are deliberately not measured", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Audience insights" });
+    expect(screen.queryByRole("heading", { name: "Not measured" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Deliberate:/)).not.toBeInTheDocument();
   });
 });
 

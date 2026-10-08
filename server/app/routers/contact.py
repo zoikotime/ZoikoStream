@@ -10,11 +10,14 @@ Unauthenticated by necessity (prospects have no account), so the protections are
 limit, a schema that bounds every field and forbids unknown ones, and a destination that comes
 from configuration rather than from the request.
 """
+import hashlib
 import logging
+import threading
+import time
 
 from fastapi import APIRouter, BackgroundTasks, status
 
-from ..email import send_contact_message_email
+from ..email import send_contact_confirmation_email, send_contact_message_email
 from ..ratelimit import rate_limit
 from ..schemas.contact import ContactMessageIn, ContactMessageOut
 
@@ -26,6 +29,51 @@ router = APIRouter(prefix="/contact", tags=["contact"])
 # person who mistypes their address and resubmits; tight enough that the form is not a
 # convenient way to pump mail through our provider.
 _CONTACT_LIMIT = rate_limit("contact", limit=5, window=300.0)
+
+# The same enquiry submitted again (a retry after a flaky connection, a second click that got
+# past the disabled button) is accepted but not mailed twice: neither the team nor the visitor
+# should receive duplicates. Keyed on a hash of the content, never the content itself, and held
+# per process like the rate limiter — a resubmission landing on another worker is the residual
+# case, bounded by the per-IP limit above.
+_DUPLICATE_WINDOW = 600.0
+_RECENT: dict[str, float] = {}
+_RECENT_LOCK = threading.Lock()
+
+
+def _first_submission(data: ContactMessageIn) -> bool:
+    key = hashlib.sha256("\x1f".join(
+        (str(data.email).lower(), data.first.lower(), data.last.lower(), data.topic, data.message)
+    ).encode("utf-8")).hexdigest()
+    now = time.monotonic()
+    with _RECENT_LOCK:
+        for k, seen in list(_RECENT.items()):
+            if now - seen > _DUPLICATE_WINDOW:
+                del _RECENT[k]
+        if key in _RECENT:
+            return False
+        _RECENT[key] = now
+        return True
+
+
+def _deliver(*, first: str, last: str, email: str, org: str, country: str, topic: str,
+             message: str) -> None:
+    """Background delivery: the team's copy first, then the visitor's confirmation.
+
+    The confirmation tells the visitor our team will review their enquiry, so it is sent only
+    once the provider has accepted the team's copy — otherwise it would confirm something
+    nobody received. Each failure is logged at ERROR naming which email failed (the provider
+    reason is already logged by `_send`); there is no automatic retry, so a flaky provider can
+    never produce duplicate confirmations.
+    """
+    if not send_contact_message_email(first=first, last=last, email=email, org=org,
+                                      country=country, topic=topic, message=message):
+        log.error("contact enquiry NOT delivered to the team inbox (topic=%s); "
+                  "the submitter's confirmation was withheld", topic)
+        return
+    if not send_contact_confirmation_email(first=first, last=last, email=email, org=org,
+                                           topic=topic, message=message):
+        log.error("contact confirmation NOT delivered to the submitter (topic=%s); "
+                  "the team's copy was delivered", topic)
 
 
 @router.post("", response_model=ContactMessageOut, status_code=status.HTTP_202_ACCEPTED,
@@ -39,12 +87,20 @@ def submit_contact_message(data: ContactMessageIn, background: BackgroundTasks) 
 
     Delivery runs in the background so a slow mail provider cannot hold the request open, and
     `_send` already swallows and logs provider failures, so a mail outage cannot turn a
-    successfully received enquiry into a 500 for the visitor.
+    successfully received enquiry into a 500 for the visitor. Because delivery happens after
+    the response, the response never claims an email was sent.
+
+    Two emails per accepted enquiry (see `_deliver`): the team's notification, whose recipient
+    is settings.CONTACT_EMAIL, and the submitter's confirmation, whose recipient is the
+    schema-validated `email` field. Nothing else in `data` selects a destination — the schema
+    forbids such a field even being present.
     """
-    # The recipient is settings.CONTACT_EMAIL, resolved inside the email service. Nothing from
-    # `data` selects a destination — the schema forbids such a field even being present.
+    if not _first_submission(data):
+        # Same answer as the first time: the enquiry IS received. Only the mail is not repeated.
+        log.info("contact enquiry resubmitted within %.0fs; not mailed again", _DUPLICATE_WINDOW)
+        return ContactMessageOut()
     background.add_task(
-        send_contact_message_email,
+        _deliver,
         first=data.first, last=data.last, email=str(data.email), org=data.org,
         country=data.country, topic=data.topic, message=data.message,
     )

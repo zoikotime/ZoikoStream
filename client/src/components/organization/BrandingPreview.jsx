@@ -45,17 +45,17 @@ export default function BrandingPreview({ open, onClose, accent, logoUrl, logoUr
         className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-700 dark:bg-slate-950"
       >
         <div className="flex items-center gap-3">
-          <span className="grid h-12 w-12 shrink-0 place-items-center overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
-            {/* Same chain as the viewer page: this theme's logo, then the light one, then
-                the ZoikoStream mark. A link that fails to load falls down the chain. */}
-            <OrgLogo
-              light={logoUrl}
-              dark={logoUrlDark}
-              name={name}
-              height="max-h-full"
-              className="max-w-full"
-              fallback={<img src="/zoiko-logo.png" alt="ZoikoStream" className="max-h-full max-w-full object-contain" />}
-            />
+          {/* The logo exactly as the viewer page's brand bar draws it: the same component, the
+              same chain (this theme's logo, then the light one, then the ZoikoStream mark on its
+              light chip), the bar's own height, on the bar's own surface. The box is a fixed
+              size, so the title never shifts while an image loads, and wide enough for a
+              wordmark: it used to be a 48px square, which drew a 2.8:1 wordmark at 46x16 px, and
+              the fallback was the bare wordmark on a slate tile, which hid its navy lettering. */}
+          <span
+            data-testid="branding-preview-logo"
+            className="flex h-12 w-28 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-white px-2 sm:w-32 dark:border-slate-700 dark:bg-slate-950"
+          >
+            <OrgLogo light={logoUrl} dark={logoUrlDark} name={name} height="h-6 sm:h-7" className="max-w-full" />
           </span>
           <div className="min-w-0">
             <p className="truncate text-xs font-semibold uppercase tracking-wide text-slate-400">{name}</p>

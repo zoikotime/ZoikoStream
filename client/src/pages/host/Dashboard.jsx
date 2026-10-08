@@ -31,6 +31,7 @@ import HostPanel from "../../components/host/HostPanel";
 import FeatureModal from "../../components/host/FeatureModal";
 import StartMeetingPrompt from "../../components/host/StartMeetingPrompt";
 import useKeepAwake from "../../hooks/useKeepAwake";
+import { useSessionHold } from "../../auth/useSessionKeeper";
 import useBroadcastKeepAlive from "../../native/useBroadcastKeepAlive";
 export default function HostDashboard() {
   const navigate = useNavigate();
@@ -85,6 +86,14 @@ export default function HostDashboard() {
 
   const canHost = state.canHost;
   const live = state.broadcast?.status === "live";
+  // While this console is ON AIR the producer's sign-in is kept alive (auth/useSessionKeeper):
+  // someone watching their own broadcast may not touch the mouse for half an hour, and must
+  // not be signed out mid-event. The hold ends with the broadcast; an abandoned console that
+  // is not live lets its session expire like any other tab. It also applies while this tab is
+  // hidden (`whileHidden`): the broadcast runs from this console, and a producer routinely
+  // works from another window (OBS, slides) meanwhile. The server's absolute limit still ends
+  // the session regardless.
+  useSessionHold(live, { whileHidden: true });
   const scheduledEnd = state.event?.scheduled_end || state.event?.end_time;
   const overrun = useEventOverrun({
     scheduledEnd,

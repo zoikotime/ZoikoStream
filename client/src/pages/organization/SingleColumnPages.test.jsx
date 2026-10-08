@@ -66,6 +66,14 @@ const ATTENDANCE = {
   avg_watch_minutes_estimated: true,
 };
 
+// What GET /organization/audience-insights answers for an organization nobody has watched yet.
+const INSIGHTS_EMPTY = {
+  range: "30d", viewers: 0, geography: [], geography_known: 0, geography_unknown: 0,
+  device_mix: [], device_breakdown: { browsers: [], operating_systems: [], clients: [] },
+  registration_attendance: { applicable: false, registered: 0, attended: 0, rate: null },
+  blocked_join_attempts: { total: 0, reasons: [] },
+};
+
 const OVERVIEW = {
   organization: { name: "Northwind" },
   sessions: {
@@ -90,6 +98,7 @@ beforeEach(() => {
   vi.mocked(api.get).mockImplementation((url) => {
     if (url === "/events") return Promise.resolve({ data: EVENTS });
     if (url === "/organization/audience-attendance") return Promise.resolve({ data: ATTENDANCE });
+    if (url === "/organization/audience-insights") return Promise.resolve({ data: INSIGHTS_EMPTY });
     if (url === "/organization/overview") return Promise.resolve({ data: OVERVIEW });
     return Promise.resolve({ data: {} });
   });
@@ -141,10 +150,10 @@ describe("Audience keeps its content, in order, full width", () => {
     expect(screen.queryByRole("link", { name: /playback gates/i })).not.toBeInTheDocument();
   });
 
-  it("reads top to bottom: access by event, then attendance, then not measured, then controls", async () => {
+  it("reads top to bottom: access by event, then attendance, then audience insights, then controls", async () => {
     renderPage(AudienceAccess);
     await screen.findByRole("heading", { level: 1 });
-    const order = ["Access by event", "Attendance", "Not measured", "Controls that shape the audience"];
+    const order = ["Access by event", "Attendance", "Audience insights", "Controls that shape the audience"];
     const tops = order.map((t) => {
       const heading = screen.getByRole("heading", { name: t });
       return [...document.querySelectorAll("*")].indexOf(heading);
@@ -155,13 +164,23 @@ describe("Audience keeps its content, in order, full width", () => {
   it("keeps unmeasured figures as an em dash, never as zero", async () => {
     renderPage(AudienceAccess);
     await screen.findByRole("heading", { level: 1 });
-    // avg_watch_minutes and show_rate are null in the payload above.
+    // avg_watch_minutes is null in the payload above.
     const watch = screen.getByText("Average watch time").closest("div");
     expect(within(watch).getByText("—")).toBeInTheDocument();
-    // …and the three that nothing produces at all.
-    for (const label of ["Audience geography", "Device and player mix", "Blocked join attempts"]) {
-      expect(within(screen.getByText(label).closest("div")).getByText("—")).toBeInTheDocument();
-    }
+  });
+
+  it("says when audience insights have nothing yet, rather than inventing figures", async () => {
+    renderPage(AudienceAccess);
+    expect(await screen.findByText("No geography data collected yet")).toBeInTheDocument();
+    expect(screen.getByText("No viewer device data yet")).toBeInTheDocument();
+    expect(screen.getByText("No blocked join attempts in this window")).toBeInTheDocument();
+    // No gated event in the window: not applicable, never 0%.
+    const rate = screen.getByText("Registration → attendance").closest("div");
+    expect(within(rate).getByText("Not applicable")).toBeInTheDocument();
+    expect(within(rate).queryByText("0%")).not.toBeInTheDocument();
+    // The copy claiming these are deliberately not measured is gone.
+    expect(screen.queryByText(/not measured/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Deliberate:/)).not.toBeInTheDocument();
   });
 
   it("keeps the estimation caveat rather than quietly presenting estimates as counts", async () => {

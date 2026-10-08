@@ -337,6 +337,9 @@ _EVENT_REGISTRATION_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS invited_by UUID REFERENCES users(id)",
     "ADD COLUMN IF NOT EXISTS claim_token_hash VARCHAR(64)",
     "ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ",
+    # Optional viewer country (ISO alpha-2) for aggregate audience geography. Nullable, no
+    # default, no backfill: existing registrations simply have no country.
+    "ADD COLUMN IF NOT EXISTS country_code VARCHAR(2)",
 ]
 
 # Schema drift: the live table carries org_id/user_id/status/bookmarked/watch_seconds/

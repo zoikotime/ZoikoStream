@@ -196,3 +196,117 @@ describe("registering", () => {
     expect(localStorage.getItem(`zk_reg_${EVENT_ID}`)).toBeNull();
   });
 });
+
+// ── the optional Country / Region ─────────────────────────────────────────────────────────
+// Country level only, for aggregate audience geography (server/app/services/audience.py).
+// Optional: a viewer who leaves it blank registers exactly as before.
+
+const countryInput = () => screen.getByRole("combobox", { name: /country \/ region/i });
+
+describe("the Country / Region field", () => {
+  it("is offered as optional, with what it is used for", () => {
+    renderGate();
+    expect(countryInput()).toBeInTheDocument();
+    expect(countryInput()).not.toBeRequired();
+    expect(screen.getByText("(optional)")).toBeInTheDocument();
+    expect(screen.getByText("Used for aggregate event audience analytics.")).toBeInTheDocument();
+  });
+
+  it("is searchable over the ISO country list", () => {
+    const { container } = renderGate();
+    const list = container.querySelector(`datalist#${CSS.escape(countryInput().getAttribute("list"))}`);
+    const names = [...list.querySelectorAll("option")].map((o) => o.value);
+    expect(names).toContain("India");
+    expect(names).toContain("United States");
+    expect(names.length).toBeGreaterThan(200);
+  });
+
+  it("sends no country at all when left blank", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await fillForm(user);
+    await register(user);
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    expect(vi.mocked(api.post).mock.calls[0][1]).toEqual({ name: NAME });
+  });
+
+  it("sends the ISO code of the chosen country", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await fillForm(user);
+    await user.type(countryInput(), "india");
+    await register(user);
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    expect(vi.mocked(api.post).mock.calls[0][1]).toEqual({ name: NAME, country: "IN" });
+  });
+
+  it("refuses something that is not a country, inline, without registering", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await fillForm(user);
+    await user.type(countryInput(), "Atlantis");
+    await register(user);
+    expect(await screen.findByText(/choose a country from the list/i)).toBeInTheDocument();
+    expect(countryInput()).toHaveAttribute("aria-invalid", "true");
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it("is remembered with the name, only when Remember me is ticked", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await fillForm(user);
+    await user.type(countryInput(), "Japan");
+    await user.click(checkbox());
+    await register(user);
+    await waitFor(() => expect(onRegistered).toHaveBeenCalled());
+    expect(JSON.parse(localStorage.getItem("zk_viewer_profile"))).toEqual({ name: NAME, country: "JP" });
+  });
+
+  it("is not remembered when Remember me is left unticked", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await fillForm(user);
+    await user.type(countryInput(), "Japan");
+    await register(user);
+    await waitFor(() => expect(onRegistered).toHaveBeenCalled());
+    expect(localStorage.getItem("zk_viewer_profile")).toBeNull();
+  });
+});
+
+describe("a returning viewer's remembered country", () => {
+  beforeEach(() => {
+    localStorage.setItem("zk_viewer_profile", JSON.stringify({ name: NAME, country: "IN" }));
+  });
+
+  it("is shown on the Continue card and sent with the one-tap registration", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    expect(screen.getByText(`Continue as ${NAME}`)).toBeInTheDocument();
+    expect(screen.getByText("Country / Region: India")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    expect(vi.mocked(api.post).mock.calls[0][1]).toEqual({ name: NAME, country: "IN" });
+  });
+
+  it("is prefilled when they change details, and can be updated", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await user.click(screen.getByRole("button", { name: /not you\? change details/i }));
+    expect(countryInput()).toHaveValue("India");
+    await user.clear(countryInput());
+    await user.type(countryInput(), "Canada");
+    await register(user);
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    expect(vi.mocked(api.post).mock.calls[0][1]).toEqual({ name: NAME, country: "CA" });
+  });
+
+  it("can be removed by clearing the field", async () => {
+    const user = userEvent.setup();
+    renderGate();
+    await user.click(screen.getByRole("button", { name: /not you\? change details/i }));
+    await user.clear(countryInput());
+    await register(user);
+    await waitFor(() => expect(api.post).toHaveBeenCalled());
+    expect(vi.mocked(api.post).mock.calls[0][1]).toEqual({ name: NAME });
+  });
+});
