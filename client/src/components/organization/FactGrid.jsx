@@ -13,6 +13,9 @@ import { CONSOLE, cx } from "../../ui/tokens";
 //
 //   <FactGrid facts={[{ label: "Unique attendees", value: 12 },
 //                     { label: "Blocked joins", value: null, reason: "Not recorded" }]} />
+//
+// An optional `detail` is a short line under the value saying what it is made of
+// ("3 of 12 registered viewers attended").
 const COLUMNS = {
   2: "sm:grid-cols-2",
   3: "sm:grid-cols-2 lg:grid-cols-3",
@@ -22,7 +25,7 @@ const COLUMNS = {
 export default function FactGrid({ facts = [], columns = 4, className = "" }) {
   return (
     <dl className={cx("grid grid-cols-1 gap-x-6 gap-y-5", COLUMNS[columns] || COLUMNS[4], className)}>
-      {facts.map(({ label, value, reason, tone }) => {
+      {facts.map(({ label, value, reason, tone, detail }) => {
         const missing = value == null;
         return (
           <div key={label} className="min-w-0">
@@ -38,6 +41,7 @@ export default function FactGrid({ facts = [], columns = 4, className = "" }) {
             >
               {missing ? "—" : value}
             </dd>
+            {detail && <dd className={cx("mt-0.5 text-[12px]", CONSOLE.faint)}>{detail}</dd>}
           </div>
         );
       })}

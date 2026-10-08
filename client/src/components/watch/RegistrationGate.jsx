@@ -1,13 +1,15 @@
 // client/src/components/watch/RegistrationGate.jsx
 // Shown in place of the video player when an event has registration_required=true and
-// the visitor hasn't registered yet. Anonymous (no login) — POSTs the NAME ONLY, stores the
-// returned access token, and hands control back to EventWatch to refetch /watch.
+// the visitor hasn't registered yet. Anonymous (no login) — POSTs the name and, only if the
+// viewer chose one, an ISO Country / Region (CountryField; aggregate geography only), stores
+// the returned access token, and hands control back to EventWatch to refetch /watch.
 //
 // ── TWO DIFFERENT THINGS, KEPT APART ────────────────────────────────────────────────────
 // A viewer who ticked "Remember me" on an earlier event is greeted with "Continue as
 // Naveen" instead of an empty form. That shortcut saves them TYPING and nothing else:
 //
-//   remembered profile   the name, one key for the whole browser (utils/viewerProfile).
+//   remembered profile   the name (and country, if given), one key for the whole browser
+//                        (utils/viewerProfile).
 //                        Grants no access at all. It only fills in the form.
 //   event credential     `zk_reg_<eventId>` in EventWatch — an opaque server-signed token
 //                        bound to ONE event. This is what grants access.
@@ -19,7 +21,9 @@ import { useId, useState } from "react";
 import { FiCheckCircle, FiLock, FiUser } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { cx } from "../../ui/tokens";
+import { countryName, resolveCountry } from "../../utils/countries";
 import { clearViewerProfile, readViewerProfile, saveViewerProfile } from "../../utils/viewerProfile";
+import CountryField from "./CountryField";
 
 const field =
   "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100";
@@ -31,7 +35,11 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
   // on a new device, or for anyone who never ticked Remember me — all of which land on the
   // ordinary empty form below.
   const [saved, setSaved] = useState(readViewerProfile);
-  const [form, setForm] = useState(() => saved || { name: "" });
+  // `country` here is the field's text (a country NAME); it becomes an ISO code on submit.
+  const [form, setForm] = useState(() => ({
+    name: saved?.name || "", country: countryName(saved?.country) || "",
+  }));
+  const [countryError, setCountryError] = useState(null);
   // Unticked by default: keeping a credential on the device past this visit is a choice the
   // viewer makes, not one made for them. A returning viewer has already made it — a saved
   // profile only exists because they ticked this — so it starts on for them, and unticking
@@ -58,10 +66,12 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
   };
 
   // `identity` is passed explicitly rather than read from state: the Continue path submits
-  // the SAVED values, and the edit path submits the typed ones.
+  // the SAVED values, and the edit path submits the typed ones. `identity.country` is an ISO
+  // code or null — never the half-typed text.
   const register = async (identity) => {
     if (submitting) return;
     const name = identity.name.trim();
+    const country = identity.country || null;
     // Validated on both paths — a corrupt or hand-edited stored profile must not be able to
     // post something the typed form would have rejected.
     if (!name) {
@@ -75,11 +85,11 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
       // is a name, never a token, so there is nothing here that could carry access over from
       // an event the viewer registered for previously. No `email` key is sent at all — the
       // schema makes it optional and the server mints its own placeholder (see
-      // routers/events.register_for_event).
-      const { data } = await api.post(`/events/${eventId}/register`, { name });
+      // routers/events.register_for_event). `country` is only sent when the viewer chose one.
+      const { data } = await api.post(`/events/${eventId}/register`, { name, ...(country ? { country } : {}) });
       // Only after the server accepted it, and only with consent. A rejected or abandoned
       // attempt leaves the remembered profile exactly as it was.
-      if (remember) saveViewerProfile({ name });
+      if (remember) saveViewerProfile({ name, country });
       else clearViewerProfile();
       // Storage of the CREDENTIAL is EventWatch's job — it owns both the persistent and
       // session-only stores and the Remember me choice decides which. Writing localStorage
@@ -100,7 +110,10 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
   const submit = (e) => {
     e.preventDefault();
     if (!valid) return;
-    register(form);
+    const { code, error: bad } = resolveCountry(form.country);
+    setCountryError(bad || null);
+    if (bad) return;
+    register({ name: form.name, country: code });
   };
 
   return (
@@ -132,6 +145,11 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
                 <p className="text-sm font-semibold text-slate-900 dark:text-white">
                   Continue as {greeting.name}
                 </p>
+                {greeting.country && (
+                  <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    Country / Region: {countryName(greeting.country)}
+                  </p>
+                )}
               </div>
               {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
               <button
@@ -169,7 +187,13 @@ export default function RegistrationGate({ eventId, eventTitle, onRegistered }) 
                 />
               </div>
             </div>
-            {/* Directly below the name, above the button. */}
+            <CountryField
+              value={form.country}
+              onChange={(v) => { set("country", v); if (countryError) setCountryError(null); }}
+              error={countryError}
+              disabled={submitting}
+            />
+            {/* Below the details, above the button. */}
             <label className="flex cursor-pointer items-start gap-2.5 text-left">
               <input
                 type="checkbox"

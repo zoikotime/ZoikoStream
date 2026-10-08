@@ -1,10 +1,12 @@
-// The remembered viewer profile: a name, for this browser, for convenience.
+// The remembered viewer profile: a name and, if they gave one, a country, for this browser,
+// for convenience.
 //
 // ── WHAT THIS IS NOT ────────────────────────────────────────────────────────────────────
 // This is deliberately NOT an access credential, and the two must never be confused:
 //
-//   device profile (here)          the viewer's name. One key for the whole browser. Grants
-//                                  NOTHING — it only pre-fills a form.
+//   device profile (here)          the viewer's name and optional ISO country code. One key
+//                                  for the whole browser. Grants NOTHING — it only pre-fills
+//                                  a form.
 //   event credential (EventWatch)  `zk_reg_<eventId>`, an opaque server-signed JWT bound
 //                                  to ONE event and verified per request. Grants access.
 //
@@ -24,6 +26,8 @@
 // decides whether the event credential persists. Unticking it on a later registration
 // clears what was saved before, so the choice is revocable rather than one-way.
 
+import { countryName } from "./countries";
+
 const KEY = "zk_viewer_profile";
 
 /**
@@ -37,15 +41,19 @@ const KEY = "zk_viewer_profile";
  * failing the whole profile would have logged out every returning viewer on upgrade. The
  * address is simply never read and never written again, so it ages out on the next save.
  *
- * @returns {{name: string} | null}
+ * `country` is an ISO code from the same list the server accepts, or null — a record saved
+ * before the field existed, or one holding something unrecognised, simply has no country.
+ *
+ * @returns {{name: string, country: string | null} | null}
  */
 export function readViewerProfile() {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
-    const { name } = JSON.parse(raw) || {};
+    const { name, country } = JSON.parse(raw) || {};
     if (typeof name !== "string" || !name.trim()) return null;
-    return { name: name.trim() };
+    const code = typeof country === "string" && countryName(country) ? country.toUpperCase() : null;
+    return { name: name.trim(), country: code };
   } catch {
     return null;
   }
@@ -56,10 +64,11 @@ export function readViewerProfile() {
  * accepted, and only when "Remember me" was ticked — never from the form as it is typed,
  * so a half-finished or rejected attempt leaves nothing behind.
  */
-export function saveViewerProfile({ name }) {
+export function saveViewerProfile({ name, country = null }) {
   if (!name?.trim()) return;
+  const code = country && countryName(country) ? country.toUpperCase() : null;
   try {
-    localStorage.setItem(KEY, JSON.stringify({ name: name.trim() }));
+    localStorage.setItem(KEY, JSON.stringify({ name: name.trim(), ...(code ? { country: code } : {}) }));
   } catch { /* storage unavailable; this visit still works, nothing is remembered */ }
 }
 

@@ -26,11 +26,12 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..crud import event as event_crud
-from ..db import get_db
+from ..db import SessionLocal, get_db
 from ..models import EventRegistration, Organization, User
 from ..ratelimit import SlidingWindow
 from ..security import ALGORITHM, decode_registration_token
 from ..services import bus, livekit, org_state
+from ..services import audience as audience_svc
 from ..services import moderation as mod
 # Importing these registers the host/producer actions and the contributor-backstage
 # actions into mod.ACTIONS, the host-only permission set, and their snapshot
@@ -49,6 +50,29 @@ router = APIRouter(prefix="/live", tags=["live"])
 RATE_LIMIT = 30           # actions ...
 RATE_WINDOW = 10.0        # ... per this many seconds
 IDLE_TIMEOUT = 90.0       # no frame at all for this long -> reap the socket (client pings every 15s)
+
+# A signed-in connection's sign-in session is re-checked on this beat while the socket stays
+# open (services/auth_sessions.py), so the socket ends with the session — idle or maximum
+# length reached, signed out, user deactivated, organization restricted — instead of staying
+# privileged until some later HTTP request notices. Re-checking never extends anything, and
+# the socket's own heartbeats are not activity.
+SESSION_RECHECK_SECONDS = 60.0
+# A re-check that cannot reach the database is retried on the next beat; after this many in a
+# row the socket closes with a RETRYABLE code, so the client reconnects and is checked afresh
+# rather than keeping an unverifiable privileged connection open indefinitely.
+SESSION_RECHECK_FAILURE_LIMIT = 3
+# App-defined close code: "the sign-in this socket was opened with has ended". The client
+# (useEventStream) signs the user out exactly as for a 401, using the reason the close carries.
+SESSION_ENDED_CLOSE_CODE = 4401
+
+
+class _SessionEnded:
+    """Queued for THIS connection's writer by its session guard. A plain object, never JSON,
+    so nothing arriving over the bus can impersonate it."""
+
+    def __init__(self, code: int, reason: str):
+        self.code = code
+        self.reason = reason
 
 # Reactions get their OWN budget rather than drawing on the shared one above, for two
 # reasons that both matter at once:
@@ -92,7 +116,59 @@ def _user_from_token(token: str | None, db: Session) -> User | None:
         user = db.get(User, payload["sub"])
     except (JWTError, KeyError):
         return None
-    return user if user and user.is_active else None
+    if not (user and user.is_active):
+        return None
+    # The token's server-side session must still be live (services/auth_sessions.py), exactly
+    # as for HTTP. Checked at connect only, and never extended here: a socket's heartbeats are
+    # not user activity, so an abandoned console cannot keep its session alive.
+    from ..services import auth_sessions
+    try:
+        auth_sessions.check(db, payload.get("sid"), user)
+    except auth_sessions.SessionInvalid:
+        return None
+    return user
+
+
+def _token_claims(token: str | None) -> dict | None:
+    """The claims of a token THIS server signed, or None (missing, forged, expired)."""
+    if not token:
+        return None
+    try:
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+
+def _session_verdict(user_id, sid: str | None, path: str) -> tuple[int, str] | None:
+    """None while a signed-in socket may stay open; otherwise (close code, reason).
+
+    The same rules as every authenticated HTTP request (security.get_current_user) plus the
+    organization gate the socket applied at connect. Its own short-lived DB session: called
+    from a thread, on a beat, for as long as the socket lives.
+    """
+    from ..services import auth_sessions
+
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if user is None or not user.is_active:
+            return SESSION_ENDED_CLOSE_CODE, "reauth"
+        try:
+            auth_sessions.check(db, sid, user)
+        except auth_sessions.SessionInvalid as exc:
+            # The same vocabulary the client already maps from a structured 401
+            # (sessionStore.sessionEndReasonOf): a revocation is "revoked", an expiry its reason.
+            return SESSION_ENDED_CLOSE_CODE, ("revoked" if exc.code == auth_sessions.SESSION_REVOKED
+                                              else exc.reason)
+        org = db.get(Organization, user.org_id) if user.org_id else None
+        blocked = org_state.blocked_reason(org, path)
+        if blocked is not None:
+            # Not a session end: the same deliberate, non-retryable refusal as at connect.
+            label = org_state.STATE_LABELS.get(blocked, blocked)
+            return status.WS_1008_POLICY_VIOLATION, f"This organization is {label}"
+        return None
+    finally:
+        db.close()
 
 
 def _registration_from_reg_token(reg: str | None, event_id: uuid.UUID, db: Session) -> EventRegistration | None:
@@ -188,6 +264,20 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     if user is None and registration is None and not link:
         if not await _accept(websocket, event_id):
             return
+        # A genuine sign-in whose session has ENDED (idle, maximum length, signed out) says so
+        # with the session-ended code, so the client signs out with the reason exactly as it
+        # does for an HTTP 401. Anything else (no token, a forged or malformed one) is the
+        # plain refusal it always was.
+        claims = _token_claims(token)
+        if claims and claims.get("sub"):
+            try:
+                verdict = await asyncio.to_thread(_session_verdict, claims["sub"], claims.get("sid"),
+                                                  websocket.url.path)
+            except Exception:  # noqa: BLE001 - e.g. a `sub` that is not a user id: plain refusal
+                verdict = None
+            if verdict is not None and verdict[0] == SESSION_ENDED_CLOSE_CODE:
+                await websocket.close(code=SESSION_ENDED_CLOSE_CODE, reason=verdict[1])
+                return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired session")
         return
 
@@ -207,6 +297,10 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
     ctx = None
     if user is not None:
         ctx = await asyncio.to_thread(mod.resolve_ctx, event_id, user)
+    # Admitted on the SIGN-IN (not on a registration or an access link): the connection stays
+    # subject to that sign-in's session for as long as it is open (session_guard below).
+    session_user_id = user.id if ctx is not None else None
+    session_sid = (_token_claims(token) or {}).get("sid") if session_user_id else None
     if ctx is None and registration is not None:
         ctx = await asyncio.to_thread(mod.resolve_ctx_from_registration, event_id, registration)
     if ctx is None and link:
@@ -220,6 +314,9 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Event not found")
         return
     if await bus.is_banned(ctx.event_id, ctx.identity):
+        # A removed viewer trying to rejoin is a blocked join on the Audience page
+        # (services/audience.py): reason and time only, de-duplicated in memory.
+        await asyncio.to_thread(audience_svc.record_denial_by_id, ctx.event_id, "removed_by_host", ctx.identity)
         if not await _accept(websocket, event_id):
             return
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="You have been removed from this event")
@@ -260,6 +357,11 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
         # roster badge and a waiting-room bypass, not an authorization. Its actual authority
         # is still ctx.can_host, which stays False, so it cannot reach any HOST_ONLY action.
         role = "host" if ctx.can_moderate else "speaker" if ctx.can_contribute else "viewer"
+        # Watch time for the Audience page: when a viewer's connection closes, the part of it
+        # spent admitted to the live stream is credited to their audience row (services/
+        # audience.record_leave). Only a row GET /watch created when admitting them is ever
+        # updated, so staff never count.
+        connected_since = datetime.now(timezone.utc)
         # Everything up to and including the opening snapshot is guarded. It used to sit
         # OUTSIDE the try below (which only starts at the receive loop), so a failure in
         # any of it - Redis unreachable, a slow DB, LiveKit token minting, a payload that
@@ -302,9 +404,19 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             connect path already uses for a banned rejoin attempt, so a removed viewer
             can't just keep sitting on the page with a live socket to a room they were
             just kicked out of. useEventStream.js already treats that code as fatal and
-            does not retry."""
+            does not retry.
+
+            The other: this connection's own session guard ending it (_SessionEnded). The
+            client is told why, then the socket closes — 4401 for an ended sign-in (the client
+            signs out), 1008 for a restricted organization, 1011 (retryable) for a session that
+            could not be verified."""
             while True:
                 env = await queue.get()
+                if isinstance(env, _SessionEnded):
+                    if env.code == SESSION_ENDED_CLOSE_CODE:
+                        await websocket.send_json(bus.envelope("session", "ended", {"reason": env.reason}))
+                    await websocket.close(code=env.code, reason=env.reason)
+                    return
                 await websocket.send_json(env)
                 if (
                     env.get("channel") == "session"
@@ -317,7 +429,30 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
                     )
                     return
 
+        async def session_guard():
+            """Re-check the sign-in this connection was admitted on, every
+            SESSION_RECHECK_SECONDS, and end the connection when it no longer holds. Reads only;
+            never extends the session (only POST /auth/session/activity does)."""
+            failures = 0
+            while True:
+                await asyncio.sleep(SESSION_RECHECK_SECONDS)
+                try:
+                    verdict = await asyncio.to_thread(_session_verdict, session_user_id, session_sid,
+                                                      websocket.url.path)
+                    failures = 0
+                except Exception:  # noqa: BLE001 - a DB blip is not a verdict on the session
+                    failures += 1
+                    log.warning("live socket session re-check failed for event %s (%d in a row)",
+                                event_id, failures, exc_info=True)
+                    if failures < SESSION_RECHECK_FAILURE_LIMIT:
+                        continue
+                    verdict = (status.WS_1011_INTERNAL_ERROR, "Session could not be verified")
+                if verdict is not None:
+                    await queue.put(_SessionEnded(*verdict))
+                    return
+
         pump = asyncio.create_task(writer())
+        guard = asyncio.create_task(session_guard()) if session_user_id else None
         try:
             while True:
                 try:
@@ -355,9 +490,14 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             log.exception("live socket failed for event %s", event_id)
         finally:
             pump.cancel()
+            if guard is not None:
+                guard.cancel()
             gone = await bus.presence_remove(ctx.event_id, ctx.identity)
             if gone:
                 await bus.publish(ctx.event_id, "participants", "participant.leave", gone)
+            if role == "viewer":
+                await asyncio.to_thread(audience_svc.record_leave_by_id, ctx.event_id, ctx.identity,
+                                        connected_since)
             if ctx.can_contribute:
                 await asyncio.to_thread(contributor.mark_disconnected, ctx.event_id, ctx.user_id)
 

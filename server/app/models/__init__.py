@@ -32,6 +32,22 @@ from .support_access import (
     SUPPORT_STATUSES,
     SupportAccessRequest,
 )
+from .audience import (
+    BROWSERS,
+    CLIENT_TYPES,
+    DENIAL_REASONS,
+    DEVICE_TYPES,
+    OPERATING_SYSTEMS,
+    AudienceSession,
+    JoinDenial,
+)
+from .auth_session import (
+    SESSION_END_ABSOLUTE,
+    SESSION_END_IDLE,
+    SESSION_END_LOGOUT,
+    SESSION_END_REASONS,
+    AuthSession,
+)
 from .stepup import (
     STEP_UP_HIGH_RISK_ROLE_GRANT,
     STEP_UP_OWNERSHIP_TRANSFER,

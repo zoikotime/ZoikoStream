@@ -26,6 +26,7 @@ from ..crud import organization as crud
 from ..db import get_db
 from ..email import UnsafeLinkError
 from ..services import account_lifecycle as lifecycle
+from ..services import audience as audience_svc
 from ..services import payments as payment_svc
 from ..models.plan import RETIRED_PLAN_SLUGS, Plan
 from ..models.subscription import (
@@ -562,6 +563,22 @@ def audience_attendance(
     org_svc.audience_attendance's docstring for exactly which figures are real counts vs.
     labeled estimates. Readable by any member, same posture as /analytics."""
     return org_svc.audience_attendance(db, org, range_key=range_)
+
+
+@router.get("/audience-insights")
+def audience_insights(
+    range_: str = Query("30d", alias="range", pattern="^(7d|30d|90d|12m)$"),
+    event_id: uuid.UUID | None = Query(None),
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """The Audience page's Audience insights: geography, device and player mix,
+    registration -> attendance and blocked join attempts (services/audience.insights) over the
+    same window as the rest of the page, optionally for one of the caller's own events. Org
+    comes from the token; an event of another organization reads as not found."""
+    if event_id is not None and event_crud.get_event(db, org.id, event_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    return audience_svc.insights(db, org, range_key=range_, event_id=event_id)
 
 
 @router.get("/events/{event_id}/recordings", response_model=list[EventRecordingOut])
@@ -2191,7 +2208,8 @@ def accept_invitation(data: InvitationAccept, background: BackgroundTasks,
     org_comms.announce_member_joined(db, background, inv, user)
     out = UserOut.model_validate(user)
     out.organization_name = user.organization.name if user.organization else None
-    return TokenOut(access_token=create_access_token(user, remember=False), user=out)
+    # A server-side session like any other sign-in (services/auth_sessions.py).
+    return TokenOut(access_token=create_access_token(user, remember=False, db=db), user=out)
 
 
 @router.post("/invitations/reject")

@@ -112,6 +112,14 @@ const seedFromPlan = (plan) => {
   return { ...EMPTY, topic: "procurement", message: `Requested plan: ${name}\n\n` };
 };
 
+// The address a confirmation is going to, shown without repeating it in full on screen:
+// first character of the local part, then the domain ("a•••@example.com").
+const maskEmail = (email) => {
+  const at = email.lastIndexOf("@");
+  if (at < 1) return "the email address you provided";
+  return `${email[0]}•••${email.slice(at)}`;
+};
+
 export default function Contact() {
   const [params] = useSearchParams();
   const [form, setForm] = useState(() => seedFromPlan(params.get("plan")));
@@ -120,6 +128,7 @@ export default function Contact() {
   // (or an Enter keypress while the first request is in flight) cannot post twice.
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const [sentTo, setSentTo] = useState("");
   const [sendError, setSendError] = useState("");
   const topicRef = useRef(null);
 
@@ -179,6 +188,7 @@ export default function Contact() {
       document.querySelector("[aria-invalid='true']")?.focus();
       return;
     }
+    const email = form.email.trim();
     const topicLabel = TOPICS.find(([v]) => v === form.topic)?.[1] || form.topic;
     const country = COUNTRIES.find(([code]) => code === form.country)?.[1] || form.country;
     setSending(true);
@@ -187,13 +197,14 @@ export default function Contact() {
       await api.post("/contact", {
         first: form.first.trim(),
         last: form.last.trim(),
-        email: form.email.trim(),
+        email,
         org: form.org.trim(),
         country,
         topic: topicLabel,
         message: form.message.trim(),
       });
       setSent(true);
+      setSentTo(maskEmail(email));
       setForm(EMPTY);                       // a delivered message should not sit in the form
       setErrors({});
     } catch (err) {
@@ -402,7 +413,11 @@ export default function Contact() {
               data-testid="contact-success"
               className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-[13px] leading-relaxed text-emerald-800"
             >
-              Thanks! Your message has been sent. Our team will get back to you shortly.
+              {/* Delivery happens after the API answers 202, so this says what is true now:
+                  the enquiry is received and a confirmation will follow. It never claims an
+                  email was sent, which the page cannot know. */}
+              Thanks — we&rsquo;ve received your inquiry. We&rsquo;ll send a confirmation to{" "}
+              <span className="font-semibold">{sentTo}</span>.
             </p>
           )}
           {sendError && (
