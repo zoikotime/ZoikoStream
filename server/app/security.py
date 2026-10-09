@@ -41,27 +41,55 @@ def verify_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode(), password_hash.encode())
 
 
-def create_access_token(user: User, remember: bool) -> str:
-    # ZST-EC-001 Phase 10. organizations.security.session_timeout was stored and displayed
-    # but never read, so a tenant that set "1 hour" still got the platform default. It is
-    # applied here, and only when it SHORTENS the session - the setting exists to tighten a
-    # tenant's own sessions, not to let one hold a token longer than the product allows.
-    from .services import org_policy   # local import: services import security
+def create_access_token(user: User, remember: bool, *, db: Session | None = None,
+                        user_agent: str | None = None) -> str:
+    """Start a server-side session (services/auth_sessions.py) and return its bearer token.
 
-    delta = org_policy.session_lifetime(getattr(user, "organization", None),
-                                        remember=remember)
+    The token carries the session id (`sid`) and expires with the session's ABSOLUTE limit:
+    the platform maximum, shortened by the organization's session_timeout policy (ZST-EC-001
+    Phase 10 — applied only when it SHORTENS the session). Idle expiry and sign-out are
+    enforced server-side on every request, which a stateless token could not do. "Remember
+    me" (`remember`) is recorded but never lengthens anything.
+
+    `db` is the caller's session when it has one; without it (tests, scripts) the session row
+    is written through a short-lived session of its own.
+    """
+    from .services import auth_sessions   # local import: services import security
+
+    if db is None:
+        from .db import SessionLocal
+        own = SessionLocal()
+        try:
+            sid, row = auth_sessions.start(own, user, remember=remember, user_agent=user_agent)
+            expires = row.absolute_expires_at
+        finally:
+            own.close()
+    else:
+        sid, row = auth_sessions.start(db, user, remember=remember, user_agent=user_agent)
+        expires = row.absolute_expires_at
     payload = {
         "sub": str(user.id),
         "role": user.role,
-        "exp": datetime.now(timezone.utc) + delta,
+        "sid": sid,
+        "exp": expires,
     }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 
 def get_current_user(
+    request: Request,
     creds: HTTPAuthorizationCredentials = Depends(_bearer),
     db: Session = Depends(get_db),
 ) -> User:
+    """The signed-in user, after the token AND its server-side session check out.
+
+    A valid signature is no longer enough: the session the token names must exist, belong to
+    this user, be unrevoked, and be inside both its idle and absolute limits. An ended session
+    is a structured 401 (SESSION_EXPIRED / SESSION_REVOKED) the client can explain. This check
+    never extends a session — only POST /api/auth/session/activity does.
+    """
+    from .services import auth_sessions
+
     unauthorized = HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
     try:
         payload = jwt.decode(creds.credentials, settings.SECRET_KEY, algorithms=[ALGORITHM])
@@ -71,6 +99,11 @@ def get_current_user(
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         raise unauthorized
+    try:
+        session = auth_sessions.check(db, payload.get("sid"), user)
+    except auth_sessions.SessionInvalid as exc:
+        raise auth_sessions.http_error(exc)
+    request.state.auth_session = session
     return user
 
 
@@ -78,9 +111,12 @@ def get_current_user_optional(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
     db: Session = Depends(get_db),
 ) -> User | None:
-    """Same decode as get_current_user, but returns None instead of 401 when there's no
+    """Same checks as get_current_user, but returns None instead of 401 when there's no
     token or it doesn't check out — for endpoints a signed-out visitor can also hit
-    (public event pages), where a bad/missing token just means "treat as anonymous"."""
+    (public event pages), where a bad/missing token or an ended session just means "treat as
+    anonymous": a public page keeps working for someone whose session has lapsed."""
+    from .services import auth_sessions
+
     if creds is None:
         return None
     try:
@@ -89,7 +125,13 @@ def get_current_user_optional(
     except (JWTError, KeyError, ValueError):
         return None
     user = db.get(User, user_id)
-    return user if user and user.is_active else None
+    if user is None or not user.is_active:
+        return None
+    try:
+        auth_sessions.check(db, payload.get("sid"), user)
+    except auth_sessions.SessionInvalid:
+        return None
+    return user
 
 
 def create_registration_token(registration: EventRegistration) -> str:

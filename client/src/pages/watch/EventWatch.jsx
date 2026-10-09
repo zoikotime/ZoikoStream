@@ -20,6 +20,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import { useAuth } from "../../auth/AuthContext";
 import api, { errMsg } from "../../api";
 import { isCustomDomain } from "../../utils/hostMode";
+import { IS_NATIVE } from "../../platform";
 import { PRE_LIVE_STATUSES } from "../../data/events";
 import WatchHeader from "../../components/watch/WatchHeader";
 import VideoPlayer from "../../components/watch/VideoPlayer";
@@ -29,6 +30,7 @@ import ReactionBar from "../../components/watch/ReactionBar";
 import ReactionOverlay from "../../components/live/ReactionOverlay";
 import useReactionChannel from "../../hooks/useReactionChannel";
 import RegistrationGate from "../../components/watch/RegistrationGate";
+import CountryPrompt from "../../components/watch/CountryPrompt";
 import AccessWindowNotice from "../../components/watch/AccessWindowNotice";
 import CapacityWaitingNotice from "../../components/watch/CapacityWaitingNotice";
 import ViewerErrorState from "../../components/watch/ViewerErrorState";
@@ -40,7 +42,7 @@ import { readInvitation, redeemInvitation, stripInvitation } from "./invitationL
 import { detectInAppBrowser } from "../../utils/inAppBrowser";
 import FeedbackModal from "../../components/common/FeedbackModal";
 import Spinner from "../../ui/Spinner";
-import Logo from "../../ui/Logo";
+import OrgLogo from "../../ui/OrgLogo";
 import { notify } from "../../ui/Toast";
 import { playAlertChime, unlockAudio } from "../../utils/sound";
 
@@ -86,6 +88,20 @@ const REPLAY_POLL_MS = 30000;
 // Statuses that come BEFORE a broadcast (data/events.js, mirroring server/app/models/event.py).
 // The pre-event state replaces the player for these; everything after go-live keeps the player.
 const PRE_LIVE = new Set(PRE_LIVE_STATUSES);
+
+// What this page is running inside, for the organizer's device and player mix (server/app/
+// services/audience.py). Only things the page itself knows: the mobile app build, or being
+// framed by another site's page. Device, browser and OS come from the request, never asked.
+function viewerClient() {
+  if (IS_NATIVE) return "mobile";
+  try {
+    if (window.self !== window.top) return "embedded";
+  } catch {
+    return "embedded";   // a cross-origin parent refuses even the comparison
+  }
+  return "web";
+}
+const VIEWER_CLIENT = viewerClient();
 
 // Real chat/Q&A/polls over the same live socket the host/moderator consoles use (see
 // live.py — any authenticated attendee, OR a name+email self-registration (mustIdentify
@@ -434,7 +450,7 @@ function EventWatchPage() {
     const link = override.link || linkToken;
     const accessParams = { ...(reg ? { reg } : {}), ...(link ? { link } : {}) };
     api
-      .get(`/events/${eventId}/watch`, { params: Object.keys(accessParams).length ? accessParams : undefined })
+      .get(`/events/${eventId}/watch`, { params: { ...accessParams, client: VIEWER_CLIENT } })
       .then(({ data }) => {
         // A good answer clears whatever an earlier failure left on screen. Without this a
         // single failed request stranded the page on "could not be found" for good.
@@ -999,20 +1015,31 @@ function EventWatchPage() {
       </div>
     );
 
+  const brandLogo = (
+    <OrgLogo
+      light={watch?.organization_logo_url}
+      dark={watch?.organization_logo_url_dark}
+      name={watch?.organization_name}
+      height="h-6 sm:h-7"
+    />
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
-      {/* Brand bar — the real wordmark asset (ui/Logo), not a text stand-in. */}
+      {/* Brand bar — the organization's logo for the viewer's theme (dark logo, then light,
+          then the ZoikoStream wordmark: ui/OrgLogo). Before the payload arrives, or for an
+          organization with no logo, it is the ZoikoStream mark exactly as before. */}
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/75 backdrop-blur-xl dark:border-white/10 dark:bg-slate-950/75">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
           {isCustomDomain() ? (
-            <span className="shrink-0"><Logo height="h-6 sm:h-7" /></span>
+            <span className="shrink-0">{brandLogo}</span>
           ) : (
             <Link
               to="/"
               aria-label="ZoikoStream home"
               className="shrink-0 rounded-xl transition duration-150 hover:opacity-85 motion-reduce:transition-none"
             >
-              <Logo height="h-6 sm:h-7" />
+              {brandLogo}
             </Link>
           )}
           <div className="flex items-center gap-1.5 sm:gap-3">
@@ -1156,6 +1183,9 @@ function EventWatchPage() {
                 raiseHandVisible={Boolean(watch.raise_hand_enabled)}
               />
             )}
+            {/* A host-invited viewer never saw the registration form's optional Country /
+                Region, so it is offered once here (server decides: watch.country_prompt). */}
+            {watch.country_prompt && regToken && <CountryPrompt eventId={eventId} regToken={regToken} />}
           </div>
 
           {/* row-span-2 so the panel's grid area covers the player AND the info card —

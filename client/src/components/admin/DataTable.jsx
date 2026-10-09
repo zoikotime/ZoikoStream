@@ -107,7 +107,7 @@ export default function DataTable({
   // forwards them to the API. Omit them and this component behaves exactly as before — that
   // is what keeps the other admin tables untouched.
   serverSort = null,          // { key, dir } | null — controlled sort; disables local sorting
-  onSortChange,               // (next) => void, next is { key, dir } | null
+  onSortChange,               // (next, key) => void, next is { key, dir } | null, key the clicked column
   serverPage,                 // 1-based current page; disables local slicing
   serverPageCount,            // total pages from the API's `total`
   serverTotal,                // the API's `total`, so the count line names the dataset
@@ -191,11 +191,21 @@ export default function DataTable({
     : pageSize ? sorted.slice((current - 1) * pageSize, current * pageSize) : sorted;
   const goToPage = serverPaged ? onPageChange : setPage;
 
+  // An empty table has nothing to order, so its sort controls are disabled and no column reads
+  // as active — whatever the sort state holds. Clicks over zero rows used to flip the arrows.
+  // Every header (arrow, highlight, aria-sort) reads `shownSort`: in server mode the arrows
+  // used to read the local state while aria-sort read the caller's, so the two disagreed.
+  const sortDisabled = sorted.length === 0;
+  const shownSort = sortDisabled ? null : activeSort;
+
   // Same three-state cycle either way (asc -> desc -> unsorted); only the destination differs.
   const nextSort = (s, key) =>
     s?.key === key ? (s.dir === "asc" ? { key, dir: "desc" } : null) : { key, dir: "asc" };
-  const toggleSort = (key) =>
-    serverMode ? onSortChange(nextSort(serverSort, key)) : setSort((s) => nextSort(s, key));
+  const toggleSort = (key) => {
+    if (sortDisabled) return;
+    if (serverMode) onSortChange(nextSort(serverSort, key), key);
+    else setSort((s) => nextSort(s, key));
+  };
 
   // Selection acts on the full filtered/sorted set (not just the current page).
   const allKeys = selectable ? sorted.map(rowKey) : [];
@@ -285,26 +295,34 @@ export default function DataTable({
                     alignCls(c.align),
                     c.headerClassName
                   )}
-                  aria-sort={activeSort?.key === c.key ? (activeSort.dir === "asc" ? "ascending" : "descending") : undefined}
+                  aria-sort={shownSort?.key === c.key ? (shownSort.dir === "asc" ? "ascending" : "descending") : undefined}
                 >
                   {c.sortable ? (
                     <button
                       type="button"
                       onClick={() => toggleSort(c.key)}
-                      title={`Sort by ${typeof c.header === "string" ? c.header : c.key}`}
+                      // Native `disabled` takes it out of the tab order and stops Enter/Space;
+                      // aria-disabled states it either way for assistive tech.
+                      disabled={sortDisabled}
+                      aria-disabled={sortDisabled}
+                      title={sortDisabled ? undefined : `Sort by ${typeof c.header === "string" ? c.header : c.key}`}
                       className={cx(
-                        // The header itself becomes the hover target: a tinted, rounded hit area
-                        // rather than a text-colour nudge that nobody notices in light mode.
-                        "group/sort -mx-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5",
-                        "transition-colors duration-150 motion-reduce:transition-none",
-                        "hover:bg-slate-200/70 hover:text-slate-700 dark:hover:bg-white/10 dark:hover:text-slate-100",
-                        sort?.key === c.key && "text-violet-700 dark:text-violet-300",
+                        "-mx-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5",
+                        sortDisabled
+                          ? "cursor-default"
+                          : cx(
+                              // The header itself becomes the hover target: a tinted, rounded hit area
+                              // rather than a text-colour nudge that nobody notices in light mode.
+                              "group/sort transition-colors duration-150 motion-reduce:transition-none",
+                              "hover:bg-slate-200/70 hover:text-slate-700 dark:hover:bg-white/10 dark:hover:text-slate-100",
+                              shownSort?.key === c.key && "text-violet-700 dark:text-violet-300"
+                            ),
                         focusRing,
                         c.align === "right" && "flex-row-reverse"
                       )}
                     >
                       {c.header}
-                      <SortIcon active={sort?.key === c.key} dir={sort?.dir} />
+                      <SortIcon active={shownSort?.key === c.key} dir={shownSort?.dir} />
                     </button>
                   ) : (
                     c.header

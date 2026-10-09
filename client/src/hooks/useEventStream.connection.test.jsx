@@ -17,7 +17,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../api", () => ({ API_BASE: "http://api.test" }));
+vi.mock("../api", () => ({ API_BASE: "http://api.test", AUTH_EXPIRED_EVENT: "zoiko:auth-expired" }));
 
 import useEventStream from "./useEventStream";
 
@@ -207,5 +207,39 @@ describe("a refused connection", () => {
 
     expect(result.current.status).toBe("unauthorized");
     expect(result.current.closeReason).toBe("Invalid or expired session");
+  });
+});
+
+// ── the sign-in ended while the socket was open (server: routers/live.py session_guard) ──
+
+describe("a session-ended close (4401)", () => {
+  it("ends the sign-in like a 401 — with the reason — and is never retried", async () => {
+    const heard = [];
+    const onExpired = (e) => heard.push(e.detail);
+    window.addEventListener("zoiko:auth-expired", onExpired);
+    const { result } = mount();
+    latest().open();
+
+    act(() => latest().onclose?.({ code: 4401, reason: "idle" }));
+
+    expect(result.current.status).toBe("unauthorized");
+    expect(result.current.closeReason).toBe("Your session expired due to inactivity. Please sign in again.");
+    expect(heard).toEqual([{ reason: "idle" }]);
+    expect(sessionStorage.getItem("zs.session-ended")).toBe("idle");
+    await advance();
+    expect(sockets).toHaveLength(1);
+    window.removeEventListener("zoiko:auth-expired", onExpired);
+    sessionStorage.clear();
+  });
+
+  it("an unknown reason is reported as a plain sign-in-again", () => {
+    const heard = [];
+    const onExpired = (e) => heard.push(e.detail);
+    window.addEventListener("zoiko:auth-expired", onExpired);
+    mount();
+    act(() => latest().onclose?.({ code: 4401, reason: "<script>" }));
+    expect(heard).toEqual([{ reason: "reauth" }]);
+    window.removeEventListener("zoiko:auth-expired", onExpired);
+    sessionStorage.clear();
   });
 });

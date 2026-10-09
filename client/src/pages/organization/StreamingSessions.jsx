@@ -36,17 +36,58 @@ const RANGES = [
 const MODE_TONE = { live: "success", test: "info", paused: "warning", ended: "neutral" };
 const STATE_TONE = { Healthy: "success", Paused: "warning", Ended: "neutral", Archived: "neutral" };
 
-const duration = (from, to) => {
+const durationMs = (from, to) => {
   if (!from) return null;
   const ms = (to ? new Date(to) : new Date()).getTime() - new Date(from).getTime();
-  if (Number.isNaN(ms) || ms < 0) return null;
+  return Number.isNaN(ms) || ms < 0 ? null : ms;
+};
+
+const duration = (from, to) => {
+  const ms = durationMs(from, to);
+  if (ms == null) return null;
   const mins = Math.round(ms / 60_000);
   if (mins < 60) return `${mins}m`;
   return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m`;
 };
 
+// The table's one sort state. Neutral on load (the server's newest-first order), and neutral
+// again whenever the list empties, so a stale column never comes back over different rows.
+const SORT_NONE = { sortField: null, sortDirection: null };
+
+// What each sortable column orders by. Duration is the session's length (a live one runs to
+// now); it used to sort by start time, which is a different order.
+const SORT_VALUE = {
+  session: (s) => s.title,
+  mode: (s) => s.mode,
+  state: (s) => s.state,
+  duration: (s) => durationMs(s.started_at, s.ended_at),
+  peakAudience: (s) => s.peak_viewers,
+};
+
+// A new column starts ascending and replaces the old one; the same column flips asc <-> desc.
+const nextSort = (s, field) => ({
+  sortField: field,
+  sortDirection: s.sortField === field && s.sortDirection === "asc" ? "desc" : "asc",
+});
+
+// Missing values sort last in either direction, as in the shared table's own comparator.
+function sortSessions(items, { sortField, sortDirection }) {
+  const value = SORT_VALUE[sortField];
+  if (!value) return items;
+  const dir = sortDirection === "desc" ? -1 : 1;
+  return [...items].sort((a, b) => {
+    const av = value(a);
+    const bv = value(b);
+    if (av == null) return bv == null ? 0 : 1;
+    if (bv == null) return -1;
+    if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+    return String(av).localeCompare(String(bv)) * dir;
+  });
+}
+
 export default function StreamingSessions() {
   const [range, setRange] = useState("24h");
+  const [sort, setSort] = useState(SORT_NONE);
   const { data, loading, error, reload } = useApi(() =>
     api.get("/organization/overview", { params: { range } }).then((r) => r.data)
   );
@@ -55,9 +96,14 @@ export default function StreamingSessions() {
   const sessions = useMemo(() => data?.sessions || {}, [data]);
   const items = useMemo(() => sessions.items || [], [sessions]);
 
+  // Render-phase reset (the documented alternative to setState in an effect): whatever emptied
+  // the list (a new range, a refresh, another organization) also drops the sort.
+  if (!items.length && sort.sortField !== null) setSort(SORT_NONE);
+  const rows = useMemo(() => sortSessions(items, sort), [items, sort]);
+
   const columns = [
     {
-      key: "title",
+      key: "session",
       header: "Session",
       sortable: true,
       render: (s) => (
@@ -90,7 +136,6 @@ export default function StreamingSessions() {
       key: "duration",
       header: "Duration",
       align: "right",
-      sortValue: (s) => new Date(s.started_at || 0).getTime(),
       sortable: true,
       render: (s) => (
         <span className={cx("text-[13px]", type.mono, CONSOLE.body)}>
@@ -99,7 +144,7 @@ export default function StreamingSessions() {
       ),
     },
     {
-      key: "peak_viewers",
+      key: "peakAudience",
       header: "Peak audience",
       align: "right",
       sortable: true,
@@ -178,10 +223,13 @@ export default function StreamingSessions() {
         >
           <DataTable
             columns={columns}
-            rows={items}
+            rows={rows}
             rowKey={(s) => s.id}
             loading={loading}
-            initialSort={{ key: "duration", dir: "desc" }}
+            // The page owns the sort and hands the rows over already ordered: the table's
+            // controlled-sort contract, the same one a server-sorted list uses.
+            serverSort={sort.sortField ? { key: sort.sortField, dir: sort.sortDirection } : null}
+            onSortChange={(_, field) => setSort((s) => nextSort(s, field))}
             minWidth={720}
             rowActions={(s) => (
               <ConsoleButton

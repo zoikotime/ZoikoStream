@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { API_BASE } from "../api";
+import { API_BASE, AUTH_EXPIRED_EVENT } from "../api";
+import { SESSION_END_MESSAGES, markSessionEnded, readToken } from "../auth/sessionStore";
 
 // ONE WebSocket to a live event, carrying every logical channel (chat, participants,
 // polls, q&a, announcements, activity, and the per-socket control channel still named
@@ -20,7 +21,11 @@ const PING_MS = 15000;
 const MAX_BACKOFF_MS = 15000;
 // 1008 = policy violation: the server rejected the token / event / a ban. Retrying that
 // just loops, so we stop and surface it.
-const FATAL_CODES = new Set([1008]);
+// 4401 = the sign-in this socket was opened with has ended (server/app/routers/live.py
+// re-checks it while the socket is open: idle or maximum length reached, signed out, account
+// disabled). The close reason is the session-end reason ("idle", "absolute", "revoked", ...).
+const SESSION_ENDED = 4401;
+const FATAL_CODES = new Set([1008, SESSION_ENDED]);
 
 const wsUrl = (eventId, token, reg, link) => {
   const origin = API_BASE.replace(/^http/, "ws").replace(/\/$/, "");
@@ -42,7 +47,9 @@ const wsUrl = (eventId, token, reg, link) => {
 export default function useEventStream(eventId, onEnvelope, regToken, linkToken, { paused = false } = {}) {
   // Read the session once at init: with no token there is nothing to connect to, and
   // starting in "unauthorized" avoids a pointless "connecting" flash.
-  const [token] = useState(() => localStorage.getItem("token"));
+  // From wherever "Remember me" put it (auth/sessionStore). The server checks the token's
+  // session when the socket connects; heartbeats never extend it.
+  const [token] = useState(() => readToken());
   const authKey = token || regToken || linkToken;
   const [status, setStatus] = useState(authKey ? "connecting" : "unauthorized"); // connecting | open | reconnecting | offline | unauthorized
   // The server's close reason (e.g. a join-window/ban/invalid-session message) — only
@@ -129,6 +136,17 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken,
         pingTimer.current = null;
         setLatency(null);
         if (closed || manuallyClosed.current) return;
+        if (e.code === SESSION_ENDED) {
+          // Exactly what a 401 from any HTTP call does (api.js): record why, and end the session
+          // in AuthContext — which signs this tab out, tells the other tabs, and lets the route
+          // guards send a protected page to /login. Never retried: the session is over.
+          const reason = SESSION_END_MESSAGES[e.reason] ? e.reason : "reauth";
+          markSessionEnded(reason);
+          setCloseReason(SESSION_END_MESSAGES[reason]);
+          setStatus("unauthorized");
+          window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { reason } }));
+          return;
+        }
         if (FATAL_CODES.has(e.code)) {
           setCloseReason(e.reason || null);
           setStatus("unauthorized");

@@ -151,8 +151,29 @@ describe("Contact form", () => {
     renderAt();
     await completeForm(user);
     await user.click(screen.getByTestId("contact-submit"));
-    expect(await screen.findByTestId("contact-success")).toHaveTextContent(/has been sent/i);
+    expect(await screen.findByTestId("contact-success")).toHaveTextContent(/we.ve received your inquiry/i);
     expect(screen.getByLabelText(/first name/i)).toHaveValue("");
+  }, 20000);
+
+  it("says a confirmation will go to the submitted address, masked", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await completeForm(user);
+    await user.click(screen.getByTestId("contact-submit"));
+    const success = await screen.findByTestId("contact-success");
+    expect(success).toHaveTextContent("We’ll send a confirmation to a•••@example.com.");
+    expect(success).not.toHaveTextContent("ada@example.com");
+  }, 20000);
+
+  it("never claims an email was sent — delivery happens after the API answers", async () => {
+    // The API's 202 means "received"; the provider is called afterwards, so the page cannot
+    // know whether either email went out and must not say so.
+    const user = userEvent.setup();
+    renderAt();
+    await completeForm(user);
+    await user.click(screen.getByTestId("contact-submit"));
+    const success = await screen.findByTestId("contact-success");
+    expect(success).not.toHaveTextContent(/has been sent|was sent|email sent/i);
   }, 20000);
 
   it("shows an error and keeps the entered data when the API fails", async () => {
@@ -165,6 +186,8 @@ describe("Contact form", () => {
     // Data survives so the visitor can retry without retyping.
     expect(screen.getByLabelText(/first name/i)).toHaveValue("Ada");
     expect(screen.queryByTestId("contact-success")).not.toBeInTheDocument();
+    // And nothing on the page promises a confirmation for a submission that failed.
+    expect(screen.queryByText(/confirmation/i)).not.toBeInTheDocument();
   }, 20000);
 
   it("disables the button while sending, preventing a double submit", async () => {

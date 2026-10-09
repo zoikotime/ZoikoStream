@@ -1,6 +1,7 @@
 import base64
 import html
 import logging
+import re
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -38,6 +39,7 @@ def _send(
     text_body: str | None = None,
     *,
     sender: str | None = None,
+    reply_to: str | None = None,
 ) -> bool:
     """Post one email to Resend. Best-effort: logs and swallows failures so a mail
     outage never breaks the request that triggered it.
@@ -48,7 +50,9 @@ def _send(
 
     `text_body` adds the plain-text alternative required for every HTML email
     (ZST-EC-001 doctrine rule 9). `sender` overrides the default identity for templates
-    that must ship from a specific approved sender, e.g. Zoiko Steam Security.
+    that must ship from a specific approved sender, e.g. Zoiko Steam Security. `reply_to`
+    sets where a recipient's reply goes; it is only ever a configured address, never a value
+    taken from a request.
     """
     if not settings.RESEND_API_KEY:
         log.warning("RESEND_API_KEY not set; skipping email to %s", to)
@@ -61,6 +65,8 @@ def _send(
     }
     if text_body:
         payload["text"] = text_body
+    if reply_to:
+        payload["reply_to"] = reply_to
     logo = _logo_attachment()
     if logo:
         payload["attachments"] = [logo]
@@ -3469,7 +3475,7 @@ def _contact_html(name: str, email: str, org: str, country: str, topic: str, mes
 
 
 def send_contact_message_email(*, first: str, last: str, email: str, org: str, country: str,
-                                topic: str, message: str) -> None:
+                                topic: str, message: str) -> bool:
     """Deliver a public contact-form enquiry to the configured internal inbox.
 
     The recipient is settings.CONTACT_EMAIL and is NEVER derived from the request, so no
@@ -3479,15 +3485,110 @@ def send_contact_message_email(*, first: str, last: str, email: str, org: str, c
     Subject is built from sanitized values: CR/LF are stripped because a newline inside a
     header is the classic header-injection primitive (it would let a submitter append their
     own Bcc:). Length is capped so a long name cannot push the real subject out of view.
+
+    Returns whether the provider accepted it: the submitter's confirmation is only sent once
+    the team actually has the enquiry (routers/contact.py).
     """
     name = f"{first} {last}".strip()
     # Strip anything that could terminate a header line, then bound the length.
     safe_subject_name = " ".join(name.replace("\r", " ").replace("\n", " ").split())[:80]
     safe_subject_topic = " ".join(topic.replace("\r", " ").replace("\n", " ").split())[:40]
-    _send(
+    return _send(
         settings.CONTACT_EMAIL,
         f"[{safe_subject_topic}] Enquiry from {safe_subject_name}",
         _contact_html(name, email, org, country, topic, message),
+    )
+
+
+# ── Contact form: the submitter's confirmation ──────────────────────────────────────────
+# Sent to the address the visitor typed, after the team's copy was accepted by the provider.
+#
+# That address is unverified, so this email must not be usable to deliver someone else's
+# words from our domain to a third party. Hence: a FIXED subject (no request text in a header
+# at all), every echoed field HTML-escaped, the message reduced to a short single-line
+# excerpt, and anything link-shaped removed from what is echoed. The per-IP rate limit and the
+# duplicate guard in routers/contact.py bound the volume.
+#
+# No response-time promise: the product does not make one, so the copy does not invent one.
+CONTACT_CONFIRMATION_SUBJECT = "We've received your ZoikoStream inquiry"
+CONTACT_CONFIRMATION_EXCERPT = 160
+_LINKISH = re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)\S+")
+
+
+def _contact_echo(value: str, limit: int | None = None) -> str:
+    """Visitor-supplied text, made safe to send back to an unverified address: one line,
+    links removed, optionally truncated. HTML escaping happens where it is rendered."""
+    text = _LINKISH.sub("[link removed]", " ".join((value or "").split()))
+    if limit and len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
+def _contact_summary(first: str, last: str, org: str, topic: str, message: str) -> list[tuple[str, str]]:
+    rows = [("Name", _contact_echo(f"{first} {last}"))]
+    if (org or "").strip():
+        rows.append(("Organization", _contact_echo(org)))
+    rows.append(("Inquiry type", _contact_echo(topic)))
+    rows.append(("Message", _contact_echo(message, CONTACT_CONFIRMATION_EXCERPT)))
+    return rows
+
+
+def _contact_confirmation_html(first: str, rows: list[tuple[str, str]]) -> str:
+    row_html = "".join(
+        f'<tr><td style="padding:8px 12px 8px 0;color:#888;white-space:nowrap;vertical-align:top;">{html.escape(k)}</td>'
+        f'<td style="padding:8px 0;">{html.escape(v)}</td></tr>'
+        for k, v in rows
+    )
+    return _shell(f"""
+    {_header("We've received your inquiry")}
+    <div style="padding:24px 32px 40px;color:#333;font-size:15px;line-height:1.6;">
+      <p>Hi {html.escape(first)},</p>
+      <p>Thank you for contacting ZoikoStream. We've received your inquiry and our team will
+         review the details and get back to you as soon as possible.</p>
+      <p style="margin:24px 0 4px;font-weight:600;color:#2e2e4d;">Submission summary</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px;">{row_html}</table>
+      <p style="margin-top:24px;color:#888;font-size:13px;">
+        If you did not submit this request, you can ignore this email.
+      </p>
+      <p style="margin-bottom:0;">ZoikoStream Team</p>
+    </div>""")
+
+
+def _contact_confirmation_text(first: str, rows: list[tuple[str, str]]) -> str:
+    summary = "\n".join(f"- {k}: {v}" for k, v in rows)
+    return (
+        f"Hi {first},\n\n"
+        "Thank you for contacting ZoikoStream. We've received your inquiry and our team will "
+        "review the details and get back to you as soon as possible.\n\n"
+        f"Submission summary:\n{summary}\n\n"
+        "If you did not submit this request, you can ignore this email.\n\n"
+        "ZoikoStream Team\n"
+    )
+
+
+def send_contact_confirmation_email(*, first: str, last: str, email: str, org: str, topic: str,
+                                     message: str) -> bool:
+    """Confirm a contact-form enquiry to the address the visitor submitted.
+
+    `email` is the schema-validated work email (routers/contact.py) — the recipient is never
+    taken from anywhere else. Re-checked here as defence in depth: a value that could break a
+    header or is not an address is refused without calling the provider. Replies go to the
+    configured contact inbox, so a visitor answering this email reaches the team.
+
+    Returns whether the provider accepted it; failures are already logged by `_send`.
+    """
+    to = (email or "").strip()
+    if not to or "@" not in to or any(ch in to for ch in "\r\n,;<>") or " " in to:
+        log.warning("contact confirmation not sent: recipient failed the address check")
+        return False
+    rows = _contact_summary(first, last, org, topic, message)
+    greeting = _contact_echo(first) or "there"
+    return _send(
+        to,
+        CONTACT_CONFIRMATION_SUBJECT,
+        _contact_confirmation_html(greeting, rows),
+        text_body=_contact_confirmation_text(greeting, rows),
+        reply_to=settings.CONTACT_EMAIL,
     )
 
 

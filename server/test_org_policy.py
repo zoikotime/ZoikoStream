@@ -251,20 +251,25 @@ def test_session_timeout_shortens_the_real_token():
 
 
 def test_session_timeout_cannot_extend_beyond_the_platform_default():
+    # The platform maximum is the absolute session limit (services/auth_sessions.py). Read
+    # into a local first so a failure report never has to render the settings object.
+    default = timedelta(hours=settings.SESSION_ABSOLUTE_TIMEOUT_HOURS)
     o = Org(security={"session_timeout": "24 hours"})
     try:
-        default = timedelta(hours=settings.ACCESS_TOKEN_HOURS)
         got = org_policy.session_lifetime(o.org_row(), remember=False)
         assert got <= default, \
-            "an Organization must not be able to hold a token longer than the platform allows"
+            "an Organization must not be able to hold a session longer than the platform allows"
+        # "Remember me" no longer buys a longer session either.
+        assert org_policy.session_lifetime(o.org_row(), remember=True) == got
+        # And the console shows the limit actually enforced, not the configured 24 hours.
+        assert org_policy.session_timeout_label(o.org_row()) == f"{int(default.total_seconds() // 3600)} hours"
     finally:
         o.cleanup()
 
     junk = Org(security={"session_timeout": "forever"})
     try:
-        assert org_policy.session_lifetime(junk.org_row()) == \
-            timedelta(hours=settings.ACCESS_TOKEN_HOURS), \
-            "an unrecognized value must fall back, never be honoured as written"
+        got = org_policy.session_lifetime(junk.org_row())
+        assert got == default, "an unrecognized value must fall back, never be honoured as written"
         assert org_policy.session_timeout_label(junk.org_row()).endswith("hours")
     finally:
         junk.cleanup()

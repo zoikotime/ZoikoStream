@@ -2,6 +2,7 @@ import { useState } from "react";
 import { FiRadio } from "react-icons/fi";
 import Modal from "../../ui/Modal";
 import Button from "../../ui/Button";
+import OrgLogo from "../../ui/OrgLogo";
 import { ACCENT, cx } from "../../ui/tokens";
 
 // Settings -> Branding's preview: the organization's CURRENT form values (saved or not) applied
@@ -11,17 +12,16 @@ import { ACCENT, cx } from "../../ui/tokens";
 // code, so nothing in it can start a session, create one or change an event: the "Go Live"
 // inside it only demonstrates how the branded action looks and responds (hover, focus, press).
 //
-// It also says plainly that nothing renders the brand yet. The stored color and logo are not
-// applied to event pages, emails or the console today, and a preview that looked like a live
-// page would claim otherwise.
-export default function BrandingPreview({ open, onClose, accent, logoUrl, orgName }) {
+// It also says plainly what the brand reaches today: the logos appear in the viewer page's
+// header (the version for the viewer's theme, via ui/OrgLogo — the same component this preview
+// uses, so the two cannot disagree); the color is not applied anywhere yet.
+export default function BrandingPreview({ open, onClose, accent, logoUrl, logoUrlDark, orgName }) {
   const [presses, setPresses] = useState(0);
   const tone = ACCENT[accent] || ACCENT.violet;
   const close = () => {
     setPresses(0);
     onClose();
   };
-  const logo = (logoUrl || "").trim() || "/zoiko-logo.png";
   const name = (orgName || "").trim() || "Your organization";
 
   return (
@@ -34,9 +34,10 @@ export default function BrandingPreview({ open, onClose, accent, logoUrl, orgNam
       footer={<Button variant="secondary" size="sm" onClick={close}>Close</Button>}
     >
       <p className="text-xs text-slate-500 dark:text-slate-400">
-        A mock-up using your current branding, including unsaved changes. Nothing here starts a
-        broadcast. Your brand is not applied anywhere yet — event pages, emails and the console
-        still use the ZoikoStream palette and mark.
+        A mock-up using your current branding, including unsaved changes, in the console&apos;s
+        current theme. Nothing here starts a broadcast. Your logo appears in the header of your
+        events&apos; viewer pages; the brand color is not applied yet, and emails and the console
+        keep the ZoikoStream palette and mark.
       </p>
 
       <div
@@ -44,13 +45,17 @@ export default function BrandingPreview({ open, onClose, accent, logoUrl, orgNam
         className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-700 dark:bg-slate-950"
       >
         <div className="flex items-center gap-3">
-          <span className="grid h-12 w-12 shrink-0 place-items-center overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800">
-            <img
-              src={logo}
-              alt={`${name} logo`}
-              className="max-h-full max-w-full object-contain"
-              onError={(e) => { e.currentTarget.src = "/zoiko-logo.png"; }}
-            />
+          {/* The logo exactly as the viewer page's brand bar draws it: the same component, the
+              same chain (this theme's logo, then the light one, then the ZoikoStream mark on its
+              light chip), the bar's own height, on the bar's own surface. The box is a fixed
+              size, so the title never shifts while an image loads, and wide enough for a
+              wordmark: it used to be a 48px square, which drew a 2.8:1 wordmark at 46x16 px, and
+              the fallback was the bare wordmark on a slate tile, which hid its navy lettering. */}
+          <span
+            data-testid="branding-preview-logo"
+            className="flex h-12 w-28 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-white px-2 sm:w-32 dark:border-slate-700 dark:bg-slate-950"
+          >
+            <OrgLogo light={logoUrl} dark={logoUrlDark} name={name} height="h-6 sm:h-7" className="max-w-full" />
           </span>
           <div className="min-w-0">
             <p className="truncate text-xs font-semibold uppercase tracking-wide text-slate-400">{name}</p>

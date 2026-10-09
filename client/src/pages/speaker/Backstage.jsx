@@ -25,6 +25,8 @@ import { notify } from "../../ui/Toast";
 import { CONTRIBUTOR_STATE_TONE, CONTRIBUTOR_STATE_LABEL } from "../../data/host";
 import useKeepAwake from "../../hooks/useKeepAwake";
 import useBroadcastKeepAlive from "../../native/useBroadcastKeepAlive";
+import { useSessionHold } from "../../auth/useSessionKeeper";
+import { isActivelyPresenting } from "./activeSpeaker";
 
 const EMPTY = { ready: false, event: null, myState: null, publishToken: null, livekitUrl: null };
 
@@ -165,13 +167,25 @@ export default function Backstage() {
   });
 
   const isLive = state === "live" || state === "muted";
-  const { connected: publishing, reconnecting: publishReconnecting, publishError } = useLiveKitPublish({
+  const {
+    connected: publishing, reconnecting: publishReconnecting, publishError, publishedAudio, publishedVideo,
+  } = useLiveKitPublish({
     enabled: isLive && mediaActive,
     url: panel.livekitUrl,
     token: panel.publishToken,
     streamRef,
     videoTrack,
   });
+
+  // A speaker presenting on stage may not touch the mouse for half an hour, and must not be
+  // signed out mid-broadcast. While they are genuinely on air — on stage, with a camera or
+  // unmuted microphone that LiveKit has actually acknowledged (./activeSpeaker) — and this tab
+  // is visible, the sign-in is held (auth/useSessionKeeper). Anything else — waiting off stage,
+  // devices off, publish connection lost, the tab hidden or abandoned — lets the ordinary idle
+  // timeout and its warning apply, and the server's absolute limit applies throughout.
+  useSessionHold(isActivelyPresenting({
+    contributorState: state, publishedAudio, publishedVideo, micOn: mic, cameraOn: camera,
+  }));
 
   const requestHelp = () => {
     send("contributor.request_help", {});

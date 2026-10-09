@@ -65,8 +65,22 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     SECRET_KEY: str = DEV_SECRET_KEY
     SUPER_ADMIN_EMAIL: str = "info@zoikostream.com"  # this email registers as super_admin
-    ACCESS_TOKEN_HOURS: int = 24              # default session length
-    REMEMBER_TOKEN_DAYS: int = 30            # "Remember for 30 days"
+    # ── Sign-in sessions (services/auth_sessions.py) ─────────────────────────────────────
+    # IDLE: a session with no genuine user activity for this long expires. Activity is what
+    # the client reports after real interaction (POST /api/auth/session/activity); background
+    # polling and websocket heartbeats never count.
+    SESSION_IDLE_TIMEOUT_MINUTES: int = 30
+    # ABSOLUTE: the maximum length of any session, however active. An organization's own
+    # session_timeout policy can shorten this, never lengthen it.
+    SESSION_ABSOLUTE_TIMEOUT_HOURS: int = 12
+    # Server-side write throttle: activity reports closer together than this are accepted but
+    # do not write, so an active user costs at most one UPDATE per interval.
+    SESSION_ACTIVITY_MIN_INTERVAL_SECONDS: int = 60
+    # Retired. They set the JWT lifetime (24 h, or 30 days with "Remember me") before
+    # sessions existed; a token now lives exactly as long as its session's absolute limit,
+    # and "Remember me" no longer lengthens anything. Kept so existing env files still parse.
+    ACCESS_TOKEN_HOURS: int = 24
+    REMEMBER_TOKEN_DAYS: int = 30
     # 5173 is Vite's default; 5174 is its fallback when 5173 is taken. 4173 = vite preview.
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:5174,http://localhost:4173"
     APP_URL: str = "http://localhost:5173"

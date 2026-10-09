@@ -11,6 +11,7 @@ from ..config import settings
 from ..crud import admin as admin_crud
 from ..crud import identity as identity_crud
 from ..crud import recovery as recovery_crud
+from ..services import auth_sessions
 from ..services import org_policy
 from ..services import stepup as stepup_svc
 from ..db import get_db
@@ -21,7 +22,7 @@ from ..email import (
     send_reset_otp_email,
     verification_url,
 )
-from ..models import STEP_UP_PURPOSES, STEP_UP_TTL_MINUTES, ALLOW, ALLOW_NEW_CONTEXT, BLOCK_SUSPICIOUS, Organization, User
+from ..models import STEP_UP_PURPOSES, STEP_UP_TTL_MINUTES, ALLOW, ALLOW_NEW_CONTEXT, BLOCK_SUSPICIOUS, SESSION_END_LOGOUT, Organization, User
 from ..services import identity_security as idsec
 from ..ratelimit import rate_limit
 from ..schemas import (
@@ -36,6 +37,7 @@ from ..schemas import (
     ResendVerificationIn,
     ChangePasswordIn,
     ResetPasswordIn,
+    SessionStatusOut,
     TokenOut,
     UserOut,
     VerificationResultOut,
@@ -322,7 +324,9 @@ def login(data: LoginIn, background: BackgroundTasks, request: Request,
     user_out.organization_name = user.organization.name if user.organization else None
     
     return TokenOut(
-        access_token=create_access_token(user, remember=data.remember),
+        # One server-side session per sign-in (services/auth_sessions.py): its own idle and
+        # absolute limits, revocable on its own, independent of the user's other devices.
+        access_token=create_access_token(user, remember=data.remember, db=db, user_agent=agent),
         user=user_out,
     )
 
@@ -716,6 +720,36 @@ def change_password(data: ChangePasswordIn, background: BackgroundTasks,
     )
     # Never the hash, never either password.
     return {"message": "Password updated successfully"}
+
+
+# ── Sign-in session lifecycle (services/auth_sessions.py) ───────────────────────────────
+# Three calls, and only the second ever extends a session:
+#   GET  /auth/session           where the session stands (deadlines on the server clock)
+#   POST /auth/session/activity  the client saw genuine user activity -> slide the idle window
+#   POST /auth/logout            end THIS session (this device); other devices are untouched
+# Every other authenticated request is checked against the same limits but never extends
+# them, so background polling and an abandoned tab cannot keep a session alive.
+
+@router.get("/session", response_model=SessionStatusOut)
+def session_status(request: Request, user: User = Depends(get_current_user)):
+    return auth_sessions.status_of(request.state.auth_session)
+
+
+@router.post("/session/activity", response_model=SessionStatusOut)
+def session_activity(request: Request, user: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    """Record genuine user activity. Only reachable on a session that is still live (the
+    dependency refuses an ended one), and capped by the absolute limit however often it is
+    called, so it can postpone idle expiry but never resurrect or outlast a session."""
+    session = auth_sessions.touch(db, request.state.auth_session)
+    return auth_sessions.status_of(session)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Sign out this device: the session is revoked server-side, so the token it was issued
+    with is refused from now on even if a copy survives somewhere."""
+    auth_sessions.revoke(db, request.state.auth_session, SESSION_END_LOGOUT)
 
 
 @router.get("/me", response_model=UserOut)

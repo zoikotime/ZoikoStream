@@ -1,4 +1,5 @@
 import axios from "axios";
+import { clearToken, markSessionEnded, readToken, sessionEndReasonOf } from "./auth/sessionStore";
 
 // In production the API and the SPA are the same origin (one container — see the Dockerfile),
 // so nothing has to be baked in at build time. VITE_API_URL still overrides, and dev falls
@@ -15,10 +16,11 @@ export const API_BASE =
 // never "*".
 const api = axios.create({ baseURL: `${API_BASE}/api`, withCredentials: true });
 
-// Attach the stored token to every request.
+// Attach the stored token to every request — from wherever "Remember me" put it
+// (auth/sessionStore). A request that already names its own credential keeps it.
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
+  const token = readToken();
+  if (token && !config.headers.Authorization) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
@@ -35,7 +37,11 @@ export const AUTH_EXPIRED_EVENT = "zoiko:auth-expired";
 // its own 401, including the startup case where a 401 is the expected, normal answer. Letting
 // the interceptor also fire on it would clear storage underneath the very code deciding what
 // to do about it.
-const AUTH_ENDPOINT = /^\/auth\/(me|login|register|forgot-password|reset-password|verify-email|verify-otp|resend-verification|recover)/;
+//
+// `/auth/logout` too: signing out of a session the server already ended is still a sign-out,
+// not an expiry to announce. And `/auth/step-up`: its 401 means "that password was wrong",
+// which must never end the session the user is re-authenticating within.
+const AUTH_ENDPOINT = /^\/auth\/(me|login|logout|step-up|register|forgot-password|reset-password|verify-email|verify-otp|resend-verification|recover)/;
 
 api.interceptors.response.use(
   (response) => response,
@@ -52,17 +58,21 @@ api.interceptors.response.use(
     const sentToken = !!config?.headers?.Authorization;
     const path = config?.url || "";
     if (status === 401 && sentToken && !AUTH_ENDPOINT.test(path)) {
+      clearToken();
       try {
-        localStorage.removeItem("token");
         // Legacy key from the build that treated a stored profile as proof of identity.
         // AuthContext.clearStoredAuth sweeps the rest; this keeps the two in step for the
         // one key that mattered.
         localStorage.removeItem("user");
       } catch { /* private mode / blocked site data — nothing stored to clear */ }
+      // The server says WHY (SESSION_EXPIRED idle/absolute, SESSION_REVOKED): kept for the
+      // sign-in page, and carried to the other tabs. Never a database or server error.
+      const reason = sessionEndReasonOf(error) || "reauth";
+      markSessionEnded(reason);
       // No retry and no redirect — this only clears state and announces it. A retry would
-      // fail identically (nothing refreshes the token), and looping is exactly the failure
-      // mode a response interceptor invites; the route guards own where to send the user.
-      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+      // fail identically (the session is over), and looping is exactly the failure mode a
+      // response interceptor invites; the route guards own where to send the user.
+      window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { reason } }));
     }
     return Promise.reject(error);
   },

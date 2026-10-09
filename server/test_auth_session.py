@@ -255,9 +255,11 @@ def test_role_is_enforced_server_side(w):
         assert code == 403, f"{path} answered {code} to an org_admin"
 
     # And a token whose ROLE CLAIM was tampered with buys nothing: authorization reads the
-    # user record, not the claim.
-    escalated = jwt.encode({"sub": str(w.admin_id), "role": "super_admin",
-                            "exp": _now() + timedelta(hours=1)},
+    # user record, not the claim. Built from the real token's claims (so it names a live
+    # server-side session) with only the role swapped — otherwise it would be refused for
+    # having no session, and this would stop testing authorization at all.
+    claims = jwt.get_unverified_claims(token)
+    escalated = jwt.encode({**claims, "role": "super_admin"},
                            settings.SECRET_KEY, algorithm=ALGORITHM)
     assert client.get("/api/admin/dashboard",
                       headers=_auth(escalated)).status_code == 403, (

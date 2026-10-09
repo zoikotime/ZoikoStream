@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { SESSION_END_MESSAGES, clearSessionEndReason, peekSessionEndReason } from "../../auth/sessionStore";
 import { FiArrowRight, FiLock, FiMail } from "react-icons/fi";
 import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
@@ -22,8 +23,18 @@ export default function Login() {
   // while signed out) — land back on THAT page, not the bare role dashboard.
   const from = location.state?.from;
 
+  // Read without consuming during render (StrictMode renders twice), cleared once mounted so
+  // a later visit to /login does not repeat it.
+  const [endedReason] = useState(() => peekSessionEndReason());
+  useEffect(() => {
+    clearSessionEndReason();
+  }, []);
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  // "Remember me": keep this sign-in across browser restarts (on), or only for this browser
+  // session (off). Either way the session still ends after inactivity or at its maximum
+  // length — remembering never makes it last longer.
   const [remember, setRemember] = useState(true);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
@@ -53,7 +64,7 @@ export default function Login() {
       // the redirect below is driven by the server's answer rather than by the login
       // payload we happen to be holding. Awaiting it also means the destination route never
       // renders while auth state is still resolving.
-      const account = await setSession(data);
+      const account = await setSession(data, { remember });
       if (!account) {
         notify.error("Signed in, but the session could not be confirmed. Please try again.");
         return;
@@ -99,6 +110,18 @@ export default function Login() {
 
         <h1 className="text-[26px] font-bold tracking-tight text-slate-900 dark:text-white">Welcome back</h1>
         <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">Sign in to your ZoikoStream account</p>
+
+        {/* Why the previous session ended, as the server reported it (idle, maximum length,
+            signed out elsewhere). Shown once, never as a generic error. */}
+        {endedReason && (
+          <p
+            role="status"
+            data-testid="session-ended"
+            className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+          >
+            {SESSION_END_MESSAGES[endedReason] || SESSION_END_MESSAGES.reauth}
+          </p>
+        )}
 
         <form onSubmit={submit} noValidate className="mt-6 space-y-4">
           <Field

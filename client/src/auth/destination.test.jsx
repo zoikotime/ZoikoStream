@@ -433,6 +433,9 @@ describe("the Producer Console route", () => {
     let release;
     api.get.mockImplementation((url) => {
       if (url === "/auth/me") return Promise.resolve({ data: account("host") });
+      // The session keeper's status read — answered, so the held promise below is only ever
+      // the assignment check this test is about.
+      if (url === "/auth/session") return new Promise(() => {});
       return new Promise((r) => { release = () => r({ data: access({ can_host: true }) }); });
     });
 

@@ -307,12 +307,14 @@ describe("refreshing", () => {
 // ── 10. no dead UI ─────────────────────────────────────────────────────────────────────
 
 describe("Trust & evidence", () => {
-  it("links the two cards that have somewhere to go", async () => {
+  it("links the two cards that have somewhere to go — each to its own page, not Settings", async () => {
+    // They used to open Settings → Security (the change-password form). Navigation, Back and
+    // the detail pages themselves are covered in TrustEvidence.test.jsx.
     show();
     await heading();
 
-    expect(screen.getByRole("link", { name: /security overview/i })).toHaveAttribute("href", expect.stringContaining("/organization/settings"));
-    expect(screen.getByRole("link", { name: /data residency/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /security overview/i })).toHaveAttribute("href", "/organization/support/security");
+    expect(screen.getByRole("link", { name: /data residency/i })).toHaveAttribute("href", "/organization/support/data-residency");
   });
 
   it("marks the two that do not, instead of leaving them looking clickable", async () => {

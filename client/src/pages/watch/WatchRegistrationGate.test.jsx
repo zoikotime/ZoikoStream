@@ -133,9 +133,9 @@ describe("a fresh visitor to a public event", () => {
   it("presents no saved credential, because there is none", async () => {
     renderWatch(EVENT_A);
     await screen.findByText("Enter your name to watch the live event.");
-    // Fresh browser: the watch call carries no reg/link params at all.
+    // Fresh browser: the watch call carries no reg/link params at all, only the client hint.
     const [, config] = vi.mocked(api.get).mock.calls[0];
-    expect(config?.params).toBeUndefined();
+    expect(config?.params).toEqual({ client: "web" });
   });
 });
 
@@ -173,7 +173,7 @@ describe("a remembered credential", () => {
     renderWatch(EVENT_B);
     expect(await screen.findByText("Enter your name to watch the live event.")).toBeInTheDocument();
     const [, config] = vi.mocked(api.get).mock.calls[0];
-    expect(config?.params).toBeUndefined();
+    expect(config?.params).toEqual({ client: "web" });
   });
 
   it("is discarded and the form shown when the server rejects it", async () => {
@@ -197,5 +197,35 @@ describe("a remembered credential", () => {
     expect(vi.mocked(api.get).mock.calls[0][1].params).toMatchObject({
       reg: "session.only.credential",
     });
+  });
+});
+
+// ── audience analytics inputs ─────────────────────────────────────────────────────────────
+
+describe("what the viewer page tells the server for audience analytics", () => {
+  it("names the client it runs in, and nothing about the device", async () => {
+    vi.mocked(api.get).mockResolvedValue({ data: unregistered(EVENT_A) });
+    renderWatch(EVENT_A);
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    const [, config] = vi.mocked(api.get).mock.calls[0];
+    // Device, browser and OS are read server-side from the request; the page only says
+    // whether it is the web page, the mobile app or an embed.
+    expect(config.params).toEqual({ client: "web" });
+  });
+
+  it("offers a host-invited viewer the optional Country / Region once, when the server asks", async () => {
+    localStorage.setItem(`zk_reg_${EVENT_A}`, "invited.viewer.credential");
+    vi.mocked(api.get).mockResolvedValue({ data: { ...registered(EVENT_A), country_prompt: true } });
+    renderWatch(EVENT_A);
+    expect(await screen.findByText("Where are you watching from?")).toBeInTheDocument();
+  });
+
+  it("does not ask a viewer the server did not flag", async () => {
+    localStorage.setItem(`zk_reg_${EVENT_A}`, "self.registered.credential");
+    vi.mocked(api.get).mockResolvedValue({ data: { ...registered(EVENT_A), country_prompt: false } });
+    renderWatch(EVENT_A);
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    await screen.findByRole("heading", { level: 1 });
+    expect(screen.queryByText("Where are you watching from?")).not.toBeInTheDocument();
   });
 });

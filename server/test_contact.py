@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 from app import main as main_app
 from app import ratelimit
 from app.config import settings
+from app.email import CONTACT_CONFIRMATION_SUBJECT
+from app.routers import contact as contact_router
 
 VALID = {
     "first": "Ada",
@@ -29,16 +31,25 @@ VALID = {
 @pytest.fixture
 def client():
     """Fresh rate-limit budget per test: the limiter is per-IP process state, so without this
-    the fourth test in a file would start seeing 429s from the third."""
+    the fourth test in a file would start seeing 429s from the third. The duplicate-enquiry
+    guard is process state too, and every test posts the same VALID payload."""
     ratelimit._HITS.clear()
+    contact_router._RECENT.clear()
     with TestClient(main_app.app) as c:
         yield c
     ratelimit._HITS.clear()
+    contact_router._RECENT.clear()
 
 
 @pytest.fixture
 def sender():
     with patch("app.routers.contact.send_contact_message_email") as m:
+        yield m
+
+
+@pytest.fixture
+def confirmer():
+    with patch("app.routers.contact.send_contact_confirmation_email") as m:
         yield m
 
 
@@ -244,3 +255,156 @@ def test_the_endpoint_is_write_only(client):
     letting it fall through to the SPA catch-all (which would answer with index.html).
     """
     assert client.get("/api/contact").status_code in (404, 405)
+
+
+# ── the submitter's confirmation ──────────────────────────────────────────────────────────
+# Every accepted enquiry now produces two emails: the team's notification (unchanged) and a
+# confirmation to the submitted work email. The confirmation follows only a delivered team
+# copy, goes only to the validated address, and is never sent twice for one enquiry.
+
+def test_a_valid_submission_sends_the_team_copy_and_the_confirmation(client, sender, confirmer):
+    r = client.post("/api/contact", json=VALID)
+    assert r.status_code == 202 and r.json() == {"received": True}
+    assert sender.call_count == 1 and confirmer.call_count == 1
+    kw = confirmer.call_args.kwargs
+    assert kw["email"] == "ada@example.com"
+    assert kw["first"] == "Ada" and kw["org"] == VALID["org"]
+
+
+def test_the_confirmation_goes_to_the_submitted_work_email_trimmed(client, sender, confirmer):
+    client.post("/api/contact", json={**VALID, "email": "  ada@example.com  "})
+    assert confirmer.call_args.kwargs["email"] == "ada@example.com"
+
+
+@pytest.mark.parametrize("bad", ["not-an-email", "ada@", "@example.com", "ada example@x.com", ""])
+def test_an_invalid_email_sends_nothing(client, sender, confirmer, bad):
+    assert client.post("/api/contact", json={**VALID, "email": bad}).status_code == 422
+    assert sender.call_count == 0 and confirmer.call_count == 0
+
+
+def test_a_validation_failure_sends_no_email_at_all(client, sender, confirmer):
+    assert client.post("/api/contact", json={**VALID, "message": "   "}).status_code == 422
+    assert client.post("/api/contact", json={k: v for k, v in VALID.items() if k != "first"}).status_code == 422
+    assert sender.call_count == 0 and confirmer.call_count == 0
+
+
+def test_the_real_delivery_path_sends_both_emails_to_the_right_places(client):
+    """Through the real email service down to `_send`: the team copy to the configured inbox
+    with its existing subject, then the confirmation to the submitter with a fixed subject,
+    a plain-text part, and replies routed to the team."""
+    with patch.object(settings, "CONTACT_EMAIL", "team@zoiko.test"), \
+         patch("app.email._send", return_value=True) as send:
+        assert client.post("/api/contact", json=VALID).status_code == 202
+    assert send.call_count == 2
+    team, confirm = send.call_args_list
+    assert team.args[0] == "team@zoiko.test"
+    # The team subject is unchanged, including its existing 40-character cap on the topic.
+    assert team.args[1] == f"[{VALID['topic'][:40]}] Enquiry from Ada Lovelace"
+    assert "ada@example.com" in team.args[2]                  # body only, as before
+    assert "reply_to" not in team.kwargs                      # team copy unchanged: no new header
+    assert confirm.args[0] == "ada@example.com"
+    assert confirm.args[1] == CONTACT_CONFIRMATION_SUBJECT == "We've received your ZoikoStream inquiry"
+    assert confirm.kwargs["reply_to"] == "team@zoiko.test"
+    assert "Hi Ada," in confirm.kwargs["text_body"]
+
+
+def _confirmation(**over):
+    """Render the confirmation through the real builder, capturing what would be sent."""
+    from app.email import send_contact_confirmation_email
+    args = dict(first="Ada", last="Lovelace", email="ada@example.com", org="Analytical Engines",
+                topic="Procurement", message="We would like to move to the Pro plan.")
+    args.update(over)
+    with patch("app.email._send", return_value=True) as send:
+        ok = send_contact_confirmation_email(**args)
+    return ok, send
+
+
+def test_the_confirmation_greets_by_first_name_and_summarises_the_enquiry():
+    ok, send = _confirmation()
+    assert ok
+    html_body, text = send.call_args.args[2], send.call_args.kwargs["text_body"]
+    for body in (html_body, text):
+        assert "Hi Ada," in body
+        assert "Thank you for contacting ZoikoStream" in body
+        assert "Ada Lovelace" in body and "Analytical Engines" in body and "Procurement" in body
+        assert "We would like to move to the Pro plan." in body
+        assert "If you did not submit this request, you can ignore this email." in body
+        assert "ZoikoStream Team" in body
+    # No invented response-time promise.
+    assert "24 hours" not in html_body and "within" not in text.lower()
+
+
+def test_the_organization_row_appears_only_when_one_was_given():
+    _, with_org = _confirmation(org="Analytical Engines")
+    _, without = _confirmation(org="")
+    assert "Organization" in with_org.call_args.kwargs["text_body"]
+    assert "Organization" not in without.call_args.kwargs["text_body"]
+    assert "Organization" not in without.call_args.args[2]
+
+
+def test_the_confirmation_cannot_carry_markup_or_links_to_an_unverified_address():
+    _, send = _confirmation(first="<script>alert(1)</script>",
+                            message="Claim your prize at https://evil.example/win or www.bad.test " + "x" * 400)
+    html_body, text = send.call_args.args[2], send.call_args.kwargs["text_body"]
+    assert "<script>" not in html_body and "&lt;script&gt;" in html_body
+    for body in (html_body, text):
+        assert "evil.example" not in body and "www.bad.test" not in body
+        assert "[link removed]" in body
+    message_line = next(l for l in text.splitlines() if l.startswith("- Message:"))
+    assert len(message_line) < 200 and message_line.endswith("…")
+
+
+def test_the_confirmation_subject_never_contains_request_text():
+    _, send = _confirmation(first="Ada\r\nBcc: attacker@evil.test", topic="t\r\nX: y")
+    assert send.call_args.args[1] == CONTACT_CONFIRMATION_SUBJECT
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "no-at-sign", "ada@example.com\r\nBcc: x@evil.test",
+                                 "ada@example.com, other@evil.test", "Ada <ada@example.com>"])
+def test_the_confirmation_refuses_an_unsafe_recipient_without_calling_the_provider(bad):
+    ok, send = _confirmation(email=bad)
+    assert ok is False
+    assert send.call_count == 0
+
+
+def test_a_team_delivery_failure_withholds_the_confirmation(client, caplog):
+    """The confirmation says our team will review the enquiry — it must not go out when the
+    team never received it."""
+    with patch("app.email._send", side_effect=[False]) as send, caplog.at_level("ERROR"):
+        assert client.post("/api/contact", json=VALID).status_code == 202
+    assert send.call_count == 1
+    assert "NOT delivered to the team inbox" in caplog.text
+
+
+def test_a_confirmation_failure_is_logged_once_and_never_retried(client, caplog):
+    with patch("app.email._send", side_effect=[True, False]) as send, caplog.at_level("ERROR"):
+        r = client.post("/api/contact", json=VALID)
+    assert r.status_code == 202 and r.json() == {"received": True}
+    assert send.call_count == 2                                # no retry, so no duplicate
+    assert "confirmation NOT delivered to the submitter" in caplog.text
+
+
+def test_no_provider_secret_reaches_the_response_or_the_log(client, caplog):
+    import httpx
+
+    secret = "re_live_SECRET_must_never_be_logged_123456"
+    request = httpx.Request("POST", "https://api.resend.com/emails")
+    failure = httpx.HTTPStatusError("422 Unprocessable", request=request,
+                                    response=httpx.Response(422, request=request, text='{"message":"invalid"}'))
+    with patch.object(settings, "RESEND_API_KEY", secret), \
+         patch("app.email.httpx.post", side_effect=failure), caplog.at_level("DEBUG"):
+        r = client.post("/api/contact", json=VALID)
+    assert r.status_code == 202
+    assert secret not in r.text and secret not in caplog.text
+    assert "resend" not in r.text.lower()
+
+
+def test_a_resubmitted_enquiry_is_accepted_but_not_mailed_twice(client, sender, confirmer):
+    first = client.post("/api/contact", json=VALID)
+    again = client.post("/api/contact", json=VALID)
+    assert first.status_code == again.status_code == 202
+    assert again.json() == {"received": True}
+    assert sender.call_count == 1 and confirmer.call_count == 1
+    # A different enquiry from the same person is a new enquiry.
+    client.post("/api/contact", json={**VALID, "message": "A second, different question."})
+    assert sender.call_count == 2 and confirmer.call_count == 2

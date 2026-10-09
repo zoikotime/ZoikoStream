@@ -68,17 +68,18 @@ def password_violation(org: Organization | None, password: str) -> str | None:
 # ── session_timeout ─────────────────────────────────────────────────────────────────────
 
 def session_lifetime(org: Organization | None, *, remember: bool = False) -> timedelta:
-    """Token lifetime for this organization.
+    """Maximum (absolute) length of a sign-in session for this organization.
 
-    Only applied when the organization's configured timeout is SHORTER than the platform
-    default — the setting exists to tighten a tenant's sessions, not to let one tenant hold
-    a token for longer than the product allows.
+    The platform maximum (SESSION_ABSOLUTE_TIMEOUT_HOURS), shortened by the organization's
+    configured timeout when that is SHORTER — the setting exists to tighten a tenant's
+    sessions, never to let one tenant hold a session longer than the product allows.
 
-    `remember` keeps the long-lived path, but still clamps to the organization's policy when
-    that policy is shorter, so "remember me" cannot be used to escape a tenant's own rule.
+    `remember` no longer lengthens anything. It used to buy a 30-day token; "Remember me" now
+    only decides whether the client keeps the credential across a browser restart, and the
+    idle and absolute limits apply to every session (services/auth_sessions.py). The
+    parameter stays so existing callers keep working.
     """
-    default = (timedelta(days=app_settings.REMEMBER_TOKEN_DAYS) if remember
-               else timedelta(hours=app_settings.ACCESS_TOKEN_HOURS))
+    default = timedelta(hours=app_settings.SESSION_ABSOLUTE_TIMEOUT_HOURS)
     configured = SESSION_TIMEOUTS.get((_security(org).get("session_timeout") or "").strip())
     if configured is None:
         return default
@@ -86,9 +87,13 @@ def session_lifetime(org: Organization | None, *, remember: bool = False) -> tim
 
 
 def session_timeout_label(org: Organization | None) -> str:
-    """What the console may truthfully display."""
+    """What the console may truthfully display: the limit actually enforced. A configured
+    value at or above the platform maximum is not what applies, so it is not what is shown."""
     raw = (_security(org).get("session_timeout") or "").strip()
-    return raw if raw in SESSION_TIMEOUTS else f"{app_settings.ACCESS_TOKEN_HOURS} hours"
+    configured = SESSION_TIMEOUTS.get(raw)
+    if configured is not None and configured < timedelta(hours=app_settings.SESSION_ABSOLUTE_TIMEOUT_HOURS):
+        return raw
+    return f"{app_settings.SESSION_ABSOLUTE_TIMEOUT_HOURS} hours"
 
 
 # ── allowed_domains ─────────────────────────────────────────────────────────────────────
