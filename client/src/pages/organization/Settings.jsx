@@ -21,6 +21,8 @@ import { logoUrlError } from "../../utils/orgLogo";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import ApiCredentials from "../../components/organization/ApiCredentials";
 import ChangePasswordForm from "../../components/organization/profile/ChangePasswordForm";
+import ProfilePhotoEditor from "../../components/profile/ProfilePhotoEditor";
+import { useAuth } from "../../auth/AuthContext";
 import BrandingPreview from "../../components/organization/BrandingPreview";
 import LogoField from "../../components/organization/LogoField";
 import CustomDomainPanel from "../../components/organization/CustomDomainPanel";
@@ -306,6 +308,8 @@ const changedFields = (key, form, base) => {
 
 export default function OrganizationSettings() {
   const { data, loading, error, reload } = useApi(loadSettings);
+  // The signed-in person, for their own profile photo (General tab).
+  const me = useAuth()?.user || null;
   // Server-described notification controls. null on an older API build, which the panel
   // falls back to handling.
   const catalog = data?.notifCatalog ?? null;
@@ -508,6 +512,12 @@ export default function OrganizationSettings() {
           {/* ── GENERAL: Organization Profile + Custom Domain ── */}
           {tab === "general" && (
             <>
+              {/* "Edit Profile" on /organization/profile lands here. The photo is the person's
+                  own, saved on its own (Save photo) — separate from the organization fields
+                  below and their Save. */}
+              <Panel title="Your profile photo" desc="Shown wherever your name appears in this organization">
+                <ProfilePhotoEditor user={me} />
+              </Panel>
               <Panel title="Organization Profile" desc="Basic information about your organization">
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Field label="Organization Name" error={errors.name}>

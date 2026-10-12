@@ -1319,7 +1319,9 @@ def console_state(db: Session, org: Organization, user: User) -> dict:
             ) or 0,
         },
         "user": {"name": user.full_name, "email": user.email,
-                 "role_label": _role_label(user.role)},
+                 "role_label": _role_label(user.role),
+                 # The console chrome (sidebar, account menu) shows the photo when there is one.
+                 "avatar_url": user.avatar_url},
     }
 
 

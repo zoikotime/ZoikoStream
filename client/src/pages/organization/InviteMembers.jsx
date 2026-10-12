@@ -16,6 +16,7 @@ import SectionCard from "../../components/admin/SectionCard";
 import { cx, focusRing } from "../../ui/tokens";
 import { Label } from "../../ui/forms";
 import { fmtDate } from "../../data/events";
+import UserAvatar from "../../ui/UserAvatar";
 
 // Mirrors the backend's ORG_ASSIGNABLE_ROLES (routers/organization.py) — "moderator" was
 // removed from both together, so the form cannot offer a role the API would reject.
@@ -204,9 +205,12 @@ export default function OrganizationMembers() {
       sortValue: (r) => (r.full_name || "").toLowerCase(),
       render: (r) => (
         <div className="flex items-center gap-3">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-violet-100 text-xs font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
-            {(r.full_name || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase()}
-          </span>
+          <UserAvatar
+            name={r.full_name}
+            src={r.avatar_url}
+            alt=""
+            className="h-9 w-9 bg-violet-100 text-xs font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300"
+          />
           <div className="min-w-0">
             <p className="truncate font-medium text-slate-800 dark:text-slate-100">
               {r.full_name}

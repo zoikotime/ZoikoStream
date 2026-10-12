@@ -192,6 +192,9 @@ _USER_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS recovery_email VARCHAR(255)",
     "ADD COLUMN IF NOT EXISTS recovery_email_verified_at TIMESTAMPTZ",
     "ADD COLUMN IF NOT EXISTS recovery_email_pending VARCHAR(255)",
+    # The user's own profile photo (services/avatars.py): the path it is served from, never
+    # the image itself. NULL on every existing row, which keeps showing their initials.
+    "ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255)",
 ]
 
 # Backfill the timestamp for the grandfathered rows above so `email_verified` is never

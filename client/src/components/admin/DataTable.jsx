@@ -79,6 +79,13 @@ export default function DataTable({
   skeletonRows = 6,
   empty,
   rowActions,
+  // Heading for the rowActions column. Omitted, the column stays unlabelled as before; a table
+  // that also has other icon columns names it ("Actions") so each icon's column says what it is.
+  rowActionsHeader,
+  // Row actions are revealed on row hover / keyboard focus by default (a quiet table whose
+  // actions are secondary). A table whose actions are primary controls — the Events list's
+  // View and Delete — shows them at rest instead: never hidden, hover only adds emphasis.
+  alwaysShowRowActions = false,
   onRowClick,
   initialSort = null,
   pageSize,
@@ -329,7 +336,13 @@ export default function DataTable({
                   )}
                 </th>
               ))}
-              {rowActions && <th className="w-12 px-4 py-2.5" />}
+              {rowActions && (rowActionsHeader ? (
+                <th className="whitespace-nowrap px-4 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-500">
+                  {rowActionsHeader}
+                </th>
+              ) : (
+                <th className="w-12 px-4 py-2.5" />
+              ))}
             </tr>
           </thead>
 
@@ -395,7 +408,14 @@ export default function DataTable({
                     ))}
                     {rowActions && (
                       <td className="px-4 py-3.5 text-right">
-                        <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
+                        <div
+                          data-row-actions
+                          className={cx(
+                            "flex items-center justify-end gap-1",
+                            !alwaysShowRowActions &&
+                              "opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none"
+                          )}
+                        >
                           {rowActions(row)}
                         </div>
                       </td>
