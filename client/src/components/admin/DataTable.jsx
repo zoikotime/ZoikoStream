@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FiChevronDown, FiChevronLeft, FiChevronRight, FiChevronUp, FiSearch } from "react-icons/fi";
 import { CONSOLE, cx, focusRing } from "../../ui/tokens";
+import useMediaQuery from "../../hooks/useMediaQuery";
 
 // Reusable data grid for every table (Organizations, Users, Events, Billing, …).
 // Features: client-side sortable columns with clear indicators, optional pagination
@@ -33,12 +34,37 @@ function SortIcon({ active, dir }) {
   return dir === "asc" ? <FiChevronUp aria-hidden="true" /> : <FiChevronDown aria-hidden="true" />;
 }
 
-function PageBtn({ disabled, active, onClick, children }) {
+// The page numbers to draw: first, last, and the current page with one neighbour each side,
+// with "gap" marking each run that was skipped. Rendering every page put 44 buttons in one
+// row for Identity & Access (2,173 accounts / 50) and pushed them past the card's edge.
+// A gap is only used where it hides two or more pages; a single hidden page is cheaper to
+// show than to replace with an ellipsis of the same width.
+//
+// `siblings` is 0 on phones: nine controls (‹ 1 2 3 4 5 … 44 ›) need ~320px and a 375px
+// card offers ~310, so the Next arrow wrapped onto a line of its own. Without neighbours the
+// row is at most seven controls. Computed rather than hidden with `sm:` classes, because
+// hiding the neighbours would leave sequences like "1 2 4" with no gap marker between them.
+function pageWindow(current, pageCount, siblings = 1) {
+  const shown = new Set([1, pageCount, current - siblings, current, current + siblings]);
+  const pages = [...shown].filter((p) => p >= 1 && p <= pageCount).sort((a, b) => a - b);
+  const out = [];
+  pages.forEach((p, i) => {
+    const prev = pages[i - 1];
+    if (prev != null && p - prev === 2) out.push(prev + 1);
+    else if (prev != null && p - prev > 2) out.push(`gap-${prev}`);
+    out.push(p);
+  });
+  return out;
+}
+
+function PageBtn({ disabled, active, onClick, children, ...rest }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-current={active ? "page" : undefined}
+      {...rest}
       className={cx(
         "grid h-8 min-w-8 place-items-center rounded-md px-2 text-sm font-medium transition duration-150 motion-reduce:transition-none",
         focusRing,
@@ -197,6 +223,8 @@ export default function DataTable({
     ? sorted
     : pageSize ? sorted.slice((current - 1) * pageSize, current * pageSize) : sorted;
   const goToPage = serverPaged ? onPageChange : setPage;
+  // Same phone breakpoint VideoPlayer uses; see pageWindow for why the window narrows there.
+  const isPhone = useMediaQuery("(max-width: 639.98px)");
 
   // An empty table has nothing to order, so its sort controls are disabled and no column reads
   // as active — whatever the sort state holds. Clicks over zero rows used to flip the arrows.
@@ -482,19 +510,25 @@ export default function DataTable({
               : Math.min(current * pageSize, sorted.length)}{" "}
             of {serverPaged ? (serverTotal ?? sorted.length) : sorted.length}
           </p>
-          <div className="flex items-center gap-1">
-            <PageBtn disabled={current === 1} onClick={() => goToPage(current - 1)}>
-              <FiChevronLeft />
+          <nav aria-label="Pagination" className="flex min-w-0 flex-wrap items-center gap-1">
+            <PageBtn disabled={current === 1} onClick={() => goToPage(current - 1)} aria-label="Previous page">
+              <FiChevronLeft aria-hidden="true" />
             </PageBtn>
-            {Array.from({ length: pageCount }, (_, i) => i + 1).map((p) => (
-              <PageBtn key={p} active={p === current} onClick={() => goToPage(p)}>
-                {p}
-              </PageBtn>
-            ))}
-            <PageBtn disabled={current === pageCount} onClick={() => goToPage(current + 1)}>
-              <FiChevronRight />
+            {pageWindow(current, pageCount, isPhone ? 0 : 1).map((p) =>
+              typeof p === "number" ? (
+                <PageBtn key={p} active={p === current} onClick={() => goToPage(p)}>
+                  {p}
+                </PageBtn>
+              ) : (
+                <span key={p} aria-hidden="true" className="grid h-8 min-w-8 place-items-center text-sm text-slate-400 dark:text-neutral-500">
+                  …
+                </span>
+              )
+            )}
+            <PageBtn disabled={current === pageCount} onClick={() => goToPage(current + 1)} aria-label="Next page">
+              <FiChevronRight aria-hidden="true" />
             </PageBtn>
-          </div>
+          </nav>
         </div>
       )}
     </div>
