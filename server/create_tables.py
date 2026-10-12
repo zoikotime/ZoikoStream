@@ -1259,5 +1259,33 @@ def ensure_schema():
     print("Schema ready!")
 
 
+def ensure_chatbot_schemas():
+    """The two Guide assistants' own schemas, applied by the same deploy step as the platform.
+
+    * Operator Guide: its opguide_* tables in THIS database (separate metadata, so
+      create_all above never sees them; additive and idempotent).
+    * Public Guide: its own database at GUIDE_DATABASE_URL — created if missing, migrated,
+      and its knowledge index rebuilt only when the approved sources changed. Skipped when
+      GUIDE_DATABASE_URL is not configured.
+
+    Failure-isolated like the assistants themselves: a problem here is reported loudly in the
+    deploy log but never fails the platform migration — the platform runs without the
+    affected assistant until it is fixed.
+    """
+    try:
+        from app.operator_guide.schema import create_schema
+        created = create_schema(engine)
+        print("Operator Guide schema ready" + (f" (created: {', '.join(created)})" if created else ""))
+    except Exception as exc:
+        print(f"WARNING: Operator Guide schema NOT applied: {type(exc).__name__}: {exc}")
+    try:
+        from app.guide.deploy import prepare_database
+        for line in prepare_database():
+            print(f"Public Guide: {line}")
+    except Exception as exc:
+        print(f"WARNING: Public Guide database NOT prepared: {type(exc).__name__}: {exc}")
+
+
 if __name__ == "__main__":
     ensure_schema()
+    ensure_chatbot_schemas()

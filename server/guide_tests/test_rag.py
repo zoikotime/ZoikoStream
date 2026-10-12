@@ -157,3 +157,15 @@ def test_conflicting_pricing_sources(fresh_corpus, db):  # RAG-AT-05
     ingest_corpus(FIXTURES / "knowledge_conflict")
     pack = retrieve(db, "How much is the Business plan per month?", "PRICING")
     assert pack.answerability == "SOURCE_CONFLICT"
+
+
+def test_deploy_skips_reindexing_unchanged_knowledge(db):
+    """Deploy-time refresh (app/guide/deploy.py) rebuilds only when the sources changed."""
+    from conftest import FIXTURES
+    from app.guide.knowledge import ingest
+    from app.guide.settings import get_settings
+    docs = ingest.load_sources(FIXTURES / "knowledge")
+    profile = get_settings().GUIDE_EMBEDDING_PROFILE
+    assert ingest.is_current(db, docs, profile)          # the session fixture already built it
+    assert not ingest.is_current(db, docs[:-1], profile)  # a removed source changes the digest
+    assert not ingest.is_current(db, docs, "fastembed:other-model")

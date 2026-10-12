@@ -223,6 +223,22 @@ def _register(db: Session, doc: SourceDoc, now: datetime) -> GuideKnowledgeSourc
 
 # ── Build & activate ───────────────────────────────────────────────────────────────────────
 
+def release_digest(docs: list[SourceDoc], embedding_profile: str) -> bytes:
+    """Fingerprint of an index build: every source's content, the embedding profile and the
+    chunking profile. Identical inputs give an identical digest."""
+    return hashlib.sha256(b"".join(
+        d.digest for d in sorted(docs, key=lambda d: d.meta["source_id"]))
+        + embedding_profile.encode() + CHUNKING_PROFILE.encode()).digest()
+
+
+def is_current(db: Session, docs: list[SourceDoc], embedding_profile: str) -> bool:
+    """True when the active release was built from exactly these sources and profiles, so a
+    deploy can skip re-indexing unchanged knowledge."""
+    active = db.scalar(select(RagIndexRelease).where(RagIndexRelease.status == "active"))
+    return bool(active and active.embedding_profile == embedding_profile
+                and active.build_digest == release_digest(docs, embedding_profile))
+
+
 def build_release(db: Session, docs: list[SourceDoc], *, embedding_profile: str | None = None,
                   activate: bool = True) -> RagIndexRelease:
     now = datetime.now(timezone.utc)
@@ -235,9 +251,7 @@ def build_release(db: Session, docs: list[SourceDoc], *, embedding_profile: str 
         GuideKnowledgeSourceVersion.status == "published").values(status="retired",
                                                                   updated_at=now))
 
-    build_digest = hashlib.sha256(b"".join(
-        d.digest for d in sorted(docs, key=lambda d: d.meta["source_id"]))
-        + embedder.profile.encode() + CHUNKING_PROFILE.encode()).digest()
+    build_digest = release_digest(docs, embedder.profile)
     previous = db.scalar(select(RagIndexRelease).where(RagIndexRelease.status == "active"))
     release = RagIndexRelease(
         # Random suffix: rebuilding identical content (e.g. after an embedding fix) is a NEW
