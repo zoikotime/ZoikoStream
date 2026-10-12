@@ -185,12 +185,27 @@ describe("super admin behaviour is preserved", () => {
 
   it("clears the commercial scope when the role is not super admin", async () => {
     const u = userEvent.setup();
-    openModal(userWithRole("super_admin"));
+    openModal({ ...userWithRole("super_admin"), staff_commercial_role: "finance_ops" });
 
     await u.selectOptions(roleSelect(), "org_admin");
     await u.click(await saveButton());
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
     expect(vi.mocked(api.patch).mock.calls[0][1].staff_commercial_role).toBe("");
+  });
+
+  // Sending "" for an account that has no scope was not a no-op: the server reads any
+  // staff_commercial_role it receives as a scoping change and demands an identity elevation,
+  // so every save from this modal — even a rename — was elevation-gated.
+  it("omits the commercial scope when there is nothing to change", async () => {
+    const u = userEvent.setup();
+    openModal(userWithRole("org_admin"));
+
+    await u.clear(screen.getAllByRole("textbox")[0]);
+    await u.type(screen.getAllByRole("textbox")[0], "Renamed");
+    await u.click(await saveButton());
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(vi.mocked(api.patch).mock.calls[0][1]).not.toHaveProperty("staff_commercial_role");
   });
 });

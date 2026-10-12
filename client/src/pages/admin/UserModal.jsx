@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { FiLock } from "react-icons/fi";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
 import { Input, Select, Label, Switch } from "../../ui/forms";
@@ -6,6 +7,7 @@ import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import { ASSIGNABLE_PLATFORM_ROLES, roleLabel, STAFF_COMMERCIAL_ROLES } from "./roleInfo";
 import { readSupportState } from "./supportAccess";
+import useElevation from "../../components/admin/useElevation";
 
 // Edit an existing platform user's role/name/active state. The admin API has no user
 // creation route (accounts are created through org signup/invitations), so this is
@@ -70,21 +72,61 @@ export default function UserModal({ open, onClose, user, onSaved }) {
     ? ASSIGNABLE_PLATFORM_ROLES
     : [...ASSIGNABLE_PLATFORM_ROLES, user?.role].filter(Boolean);
 
-  const close = () => !saving && onClose();
+  // ── "identity" elevation: shown before the click, not discovered after it ────────────
+  // The server refuses the high-risk subset of this PATCH without an active "identity"
+  // elevation (routers/admin._is_high_risk_user_change). This mirrors that predicate so the
+  // modal can say so and offer the way out, the same way EndSessionDialog does for
+  // "broadcast". It is a mirror, not the authority: the PATCH still decides, and a 403 from
+  // it is still surfaced below.
+  //
+  // The staff scope is the value the server would RECEIVE. It used to be sent on every save
+  // ("" for anyone not a super admin), and the server treats any value it receives as a
+  // staff-scoping change, so renaming an Org Admin demanded the same step-up as minting a
+  // Super Admin. It is now sent only when it actually changes.
+  const staffScope = form.role === "super_admin" ? form.staff_commercial_role : "";
+  const staffChanged = Boolean(user) && staffScope !== (user.staff_commercial_role || "");
+  const needsIdentity = Boolean(user) && (
+    (form.role !== user.role && (form.role === "super_admin" || user.role === "super_admin"))
+    || (!form.is_active && user.role === "super_admin")
+    || staffChanged
+  );
+  const identity = useElevation("identity");
+  // Unknown is not "not elevated": with the console state unreadable the modal cannot claim
+  // the operator lacks the grant, so it leaves Save to the server rather than blocking it.
+  const elevationBlocked = needsIdentity && !identity.ok && identity.status !== "unknown";
+  const [elevationError, setElevationError] = useState(null);
+
+  const elevateForIdentity = async () => {
+    setElevationError(null);
+    try {
+      const granted = await identity.elevate("Change a platform role from Identity & Access");
+      if (!granted) {
+        setElevationError(
+          "You already hold a different elevation, and the platform opens one at a time. " +
+          "End it from the rail (“End now”), then elevate again."
+        );
+      }
+    } catch (e2) {
+      setElevationError(errMsg(e2));
+    }
+  };
+
+  const close = () => !saving && !identity.elevating && onClose();
 
   const submit = async (e) => {
     e.preventDefault();
     if (!user) return;
     if (!form.full_name.trim()) return notify.error("Name is required");
+    if (elevationBlocked) return;
     setSaving(true);
     try {
       await api.patch(`/admin/users/${user.id}`, {
         full_name: form.full_name.trim(),
         role: form.role,
         is_active: form.is_active,
-        // "" clears it; only sent meaningfully when role stays/becomes super_admin — the
-        // backend rejects a non-empty value otherwise (schemas.admin.UserUpdate).
-        staff_commercial_role: form.role === "super_admin" ? form.staff_commercial_role : "",
+        // "" clears it; a non-empty value is only valid for a super_admin
+        // (schemas.admin.UserUpdate). Omitted when unchanged — see staffChanged above.
+        ...(staffChanged ? { staff_commercial_role: staffScope } : {}),
       });
       notify.success(`${form.full_name} updated`);
       onSaved?.();
@@ -106,21 +148,27 @@ export default function UserModal({ open, onClose, user, onSaved }) {
       className="max-w-md"
       footer={
         <>
-          <Button variant="secondary" size="sm" onClick={close} disabled={saving}>Cancel</Button>
-          <Button
-            size="sm"
-            onClick={submit}
-            loading={saving}
-            // Enabled. Editing an account's platform attributes — name, platform role,
-            // whether it may sign in — is platform governance, and PATCH /admin/users/{id}
-            // no longer sits behind an ORG-009 support context (see its docstring). The
-            // server is still the authority: it requires super_admin, requires an "identity"
-            // elevation for the high-risk subset, and refuses anything that would empty the
-            // active super-admin set.
-            disabled={saving}
-          >
-            Save changes
-          </Button>
+          <Button variant="secondary" size="sm" onClick={close} disabled={saving || identity.elevating}>Cancel</Button>
+          {elevationBlocked ? (
+            <Button size="sm" onClick={elevateForIdentity} loading={identity.elevating} disabled={identity.elevating}>
+              Elevate access
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onClick={submit}
+              loading={saving}
+              // Enabled. Editing an account's platform attributes — name, platform role,
+              // whether it may sign in — is platform governance, and PATCH /admin/users/{id}
+              // no longer sits behind an ORG-009 support context (see its docstring). The
+              // server is still the authority: it requires super_admin, requires an "identity"
+              // elevation for the high-risk subset, and refuses anything that would empty the
+              // active super-admin set.
+              disabled={saving}
+            >
+              Save changes
+            </Button>
+          )}
         </>
       }
     >
@@ -190,6 +238,30 @@ export default function UserModal({ open, onClose, user, onSaved }) {
           accent="violet"
           label={<span className="text-sm font-medium text-slate-700 dark:text-slate-200">Account active</span>}
         />
+        {needsIdentity && !identity.ok && (
+          <div role="status" className="flex gap-2.5 rounded-lg bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+            <FiLock aria-hidden="true" className="mt-0.5 shrink-0" />
+            <p>
+              {identity.status === "unknown"
+                ? "Access state unknown — the console API is unreachable, so it cannot be confirmed that you hold the identity elevation this change needs. The server will decide when you save."
+                : identity.status === "expired"
+                  ? "Your elevation has expired. Elevate again to make this change."
+                  : identity.status === "wrong_scope"
+                    ? "Your current elevation does not cover identity changes. Elevate for identity to continue."
+                    : "Granting or removing Super Admin, deactivating a Super Admin, or changing commercial staff scope needs an active identity elevation (15 minutes, audited)."}
+            </p>
+          </div>
+        )}
+        {needsIdentity && identity.ok && identity.seconds > 0 && (
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Identity elevation active · {Math.floor(identity.seconds / 60)}m {identity.seconds % 60}s remaining.
+          </p>
+        )}
+        {elevationError && (
+          <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2.5 text-xs text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
+            {elevationError}
+          </p>
+        )}
       </form>
     </Modal>
   );
