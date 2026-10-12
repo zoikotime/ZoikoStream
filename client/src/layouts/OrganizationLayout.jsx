@@ -1,7 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import api from "../api";
 import useApi from "../hooks/useApi";
 import useInterval from "../hooks/useInterval";
+import { PROFILE_UPDATED_EVENT } from "../utils/avatar";
 import { CONSOLE } from "../ui/tokens";
 import AppShell from "./AppShell";
 import Sidebar from "../components/Dashboard/Sidebar";
@@ -38,6 +39,12 @@ export default function OrganizationLayout() {
     api.get("/organization/console-state").then((r) => r.data)
   );
   useInterval(reload, REFRESH_MS);
+  // The signed-in user changed their profile photo: the sidebar and account menu read identity
+  // from this payload, so re-read it now rather than on the next timer tick.
+  useEffect(() => {
+    window.addEventListener(PROFILE_UPDATED_EVENT, reload);
+    return () => window.removeEventListener(PROFILE_UPDATED_EVENT, reload);
+  }, [reload]);
 
   // Set by the page that wants the topbar's Quick Actions menu (Profile).
   const [quickActions, setQuickActions] = useState(false);

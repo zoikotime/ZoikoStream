@@ -130,6 +130,8 @@ class UserOut(BaseModel):
     organization_name: str | None = None
     platform_role: str | None = None
     organization_role: str | None = None
+    # The account's own profile photo (served path, services/avatars.py), or null — initials.
+    avatar_url: str | None = None
 
 
 class SessionStatusOut(BaseModel):

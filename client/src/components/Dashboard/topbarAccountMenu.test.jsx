@@ -58,13 +58,14 @@ describe("the account menu", () => {
     expect(screen.getByRole("menu")).toHaveTextContent("Vihari Rao");
   });
 
-  it("never throws on a missing name, and shows a neutral initial", async () => {
+  it("never throws on a missing name, and shows a neutral placeholder", async () => {
     auth.user = { full_name: null, email: null };
     const u = userEvent.setup();
     renderTopbar({ user: { name: null } });
     await open(u);
     const menu = screen.getByRole("menu");
-    expect(menu).toHaveTextContent("?");
+    // No name, no initials: the shared avatar falls back to a generic person icon (ui/UserAvatar).
+    expect(menu.querySelector('[data-avatar="icon"]')).not.toBeNull();
     expect(menu).toHaveTextContent("Member");
   });
 

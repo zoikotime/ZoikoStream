@@ -5,8 +5,7 @@ import { Input } from "../../ui/forms";
 import Spinner from "../../ui/Spinner";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
-
-const initials = (name) => (name || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+import UserAvatar from "../../ui/UserAvatar";
 
 // Searchable, multi-select list of the org's active members. Used both standalone
 // (CreateEventModal, picking hosts before the event exists) and inside AssignPeopleModal
@@ -60,9 +59,12 @@ export default function MemberPicker({ selected, onToggle, className = "" }) {
                     : "border-transparent hover:bg-slate-50 dark:hover:bg-slate-800"
                 )}
               >
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-violet-100 text-xs font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
-                  {initials(u.full_name)}
-                </span>
+                <UserAvatar
+                  name={u.full_name}
+                  src={u.avatar_url}
+                  alt=""
+                  className="h-9 w-9 bg-violet-100 text-xs font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300"
+                />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium text-slate-800 dark:text-slate-100">
                     {u.full_name}

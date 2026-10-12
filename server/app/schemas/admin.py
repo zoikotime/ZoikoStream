@@ -98,6 +98,8 @@ class AdminUserOut(BaseModel):
     created_at: datetime | None = None
     # Commercial RBAC (ZST-LE-COM-001 Section 25) — meaningful only when role=='super_admin'.
     staff_commercial_role: str | None = None
+    # The member's own profile photo, or null (initials). Set only by its owner.
+    avatar_url: str | None = None
 
 
 class UserUpdate(BaseModel):

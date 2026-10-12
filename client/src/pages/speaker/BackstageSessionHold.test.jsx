@@ -17,7 +17,9 @@ vi.mock("../../api", () => ({
 }));
 vi.mock("../../ui/Toast", () => ({ notify: { error: vi.fn(), success: vi.fn() } }));
 
-let pushEnvelope = () => {};
+// Set by THIS test's Backstage when it mounts (reset before each test, so a snapshot can never
+// be delivered to a page left over from the previous one).
+let pushEnvelope = null;
 vi.mock("../../hooks/useEventStream", () => ({
   default: (eventId, onEnvelope) => {
     pushEnvelope = onEnvelope;
@@ -82,6 +84,7 @@ beforeEach(() => {
   sessionStorage.clear();
   vi.clearAllMocks();
   setVisibility("visible");
+  pushEnvelope = null;
   published = { publishedAudio: true, publishedVideo: true };
   localStorage.setItem("token", "speaker.jwt.value");
   sessionStatus = () => statusIn(30 * MIN);
@@ -125,10 +128,14 @@ function renderBackstage() {
 
 const contributor = (state) => ({ user_id: SPEAKER.id, state });
 
-/** The live socket's snapshot: the speaker is in `state`. */
+// What the page shows once it has applied the snapshot for each state used here.
+const SHOWN = { live: /You.re on air/, ready: /waiting for the host to bring you live/ };
+
+/** The live socket's snapshot: the speaker is in `state`. Waits for the page to mount (the
+ *  sign-in check comes first) and then to render that state, so nothing races the snapshot. */
 async function joinAs(state) {
   renderBackstage();
-  await waitFor(() => expect(api.get).toHaveBeenCalledWith("/auth/me"));
+  await waitFor(() => expect(pushEnvelope).toBeTypeOf("function"));
   await act(async () => {
     pushEnvelope({
       channel: "moderator", type: "snapshot",
@@ -136,6 +143,7 @@ async function joinAs(state) {
               my_publish_token: "publish.jwt", livekit_url: "wss://livekit.test" },
     });
   });
+  await screen.findByText(SHOWN[state]);
   await act(async () => {});
 }
 

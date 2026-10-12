@@ -23,6 +23,7 @@ from .routers.live import router as live_router
 from .routers.commercial import router as commercial_router
 from .routers.deliveries import router as deliveries_router
 from .routers.contact import router as contact_router
+from .routers.profile import router as profile_router
 from .routers.status import router as status_router
 from .routers.trust import router as trust_router
 from .routers.wellknown import router as wellknown_router
@@ -501,8 +502,10 @@ _ORG_STATE_GATE = [Depends(require_operational_org_access)]
 # public and unauthenticated by design (per-route rate limits instead), and it is NOT
 # org-state gated — withholding a privacy right from a tenant we restricted would compound
 # the restriction rather than enforce it.
+# profile_router (your own profile photo) sits with auth_router: it is the account's identity,
+# not organization operations, and the photos it serves must load for every member list.
 for router in (auth_router, dashboard_router, admin_router, contact_router, live_router,
-               status_router, trust_router, privacy_router):
+               status_router, trust_router, privacy_router, profile_router):
     app.include_router(router, prefix="/api")
 
 # NO /api prefix, and no org-state gate. Android fetches

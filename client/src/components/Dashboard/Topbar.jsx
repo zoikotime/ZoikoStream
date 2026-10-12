@@ -9,6 +9,7 @@ import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import ThemeToggle from "../../ui/ThemeToggle";
 import HealthDot from "../admin/HealthDot";
 import QuickActionsMenu from "../organization/QuickActionsMenu";
+import UserAvatar from "../../ui/UserAvatar";
 
 // Organization console topbar. One presentation for every /organization/* route: the
 // primary "request live event" action, theme, and the account menu.
@@ -27,11 +28,6 @@ import QuickActionsMenu from "../organization/QuickActionsMenu";
 // The notification bell that used to live here was hardcoded to "3" with no data source; it
 // is gone rather than lying about unread items.
 const UNKNOWN = { status: "neutral", label: "Status unavailable" };
-
-// `name || ""`, not a default parameter: a default only covers `undefined`, and a null name
-// from the API would otherwise throw here and take the whole topbar down.
-const initials = (name) =>
-  String(name || "").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
 
 function useClickOutside(onClose) {
   const ref = useRef(null);
@@ -63,6 +59,9 @@ export default function Topbar({
     ...(state?.user || {}),
     name: state?.user?.name || user?.full_name,
     email: state?.user?.email || user?.email,
+    // The signed-in account's own record first: it is re-read the moment the photo changes
+    // (ProfilePhotoEditor), a beat before /console-state catches up.
+    avatar_url: user ? user.avatar_url ?? null : state?.user?.avatar_url ?? null,
   };
 
   const iconBtn = cx(
@@ -177,9 +176,12 @@ export default function Topbar({
             )}
             aria-label="Account menu"
           >
-            <span className={cx("grid h-7 w-7 place-items-center rounded-full text-[10px] font-semibold text-white shadow-sm shadow-violet-900/25", brand.chip)}>
-              {initials(person.name)}
-            </span>
+            <UserAvatar
+              name={person.name}
+              src={person.avatar_url}
+              alt=""
+              className={cx("h-7 w-7 text-[10px] font-semibold text-white shadow-sm shadow-violet-900/25", brand.chip)}
+            />
             <FiChevronDown
               className={cx(
                 "hidden text-[13px] transition-transform duration-150 sm:block motion-reduce:transition-none",
@@ -199,9 +201,11 @@ export default function Topbar({
               )}
             >
               <div className="flex items-center gap-2.5 px-3 py-2.5">
-                <span className={cx("grid h-9 w-9 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white", brand.chip)}>
-                  {initials(person.name)}
-                </span>
+                <UserAvatar
+                  name={person.name}
+                  src={person.avatar_url}
+                  className={cx("h-9 w-9 text-[11px] font-semibold text-white", brand.chip)}
+                />
                 <div className="min-w-0">
                   <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>
                     {person.name || "Member"}

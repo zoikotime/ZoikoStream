@@ -211,12 +211,16 @@ export default function OrganizationEvents() {
       render: (r) => fmtDuration(r.duration_minutes),
     },
     {
-      key: "actions",
-      header: "Actions",
+      // Its own column, named for what it is: the link sat under "Actions" beside View and
+      // Delete, which said nothing about what the icon does. "Viewer link", not "Public link":
+      // private and invite-only events have a viewer URL too (utils/viewerLink decides which).
+      // Icon-only: the label lives in the header, the tooltip and the accessible name. Copy
+      // ONLY — there is deliberately no affordance here that opens the attendee page, and the
+      // URL is never rendered.
+      key: "viewer_link",
+      header: "Viewer link",
       align: "right",
-      // Icon-only: the rail is already six columns wide and the label lives in the tooltip
-      // and the accessible name. Copy ONLY — there is deliberately no affordance here that
-      // opens the attendee page, and the URL is never rendered.
+      headerClassName: "whitespace-nowrap",
       render: (r) => (
         <button
           type="button"
@@ -309,7 +313,13 @@ export default function OrganizationEvents() {
               serverPageCount={Math.max(1, Math.ceil(total / PAGE_SIZE))}
               serverTotal={total}
               onPageChange={setPage}
-              minWidth={820}
+              minWidth={900}
+              // View, Delete and any other management controls: labelled now that the viewer
+              // link has a column of its own, and visible at rest — they used to appear only
+              // while the pointer was over the row, so nothing showed the actions existed.
+              // Hover and keyboard focus only add emphasis (the buttons' own hover and focus ring).
+              rowActionsHeader="Actions"
+              alwaysShowRowActions
               empty={{
                 icon: FiCalendar,
                 title: query || statusFilter !== "all" ? "No events match your filters" : "No events yet",
