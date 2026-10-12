@@ -3493,6 +3493,10 @@ def send_contact_message_email(*, first: str, last: str, email: str, org: str, c
     # Strip anything that could terminate a header line, then bound the length.
     safe_subject_name = " ".join(name.replace("\r", " ").replace("\n", " ").split())[:80]
     safe_subject_topic = " ".join(topic.replace("\r", " ").replace("\n", " ").split())[:40]
+    # NO reply_to. `_send`'s rule is that the header only ever carries a CONFIGURED address,
+    # never a value taken from a request — and the submitter's address is exactly that. The
+    # operator still has it: the body says "Reply directly to <address>", so nothing is lost
+    # except a request-supplied value in a header, which is the thing the rule exists to stop.
     return _send(
         settings.CONTACT_EMAIL,
         f"[{safe_subject_topic}] Enquiry from {safe_subject_name}",
@@ -3500,16 +3504,6 @@ def send_contact_message_email(*, first: str, last: str, email: str, org: str, c
     )
 
 
-# ── Contact form: the submitter's confirmation ──────────────────────────────────────────
-# Sent to the address the visitor typed, after the team's copy was accepted by the provider.
-#
-# That address is unverified, so this email must not be usable to deliver someone else's
-# words from our domain to a third party. Hence: a FIXED subject (no request text in a header
-# at all), every echoed field HTML-escaped, the message reduced to a short single-line
-# excerpt, and anything link-shaped removed from what is echoed. The per-IP rate limit and the
-# duplicate guard in routers/contact.py bound the volume.
-#
-# No response-time promise: the product does not make one, so the copy does not invent one.
 CONTACT_CONFIRMATION_SUBJECT = "We've received your ZoikoStream inquiry"
 CONTACT_CONFIRMATION_EXCERPT = 160
 _LINKISH = re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)\S+")

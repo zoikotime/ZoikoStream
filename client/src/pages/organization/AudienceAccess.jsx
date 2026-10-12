@@ -538,18 +538,25 @@ export default function AudienceAccess() {
               // analytics() made when "Total Viewers" became peak_viewers_summed.
               label: "Estimated attendees",
               value: attendance.loading ? null : a.unique_attendees ?? null,
-              reason: "Loading",
+              // Reasons are PRINTED now, not just hovered, so each one has to be true in the
+              // state it actually appears in. While the panel is loading a figure is not
+              // missing, it is not here yet — and "No attendance data" under every card would
+              // be a false statement that resolves a second later. No reason while loading;
+              // the dash alone is the honest placeholder.
+              reason: attendance.loading ? undefined : "No attendance data for this window",
             },
             {
               label: "Returning attendees",
               value: attendance.loading ? null : a.returning ?? null,
-              reason: "Loading",
+              reason: attendance.loading ? undefined : "No attendance data for this window",
             },
             {
               label: "Average watch time",
               value:
                 attendance.loading || a.avg_watch_minutes == null ? null : `${a.avg_watch_minutes}m`,
-              reason: "No sampled viewer data for this window",
+              // Distinct from a measured 0.0, which renders as "0m": this is the never-sampled
+              // case, where services/org.py deliberately returns null rather than zero.
+              reason: attendance.loading ? undefined : "No sampled viewer data for this window",
             },
             // Counted, not estimated: distinct registrations for registration-gated or
             // private events in the window whose registrant was admitted to the live stream.

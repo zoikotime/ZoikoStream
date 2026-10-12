@@ -42,6 +42,7 @@ from .payments import (
     PaymentProvider,
     PaymentResult,
     ProviderDeclined,
+    ProviderSubscription,
     ProviderInvalidRequest,
     ProviderNotConfigured,
     ProviderStateUnknown,
@@ -431,6 +432,123 @@ class StripePaymentProvider(PaymentProvider):
             checkout_url=url,
             stripe_customer_id=customer_ref,
             stripe_subscription_id=sub_ref,
+        )
+
+    def retrieve_subscription_checkout_session(
+        self, checkout_session_ref: str,
+    ) -> "SubscriptionCheckoutResult":
+        """Read back a subscription Checkout Session this adapter created.
+
+        ── WHY THIS EXISTS ──────────────────────────────────────────────────────────────
+        It was CALLED but never DEFINED. routers/organization.py (the upgrade click) and
+        services/maintenance.py (the reconciliation sweep) both invoked it, and
+        subscription_sync.py's comment even asserted it "already exists". It did not, so the
+        call raised AttributeError — which is not a PaymentProviderError, so the endpoint's
+        `except payment_svc.PaymentProviderError` could not catch it and the request came back
+        as an unhandled 500: "Something went wrong starting checkout."
+
+        It only ever fired for an organization whose subscription already carried a
+        `checkout_session_ref`, which is why a FIRST upgrade click worked and every click
+        after it failed — the first one bound the reference that sent the next one down this
+        branch.
+
+        ── WHAT THE CALLER DOES WITH IT ─────────────────────────────────────────────────
+        It decides whether to refuse, resume or replace an outstanding session:
+
+            paid              -> 409, the money already moved and only the webhook may
+                                 activate the subscription (Section 18)
+            open, not paid    -> hand back the SAME url, so one tenant cannot accumulate
+                                 parallel sessions by clicking Upgrade repeatedly
+            terminal          -> supersede it and create a fresh one
+
+        `url` is None once Stripe expires a session, which is exactly why "open" is read from
+        `status` rather than inferred from the URL being present.
+        """
+        ref = (checkout_session_ref or "").strip()
+        if not ref:
+            raise ProviderInvalidRequest("A checkout session reference is required")
+        try:
+            session = self._client.checkout.sessions.retrieve(ref)
+        except Exception as exc:
+            translated = _translate(exc, operation="retrieve_subscription_checkout_session")
+            self._log("subscription_checkout_retrieve_error", error=type(translated).__name__)
+            raise translated from exc
+
+        status = getattr(session, "status", None)            # open | complete | expired
+        payment_status = getattr(session, "payment_status", None)
+        # `no_payment_required` is a real paid outcome for a trial that collects no card up
+        # front: the session finished and nothing further is owed, so treating it as unpaid
+        # would send the customer through checkout a second time.
+        paid = payment_status in ("paid", "no_payment_required")
+        # Anything not still open cannot be redirected to again. `complete` is included on
+        # purpose: a finished session is spent whether or not money moved.
+        terminal = status in ("expired", "complete")
+
+        sub = getattr(session, "subscription", None)
+        sub_ref = sub if isinstance(sub, str) else getattr(sub, "id", None)
+        customer = getattr(session, "customer", None)
+        customer_ref = customer if isinstance(customer, str) else getattr(customer, "id", None)
+        self._log("subscription_checkout_retrieved", checkout_session_ref=ref,
+                  session_status=status, paid=paid, terminal=terminal)
+        return SubscriptionCheckoutResult(
+            checkout_session_ref=getattr(session, "id", ref),
+            # "" rather than None: the dataclass types this as str, and the caller tests it
+            # for truthiness before redirecting anywhere.
+            checkout_url=getattr(session, "url", None) or "",
+            stripe_customer_id=customer_ref,
+            stripe_subscription_id=sub_ref,
+            paid=paid,
+            terminal=terminal,
+        )
+
+    def retrieve_subscription(self, provider_subscription_ref: str) -> "ProviderSubscription":
+        """Read one subscription back from Stripe.
+
+        Called by subscription_sync (the on-demand repair behind the Billing page) and by
+        maintenance.reconcile_stripe_subscriptions (the sweep). It was defined in neither —
+        the same omission as retrieve_subscription_checkout_session above, and on the same
+        path: a tenant whose activation webhook never arrived could not be repaired, because
+        the repair itself raised AttributeError.
+
+        Returns FACTS ONLY. The Section 12 state is decided by the caller through the existing
+        status mapping, and the plan by resolving `price_ids` against the approved price
+        configuration. Nothing here decides either.
+        """
+        ref = (provider_subscription_ref or "").strip()
+        if not ref:
+            raise ProviderInvalidRequest("A subscription reference is required")
+        try:
+            sub = self._client.subscriptions.retrieve(ref)
+        except Exception as exc:
+            translated = _translate(exc, operation="retrieve_subscription")
+            self._log("subscription_retrieve_error", error=type(translated).__name__)
+            raise translated from exc
+
+        items = list(getattr(getattr(sub, "items", None), "data", None) or [])
+        price_ids, interval, period_end = [], None, getattr(sub, "current_period_end", None)
+        for item in items:
+            price = getattr(item, "price", None)
+            pid = getattr(price, "id", None)
+            if pid:
+                price_ids.append(pid)
+            recurring = getattr(price, "recurring", None)
+            interval = interval or getattr(recurring, "interval", None)
+            # Recent Stripe API versions moved the period onto the ITEM. Read the subscription
+            # first and fall back, so this works either side of that change rather than
+            # silently reporting no renewal date.
+            period_end = period_end or getattr(item, "current_period_end", None)
+
+        customer = getattr(sub, "customer", None)
+        customer_ref = customer if isinstance(customer, str) else getattr(customer, "id", None)
+        self._log("subscription_retrieved", provider_subscription_ref=ref,
+                  provider_status=getattr(sub, "status", None))
+        return ProviderSubscription(
+            provider_subscription_ref=getattr(sub, "id", ref),
+            provider_status=getattr(sub, "status", None),
+            price_ids=tuple(price_ids),
+            stripe_customer_id=customer_ref,
+            current_period_end=_utc(period_end),
+            provider_interval=interval,
         )
 
     def change_subscription_price(self, provider_subscription_ref: str, *, price_id: str,

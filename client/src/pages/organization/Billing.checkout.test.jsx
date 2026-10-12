@@ -1,4 +1,8 @@
-// The Upgrade button: from click to Stripe-hosted Checkout.
+// The purchase button: from click to Stripe-hosted Checkout.
+//
+// An organization with NO subscription reads "Buy Plan", not "Upgrade". It was the latter,
+// and the click came back "This organization has no subscription record to upgrade" — the
+// backend refusing the page's own mistaken claim that something existed to move up from.
 //
 // What these pin, in order of what would actually hurt if it regressed:
 //   1. the browser is sent ONLY to a URL the server returned — never to `undefined`, which
@@ -20,6 +24,16 @@ vi.mock("../../api", () => ({
     if (typeof d === "string") return d;
     return e?.message ?? fallback;
   },
+  // The page asks this to tell "the server never answered" apart from an answer it did
+  // not like, so the stub has to answer it too.
+  transportMessage: (e) => (e?.response ? null : "Couldn't reach the ZoikoStream server."),
+  // Billing now diagnoses a failed load instead of saying "try refreshing", so the stub
+  // has to answer this too.
+  diagnoseLoadError: (e, path) => (
+    e?.response?.status
+      ? `The platform API returned ${e.response.status}`
+      : `The platform API is unreachable — check that the API server is running and that VITE_API_URL points at it.`
+  ),
 }));
 
 vi.mock("../../ui/Toast", () => ({
@@ -107,14 +121,14 @@ beforeEach(() => {
 });
 
 describe("Which plans offer a purchase", () => {
-  it("shows Upgrade on Developer", async () => {
+  it("shows Buy Plan on Developer, because nothing is being upgraded", async () => {
     await renderBilling();
-    expect(cta("Developer")).toHaveTextContent("Upgrade");
+    expect(cta("Developer")).toHaveTextContent("Buy Plan");
   });
 
-  it("shows Upgrade on Business", async () => {
+  it("shows Buy Plan on Business, because nothing is being upgraded", async () => {
     await renderBilling();
-    expect(cta("Business")).toHaveTextContent("Upgrade");
+    expect(cta("Business")).toHaveTextContent("Buy Plan");
   });
 
   it("keeps Enterprise on Talk to an expert", async () => {
@@ -254,7 +268,7 @@ describe("When checkout fails", () => {
     await renderBilling({}, { post: failing(503, "Payments are not configured") });
     await clickAndRead();
     expect(cta("Developer")).not.toBeDisabled();
-    expect(cta("Developer")).toHaveTextContent("Upgrade");
+    expect(cta("Developer")).toHaveTextContent("Buy Plan");
     expect(assigned).toEqual([]);
   });
 

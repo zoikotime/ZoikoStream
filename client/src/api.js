@@ -3,9 +3,17 @@ import { clearToken, markSessionEnded, readToken, sessionEndReasonOf } from "./a
 
 // In production the API and the SPA are the same origin (one container — see the Dockerfile),
 // so nothing has to be baked in at build time. VITE_API_URL still overrides, and dev falls
-// back to the local API on 8001 because Vite serves the client on a different port.
+// back to the local API because Vite serves the client on a different port.
+//
+// THE FALLBACK PORT IS 8000, which is what this project actually runs the API on: .env.example
+// ships `VITE_API_URL=http://127.0.0.1:8000`, server/README.md documents the docs at :8000, and
+// SETUP_GUIDE.md tells you to forward Stripe webhooks to :8000. It read 8001, so the moment
+// VITE_API_URL was not loaded — a dev server started before the line was added to .env, since
+// Vite reads env files once at startup — every request went to a port with nothing behind it.
+// Each one failed at the transport layer, which is indistinguishable from the API being down,
+// and the console reported "Couldn't load billing information" on a perfectly healthy backend.
 export const API_BASE =
-  import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8001" : window.location.origin);
+  import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin);
 
 // /api namespace: the SPA's own routes (/dashboard, /admin/*, /organization/*) are spelled
 // like the server's router prefixes, and same-origin serving makes that a collision.
@@ -14,7 +22,12 @@ export const API_BASE =
 // sends or stores it, and the one-device claim silently never engages. Safe cross-origin in
 // dev too: the backend's CORS config already pins allow_credentials to specific origins,
 // never "*".
-const api = axios.create({ baseURL: `${API_BASE}/api`, withCredentials: true });
+// A request that never settles is worse than one that fails: every caller in this app shows a
+// pending state while it waits, so a socket the server never answers leaves a button reading
+// "Submitting…" or "Redirecting to Stripe…" until the page is reloaded. 30s is well past any
+// honest response here (the slowest is Stripe checkout session creation) and well inside a
+// person's patience. A timeout surfaces as ECONNABORTED, which errMsg names below.
+const api = axios.create({ baseURL: `${API_BASE}/api`, withCredentials: true, timeout: 30_000 });
 
 // Attach the stored token to every request — from wherever "Remember me" put it
 // (auth/sessionStore). A request that already names its own credential keeps it.
@@ -105,9 +118,34 @@ export const edgeErrorMessage = (e) => {
 // Turn an axios error into a readable string for toasts. Must always return a
 // string: FastAPI 422s send `detail` as an array of {loc,msg,...} objects, and
 // passing a non-string to toast.error() crashes React (blank screen).
+// A request that never received a response at all. axios reports both of these as a bare
+// `message`, and `Network Error` in particular is the string the browser hands over for ANY
+// blocked request — a dropped connection, a DNS failure, and equally a response the browser
+// refused to deliver because it carried no CORS headers (which is what an unhandled 500 looked
+// like until app/main.py started answering those inside the CORS layer).
+//
+// Printed verbatim it names the wrong layer and reads as a verdict on the user's own
+// connection. Worse, it ends up interpolated into sentences that assert something about their
+// account — Billing's "Current subscription detected. Network Error" told people their
+// subscription was in trouble when the only fact in evidence was that one request got no
+// answer. These say what is actually known: we could not get an answer, and nothing changed.
+export const transportMessage = (e) => {
+  if (e?.response) return null;                 // the server DID answer; not a transport fault
+  if (e?.code === "ECONNABORTED" || e?.code === "ETIMEDOUT") {
+    return "The server took too long to respond, so nothing was submitted. Please try again.";
+  }
+  if (e?.code === "ERR_CANCELED") return null;  // we aborted it; the caller decides what to say
+  if (e?.request) {
+    return "Couldn't reach the ZoikoStream server, so nothing was submitted. Check your connection and try again.";
+  }
+  return null;
+};
+
 export const errMsg = (e, fallback = "Something went wrong") => {
   const edge = edgeErrorMessage(e);
   if (edge) return edge;
+  const transport = transportMessage(e);
+  if (transport) return transport;
   const data = e?.response?.data;
   const d = data?.detail;
   if (typeof d === "string") return d;

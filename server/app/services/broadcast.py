@@ -695,11 +695,26 @@ async def _end(ctx, payload, emergency: bool = False):
         if final_summary and final_summary.get("measured"):
             def persist_summary(db):
                 sess = db.get(BroadcastSession, uuid.UUID(out[0]["id"]))
-                if sess:
-                    sess.settings = {**(sess.settings or {}), "analytics_summary": final_summary}
+                if not sess:
+                    return
+                sess.settings = {**(sess.settings or {}), "analytics_summary": final_summary}
+                # The durable peak, which until now ONLY the 15s sampler ever wrote. A run
+                # the sampler could not observe — it skips its tick whenever presence is
+                # unreadable, and a short broadcast can begin and end between two ticks —
+                # left peak_viewers at 0 permanently, and that column is what the
+                # organization dashboard's peak cards read. Raised, never lowered: if the
+                # sampler saw a higher concurrent figure than the final ledger, its
+                # observation is the real one.
+                measured_peak = int(final_summary.get("peak_concurrent") or 0)
+                if measured_peak > (sess.peak_viewers or 0):
+                    sess.peak_viewers = measured_peak
             await mod.tx(persist_summary)
     except Exception:
-        pass
+        # Never fatal: the broadcast HAS ended and the host must not be told otherwise.
+        # But no longer silent — this is the step that makes a finished session's audience
+        # figures durable, so losing it is precisely how an event reads 0 afterwards.
+        log.exception("analytics finalization failed for event %s; this session's watch "
+                      "time and peak may not have been recorded", ctx.event_id)
     await bus.state_set(ctx.event_id, {"status": "ended"})
     await mod.tx(lambda db: webhooks.enqueue(db, ctx.org_id, "session.ended", {
         "event_id": str(ctx.event_id), "session_id": out[0]["id"], "reason": reason,

@@ -186,6 +186,43 @@ class SubscriptionCheckoutResult:
     checkout_url: str
     stripe_customer_id: str | None = None
     stripe_subscription_id: str | None = None
+    # Only meaningful when this describes a session that was RETRIEVED rather than created.
+    # A session that has just been created is by definition neither paid nor finished, so the
+    # defaults are the truth for the creation path and no caller there reads them.
+    #
+    #   paid      the payer completed it. The checkout endpoint refuses a second session on
+    #             this, because the money has already moved and only the webhook may activate.
+    #   terminal  it can never be used again (expired, or finished). The caller supersedes it
+    #             and opens a fresh one rather than redirecting to a dead URL.
+    #
+    # Neither is a commercial state: Section 13 keeps the Commerce Adapter from becoming
+    # product-state authority, so these describe the SESSION and the Section 12 machine still
+    # decides what the subscription is.
+    paid: bool = False
+    terminal: bool = False
+
+
+@dataclass
+class ProviderSubscription:
+    """What the provider currently says about ONE subscription.
+
+    The shape `subscription_sync.sync_from_provider` and `maintenance.reconcile_stripe_
+    subscriptions` were both already written against — it had no definition anywhere, because
+    `retrieve_subscription` was called from both and implemented in neither.
+
+    Carries facts, not verdicts. `provider_status` is Stripe's own word and is translated
+    through the single existing mapping (`payments_stripe_events._SUBSCRIPTION_STATUS_STATE`)
+    rather than being treated as a Section 12 state; a status with no counterpart is refused
+    rather than coerced. `price_ids` is what Stripe is ACTUALLY billing, which is how the plan
+    is resolved — never from metadata and never from whichever card the customer clicked.
+    """
+
+    provider_subscription_ref: str
+    provider_status: str | None
+    price_ids: tuple[str, ...] = ()
+    stripe_customer_id: str | None = None
+    current_period_end: datetime | None = None
+    provider_interval: str | None = None
 
 
 @dataclass
