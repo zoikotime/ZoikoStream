@@ -1,0 +1,357 @@
+/* ZoikoStream Guide — visual system.
+   Layout, sizing and accessibility rules follow ZST-UX-FIGMA-PUB-GUIDE-001 (440 px dock,
+   full-screen under 768 px, 44 px targets, visible focus, reduced motion). The palette uses
+   the site's own violet -> magenta brand (the same gradient as the event-page hero) so Guide
+   reads as native ZoikoStream. Every white-on-color pairing below is >= 4.5:1. Scoped under
+   .zg so nothing here can restyle the host page. */
+
+.zg {
+  --zg-brand: #6d28d9;          /* violet-700: white text 7.1:1 */
+  --zg-brand-strong: #5b21b6;
+  --zg-brand-text: #6d28d9;     /* brand-colored text on light surfaces */
+  --zg-accent: #a21caf;         /* fuchsia-700: white text 6.3:1 */
+  --zg-grad: linear-gradient(135deg, #5b21b6 0%, #7c3aed 48%, #a21caf 100%);
+  --zg-grad-soft: linear-gradient(135deg, #f3edff 0%, #fbeefd 100%);
+  --zg-ink: #1a1033;
+  --zg-text: #2b2440;
+  --zg-muted: #625a78;          /* 6.0:1 on white */
+  --zg-border: #e7e1f3;
+  --zg-surface: #ffffff;
+  --zg-subtle: #f7f4fd;
+  --zg-canvas: linear-gradient(180deg, #faf7ff 0%, #ffffff 220px);
+  --zg-success: #157347;
+  --zg-success-soft: #e8f6ee;
+  --zg-warning: #8a5a12;
+  --zg-warning-soft: #fdf4e3;
+  --zg-danger: #b42345;
+  --zg-danger-soft: #fdecef;
+  --zg-shadow-sm: 0 1px 2px rgba(26, 16, 51, 0.06), 0 2px 8px rgba(26, 16, 51, 0.05);
+  --zg-shadow-lg: 0 24px 64px rgba(46, 16, 101, 0.22), 0 4px 16px rgba(46, 16, 101, 0.10);
+  --zg-focus: 0 0 0 2px #fff, 0 0 0 4px #8b5cf6;
+  font-family: "Aptos", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  color: var(--zg-text);
+}
+.dark .zg {
+  --zg-brand-text: #c4b5fd;
+  --zg-ink: #f3efff;
+  --zg-text: #e4def5;
+  --zg-muted: #a99fc4;
+  --zg-border: #2e2547;
+  --zg-surface: #151027;
+  --zg-subtle: #1e1735;
+  --zg-canvas: linear-gradient(180deg, #1a1330 0%, #151027 220px);
+  --zg-grad-soft: linear-gradient(135deg, #261a47 0%, #2c1636 100%);
+  --zg-success: #5fd39b;
+  --zg-success-soft: #10291d;
+  --zg-warning: #f0c070;
+  --zg-warning-soft: #33280f;
+  --zg-danger: #f58ca0;
+  --zg-danger-soft: #3a1622;
+  --zg-shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --zg-focus: 0 0 0 2px #151027, 0 0 0 4px #a78bfa;
+}
+
+.zg *, .zg *::before, .zg *::after { box-sizing: border-box; }
+.zg :focus-visible { outline: none; box-shadow: var(--zg-focus); }
+.zg button { font-family: inherit; }
+.zg-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* ── Avatar (brand icon) ───────────────────────────────────────────────────────────── */
+.zg-avatar {
+  position: relative; flex: none; display: grid; place-items: center;
+  width: 32px; height: 32px; border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 1px rgba(109, 40, 217, 0.18), var(--zg-shadow-sm); overflow: hidden;
+}
+.zg-avatar img { width: 72%; height: 72%; object-fit: contain; }
+.zg-avatar--lg { width: 44px; height: 44px; }
+.zg-avatar--xl { width: 64px; height: 64px; box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12), var(--zg-shadow-sm); }
+.zg-online {
+  position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
+  background: #22c55e; border: 2px solid #fff;
+}
+
+/* ── Launcher (WF-01) ──────────────────────────────────────────────────────────────── */
+/* Launcher (Engineering Wireframe §3 / WF-01, Figma §4.1): a 56 x 56 icon button, bottom-right,
+   24 px inset at >= 1440 px and 20 px below; 52 x 52 above the safe area on phones (see the
+   mobile block). Accessible name "Open ZoikoStream Guide"; no unread badges. */
+.zg-launcher {
+  position: fixed; right: 20px; bottom: 20px; z-index: 60;
+  display: inline-grid; place-items: center; width: 56px; height: 56px; padding: 0;
+  border-radius: 999px; border: 0; background: var(--zg-grad); color: #fff; cursor: pointer;
+  box-shadow: 0 12px 32px rgba(91, 33, 182, 0.38), 0 2px 6px rgba(91, 33, 182, 0.25);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+.zg-launcher:hover { transform: translateY(-2px); box-shadow: 0 16px 40px rgba(91, 33, 182, 0.45), 0 2px 6px rgba(91, 33, 182, 0.25); }
+.zg-launcher .zg-avatar { width: 48px; height: 48px; }
+/* Soft attention halo, off for reduced motion. */
+.zg-launcher::before {
+  content: ""; position: absolute; inset: -3px; border-radius: inherit; z-index: -1;
+  background: var(--zg-grad); opacity: 0.35; animation: zg-halo 2.6s ease-out infinite;
+}
+@keyframes zg-halo { 0% { transform: scale(0.96); opacity: 0.45; } 70%, 100% { transform: scale(1.12); opacity: 0; } }
+@media (min-width: 1440px) { .zg-launcher { right: 24px; bottom: 24px; } }
+
+/* WF-10 "Public context": event, public status, public start time. */
+.zg-context { width: 100%; margin: 4px 0 2px; padding: 10px 12px; border-radius: 14px;
+  background: var(--zg-subtle); border: 1px solid var(--zg-border); text-align: left; }
+.zg-context .zg-eyebrow-label { margin: 0 0 6px; }
+.zg-context dl { margin: 0; display: grid; gap: 4px; }
+.zg-context dl > div { display: flex; gap: 8px; justify-content: space-between; font-size: 13px; }
+.zg-context dt { color: var(--zg-muted); }
+.zg-context dd { margin: 0; color: var(--zg-ink); font-weight: 600; text-align: right; }
+
+/* ── Shell (WF-02 desktop / WF-18 mobile) ───────────────────────────────────────────── */
+.zg-panel {
+  position: fixed; right: 20px; bottom: 20px; z-index: 61;
+  width: 440px; min-width: 400px; max-width: min(520px, calc(100vw - 40px));
+  height: min(720px, calc(100vh - 40px)); max-height: calc(100vh - 40px);
+  display: flex; flex-direction: column;
+  background: var(--zg-surface); border-radius: 24px; overflow: hidden;
+  box-shadow: var(--zg-shadow-lg); border: 1px solid var(--zg-border);
+  animation: zg-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transform-origin: bottom right;
+}
+@keyframes zg-in { from { opacity: 0; transform: translateY(12px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+.zg-header {
+  position: relative; display: flex; align-items: center; gap: 12px; min-height: 72px;
+  padding: 14px 10px 14px 18px; background: var(--zg-grad); color: #fff;
+}
+.zg-header::after { /* subtle sheen */
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(120% 140% at 100% 0%, rgba(255, 255, 255, 0.18) 0%, transparent 55%);
+}
+.zg-header .zg-titles { flex: 1; min-width: 0; outline: none; position: relative; z-index: 1; }
+.zg-header h2 { margin: 0; font-size: 18px; font-weight: 700; line-height: 1.2; color: #fff; }
+.zg-header p { margin: 3px 0 0; display: flex; align-items: center; gap: 6px; font-size: 13px; line-height: 1.3; color: rgba(255, 255, 255, 0.92); }
+.zg-header .zg-iconbtn { color: #fff; position: relative; z-index: 1; }
+.zg-header .zg-iconbtn:hover { background: rgba(255, 255, 255, 0.16); }
+.zg-header .zg-avatar { position: relative; z-index: 1; }
+.zg-iconbtn {
+  display: inline-grid; place-items: center; width: 44px; height: 44px; border-radius: 12px;
+  border: 0; background: transparent; color: var(--zg-muted); cursor: pointer;
+}
+.zg-iconbtn:hover { background: var(--zg-subtle); }
+.zg-iconbtn svg { width: 20px; height: 20px; }
+.zg-menu {
+  position: absolute; right: 12px; top: 64px; z-index: 3; min-width: 220px; padding: 6px;
+  background: var(--zg-surface); border: 1px solid var(--zg-border); border-radius: 14px;
+  box-shadow: var(--zg-shadow-lg); color: var(--zg-text);
+}
+.zg-menu button {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 10px 12px;
+  border: 0; border-radius: 10px; background: transparent; color: var(--zg-text);
+  font-size: 14px; font-weight: 500; text-align: left; cursor: pointer;
+}
+.zg-menu button svg { width: 16px; height: 16px; color: var(--zg-muted); }
+.zg-menu button:hover { background: var(--zg-subtle); }
+
+.zg-body {
+  position: relative; flex: 1; overflow-y: auto; padding: 20px 18px 24px; scroll-padding: 24px;
+  background: var(--zg-canvas);
+}
+.zg-stack > * + * { margin-top: 16px; }
+
+/* ── Welcome (WF-02) ────────────────────────────────────────────────────────────────── */
+.zg-welcome { text-align: center; padding: 8px 4px 0; }
+.zg-welcome .zg-avatar--xl { margin: 0 auto 12px; }
+.zg-welcome h3 { margin: 0 0 6px; font-size: 21px; font-weight: 750; color: var(--zg-ink); letter-spacing: -0.01em; }
+.zg-welcome > p { margin: 0 auto 18px; max-width: 340px; font-size: 15px; line-height: 1.5; color: var(--zg-muted); }
+.zg-eyebrow-label { margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--zg-muted); text-align: left; }
+.zg-quick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; }
+.zg-quick-card {
+  display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 10px 12px;
+  border-radius: 14px; border: 1px solid var(--zg-border); background: var(--zg-surface);
+  color: var(--zg-ink); font-size: 14px; font-weight: 600; line-height: 1.25; cursor: pointer;
+  box-shadow: var(--zg-shadow-sm); transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+.zg-quick-card:hover { transform: translateY(-1px); border-color: #c4b5fd; box-shadow: 0 6px 18px rgba(91, 33, 182, 0.12); }
+.zg-quick-icon {
+  flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
+  background: var(--zg-grad-soft); color: var(--zg-brand-text);
+}
+.zg-quick-icon svg { width: 18px; height: 18px; }
+.zg-fineprint { margin: 16px 0 0; font-size: 12px; line-height: 1.5; color: var(--zg-muted); text-align: center; }
+.zg-link {
+  color: var(--zg-brand-text); text-decoration: underline; text-underline-offset: 2px;
+  background: none; border: 0; padding: 0; font: inherit; font-weight: 600; cursor: pointer;
+  min-height: 24px; display: inline-flex; align-items: center;
+}
+.zg-links { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 14px; }
+
+/* ── Messages (WF-03) ───────────────────────────────────────────────────────────────── */
+.zg-row { display: flex; gap: 10px; align-items: flex-start; }
+.zg-row--user { justify-content: flex-end; }
+.zg-row > .zg-avatar { margin-top: 2px; }
+.zg-msg { min-width: 0; max-width: calc(100% - 42px); }
+.zg-bubble {
+  padding: 12px 14px; border-radius: 4px 18px 18px 18px; background: var(--zg-surface);
+  border: 1px solid var(--zg-border); box-shadow: var(--zg-shadow-sm);
+  font-size: 15px; line-height: 1.55; color: var(--zg-text); overflow-wrap: anywhere;
+}
+.zg-bubble p { margin: 0 0 8px; }
+.zg-bubble p:last-child { margin-bottom: 0; }
+.zg-bubble ul { margin: 0 0 8px; padding-left: 20px; }
+.zg-user {
+  max-width: 82%; padding: 10px 14px; border-radius: 18px 18px 4px 18px;
+  background: var(--zg-grad); color: #fff; font-size: 15px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 6px 16px rgba(91, 33, 182, 0.22);
+}
+.zg-bubble--boundary { background: var(--zg-subtle); }
+.zg-badge {
+  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 3px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; color: var(--zg-muted); background: var(--zg-surface); border: 1px solid var(--zg-border);
+}
+.zg-typing { display: inline-flex; gap: 5px; padding: 4px 2px; }
+.zg-typing span { width: 7px; height: 7px; border-radius: 50%; background: #a78bfa; animation: zg-dot 1.1s infinite ease-in-out; }
+.zg-typing span:nth-child(2) { animation-delay: 0.15s; }
+.zg-typing span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes zg-dot { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-3px); opacity: 1; } }
+
+.zg-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.zg-source {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--zg-border); background: var(--zg-subtle); color: var(--zg-brand-text);
+  font-size: 12px; font-weight: 600; cursor: pointer; max-width: 100%; text-align: left;
+}
+.zg-source[aria-expanded="true"] { border-color: #c4b5fd; }
+.zg-source-details {
+  margin-top: 8px; padding: 12px; border: 1px solid var(--zg-border); border-radius: 14px; background: var(--zg-surface);
+  font-size: 13px; line-height: 1.5;
+}
+.zg-source-details strong { display: block; color: var(--zg-ink); font-size: 14px; }
+.zg-meta { color: var(--zg-muted); }
+
+.zg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.zg-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 44px; padding: 10px 18px; border-radius: 999px; font-size: 14px; font-weight: 650;
+  line-height: 1.2; cursor: pointer; text-decoration: none; border: 1px solid transparent;
+  transition: transform 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+}
+.zg-btn[disabled] { opacity: 0.55; cursor: not-allowed; }
+.zg-btn--primary { background: var(--zg-grad); color: #fff; box-shadow: 0 6px 16px rgba(91, 33, 182, 0.25); }
+.zg-btn--primary:hover:not([disabled]) { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(91, 33, 182, 0.32); }
+.zg-btn--secondary { background: var(--zg-surface); color: var(--zg-brand-text); border-color: #c4b5fd; }
+.zg-btn--secondary:hover { background: var(--zg-subtle); }
+.zg-btn--ghost { background: transparent; color: var(--zg-text); border-color: var(--zg-border); }
+
+.zg-feedback { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 8px; font-size: 12px; color: var(--zg-muted); }
+.zg-feedback .zg-iconbtn { width: 34px; height: 34px; border-radius: 999px; }
+.zg-feedback .zg-iconbtn svg { width: 15px; height: 15px; }
+@media (pointer: coarse) { .zg-feedback .zg-iconbtn { width: 44px; height: 44px; } }
+.zg-chip {
+  min-height: 34px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--zg-border);
+  background: var(--zg-surface); color: var(--zg-text); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.zg-chip:hover { border-color: #c4b5fd; background: var(--zg-subtle); }
+
+/* ── Notices / states (WF-13..16) ───────────────────────────────────────────────────── */
+.zg-notice {
+  display: flex; gap: 10px; padding: 12px 14px; border-radius: 14px; font-size: 14px; line-height: 1.5;
+  border: 1px solid var(--zg-border); background: var(--zg-surface); color: var(--zg-text);
+}
+.zg-notice svg { flex: none; width: 18px; height: 18px; margin-top: 2px; color: var(--zg-brand-text); }
+.zg-notice--warning { background: var(--zg-warning-soft); border-color: color-mix(in srgb, var(--zg-warning) 30%, transparent); }
+.zg-notice--warning svg { color: var(--zg-warning); }
+.zg-notice--error { background: var(--zg-danger-soft); border-color: color-mix(in srgb, var(--zg-danger) 30%, transparent); }
+.zg-notice--error svg { color: var(--zg-danger); }
+.zg-notice--success { background: var(--zg-success-soft); border-color: color-mix(in srgb, var(--zg-success) 30%, transparent); }
+.zg-notice--success svg { color: var(--zg-success); }
+
+.zg-state { text-align: center; padding: 28px 12px 8px; }
+.zg-state-icon {
+  display: grid; place-items: center; width: 56px; height: 56px; margin: 0 auto 12px; border-radius: 18px;
+  background: var(--zg-grad-soft); color: var(--zg-brand-text);
+}
+.zg-state-icon svg { width: 26px; height: 26px; }
+.zg-state h3 { margin: 0 0 6px; font-size: 18px; color: var(--zg-ink); }
+.zg-state p { margin: 0 auto 16px; max-width: 320px; font-size: 14px; line-height: 1.55; color: var(--zg-muted); }
+.zg-state .zg-actions { justify-content: center; }
+
+/* ── Cards: support step (WF-08/09) and lead form (WF-06) ───────────────────────────── */
+.zg-card {
+  position: relative; padding: 18px 16px 16px; border-radius: 18px; border: 1px solid var(--zg-border);
+  background: var(--zg-surface); box-shadow: var(--zg-shadow-sm); overflow: hidden;
+}
+.zg-card::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--zg-grad); }
+.zg-card h3 { margin: 0 0 4px; font-size: 16px; font-weight: 700; line-height: 1.4; color: var(--zg-ink); }
+.zg-card .zg-eyebrow { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--zg-brand-text); }
+.zg-card .zg-eyebrow svg { width: 14px; height: 14px; }
+.zg-options { display: grid; gap: 8px; margin-top: 14px; }
+.zg-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  min-height: 48px; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--zg-border);
+  background: var(--zg-subtle); color: var(--zg-ink); font-size: 15px; font-weight: 550; text-align: left; cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
+}
+.zg-option svg { flex: none; width: 16px; height: 16px; color: var(--zg-muted); }
+.zg-option:hover { border-color: #a78bfa; background: var(--zg-surface); transform: translateX(2px); }
+.zg-option:hover svg { color: var(--zg-brand-text); }
+.zg-option[disabled] { opacity: 0.6; cursor: progress; transform: none; }
+.zg-step-nav { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 13px; }
+
+.zg-form { display: grid; gap: 14px; margin-top: 14px; }
+.zg-field label { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 600; color: var(--zg-ink); }
+.zg-field input, .zg-field select, .zg-field textarea {
+  width: 100%; min-height: 48px; padding: 11px 13px; border-radius: 12px; border: 1px solid var(--zg-border);
+  background: var(--zg-subtle); color: var(--zg-text); font-size: 16px; line-height: 1.4; font-family: inherit;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.zg-field input:focus, .zg-field select:focus, .zg-field textarea:focus { background: var(--zg-surface); border-color: #8b5cf6; }
+.zg-field textarea { min-height: 96px; resize: vertical; }
+.zg-field [aria-invalid="true"] { border-color: var(--zg-danger); }
+.zg-hint { margin-top: 4px; font-size: 12px; color: var(--zg-muted); }
+.zg-error { margin-top: 4px; font-size: 13px; color: var(--zg-danger); font-weight: 600; }
+.zg-consent { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.45; }
+.zg-consent input { width: 20px; height: 20px; min-height: 20px; margin-top: 1px; flex: none; accent-color: var(--zg-brand); }
+.zg-req { color: var(--zg-danger); }
+
+/* ── Composer ───────────────────────────────────────────────────────────────────────── */
+.zg-composer { padding: 12px 14px 10px; border-top: 1px solid var(--zg-border); background: var(--zg-surface); }
+.zg-composer form {
+  display: flex; align-items: flex-end; gap: 8px; padding: 6px 6px 6px 14px; border-radius: 22px;
+  border: 1px solid var(--zg-border); background: var(--zg-subtle);
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+.zg-composer form:focus-within { border-color: #a78bfa; background: var(--zg-surface); box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.14); }
+.zg-composer textarea {
+  flex: 1; min-height: 40px; max-height: 144px; padding: 9px 0; border: 0; resize: none; background: transparent;
+  color: var(--zg-text); font-size: 16px; line-height: 1.4; font-family: inherit; /* 16px: no iOS zoom */
+}
+.zg-composer textarea:focus-visible { box-shadow: none; }
+.zg-composer textarea::placeholder { color: var(--zg-muted); }
+.zg-send {
+  flex: none; width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--zg-grad); color: #fff;
+  cursor: pointer; display: grid; place-items: center; box-shadow: 0 6px 14px rgba(91, 33, 182, 0.3);
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+.zg-send:hover:not([disabled]) { transform: scale(1.05); }
+.zg-send[disabled] { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+.zg-send svg { width: 19px; height: 19px; }
+.zg-composer-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 0 4px; font-size: 11.5px; color: var(--zg-muted); }
+.zg-jump {
+  position: sticky; bottom: 8px; display: block; margin: 0 auto; min-height: 36px; padding: 6px 14px;
+  border-radius: 18px; border: 1px solid var(--zg-border); background: var(--zg-surface); color: var(--zg-brand-text);
+  font-size: 13px; font-weight: 650; box-shadow: var(--zg-shadow-lg); cursor: pointer;
+}
+
+/* ── Responsive & motion ────────────────────────────────────────────────────────────── */
+@media (max-width: 767px) {
+  .zg-panel {
+    inset: 0; width: 100%; min-width: 0; max-width: none; height: 100dvh; max-height: none;
+    border-radius: 0; border: 0; padding-bottom: env(safe-area-inset-bottom);
+  }
+  .zg-header { padding-top: calc(14px + env(safe-area-inset-top)); }
+  .zg-body { padding: 16px; }
+  .zg-launcher { right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); width: 52px; height: 52px; }
+  .zg-launcher .zg-avatar { width: 44px; height: 44px; }
+}
+@media (max-width: 360px) { .zg-quick { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) {
+  .zg-panel, .zg-launcher, .zg-launcher::before, .zg-typing span, .zg-option, .zg-quick-card, .zg-btn {
+    animation: none !important; transition: none !important;
+  }
+  .zg-launcher::before { display: none; }
+}

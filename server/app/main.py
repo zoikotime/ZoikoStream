@@ -27,6 +27,8 @@ from .routers.status import router as status_router
 from .routers.trust import router as trust_router
 from .routers.wellknown import router as wellknown_router
 from .routers.privacy import router as privacy_router
+from .guide.mount import mount_guide
+from .operator_guide.mount import mount_operator_guide
 from . import log_redaction
 from .security import ALGORITHM
 from .services import bus
@@ -474,6 +476,22 @@ app.include_router(wellknown_router)
 for router in (organization_router, events_router, commercial_router,
                deliveries_router):
     app.include_router(router, prefix="/api", dependencies=_ORG_STATE_GATE)
+
+# The public website assistant (ZoikoStream Guide) — a separate, anonymous trust domain with
+# its own database and no access to anything above. Mounted as a sub-app so its problem+json
+# errors never change a platform response, and mount_guide() never raises: a broken Guide
+# disables the Guide, not the platform. Must precede the SPA catch-all below.
+mount_guide(app)
+# The viewer page's signed event facts for that Guide (routers/guide_event_context.py). Platform
+# code, since Guide never reads platform data; isolated so a failure only costs event answers.
+try:
+    from .routers.guide_event_context import router as guide_event_context_router
+    app.include_router(guide_event_context_router, prefix="/api")
+except Exception:
+    log.exception("Guide event-context issuer failed to mount; Guide runs without it")
+# The console assistant for signed-in operators (ZST-UX-GUIDE-001) — a separate product that
+# reads tenant data with the caller's own permissions. Same failure isolation as above.
+mount_operator_guide(app)
 
 
 _DB_CONNECTIVITY_KEYWORDS = frozenset({

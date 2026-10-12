@@ -28,3 +28,6 @@ server/private_exports/
 .vscode/
 .idea/
 gcs-key.json
+
+# Guide evaluation run output (server/guide_eval). Reports quote model answers; keep them local.
+server/guide_eval/reports/
