@@ -203,6 +203,61 @@ def calculate_viewer_watch_time(
     }
 
 
+def pick_event_summary(b_sessions: list[Any] | None, bus_summary: dict | None = None) -> dict | None:
+    """The most COMPLETE finalized summary for one event, across all of its sessions.
+
+    ── WHY THIS IS NOT "THE FIRST ONE FOUND" ────────────────────────────────────────────
+    An event can be broadcast more than once (a rehearsal then the real run, or a stream
+    that dropped and was restarted). Each `_end` calls `bus.session_finalize`, which
+    recomputes over the event's WHOLE viewer-session ledger and writes the result onto the
+    session row that just ended.
+
+    That ledger is never cleared between runs — `bus.presence_clear` deletes presence, bans,
+    state and reactions, but not the session store — so each successive summary is
+    CUMULATIVE for the event, not a record of its own run. Verified directly: two runs of
+    600s and 300s finalize to 600 then 900, not 600 then 300.
+
+    Two consequences, and both were live defects:
+      * The summaries must NOT be summed. 600 + 900 would bill the first run twice.
+      * The right one is the LARGEST, not the first. The previous code iterated the
+        sessions and `break`-ed on the first row carrying a summary, from a query with no
+        ORDER BY — so an event with two runs usually reported the earlier, partial total,
+        and which total it reported was not even deterministic across queries.
+
+    Ordering by total_watch_seconds rather than by `finalized_at` because that is the
+    quantity being chosen, and a summary written by an older build may have no
+    `finalized_at` at all. Unmeasured summaries are ignored: `aggregate_event_watch_time`
+    only honours a summary with `measured` set, so returning one would just suppress the
+    snapshot fallback that does have numbers.
+    """
+    best = None
+    best_seconds = -1.0
+    for bs in (b_sessions or []):
+        settings = getattr(bs, "settings", None)
+        if not isinstance(settings, dict):
+            continue
+        candidate = settings.get("analytics_summary")
+        if not isinstance(candidate, dict) or not candidate.get("measured"):
+            continue
+        seconds = candidate.get("total_watch_seconds")
+        if seconds is None:
+            hours = candidate.get("watch_hours")
+            seconds = (hours or 0) * 3600.0
+        if float(seconds) > best_seconds:
+            best, best_seconds = candidate, float(seconds)
+    # The bus copy is the same cumulative figure, still warm for a recently-ended event and
+    # the only source when nothing was persisted onto a row. It competes on the same terms
+    # rather than being a blanket fallback, so a stale bus entry cannot beat a larger
+    # persisted total.
+    if isinstance(bus_summary, dict) and bus_summary.get("measured"):
+        seconds = bus_summary.get("total_watch_seconds")
+        if seconds is None:
+            seconds = (bus_summary.get("watch_hours") or 0) * 3600.0
+        if float(seconds) > best_seconds:
+            best = bus_summary
+    return best
+
+
 def aggregate_event_watch_time(
     event_id: Any,
     sessions: list[dict] | None = None,

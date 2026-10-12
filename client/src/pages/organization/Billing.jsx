@@ -20,13 +20,13 @@
 // the change is SCHEDULED, never immediate: no proration, effective at current_period_end, and
 // the customer keeps their current plan's entitlements until then. This page therefore shows a
 // change as PENDING with its effective date and never implies it has already happened.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   FiClock, FiHardDrive, FiUsers, FiCalendar, FiCreditCard, FiCheck, FiMail, FiFileText,
 } from "react-icons/fi";
 import { cx, ACCENT } from "../../ui/tokens";
-import api, { errMsg } from "../../api";
+import api, { diagnoseLoadError, errMsg, transportMessage } from "../../api";
 import { notify } from "../../ui/Toast";
 import useApi from "../../hooks/useApi";
 import Card from "../../ui/Card";
@@ -35,7 +35,7 @@ import Spinner from "../../ui/Spinner";
 import { fmtDate } from "../../data/events";
 import { SUPPORTS_IN_APP_CHECKOUT } from "../../platform";
 import { onAppResume, openExternal } from "../../native/bridge";
-import { visiblePlans, planCta, downgradePath } from "./planPresentation";
+import { visiblePlans, planCta, downgradePath, isRankedPlan, isTrialing } from "./planPresentation";
 
 const METER_ICON = { Storage: FiHardDrive, Members: FiUsers, "Streaming hours": FiClock };
 const METER_ACCENT = { Storage: "blue", Members: "emerald", "Streaming hours": "violet" };
@@ -289,7 +289,11 @@ export default function OrganizationBilling() {
   const paidSubscription = checkoutLocked;
   // A live subscription the hierarchy cannot place: locked, with no entitled `plan_slug`.
   // Either a conversion Stripe has not confirmed, or a plan outside the known tiers.
-  const unmappedSubscription = checkoutLocked && !ent?.plan_slug;
+  // Asked through planPresentation's OWN predicate, so the explanation cannot disappear while
+  // the lock stays on. It previously tested `!ent.plan_slug`, which is narrower than the
+  // condition planCta actually locks on: a live subscription on a plan slug outside the five
+  // ranked tiers locked every card to "Talk to an expert" with nothing on the page saying so.
+  const unmappedSubscription = checkoutLocked && !isRankedPlan(ent?.plan_slug);
   // A change already scheduled. All three fields are written together by the backend, so
   // `pending_plan_slug` is a sufficient test for "is one pending".
   const pending = ent?.pending_plan_slug
@@ -307,23 +311,52 @@ export default function OrganizationBilling() {
   // for it instead of showing "confirming…" forever. The endpoint only READS from Stripe and
   // applies the answer through the Section 12 state machine; it cannot create a subscription.
   //
-  // Attempted once per mount, tracked by a ref so a re-render from the reload cannot start a
-  // second attempt. `syncError` holds the real reason when it fails.
+  // Attempted once automatically, tracked by a ref so a re-render from the reload cannot start
+  // a second attempt. `syncError` holds the real reason when it fails.
+  //
+  // THE ATTEMPT IS RETRYABLE, which it was not. The ref was set before the request and never
+  // cleared, so ONE failure ended the repair for the life of the mount — and because the lock
+  // that this repair exists to lift is what makes every plan card read "Talk to an expert"
+  // instead of "Upgrade", a single dropped request left the whole page inert behind a banner
+  // promising it would "clear shortly". It could not clear. There was no control to retry it
+  // and no path back except reloading the browser.
+  //
+  // A transport failure is told apart from Stripe's own answer. "We could not reach the
+  // server" is a statement about one request; "Stripe has no record of this subscription" is a
+  // statement about the account, and only the second deserves the standing banner. The first
+  // gets a Retry, because trying again is the entire remedy.
   const syncAttempted = useRef(false);
   const [syncError, setSyncError] = useState(null);
+  const [syncUnreachable, setSyncUnreachable] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncAttempt, setSyncAttempt] = useState(0);
+  const retrySync = useCallback(() => {
+    syncAttempted.current = false;
+    setSyncAttempt((n) => n + 1);
+  }, []);
   useEffect(() => {
     if (!unmappedSubscription || syncAttempted.current) return undefined;
     syncAttempted.current = true;
     let cancelled = false;
+    setSyncing(true);
+    setSyncError(null);
+    setSyncUnreachable(false);
     api.post("/organization/billing/sync")
       .then(async ({ data }) => {
         if (cancelled) return;
         if (data?.error) setSyncError(data.error);
         if (data?.synced) await reloadOverview?.();
       })
-      .catch((e) => { if (!cancelled) setSyncError(errMsg(e)); });
+      .catch((e) => {
+        if (cancelled) return;
+        // No response means the repair never ran, so the ref is released and the banner
+        // offers a retry rather than presenting a transport fault as an account problem.
+        if (transportMessage(e)) setSyncUnreachable(true);
+        setSyncError(errMsg(e));
+      })
+      .finally(() => { if (!cancelled) setSyncing(false); });
     return () => { cancelled = true; };
-  }, [unmappedSubscription, reloadOverview]);
+  }, [unmappedSubscription, reloadOverview, syncAttempt]);
 
   const [changing, setChanging] = useState(null);
 
@@ -399,8 +432,24 @@ export default function OrganizationBilling() {
       )}
 
       {overviewError ? (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
-          Couldn't load billing information. Try refreshing the page.
+        /* Says WHY, and offers the one action that can help.
+           "Try refreshing the page" was advice that could not work for any of the real
+           causes: an expired session, a restricted organization, or — the one actually seen —
+           a dev client pointed at a port with no API behind it. Refreshing repeats the failure
+           and names nothing. diagnoseLoadError already distinguishes those cases for the admin
+           console; billing deserves the same, because the fix differs completely between them. */
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
+        >
+          <span>{diagnoseLoadError(overviewError, "/organization/overview")}</span>
+          <button
+            type="button"
+            onClick={reloadOverview}
+            className="shrink-0 rounded-lg border border-rose-300 px-3 py-1.5 text-xs font-semibold transition hover:bg-rose-100 dark:border-rose-500/40 dark:hover:bg-rose-500/10"
+          >
+            Retry
+          </button>
         </div>
       ) : loading ? (
         <div className="grid place-items-center py-20"><Spinner /></div>
@@ -451,13 +500,35 @@ export default function OrganizationBilling() {
                       <FiCreditCard /> Billed {ent.billing_interval}
                     </span>
                   )}
-                  {(ent?.trial_ends_at || ent?.current_period_end) && (
-                    <span className="inline-flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
-                      <FiCalendar />
-                      {ent.status === "trial" ? "Trial ends" : "Renews"} on{" "}
-                      {fmtDate(ent.trial_ends_at || ent.current_period_end)}
-                    </span>
-                  )}
+                  {/* A trial ENDS; a paid subscription RENEWS. Each state reads its own date,
+                      with no fallback between them.
+
+                      `trial_ends_at || current_period_end` was the other half of the defect:
+                      a trialing subscription with no recorded trial end would silently borrow
+                      the period end and present it as a renewal — a date the customer never
+                      agreed to, under a word that implies they had. When a trial has no end
+                      date on record the honest answer is to say it is a trial and name no
+                      date, which is what the absent branch below does. */}
+                  {(() => {
+                    const trialing = isTrialing(ent?.status);
+                    const when = trialing ? ent?.trial_ends_at : ent?.current_period_end;
+                    if (!when) {
+                      // Only worth saying for a trial: "no renewal date recorded" on a paid
+                      // plan is a backend gap, and inventing a line about it here would hide
+                      // it rather than report it.
+                      return trialing ? (
+                        <span className="inline-flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                          <FiCalendar /> In trial
+                        </span>
+                      ) : null;
+                    }
+                    return (
+                      <span className="inline-flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                        <FiCalendar />
+                        {trialing ? "Trial ends" : "Renews"} on {fmtDate(when)}
+                      </span>
+                    );
+                  })()}
                 </div>
               </div>
               {/* In-app contact form. This used to be a mail-protocol link, which handed the
@@ -597,11 +668,32 @@ export default function OrganizationBilling() {
                 className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
               >
                 <strong className="font-semibold">Current subscription detected.</strong>{" "}
-                {syncError
-                  ? <>{syncError}{" "}Plan changes are paused and nothing further will be
-                      charged.{" "}</>
-                  : <>We&apos;re synchronizing it with Stripe, so plan changes are paused for the
-                      moment. Nothing further will be charged.{" "}</>}
+                {syncUnreachable
+                  // A request that got no answer. It says so, and offers the only thing that
+                  // can help, rather than implying the subscription itself is in trouble.
+                  ? <>{syncError}{" "}Plan changes are paused until we can confirm it, and
+                      nothing further will be charged.{" "}
+                      <button
+                        type="button"
+                        onClick={retrySync}
+                        disabled={syncing}
+                        className="font-semibold underline underline-offset-2 disabled:opacity-60"
+                      >
+                        {syncing ? "Retrying…" : "Try again"}
+                      </button>{" "}or{" "}</>
+                  : syncError
+                    ? <>{syncError}{" "}Plan changes are paused and nothing further will be
+                        charged.{" "}</>
+                    : ent?.plan_slug
+                      // A real, entitled plan that is simply not one of the tiers this page
+                      // can move between. Nothing is wrong and nothing is pending, so it must
+                      // not claim to be "synchronizing" — it says what is true: the plan is
+                      // known, and changing it is a conversation rather than a button.
+                      ? <>You&apos;re on <strong>{ent.plan || ent.plan_slug}</strong>, which
+                          isn&apos;t one of the plans that can be changed from this page.
+                          Nothing further will be charged.{" "}</>
+                      : <>We&apos;re synchronizing it with Stripe, so plan changes are paused for
+                          the moment. Nothing further will be charged.{" "}</>}
                 <Link to="/contact" className="underline underline-offset-2">Contact us</Link>{" "}
                 if this doesn&apos;t clear shortly.
               </div>
@@ -645,6 +737,10 @@ export default function OrganizationBilling() {
                     </ul>
                     {/* CTA, one branch per planCta() outcome.
                         Current  : disabled, nothing to buy.
+                        Buy      : a FIRST purchase. Always checkout, never the plan-change
+                                   endpoint — there is no subscription to change. This used to
+                                   render "Upgrade", and the click was answered with "This
+                                   organization has no subscription record to upgrade".
                         Upgrade  : the EXISTING Stripe paths, still split by whether money is
                                    already moving — an org with a live paid subscription must
                                    not be sent to checkout, which would create a SECOND Stripe
@@ -652,14 +748,49 @@ export default function OrganizationBilling() {
                         Downgrade: a link to the contact form. No endpoint is called.
                         Contact  : quote-led (Enterprise) or unrankable. */}
                     {cta.kind === "current" ? (
+                      /* Deliberately NON-ACTIONABLE, and that is the product rule, not an
+                         omission: the organization is already on this plan, so there is
+                         nothing to buy, schedule or cancel from here. It carries no onClick
+                         at all, which is what makes an accidental second subscription
+                         structurally impossible rather than merely guarded against.
+
+                         `disabled` is the real HTML attribute, not a CSS imitation: it takes
+                         the control out of the tab order and makes assistive technology
+                         announce it as unavailable. pointer-events:none would hide the
+                         button from a mouse while leaving a keyboard user able to activate
+                         it, which is the wrong half of the problem to solve.
+
+                         What WAS wrong is the signal. `disabled:opacity-100` cancels the
+                         usual dimming — correct, because fading the plan somebody is paying
+                         for would read as "deactivated" — but combined with a neutral
+                         cursor the control looked like a live CTA, so people clicked it and
+                         nothing happened. It now says why on hover, and the cursor says it
+                         before the tooltip arrives. The tinted, outlined treatment is also
+                         what separates it from the solid-violet Buy/Upgrade CTAs. */
                       <button
                         type="button"
                         disabled
                         aria-current="true"
                         aria-label={`${p.name} is your current plan`}
-                        className="mt-4 inline-flex w-full cursor-default items-center justify-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700 disabled:opacity-100 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300"
+                        title={`You're on ${p.name}. There's nothing to do here — use another card to change plan.`}
+                        className="mt-4 inline-flex w-full cursor-not-allowed items-center justify-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700 disabled:opacity-100 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300"
                       >
                         Current Plan
+                      </button>
+                    ) : cta.kind === "buy" ? (
+                      <button
+                        type="button"
+                        onClick={() => startCheckout(
+                          p.slug,
+                          (p.billing_intervals || []).includes(interval)
+                            ? interval
+                            : (p.billing_intervals || ["monthly"])[0],
+                        )}
+                        disabled={checkoutFor !== null}
+                        aria-label={`Buy the ${p.name} plan`}
+                        className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-700 disabled:opacity-60"
+                      >
+                        {checkoutFor === p.slug ? "Redirecting to Stripe…" : "Buy Plan"}
                       </button>
                     ) : cta.kind === "upgrade" ? (
                       <button
@@ -688,13 +819,57 @@ export default function OrganizationBilling() {
                           : changing === p.slug ? "Scheduling…" : "Upgrade"}
                       </button>
                     ) : cta.kind === "downgrade" ? (
-                      <Link
-                        to={downgradePath(p)}
-                        aria-label={`Contact us to downgrade to the ${p.name} plan`}
-                        className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-                      >
-                        Contact us to downgrade
-                      </Link>
+                      /* A move DOWN is the same scheduled plan change as a move up, and the
+                         backend has always treated it that way: crud.admin.request_plan_change
+                         validates the cadence, the plan's availability and its approved price,
+                         and schedules it at `current_period_end` — it has no notion of
+                         direction at all. Only this card insisted a downgrade was a sales
+                         conversation, so a customer on Business could schedule their way UP
+                         self-service but had to email somebody to come back down.
+
+                         Still routed to a human when there is nothing to schedule: a plan with
+                         no approved price (Enterprise) cannot be moved to by this endpoint,
+                         and an organization with no paid subscription has no period end to
+                         schedule against. Both keep the contact form. */
+                      paidSubscription && p.self_service ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const billingInterval = (p.billing_intervals || []).includes(interval)
+                              ? interval
+                              : (p.billing_intervals || ["monthly"])[0];
+                            // The confirmation carries the one fact that makes this safe to
+                            // click: nothing changes today. Same convention the rest of the
+                            // console uses for a consequential action.
+                            const when = ent?.current_period_end
+                              ? ` on ${fmtDate(ent.current_period_end)}`
+                              : " at the end of your current billing period";
+                            if (!window.confirm(
+                              `Move to ${p.name}${when}?\n\n`
+                              + `Your current plan stays active until then, and nothing is `
+                              + `charged or credited now. You can cancel the change at any `
+                              + `time before it takes effect.`
+                            )) return;
+                            return schedulePlanChange(p.slug, billingInterval);
+                          }}
+                          disabled={changing !== null || Boolean(pending)}
+                          aria-label={`Move to the ${p.name} plan at the end of your billing period`}
+                          title={pending
+                            ? "Cancel the scheduled change first"
+                            : "Takes effect at the end of your billing period"}
+                          className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                        >
+                          {changing === p.slug ? "Scheduling…" : "Downgrade"}
+                        </button>
+                      ) : (
+                        <Link
+                          to={downgradePath(p)}
+                          aria-label={`Contact us to downgrade to the ${p.name} plan`}
+                          className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                        >
+                          Contact us to downgrade
+                        </Link>
+                      )
                     ) : (
                       <Link
                         to={`/contact?plan=${encodeURIComponent(p.name)}`}

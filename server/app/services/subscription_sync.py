@@ -82,6 +82,32 @@ SYNC_REFUSED = "refused"            # the state machine rejected the transition
 SYNC_PROVIDER_ERROR = "provider_error"
 
 
+def needs_checkout_linkage(sub: Subscription | None) -> bool:
+    """True when a checkout was started for this row and NO provider subscription was ever
+    recorded against it.
+
+    THE CASE THIS EXISTS FOR, observed in full: a tenant completed Stripe Checkout and paid.
+    Stripe held `session.payment_status='paid'`, a customer, and an ACTIVE subscription. Our
+    row held `checkout_session_ref` and nothing else — no customer id, no subscription id,
+    still `trialing` on the old plan — because the webhook never arrived.
+
+    Nothing could repair it. `needs_provider_sync` below starts from
+    `has_live_provider_subscription`, which reads `stripe_subscription_id`; that is the very
+    field the missing webhook was supposed to write. So the backstop could only run once the
+    thing it was backing up had already succeeded, and the reconciliation sweep
+    (maintenance.reconcile_stripe_subscriptions) deliberately only RECORDS this divergence as
+    `checkout_paid_without_linkage` rather than repairing it.
+
+    The checkout session reference is the way back in: Stripe's session carries the customer
+    and subscription it created, so the link can be rebuilt from the one identifier we do
+    hold. Self-limiting in the same way as below — once `stripe_subscription_id` is written
+    this is False forever.
+    """
+    if sub is None or sub.stripe_subscription_id:
+        return False
+    return bool(getattr(sub, "checkout_session_ref", None))
+
+
 def needs_provider_sync(sub: Subscription | None) -> bool:
     """True for exactly the divergence above: we hold a LIVE provider subscription, but our own
     state does not entitle the tenant to anything.
@@ -90,12 +116,90 @@ def needs_provider_sync(sub: Subscription | None) -> bool:
     true for a healthy row — an active subscription answers False and is never re-read. It is
     also self-limiting: a successful sync moves the row into an entitled state, after which this
     returns False forever.
+
+    It ALSO answers True for an unlinked paid checkout (`needs_checkout_linkage`), because that
+    row is stuck in a way no local state can resolve either — and, unlike the case above, it
+    can be stuck while still looking entitled. The organization that prompted this was
+    `trialing` on Developer, which IS an entitled state, so an entitlement test alone would
+    have called it healthy while Stripe was already billing it.
     """
+    if needs_checkout_linkage(sub):
+        return True
     if not has_live_provider_subscription(sub):
         return False
     return normalize_subscription_state(sub.status) not in {
         normalize_subscription_state(s) for s in SUBSCRIPTION_ENTITLED_STATES
     }
+
+
+def _legal_route(current: str | None, target: str) -> list[str]:
+    """The Section 12 steps from `current` to `target`, or [] when there is no short one.
+
+    One hop when the table allows it, otherwise one intermediate. Returns [] rather than
+    guessing when neither reaches — the caller then reports the refusal instead of forcing a
+    state the document does not permit.
+    """
+    from ..models.subscription import SUBSCRIPTION_TRANSITIONS
+
+    here = normalize_subscription_state(current)
+    there = normalize_subscription_state(target)
+    if here == there:
+        return []
+    if there in SUBSCRIPTION_TRANSITIONS.get(here, ()):
+        return [there]
+    for middle in SUBSCRIPTION_TRANSITIONS.get(here, ()):
+        if there in SUBSCRIPTION_TRANSITIONS.get(middle, ()):
+            return [middle, there]
+    # Unreachable in two steps. The applier is still called once with the target so the
+    # refusal — and its reason — comes from the one place that owns that decision.
+    return [there]
+
+
+def _link_from_checkout_session(db: Session, sub: Subscription, provider) -> dict | None:
+    """Copy the provider ids from a PAID checkout session onto `sub`.
+
+    Returns None when the caller should carry on to the normal sync, or a result dict when it
+    must stop (nothing to link, not paid, or the provider could not be read).
+
+    The paid test is the safety property. A checkout that was opened and abandoned leaves the
+    same `checkout_session_ref` behind as one that was completed, and the difference between
+    them is the difference between a customer who paid and one who did not.
+    """
+    ref = sub.checkout_session_ref
+    try:
+        session = provider.retrieve_subscription_checkout_session(ref)
+    except payment_svc.ProviderInvalidRequest:
+        log.error("subscription %s cites checkout session %s that Stripe does not know",
+                  sub.id, ref)
+        return {"outcome": SYNC_UNMAPPABLE, "applied": False,
+                "error": "Stripe has no record of this checkout. Please contact support."}
+    except payment_svc.PaymentProviderError as exc:
+        log.warning("checkout linkage could not reach Stripe: %s", type(exc).__name__)
+        return {"outcome": SYNC_PROVIDER_ERROR, "applied": False,
+                "error": "Couldn't reach Stripe to confirm your payment. Please try again."}
+
+    if not session.paid:
+        # Nothing was bought, so there is nothing to link and nothing to entitle. Reported as
+        # the honest state rather than an error: an open session is a checkout in progress.
+        return {"outcome": SYNC_NOT_NEEDED, "applied": False, "state": sub.status,
+                "error": None if not session.terminal
+                         else "That checkout was not completed. Please start a new one."}
+
+    if not session.stripe_subscription_id:
+        # Paid, but Stripe has not attached a subscription yet. Transient; the next poll or the
+        # webhook resolves it, and inventing an id here would be worse than waiting.
+        log.warning("checkout session %s is paid but carries no subscription id yet", ref)
+        return {"outcome": SYNC_PROVIDER_ERROR, "applied": False,
+                "error": "Your payment is confirmed and the subscription is still being set "
+                         "up. Please refresh in a moment."}
+
+    sub.stripe_subscription_id = session.stripe_subscription_id
+    if session.stripe_customer_id and not sub.stripe_customer_id:
+        sub.stripe_customer_id = session.stripe_customer_id
+    db.commit()
+    log.info("subscription %s linked to Stripe subscription from checkout session %s",
+             sub.id, ref)
+    return None
 
 
 def sync_from_provider(db: Session, sub: Subscription, *, actor=None) -> dict:
@@ -115,6 +219,19 @@ def sync_from_provider(db: Session, sub: Subscription, *, actor=None) -> dict:
         log.warning("subscription sync unavailable: %s", type(exc).__name__)
         return {"outcome": SYNC_PROVIDER_ERROR, "applied": False,
                 "error": "The payment provider is not reachable right now."}
+
+    # Rebuild the missing link first, when there is one to rebuild. Reads the checkout session
+    # we DO hold and copies across the ids Stripe created, so the retrieve below has something
+    # to ask about.
+    #
+    # It grants nothing. No status and no plan is written here: the row is only pointed at the
+    # provider objects, and the Section 12 machine below still decides what that means. An
+    # UNPAID session is refused outright, so a started-but-abandoned checkout can never link
+    # itself into an entitlement.
+    if needs_checkout_linkage(sub):
+        linked = _link_from_checkout_session(db, sub, provider)
+        if linked is not None:
+            return linked
 
     try:
         remote = provider.retrieve_subscription(sub.stripe_subscription_id)
@@ -153,16 +270,38 @@ def sync_from_provider(db: Session, sub: Subscription, *, actor=None) -> dict:
             plan is None or sub.plan_id == plan.id):
         return {"outcome": SYNC_ALREADY_CURRENT, "applied": False, "state": sub.status}
 
-    applied, error = admin_crud.apply_subscription_provider_event(
-        db, sub,
-        new_state=target,
-        plan=plan,
-        stripe_customer_id=remote.stripe_customer_id,
-        current_period_end=remote.current_period_end,
-        # Marked as a PULL so the audit trail distinguishes it from a delivered webhook.
-        reason="stripe:reconcile_on_read",
-        actor=actor,
-    )
+    # Walk the LEGAL route, which is not always one hop.
+    #
+    # Stripe reports a destination; Section 12 defines how a subscription may reach it. A row
+    # sitting in `trialing` whose Stripe subscription is `active` cannot go straight there —
+    # the table routes it `trialing -> conversion_pending -> active`, which is precisely the
+    # two webhooks that went missing (`checkout.session.completed`, then
+    # `customer.subscription.created`). Attempting the single hop is what produced
+    # "Illegal subscription transition trialing -> active" and left a paying customer stuck.
+    #
+    # This is NOT a bypass. Every step still goes through `apply_subscription_provider_event`,
+    # which refuses anything the table does not permit, and the plan is still applied only on
+    # the successful move into `active`. It replays the route the webhooks would have taken,
+    # which is what this module exists to do — "a pulled fact and a pushed fact are treated
+    # identically; the only difference is who asked".
+    #
+    # Bounded to ONE intermediate on purpose. Section 12's graph needs no more than that to
+    # reach any state a provider actually reports, and an unbounded search would be a way to
+    # arrive somewhere the table never intended.
+    applied, error = False, None
+    for step in _legal_route(sub.status, target):
+        applied, error = admin_crud.apply_subscription_provider_event(
+            db, sub,
+            new_state=step,
+            plan=plan,
+            stripe_customer_id=remote.stripe_customer_id,
+            current_period_end=remote.current_period_end,
+            # Marked as a PULL so the audit trail distinguishes it from a delivered webhook.
+            reason="stripe:reconcile_on_read",
+            actor=actor,
+        )
+        if not applied:
+            break
     if not applied:
         # The state machine refused: Stripe's answer is not reachable from where we are. Audited
         # inside the applier; surfaced here so the console stops waiting on it.

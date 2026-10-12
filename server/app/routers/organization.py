@@ -277,8 +277,30 @@ def create_subscription_checkout(data: SubscriptionCheckoutCreate,
 
     sub = admin_crud.current_subscription_for_update(db, org.id)
     if sub is None:
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                            "This organization has no subscription record to upgrade")
+        # A FIRST purchase. This used to refuse outright — "no subscription record to
+        # upgrade" — which made the first paid subscription impossible for any organization
+        # that did not already have a row. Registration provisions one, so newer tenants were
+        # unaffected; every organization created before that existed reached this line and
+        # could never buy anything. The 409 fired BEFORE Stripe, so checkout never opened.
+        #
+        # The refusal was protecting an implementation detail, not a commercial rule: the row
+        # is what the webhook correlates a completed checkout against. So it is created here
+        # when missing, through `provision_initial_subscription` — the ONE approved
+        # implementation of the rule (plan, state, trial length), shared with registration,
+        # the admin console and the backfill migration, so this cannot drift from what those
+        # produce. It establishes a local record only: no Stripe object, no card, no charge.
+        admin_crud.provision_initial_subscription(db, org, plan_slug=data.plan_slug, actor=user)
+        db.commit()
+        # Re-read UNDER THE LOCK. Provisioning commits, so the row lock taken above is gone,
+        # and the duplicate-checkout guard below depends on holding it — without this, two
+        # concurrent first purchases could each bind their own Stripe session.
+        sub = admin_crud.current_subscription_for_update(db, org.id)
+        if sub is None:
+            # Provisioning returns None when the slug is absent from the catalog. Continuing
+            # with `sub = None` would crash further down, so the customer gets a refusal.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This organization could not be set up for billing. Please contact support.")
 
     # A tenant that ALREADY has a live Stripe subscription must not be sent through checkout
     # again. This endpoint creates a NEW Stripe subscription every time it succeeds, so an
@@ -294,7 +316,36 @@ def create_subscription_checkout(data: SubscriptionCheckoutCreate,
             "can be scheduled without double-billing you.",
         )
 
-    provider = payment_svc.get_provider("stripe")
+    # Resolving the adapter is itself fallible, and every way it fails is a DEPLOYMENT fault
+    # rather than anything the customer did:
+    #   * ProviderNotConfigured / UnknownProvider — PaymentProviderError subclasses;
+    #   * ModuleNotFoundError — `get_provider` imports the Stripe SDK lazily, so an image
+    #     built without it fails HERE, on the first upgrade click, not at startup;
+    #   * anything stripe.StripeClient() raises on a malformed key.
+    #
+    # Unwrapped, all of those left the route as an unhandled exception, so the browser got a
+    # 500 and the console said "Something went wrong starting checkout" — a generic sentence
+    # that describes a misconfigured deployment as a mystery. Every OTHER failure on this
+    # route already answers with a status the page can explain (404, 409, 422, 502, 503), and
+    # this was the one gap.
+    #
+    # 503, matching the "Payments are not configured" refusal above it: the service is not
+    # able to take a payment right now, nothing was attempted at Stripe, and nothing was
+    # charged. The log carries the diagnosis; the customer gets a sentence they can act on.
+    try:
+        provider = payment_svc.get_provider("stripe")
+    except (payment_svc.PaymentProviderError, ImportError) as exc:
+        # Type and message only. A provider misconfiguration message never contains the
+        # secret key, and nothing here interpolates one.
+        log.error("subscription checkout could not resolve the Stripe provider "
+                  "org=%s plan=%s error=%s: %s",
+                  org.id, plan.slug, type(exc).__name__, exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Payments are temporarily unavailable, so checkout could not be started. "
+            "Nothing has been charged — please try again shortly or contact support.",
+        ) from exc
+
     superseded_ref = None
     if sub.checkout_session_ref:
         try:

@@ -373,6 +373,13 @@ def _bearer_role(request: Request) -> str | None:
     return payload.get("role")
 
 
+# How long a read of the maintenance flag is reused. Short enough that turning maintenance on
+# is effectively immediate to anyone watching, long enough that a burst of console requests
+# costs one database connection rather than one each.
+_MAINTENANCE_TTL = 5.0
+_maintenance_cache = {"at": -_MAINTENANCE_TTL, "value": False}
+
+
 @app.middleware("http")
 async def maintenance_gate(request: Request, call_next):
     path = request.url.path
@@ -382,13 +389,51 @@ async def maintenance_gate(request: Request, call_next):
         return await call_next(request)
 
     def check():
+        # Cached for a few seconds. This ran a fresh SessionLocal() and a SELECT on EVERY
+        # gated request, to read one boolean that an operator changes by hand perhaps twice a
+        # year — so the console's own page loads (overview, plans, entitlements, analytics)
+        # each checked out a second pooled connection before doing any work. Against a
+        # database with a small connection allowance that is the difference between fitting
+        # and not: the symptom was `FATAL: remaining connection slots are reserved for roles
+        # with the SUPERUSER attribute`, which takes down every request, not just this one.
+        #
+        # The cost of the cache is that switching maintenance ON takes effect up to
+        # _MAINTENANCE_TTL later. That is acceptable for a deliberate, announced action and is
+        # not a correctness property anything else depends on.
+        now = time.monotonic()
+        if now - _maintenance_cache["at"] < _MAINTENANCE_TTL:
+            return _maintenance_cache["value"]
         db = SessionLocal()
         try:
-            return platform_settings.maintenance_mode(db)
+            value = platform_settings.maintenance_mode(db)
         finally:
             db.close()
+        _maintenance_cache["at"], _maintenance_cache["value"] = now, value
+        return value
 
-    if await asyncio.to_thread(check):
+    try:
+        under_maintenance = await asyncio.to_thread(check)
+    except OperationalError:
+        # FAILS OPEN, and the reasoning matters.
+        #
+        # This middleware is the OUTERMOST one, so an exception raised here reaches Starlette's
+        # ServerErrorMiddleware — outside CORSMiddleware, outside the unhandled-error handler
+        # below it, and outside the ExceptionMiddleware where app.exception_handler
+        # (OperationalError) lives. None of those three could ever see it. The browser got a
+        # 500 with no CORS headers, discarded it, and reported `Network Error`, so a database
+        # blip presented as the API being unreachable.
+        #
+        # Serving the request is also the better answer on its own merits: if the database is
+        # genuinely unavailable the request will fail again further in, where the
+        # OperationalError handler turns it into a clean 503 that KEEPS its CORS headers and
+        # says what is wrong. Refusing everything here because a flag could not be read would
+        # replace a legible error with an illegible one, and would let a connection shortage
+        # masquerade as planned maintenance.
+        log.warning("maintenance flag unreadable (%s); serving the request and letting the "
+                    "database error surface where it can be reported properly", request.url.path)
+        return await call_next(request)
+
+    if under_maintenance:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "The platform is under maintenance. Please try again shortly."},

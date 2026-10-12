@@ -28,6 +28,41 @@ export const PLAN_RANK = {
   pro: 2,
 };
 
+/** Is this subscription in a trial right now, in EITHER stored spelling?
+ *
+ *  `trialing` is the Section 12 state every subscription current code creates. `trial` is the
+ *  pre-Section-12 spelling, still present on older rows — models/subscription.py carries it as
+ *  a legacy alias (`"trial": "trialing"`) and exposes SUBSCRIPTION_TRIALING_STATES so queries
+ *  match both.
+ *
+ *  THE BUG THIS CLOSES: the Billing card asked `status === "trial"` — only the dead spelling.
+ *  A real trial reports `trialing`, so the test never matched, and the card fell through to
+ *  the renewal wording: it printed "Renews on 7 Oct 2026" over a date that was the TRIAL END.
+ *  Nothing renews then; the trial lapses or converts, and the two are not the same promise to
+ *  put in front of someone deciding whether to pay.
+ *
+ *  services/org.py hit the identical bug in the trial-ending warning — it compared against the
+ *  same dead literal and so never fired — and fixed it by normalizing instead of matching a
+ *  string. This is that fix, on the client side of the same contract.
+ */
+export function isTrialing(status) {
+  return ["trialing", "trial"].includes(String(status ?? "").trim().toLowerCase());
+}
+
+/** Can this page place `slug` in the Developer → Business → Enterprise hierarchy?
+ *
+ *  THE ONE PREDICATE, because two spellings of it had drifted apart. `planCta` stops offering
+ *  a purchase whenever the current plan cannot be RANKED — which is true both when there is no
+ *  entitled slug and when the slug is real but outside the five this page knows. Billing's
+ *  explanatory banner, meanwhile, asked only whether `plan_slug` was empty. So an organization
+ *  entitled to any other slug fell into the gap: every card read "Talk to an expert", and
+ *  nothing on the page said why, which is indistinguishable from all three tiers genuinely
+ *  being sales-led.
+ */
+export function isRankedPlan(slug) {
+  return !!slug && PLAN_RANK[slug] !== undefined;
+}
+
 /** Plans to render in Available Plans, in hierarchy order.
  *
  *  A retired plan is dropped UNLESS it is the organization's own current plan. Hiding the tier
@@ -46,9 +81,16 @@ export function visiblePlans(plans, currentSlug) {
  *
  *  Returns one of:
  *    { kind: "current"   } — this is the live plan; the button is disabled
+ *    { kind: "buy"       } — NO subscription yet; a first purchase, not an upgrade
  *    { kind: "upgrade"   } — a higher, self-service tier; keeps the existing Stripe path
  *    { kind: "downgrade" } — a lower tier; a sales conversation, never a browser-side change
  *    { kind: "contact"   } — quote-led (Enterprise), or a tier this page cannot rank
+ *
+ *  `buy` and `upgrade` reach the SAME Stripe checkout endpoint. They are separate kinds
+ *  because they are separate claims: "Upgrade" told a brand-new organization it was moving
+ *  up from something it did not have, and the backend answered the click with
+ *  "This organization has no subscription record to upgrade" — a refusal that named the
+ *  page's own mistaken assumption back at the customer.
  *
  *  `checkoutLocked` is the SERVER's answer to "would a new checkout create a SECOND paid
  *  subscription" — the same predicate the checkout endpoint's 409 guard uses. It is what keeps
@@ -74,8 +116,9 @@ export function planCta(plan, currentSlug, { checkoutLocked = false } = {}) {
     // would mean a second subscription and a second charge. So nothing is purchasable and the
     // tier is not guessed at; the conversation goes to a human.
     if (checkoutLocked) return { kind: "contact" };
-    // Genuinely no live subscription: the ordinary purchase path.
-    return plan.self_service ? { kind: "upgrade" } : { kind: "contact" };
+    // Genuinely no live subscription: this is a FIRST PURCHASE, not a move between tiers.
+    // Nothing is being upgraded, so the card must not say so.
+    return plan.self_service ? { kind: "buy" } : { kind: "contact" };
   }
 
   if (targetRank < currentRank) return { kind: "downgrade" };

@@ -546,7 +546,7 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
     from . import bus
     from .viewing_sessions import combine as combine_sessions
     from .viewing_sessions import summarize_sessions
-    from .watch_time import build_event_analytics_aggregate
+    from .watch_time import build_event_analytics_aggregate, pick_event_summary
 
     per_event: dict = {}
     session_metrics_by_event: dict = {}
@@ -554,12 +554,14 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
         b_sessions = sessions_by_event.get(e.id, [])
         snaps = snapshots_by_event.get(e.id, [])
 
-        # Check stored summary in BroadcastSession.settings
-        stored_summary = None
-        for bs in b_sessions:
-            if isinstance(bs.settings, dict) and "analytics_summary" in bs.settings:
-                stored_summary = bs.settings["analytics_summary"]
-                break
+        # The most complete finalized summary across this event's sessions — see
+        # watch_time.pick_event_summary for why "the first row carrying one" was wrong.
+        # The bus stays a FALLBACK rather than a competitor here, unlike the single-event
+        # report: this runs once per event in the window, and consulting it unconditionally
+        # would put a Redis round trip per event inside the loop. Nothing is lost by it —
+        # `_end` writes the bus copy onto the session row, so an event with any persisted
+        # summary has already had the bus's figure considered.
+        stored_summary = pick_event_summary(b_sessions)
         if not stored_summary:
             stored_summary = bus.summary_get_sync(e.id)
 
