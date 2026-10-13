@@ -44,6 +44,8 @@ import SecurityReport from "./pages/SecurityReport";
 import EmailPreferences from "./pages/EmailPreferences";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import PrivacyCenter from "./pages/organization/PrivacyCenter";
+import GuideMount from "./guide/GuideMount";
+import OperatorGuideMount from "./operator-guide/OperatorGuideMount";
 
 // ── /* @__PURE__ */ on every lazy() below ───────────────────────────────────────────────
 // Without it these 29 declarations are top-level FUNCTION CALLS, which Rollup must assume
@@ -188,6 +190,12 @@ export default function App() {
               the rule. Renders nothing. On the web build IS_NATIVE is the literal `false`,
               so this branch and the import above it are both eliminated. */}
           {IS_NATIVE && <NativeShell />}
+          {/* ZoikoStream Guide, the public website assistant. Renders on eligible public pages
+              only, lazy-loads after the page, and renders nothing if it fails or is switched
+              off — the site never depends on it. Not shipped in the native app. */}
+          {!IS_NATIVE && <GuideMount />}
+          {/* Console assistant for signed-in hosts and admins (ZST-UX-GUIDE-001). */}
+          {!IS_NATIVE && <OperatorGuideMount />}
           <Routes>
             {/* Public landing page */}
             <Route path="/" element={<LandingOrDashboard />} />

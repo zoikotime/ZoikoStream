@@ -52,6 +52,11 @@ from urllib.parse import urlsplit
 # The same single .env app.config reads (server/conftest.py -> repo root is one level up).
 ROOT_ENV = Path(__file__).resolve().parents[1] / ".env"
 
+# The public Guide has its own database and suite (guide_tests/pytest.ini). Its conftest
+# rewrites GUIDE_* and ENVIRONMENT at import, so it must never be collected into this run.
+# The Operator Guide likewise (operator_guide_tests/pytest.ini, OPGUIDE_TEST_DATABASE_URL).
+collect_ignore = ["guide_tests", "operator_guide_tests"]
+
 # Values of ENVIRONMENT that mean a real deployment. Duplicated from app.config rather than
 # imported: importing app.config here would construct Settings() (and therefore read
 # DATABASE_URL) BEFORE the TEST_DATABASE_URL swap below could take effect.

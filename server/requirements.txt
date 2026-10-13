@@ -25,3 +25,12 @@ stripe>=15.3,<16
 # organization-timezone timestamps in customer email then fall back to UTC silently — the
 # message still sends, but every stated time is in the wrong zone.
 tzdata
+
+# Public website assistant (ZoikoStream Guide, server/app/guide). alembic manages ONLY the
+# Guide database (server/guide_alembic.ini); anthropic is the model provider; fastembed runs
+# the local embedding model (no API key); pgvector is the SQLAlchemy vector type; pyyaml reads
+# knowledge-source front matter.
+anthropic>=1.11,<2
+fastembed>=0.8,<1
+pgvector>=0.5,<1
+pyyaml
