@@ -47,7 +47,8 @@ export default function AppShell({
         {renderTopbar({ open, setOpen })}
         {/* Suspense so a code-split routed page (the admin console area) can stream in
             without the shell unmounting. A no-op for areas whose pages are eager. */}
-        <main className={`flex-1 overflow-auto ${mainClass}`}>
+        {/* zk-guide-safe: reserves the Guide launcher's footprint after the last row. */}
+        <main className={`zk-guide-safe flex-1 overflow-auto ${mainClass}`}>
           <Suspense
             fallback={
               <div className="grid place-items-center py-24">

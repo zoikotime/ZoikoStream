@@ -122,9 +122,11 @@ export default function ProfileHeader({
                   hydrated synchronously — they are never in a loading state, so they are
                   rendered directly. Only the API-sourced facts below skeleton.
 
-                  The avatar is the way into the photo editor: a camera overlay on hover and on
-                  keyboard focus, and a small camera badge that is always shown, so the action
-                  is discoverable on touch screens too. */}
+                  The avatar is the way into the photo editor, and it carries ONE camera: the
+                  centred overlay. It appears on hover and on keyboard focus; on a device that
+                  cannot hover (a touch screen) it is always shown, over a lighter scrim, so
+                  the action is still discoverable there. A second, always-on camera badge at
+                  the bottom-left used to do that job, and showed two cameras on every hover. */}
               <button
                 type="button"
                 onClick={() => setEditingPhoto(true)}
@@ -138,15 +140,10 @@ export default function ProfileHeader({
                 />
                 <span
                   aria-hidden="true"
-                  className="absolute inset-0 grid place-items-center rounded-full bg-slate-900/50 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100 motion-reduce:transition-none"
+                  data-avatar-edit=""
+                  className="absolute inset-0 grid place-items-center rounded-full bg-slate-900/50 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100 motion-reduce:transition-none [@media(hover:none)]:bg-slate-900/30 [@media(hover:none)]:opacity-100"
                 >
-                  <Camera className="h-6 w-6" />
-                </span>
-                <span
-                  aria-hidden="true"
-                  className="absolute bottom-1 left-1 grid h-7 w-7 place-items-center rounded-full bg-white text-violet-700 shadow ring-1 ring-slate-200 dark:bg-neutral-900 dark:text-violet-300 dark:ring-white/15"
-                >
-                  <Camera className="h-3.5 w-3.5" />
+                  <Camera className="h-6 w-6 drop-shadow" />
                 </span>
               </button>
               {/* Account-status dot, anchored to the avatar so status reads at a glance. */}

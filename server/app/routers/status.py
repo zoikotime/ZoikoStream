@@ -110,11 +110,8 @@ def public_status(db: Session = Depends(get_db)):
         .where(PublicStatusIncident.status == "resolved",
                PublicStatusIncident.published_at.isnot(None))
         .order_by(PublicStatusIncident.resolved_at.desc()).limit(20)).all()
-    upcoming = db.scalars(
-        select(ScheduledMaintenance)
-        .where(ScheduledMaintenance.status.in_(("scheduled", "in_progress", "extended")),
-               ScheduledMaintenance.published_at.isnot(None))
-        .order_by(ScheduledMaintenance.starts_at_utc)).all()
+    # The same definition the organization Support page reads (status_publication).
+    upcoming = sp.upcoming_maintenance(db)
     recent = db.scalars(
         select(ScheduledMaintenance)
         .where(ScheduledMaintenance.status.in_(("completed", "canceled")),

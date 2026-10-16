@@ -148,11 +148,17 @@ export default function StreamingSessions() {
       header: "Peak audience",
       align: "right",
       sortable: true,
-      render: (s) => (
-        <span className={cx("text-[13px]", type.mono, s.peak_viewers ? CONSOLE.heading : CONSOLE.faint)}>
-          {s.peak_viewers || "—"}
-        </span>
-      ),
+      // A peak of 0 is a measurement (nobody watched), so it reads "0" in the normal tone; only
+      // a missing figure is a faint dash. This was `peak_viewers || "—"`, which turned every
+      // zero-audience session into a dash. Sorting reads the raw number (SORT_VALUE above).
+      render: (s) => {
+        const measured = s.peak_viewers != null;
+        return (
+          <span className={cx("text-[13px]", type.mono, measured ? CONSOLE.heading : CONSOLE.faint)}>
+            {measured ? s.peak_viewers : "—"}
+          </span>
+        );
+      },
     },
   ];
 

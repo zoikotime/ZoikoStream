@@ -266,12 +266,23 @@ def _impact_seconds(intervals: list[tuple[datetime, datetime]], since: datetime,
     return total
 
 
-def availability(db: Session, since: datetime, until: datetime | None = None) -> dict:
+def _incident_scope(org_id):
+    """Incidents an ORGANIZATION may be shown: its own, plus platform-wide ones (org_id NULL).
+    None = every incident, which is the Command Center's platform-wide view."""
+    if org_id is None:
+        return ()
+    return (or_(Incident.org_id == org_id, Incident.org_id.is_(None)),)
+
+
+def availability(db: Session, since: datetime, until: datetime | None = None, org_id=None) -> dict:
     """{(stage, region): percent} over the window, from real incident impact windows.
 
     A region-less incident (region NULL) counts against every region — that is what
     "global" impact means. Availability with no recorded impact is exactly 100.0, which is
     a measurement of "nothing was recorded", not an assumption of perfection.
+
+    `org_id` narrows the evidence to that organization's own and platform-wide incidents. The
+    organization console passes it; without it another tenant's incident moved this one's figure.
     """
     until = until or _now()
     span = max((until - since).total_seconds(), 1.0)
@@ -281,6 +292,7 @@ def availability(db: Session, since: datetime, until: datetime | None = None) ->
             Incident.stage.isnot(None),
             or_(Incident.resolved_at.is_(None), Incident.resolved_at >= since),
             Incident.started_at <= until,
+            *_incident_scope(org_id),
         )
     ).all()
 
@@ -530,14 +542,18 @@ _WORST = {2: "warn", 3: "down"}
 
 
 def stage_health(db: Session, health: dict, since: datetime, stages: tuple[str, ...],
-                 until: datetime | None = None) -> list[dict]:
+                 until: datetime | None = None, org_id=None) -> list[dict]:
     """Per-stage status (from real service probes + open incidents) and availability
-    (from recorded incident windows), plus the per-region matrix the console renders."""
+    (from recorded incident windows), plus the per-region matrix the console renders.
+
+    `org_id`: an organization's view — only its own and platform-wide incidents escalate a
+    stage or count against its availability (see _incident_scope)."""
     services = {s["id"]: s for s in health["services"]}
-    avail = availability(db, since, until)
+    avail = availability(db, since, until, org_id=org_id)
 
     open_by_stage: dict[str, list[Incident]] = {}
-    for inc in db.scalars(select(Incident).where(Incident.status != "resolved")).all():
+    for inc in db.scalars(select(Incident).where(Incident.status != "resolved",
+                                                 *_incident_scope(org_id))).all():
         if inc.stage:
             open_by_stage.setdefault(inc.stage, []).append(inc)
 

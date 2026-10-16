@@ -465,9 +465,15 @@ export default function OrganizationBilling() {
           >
             <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
               <div>
+                {/* The tier's own name, exactly as the catalog below and the server spell it
+                    ("Developer", never "Developer Plan" on one card and "Developer" on the
+                    next). Where the word "plan" is needed it is the label, not the name. */}
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  Current plan
+                </p>
                 <div className="flex flex-wrap items-center gap-3">
                   <h2 className="text-xl font-bold text-slate-900 dark:text-white">
-                    {ent?.plan || "No plan"}{ent?.plan ? " Plan" : ""}
+                    {ent?.plan || "No plan"}
                   </h2>
                   {ent?.status && <Badge status={STATUS_TONE[ent.status] || "info"} dot>{ent.status}</Badge>}
                 </div>

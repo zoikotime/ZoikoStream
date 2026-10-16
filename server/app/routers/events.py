@@ -49,6 +49,7 @@ from ..models import (
 )
 from ..schemas.admin import AdminUserOut, Page
 from ..schemas.event import (
+    DisplayStatus,
     EventStatus,
     ContributorAccept,
     ContributorInvite,
@@ -85,6 +86,7 @@ from ..services import bus, event_overrun
 from ..services import admission as admission_svc
 from ..services import audience as audience_svc
 from ..services import invitation_links
+from ..services import playback_qoe
 
 def claim_cookie_policy(request: Request) -> tuple[bool, str]:
     """`(secure, samesite)` for the one-device claim cookie on this request.
@@ -153,6 +155,19 @@ def _can_edit(db, ev: Event, user: User) -> bool:
     return False
 
 
+def _with_display(db: Session, events) -> list[EventOut]:
+    """EventOut rows carrying the display status the console shows (crud.display_states:
+    "missed" for a Scheduled event past start + grace that never went live). One query for
+    the whole list."""
+    states = crud.display_states(db, events)
+    out = []
+    for e in events:
+        row = EventOut.model_validate(e)
+        row.display_status, row.start_overdue = states[e.id]
+        out.append(row)
+    return out
+
+
 def _user_out(u: User) -> AdminUserOut:
     out = AdminUserOut.model_validate(u)
     out.organization_name = u.organization.name if u.organization else None
@@ -168,6 +183,9 @@ def list_events(
     # never an empty page that looks like "no events". Omitted = every status except
     # archived (archiving is how an organization takes an event out of its working list).
     status_: EventStatus | None = Query(None, alias="status"),
+    # The Events page's filter: a canonical status, or the derived "missed". Here
+    # "scheduled" means still upcoming (a Missed event is listed under "missed").
+    display_status: DisplayStatus | None = Query(None),
     host: uuid.UUID | None = Query(None, description="filter by created_by (event owner)"),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
@@ -180,16 +198,15 @@ def list_events(
 ):
     items, total = crud.list_events(db, user.org_id, q=q, status=status_, host_id=host,
                                     date_from=date_from, date_to=date_to,
-                                    sort_by=sort_by, order=order, page=page, page_size=page_size)
+                                    sort_by=sort_by, order=order, page=page, page_size=page_size,
+                                    display_status=display_status)
     # One grouped query for the whole page, not a subquery per row. Scoped implicitly: the
     # ids come from list_events, which already filtered on the caller's own org.
     counts = crud.registration_counts(db, [e.id for e in items])
-    out = []
-    for e in items:
-        row = EventOut.model_validate(e)
+    out = _with_display(db, items)
+    for row in out:
         # 0 for an event nobody registered for — a counted zero, not an absent figure.
-        row.registered_count = counts.get(e.id, 0)
-        out.append(row)
+        row.registered_count = counts.get(row.id, 0)
     return Page(items=out, total=total, page=page, page_size=page_size)
 
 
@@ -197,8 +214,12 @@ def list_events(
 def event_status_counts(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """How many of the caller's organization's events are in each status, over the WHOLE
     organization (the Events page counters used to count only the first 100 rows it had
-    loaded). Every status in EVENT_STATUSES is present, zero included."""
-    return {"counts": crud.status_counts(db, user.org_id)}
+    loaded). Every status in EVENT_STATUSES is present, zero included.
+
+    `counts` is the canonical lifecycle. `display_counts` is what the Events page shows:
+    Missed counted on its own, and Scheduled meaning upcoming only."""
+    return {"counts": crud.status_counts(db, user.org_id),
+            "display_counts": crud.display_status_counts(db, user.org_id)}
 
 
 # ── console access (ZST post-login routing) ─────────────────────────────────────────────
@@ -295,7 +316,7 @@ def create_event(data: EventCreate, background: BackgroundTasks, admin: User = D
 
 @router.get("/{event_id}", response_model=EventOut)
 def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _get_event_or_404(db, user, event_id)
+    return _with_display(db, [_get_event_or_404(db, user, event_id)])[0]
 
 
 @router.get("/{event_id}/overrun")
@@ -326,6 +347,21 @@ def registration_gate_required(ev) -> bool:
     already-authorized guest to re-identify with data nobody checks.
     """
     return bool(ev.registration_required) or ev.visibility in ("public", "unlisted")
+
+
+def _credential_identity(user, invited, reg_payload, link_admitted, link_row, link_sub) -> str | None:
+    """The watcher's credential-backed identity — user, then registration, then access link,
+    the precedence routers/live.py's resolve_ctx family uses — or None for a visitor holding
+    none of them."""
+    if user:
+        return str(user.id)
+    if invited and reg_payload:
+        return f"guest-{reg_payload['reg']}"
+    if link_admitted and link_row:
+        # Per browser when the viewer holds a pass, so two people on one family link do not
+        # share — and evict each other from — a single LiveKit identity.
+        return invitation_links.link_identity(link_row.id, link_sub)
+    return None
 
 
 @router.get("/{event_id}/watch", response_model=WatchOut)
@@ -454,6 +490,7 @@ def watch_event(
     room = livekit.room_for_event(ev.id)
     token = url = None
     admission = retry_after = None
+    qoe_token = None
     # "degraded" (persisted by services/broadcast.py's sampler/webhook-driven
     # mark_degraded/mark_recovered when the producer's media drops mid-broadcast) still gets
     # a token — a viewer should be able to sit connected and recover automatically once the
@@ -476,21 +513,15 @@ def watch_event(
         # "insufficient permissions" the moment it tried to publish its mic — the state
         # changed everywhere except the one place (LiveKit) that actually enforces it.
         # Mirrors routers/live.py's own resolve_ctx / resolve_ctx_from_registration /
-        # resolve_ctx_from_access_link precedence (user, then reg, then link) exactly.
-        if user:
-            identity = str(user.id)
-        elif invited and reg_payload:
-            identity = f"guest-{reg_payload['reg']}"
-        elif link_admitted and link_row:
-            # Per browser when the viewer holds a pass, so two people on one family link do
-            # not share — and evict each other from — a single LiveKit identity.
-            identity = invitation_links.link_identity(link_row.id, link_sub)
-        else:
-            # No credential the live socket would accept either (see live.py's own
-            # "Invalid or expired session" refusal) — this viewer can watch/listen but was
-            # never going to hold a moderation-socket identity to promote in the first
-            # place, so a disposable identity is correct here, not a bug.
-            identity = f"viewer-{uuid.uuid4()}"
+        # resolve_ctx_from_access_link precedence (user, then reg, then link) exactly
+        # (_credential_identity).
+        #
+        # No credential the live socket would accept either (see live.py's own "Invalid or
+        # expired session" refusal) — this viewer can watch/listen but was never going to
+        # hold a moderation-socket identity to promote in the first place, so a disposable
+        # identity is correct here, not a bug.
+        identity = (_credential_identity(user, invited, reg_payload, link_admitted, link_row, link_sub)
+                    or f"viewer-{uuid.uuid4()}")
         # monitor=True is Backstage.jsx's own return-feed subscription, requested BY the
         # contributor themselves alongside their own publish connection (services/
         # contributor.py's my_publish_token, identity=ctx.identity=str(user.id) — the exact
@@ -519,6 +550,11 @@ def watch_event(
                     db, ev, identity,
                     registration_id=uuid.UUID(reg_payload["reg"]) if invited and reg_payload else None,
                     user_agent=request.headers.get("user-agent"), client_hint=client,
+                )
+                # The same audience — and only it — measures its own playback quality.
+                qoe_token = playback_qoe.issue_token(
+                    ev.id, "live", identity=identity,
+                    registration_id=uuid.UUID(reg_payload["reg"]) if invited and reg_payload else None,
                 )
         else:
             admission, retry_after = "waiting", decision.retry_after_seconds
@@ -576,6 +612,14 @@ def watch_event(
             if source and source.started_at and source.stopped_at:
                 recording_duration = int(
                     (source.stopped_at - source.started_at).total_seconds() - source.paused_ms / 1000
+                )
+            # Replay playback quality is measured by the audience exactly as live is, and
+            # reported apart from it (services/playback_qoe.py).
+            if not is_org_member and not monitor:
+                qoe_token = playback_qoe.issue_token(
+                    ev.id, "replay",
+                    identity=_credential_identity(user, invited, reg_payload, link_admitted, link_row, link_sub),
+                    registration_id=uuid.UUID(reg_payload["reg"]) if invited and reg_payload else None,
                 )
 
     # What the ended page may truthfully say about a replay (WatchOut.replay_state). Derived
@@ -655,6 +699,7 @@ def watch_event(
         admission=admission, retry_after_seconds=retry_after,
         replay_state=replay_state, replay_available_until=replay_until,
         country_prompt=country_prompt,
+        qoe_token=qoe_token,
     )
 
 
@@ -922,7 +967,9 @@ def update_event(event_id: uuid.UUID, data: EventUpdate, background: BackgroundT
     # LVE-011: completion is announced from the committed ended status, and reports where the
     # recording actually is rather than implying it is finished.
     event_closeout.notify_event_ended(db, background, updated)
-    return updated
+    # With the display status: a Missed event rescheduled to a future start comes back
+    # "scheduled" in this very response, so no stale Missed badge survives the save.
+    return _with_display(db, [updated])[0]
 
 
 @router.post("/{event_id}/end", response_model=EventOut)

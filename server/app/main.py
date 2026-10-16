@@ -20,6 +20,7 @@ from .routers.admin import router as admin_router
 from .routers.organization import router as organization_router
 from .routers.events import router as events_router
 from .routers.live import router as live_router
+from .routers.playback import router as playback_router
 from .routers.commercial import router as commercial_router
 from .routers.deliveries import router as deliveries_router
 from .routers.contact import router as contact_router
@@ -51,6 +52,7 @@ from .services.webhooks import run_webhook_retries
 from .services.delivery import run_watermark_processor
 from .services.validation import run_validation_processor
 from .services.custom_domains import run_custom_domain_sweeper
+from .services.playback_qoe import run_playback_retention_sweeper
 from .services.custom_domain_routing import CustomDomainMiddleware
 from .services.public_urls import platform_base_url
 from .config import settings
@@ -68,7 +70,7 @@ log_redaction.install()
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Fifteen background tickers, each owning its own domain (which is also what keeps
+    """Sixteen background tickers, each owning its own domain (which is also what keeps
     moderation and broadcast from having to import each other):
       * scheduler  — fires scheduled polls/announcements, closes timed-out polls
       * sampler    — writes analytics snapshots (the retention graph) and pushes live counters
@@ -95,9 +97,11 @@ async def lifespan(_: FastAPI):
       * domains    — custom-domain DNS re-checks, certificate polling, expiry of unverified
                      requests and deactivation of domains whose records disappeared
                      (services/custom_domains.py)
+      * playback   — deletes viewer playback-quality rows past their retention, daily
+                     (services/playback_qoe.py)
     The bus releases its Redis client on the way out.
 
-    All fifteen run in the LEADER process only, elected by a Postgres advisory lock (see
+    All sixteen run in the LEADER process only, elected by a Postgres advisory lock (see
     db.try_acquire_ticker_leadership). They previously ran in every process, so a deployment
     with more than one instance fired each scheduled poll, webhook delivery and watermark burn
     once per instance. A follower serves HTTP normally and simply runs no tickers; it retries
@@ -200,6 +204,8 @@ def _start_tickers() -> list:
         asyncio.create_task(run_event_planning_sweeper()),
         # Custom domains: pending re-checks, certificate polling, grace-period deactivation.
         asyncio.create_task(run_custom_domain_sweeper()),
+        # Viewer playback-quality rows past PLAYBACK_QOE_RETENTION_DAYS, once a day.
+        asyncio.create_task(run_playback_retention_sweeper()),
     ]
 
 
@@ -506,8 +512,10 @@ _ORG_STATE_GATE = [Depends(require_operational_org_access)]
 # the restriction rather than enforce it.
 # profile_router (your own profile photo) sits with auth_router: it is the account's identity,
 # not organization operations, and the photos it serves must load for every member list.
+# playback_router is the viewer player's own QoE beacon (routers/playback.py): public, and
+# ungated for live_router's reason — a restricted tenant's audience is still watching.
 for router in (auth_router, dashboard_router, admin_router, contact_router, live_router,
-               status_router, trust_router, privacy_router, profile_router):
+               status_router, trust_router, privacy_router, profile_router, playback_router):
     app.include_router(router, prefix="/api")
 
 # NO /api prefix, and no org-state gate. Android fetches

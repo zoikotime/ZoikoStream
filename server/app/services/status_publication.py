@@ -693,6 +693,21 @@ def notify_review(db: Session, background, incident: PublicStatusIncident,
 
 # ══ STS-005 / STS-006 — maintenance ════════════════════════════════════════════════════
 
+# Windows that are still ahead of us or under way. One definition, read by the public status
+# page (routers/status.py) and the organization Support page (services/org.maintenance_schedule),
+# so the two can never disagree about what is planned.
+UPCOMING_MAINTENANCE_STATUSES = ("scheduled", "in_progress", "extended")
+
+
+def upcoming_maintenance(db: Session) -> list[ScheduledMaintenance]:
+    """Published maintenance windows not yet completed or canceled, soonest first."""
+    return list(db.scalars(
+        select(ScheduledMaintenance)
+        .where(ScheduledMaintenance.status.in_(UPCOMING_MAINTENANCE_STATUSES),
+               ScheduledMaintenance.published_at.isnot(None))
+        .order_by(ScheduledMaintenance.starts_at_utc)).all())
+
+
 def schedule_maintenance(db: Session, *, title: str, components: list[str],
                          regions: list[str], starts_at_utc: datetime,
                          ends_at_utc: datetime, impact_summary: str,

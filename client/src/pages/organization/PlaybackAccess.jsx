@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   FiPlayCircle, FiLock, FiUnlock, FiUsers, FiEye, FiRefreshCw, FiCheck, FiMinus,
@@ -17,6 +17,7 @@ import OrganizationEmptyState from "../../components/organization/OrganizationEm
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import EventAccessLinks from "../../components/organization/EventAccessLinks";
 import { fmtDateTime, visLabel, VISIBILITY_HELP } from "../../data/events";
+import { FAILURE_LABELS } from "../../data/playbackQoe";
 
 // Playback & Access — who is allowed to watch, and on what terms.
 //
@@ -31,6 +32,12 @@ import { fmtDateTime, visLabel, VISIBILITY_HELP } from "../../data/events";
 //
 // The access-link table is the existing EventAccessLinks component, unchanged — the create,
 // rotate, revoke and one-time-reveal flows already live there.
+//
+// Viewer-side measurement is what viewers' OWN players reported (hooks/usePlaybackQoe.js ->
+// POST /api/playback/qoe), aggregated by the server over every session in the window
+// (GET /organization/playback/qoe — server/app/services/playback_qoe.py has the definitions).
+// Live and replay are measured from different signals, so they are shown one at a time and
+// never blended.
 
 // Gate rows: one per enforced rule, so "off" is as legible as "on".
 function GateRow({ on, label, detail, invert = false }) {
@@ -64,6 +71,170 @@ const watchWindow = (ev) => {
   return `${fmtDateTime(ev.start_time)} → ${fmtDateTime(ev.end_time)}`;
 };
 
+// ── Viewer-side measurement ──────────────────────────────────────────────────────────────
+
+const QOE_URL = "/organization/playback/qoe";
+const QOE_MODES = [["live", "Live"], ["replay", "Replay"]];
+const QOE_WINDOWS = [["all", "All time"], ["30d", "30 days"], ["7d", "7 days"], ["24h", "24 hours"]];
+
+const fmtCount = (n) => Number(n || 0).toLocaleString();
+const plural = (n, word) => `${fmtCount(n)} ${word}${n === 1 ? "" : "s"}`;
+// The aggregate ratio (server: SUM(stalled) / SUM(watched)) as a percentage. A ratio that is
+// above zero but rounds to it still says so, rather than reading as a clean 0%.
+const fmtRatio = (ratio) => {
+  if (ratio === 0) return "0%";
+  const pct = ratio * 100;
+  return pct < 0.1 ? "<0.1%" : `${pct.toFixed(1)}%`;
+};
+const fmtDuration = (ms) => {
+  const s = Math.round((ms || 0) / 1000);
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+// Rounded on integers: (1.45).toFixed(1) is "1.4", because 1.45 is not exact in binary.
+const fmtStartup = (ms) => (ms < 1000 ? `${ms} ms` : `${(Math.round(ms / 100) / 10).toFixed(1)} s`);
+
+function Segmented({ label, options, value, onChange }) {
+  return (
+    <div className={cx("inline-flex rounded-lg p-0.5", CONSOLE.segment)} role="group" aria-label={label}>
+      {options.map(([key, text]) => (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onChange(key)}
+          aria-pressed={value === key}
+          className={cx(
+            "rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors duration-150 motion-reduce:transition-none",
+            focusRing,
+            value === key ? CONSOLE.segmentOn : CONSOLE.segmentOff
+          )}
+        >
+          {text}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// "Failures by reason" is a breakdown, not one figure. Three states, kept apart: nothing has
+// been measured (a dash and why), measured with no failures (said in words, never a dash),
+// and the failures themselves, most frequent first.
+function FailureBreakdown({ loading, measured, failures }) {
+  if (loading || !measured) {
+    return (
+      <>
+        <p className={cx("text-[20px] font-semibold", CONSOLE.faint)}>—</p>
+        <p className={cx("mt-0.5 text-[11px] leading-snug", CONSOLE.faint)}>
+          {loading ? "Loading" : "No playback data yet"}
+        </p>
+      </>
+    );
+  }
+  if (failures.length === 0) {
+    return <p className={cx("text-[13px] font-medium", CONSOLE.heading)}>No playback failures</p>;
+  }
+  return (
+    <ul className={cx("divide-y", CONSOLE.divideY)} aria-label="Failures by reason">
+      {failures.map(({ reason, count }) => (
+        <li key={reason} className="flex items-baseline justify-between gap-3 py-1 text-[13px]">
+          <span className={cx("min-w-0 truncate", CONSOLE.body)}>{FAILURE_LABELS[reason] || reason}</span>
+          <span className={cx("shrink-0 font-semibold tabular-nums", CONSOLE.heading)}>{fmtCount(count)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function PlaybackQuality({ eventId, refreshKey }) {
+  const [mode, setMode] = useState("live");
+  const [windowKey, setWindowKey] = useState("all");
+  const [retry, setRetry] = useState(0);
+  // One request per (event, window, refresh). Loading is derived from whether the answer on
+  // hand is for the request being shown, so switching events never shows the last event's
+  // figures under the new title.
+  const requestKey = `${eventId}|${windowKey}|${refreshKey}|${retry}`;
+  const [result, setResult] = useState({ key: null, data: null, error: null });
+  useEffect(() => {
+    let alive = true;
+    api
+      .get(QOE_URL, { params: { event_id: eventId, window: windowKey } })
+      .then((r) => {
+        if (alive) setResult({ key: requestKey, data: r.data, error: null });
+      })
+      .catch((e) => {
+        if (alive) setResult({ key: requestKey, data: null, error: e });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [requestKey, eventId, windowKey]);
+
+  const loading = result.key !== requestKey;
+  const figures = loading ? null : result.data?.[mode];
+  const measured = Boolean(figures?.sessions);
+  const emptyReason = loading ? "Loading" : "No playback data yet";
+  const ratio = measured ? figures.rebuffer_ratio : null;
+
+  return (
+    <Panel
+      title="Viewer-side measurement"
+      description="Reported by viewers' own players. Live and replay are measured separately."
+      action={
+        <div className="flex flex-wrap items-center gap-2">
+          <Segmented label="Playback mode" options={QOE_MODES} value={mode} onChange={setMode} />
+          <Segmented label="Time window" options={QOE_WINDOWS} value={windowKey} onChange={setWindowKey} />
+        </div>
+      }
+    >
+      {!loading && result.error ? (
+        <OrganizationErrorState
+          error={result.error}
+          onRetry={() => setRetry((n) => n + 1)}
+          title="Couldn't load playback quality"
+        />
+      ) : (
+        <FactGrid
+          columns={3}
+          facts={[
+            {
+              label: "Playback starts",
+              value: measured ? fmtCount(figures.playback_starts) : null,
+              reason: emptyReason,
+              detail: measured ? `of ${plural(figures.sessions, "playback session")} · not unique viewers` : null,
+            },
+            {
+              label: "Rebuffer ratio",
+              value: ratio == null ? null : fmtRatio(ratio),
+              reason: measured ? "No watch time yet" : emptyReason,
+              detail:
+                ratio == null
+                  ? null
+                  : `${plural(figures.rebuffer_count, "stall")} · ${fmtDuration(figures.rebuffer_duration_ms)} of ${fmtDuration(figures.playback_duration_ms)} watched`,
+            },
+            {
+              label: "Failures by reason",
+              content: (
+                <FailureBreakdown loading={loading} measured={measured} failures={figures?.failures || []} />
+              ),
+            },
+          ]}
+        />
+      )}
+      <p className={cx("mt-4 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
+        A start is a playback session whose player rendered media. Rebuffering is stall time after
+        playback began; pauses, hidden tabs, seeks and broadcaster interruptions are not counted.
+        Audience counts and engagement are on{" "}
+        <Link to="/organization/analytics" className={cx("font-semibold", CONSOLE.link)}>
+          Analytics
+        </Link>
+        .
+      </p>
+    </Panel>
+  );
+}
+
 export default function PlaybackAccess() {
   const { data, loading, error, reload } = useApi(() =>
     // page_size (not `limit`) is this endpoint's parameter name, and it caps at 100.
@@ -72,6 +243,29 @@ export default function PlaybackAccess() {
       .then((r) => r.data)
   );
   const [selectedId, setSelectedId] = useState(null);
+  // The organization's last 24 hours of viewer-side measurement, every event, both modes.
+  const {
+    data: recentQoe, loading: recentLoading, error: recentError, reload: reloadRecent,
+  } = useApi(() => api.get(QOE_URL, { params: { window: "24h" } }).then((r) => r.data));
+  const [qoeRefresh, setQoeRefresh] = useState(0);
+  const refresh = () => {
+    reload();
+    reloadRecent();
+    setQoeRefresh((n) => n + 1);
+  };
+  const recentFact = (measuredValue, emptyReason) => {
+    if (recentLoading) return { value: null, reason: "Loading" };
+    if (recentError) return { value: null, reason: "Couldn't load playback quality" };
+    return measuredValue == null ? { value: null, reason: emptyReason } : { value: measuredValue };
+  };
+  const recentFailures = recentFact(
+    recentQoe?.total?.sessions ? fmtCount(recentQoe.total.failed_sessions) : null,
+    "No playback data yet"
+  );
+  const recentStartup = recentFact(
+    recentQoe?.live?.startup_ms_median != null ? fmtStartup(recentQoe.live.startup_ms_median) : null,
+    "No live playback started yet"
+  );
 
   const events = useMemo(() => {
     const rows = Array.isArray(data) ? data : data?.items || [];
@@ -101,7 +295,7 @@ export default function PlaybackAccess() {
         title="Playback & Access"
         subtitle="The gates a viewer passes before media plays, per event, and the links that carry them in."
         actions={
-          <ConsoleButton variant="secondary" leftIcon={FiRefreshCw} onClick={reload} disabled={loading}>
+          <ConsoleButton variant="secondary" leftIcon={FiRefreshCw} onClick={refresh} disabled={loading}>
             Refresh
           </ConsoleButton>
         }
@@ -123,16 +317,10 @@ export default function PlaybackAccess() {
           <StatRow label="Replay enabled" value={loading ? null : posture.replay} reason="Loading" />
         </Panel>
         <Panel className="px-5 py-4">
-          <StatRow
-            label="Playback failures (24h)"
-            value={null}
-            reason="Client-side playback QoE is not ingested"
-          />
-          <StatRow
-            label="Median start time"
-            value={null}
-            reason="Client-side playback QoE is not ingested"
-          />
+          {/* Sessions that hit a failure, live and replay together (a count adds up across
+              modes; a median does not, so start time is live only and says so). */}
+          <StatRow label="Playback failures (24h)" value={recentFailures.value} reason={recentFailures.reason} />
+          <StatRow label="Median live start (24h)" value={recentStartup.value} reason={recentStartup.reason} />
         </Panel>
       </div>
 
@@ -295,23 +483,7 @@ export default function PlaybackAccess() {
                   rotate, revoke, and the one-time raw-token reveal. Reused, not rebuilt. */}
               <EventAccessLinks event={selected} canManage />
 
-              <Panel title="Viewer-side measurement">
-                <FactGrid
-                  columns={3}
-                  facts={[
-                    { label: "Playback starts", value: null, reason: "Client-side playback QoE is not ingested" },
-                    { label: "Rebuffer ratio", value: null, reason: "Client-side playback QoE is not ingested" },
-                    { label: "Failures by reason", value: null, reason: "Client-side playback QoE is not ingested" },
-                  ]}
-                />
-                <p className={cx("mt-4 border-t pt-3 text-[12px] leading-snug", CONSOLE.divider, CONSOLE.faint)}>
-                  Audience counts and engagement that <em>are</em> measured live on{" "}
-                  <Link to="/organization/analytics" className={cx("font-semibold", CONSOLE.link)}>
-                    Analytics
-                  </Link>
-                  . What is missing here is the player&apos;s own view of quality.
-                </p>
-              </Panel>
+              <PlaybackQuality eventId={selected.id} refreshKey={qoeRefresh} />
 
               <p className={cx("flex items-center gap-2 text-[12px]", CONSOLE.faint)}>
                 <FiEye className="shrink-0" aria-hidden="true" />

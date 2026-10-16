@@ -1,25 +1,25 @@
 import { useState } from "react";
-import { FiRadio } from "react-icons/fi";
 import Modal from "../../ui/Modal";
 import Button from "../../ui/Button";
 import OrgLogo from "../../ui/OrgLogo";
 import { ACCENT, cx } from "../../ui/tokens";
 
 // Settings -> Branding's preview: the organization's CURRENT form values (saved or not) applied
-// to a mock event header and its primary action.
+// to a mock event header and a sample button.
 //
 // A mock-up by construction. This module imports no API client and no broadcast or LiveKit
-// code, so nothing in it can start a session, create one or change an event: the "Go Live"
-// inside it only demonstrates how the branded action looks and responds (hover, focus, press).
+// code, so nothing in it can start a session, create one or change an event. The sample button
+// only demonstrates how the brand color looks on a button and responds (hover, focus, press);
+// it is deliberately named after no real action, so it cannot be mistaken for one.
 //
 // It also says plainly what the brand reaches today: the logos appear in the viewer page's
 // header (the version for the viewer's theme, via ui/OrgLogo — the same component this preview
 // uses, so the two cannot disagree); the color is not applied anywhere yet.
 export default function BrandingPreview({ open, onClose, accent, logoUrl, logoUrlDark, orgName }) {
-  const [presses, setPresses] = useState(0);
+  const [pressed, setPressed] = useState(false);
   const tone = ACCENT[accent] || ACCENT.violet;
   const close = () => {
-    setPresses(0);
+    setPressed(false);
     onClose();
   };
   const name = (orgName || "").trim() || "Your organization";
@@ -35,9 +35,8 @@ export default function BrandingPreview({ open, onClose, accent, logoUrl, logoUr
     >
       <p className="text-xs text-slate-500 dark:text-slate-400">
         A mock-up using your current branding, including unsaved changes, in the console&apos;s
-        current theme. Nothing here starts a broadcast. Your logo appears in the header of your
-        events&apos; viewer pages; the brand color is not applied yet, and emails and the console
-        keep the ZoikoStream palette and mark.
+        current theme. Your logo appears in the header of your events&apos; viewer pages; the brand
+        color is not applied yet, and emails and the console keep the ZoikoStream palette and mark.
       </p>
 
       <div
@@ -70,21 +69,22 @@ export default function BrandingPreview({ open, onClose, accent, logoUrl, logoUr
           <button
             type="button"
             autoFocus
-            onClick={() => setPresses((n) => n + 1)}
+            onClick={() => setPressed(true)}
             aria-describedby="branding-preview-note"
             className={cx(
-              "inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition",
-              "hover:brightness-110 active:scale-[0.97] motion-reduce:transition-none motion-reduce:active:scale-100",
+              "inline-flex items-center rounded-lg px-5 py-2.5 text-sm font-semibold shadow-sm transition",
+              "hover:brightness-110 active:scale-[0.97] active:brightness-95 motion-reduce:transition-none motion-reduce:active:scale-100",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2 dark:focus-visible:ring-white dark:focus-visible:ring-offset-slate-950",
-              tone.solid
+              tone.solid,
+              tone.onSolid
             )}
           >
-            <FiRadio aria-hidden="true" /> Go Live
+            Sample Button
           </button>
           <p id="branding-preview-note" role="status" aria-live="polite" className="text-xs text-slate-500 dark:text-slate-400">
-            {presses
-              ? "Preview only — nothing was started. In the producer console this button begins the broadcast."
-              : "Hover, focus or press it to see each state. Preview only — nothing is started."}
+            {pressed
+              ? "That's the pressed state. The sample button doesn't perform any action."
+              : "Preview how your brand color appears on buttons and controls. Hover or focus the sample control to preview its interaction states."}
           </p>
         </div>
       </div>

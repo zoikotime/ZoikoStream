@@ -41,6 +41,7 @@ from .audience import (
     AudienceSession,
     JoinDenial,
 )
+from .playback import PLAYBACK_FAILURE_REASONS, PLAYBACK_MODES, PlaybackSession
 from .auth_session import (
     SESSION_END_ABSOLUTE,
     SESSION_END_IDLE,

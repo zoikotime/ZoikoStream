@@ -806,6 +806,7 @@ def create_incident(db, data, commander_default: str | None) -> Incident:
         ref=_incident_ref(now), title=data.title, detail=data.detail,
         severity=data.severity, kind=data.kind, org_id=data.org_id,
         commander=data.commander or commander_default, started_at=now,
+        stage=getattr(data, "stage", None),
     )
     db.add(incident)
     db.commit()

@@ -267,6 +267,31 @@ describe("Guide widget", () => {
   });
 });
 
+describe("Guide widget on a console page", () => {
+  const page = { page_id: "contact", page_type: "contact" };
+  const at = (pathname, suppressed) => (
+    <MemoryRouter initialEntries={["/contact"]}>
+      <GuideWidget page={suppressed ? null : page} pathname={pathname} suppressed={suppressed} />
+    </MemoryRouter>
+  );
+
+  it("an open panel closes and nothing renders, so it never sits on the Operator Guide's launcher", async () => {
+    const user = userEvent.setup();
+    const { rerender, container } = render(at("/contact", false));
+    await openGuide(user);
+
+    rerender(at("/organization/members", true));
+    expect(screen.queryByRole("dialog", { name: "Guide" })).toBeNull();
+    expect(container.querySelector(".zg-launcher")).toBeNull();
+    expect(container.querySelector(".zg")).toBeNull();
+
+    // Back on a public page: the launcher returns, the panel does not pop open by itself.
+    rerender(at("/contact", false));
+    expect(await screen.findByRole("button", { name: /open zoikostream guide/i })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Guide" })).toBeNull();
+  });
+});
+
 describe("Guide API helpers", () => {
   it("parses SSE and ignores malformed events", () => {
     const events = parseSSE('event: response.text.delta\ndata: {"delta":"Hi"}\n\nevent: x\ndata: {bad json\n\nevent: response.completed\ndata: {"grounded":true}\n\n');

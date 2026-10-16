@@ -32,6 +32,8 @@ import { cx } from "../../ui/tokens";
 import { useViewerLanguage } from "../../pages/watch/viewerLanguage";
 import { initials } from "../../data/watch";
 import useLiveKitViewer, { resolveQuality } from "../../hooks/useLiveKitViewer";
+import usePlaybackQoe, { usePlayerVisible } from "../../hooks/usePlaybackQoe";
+import { isViewerPause, mediaErrorReason, playRejectionReason } from "../../data/playbackQoe";
 import useMediaQuery from "../../hooks/useMediaQuery";
 import Overlay from "../../ui/Overlay";
 import Logo from "../../ui/Logo";
@@ -114,8 +116,14 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
   // at full volume), so nobody who hears the stream today hears less of it on first load.
   const [muteTouched, setMuteTouched] = useState(false);
 
+  // The live player's quality measurement (liveQoe below) is created after this hook, from
+  // its outputs; the hook's connection/subscription failures reach it through this relay.
+  const liveFailRef = useRef(null);
+  const onStreamFailure = useCallback((reason) => liveFailRef.current?.(reason), []);
+
   const {
     mediaRef, connected, reconnecting, hasVideo, hasAudio, error: streamError,
+    streamPaused = false, stopped = false,
     micOn, micError, toggleMic, enableMic, micLive,
     videoLayers, hasVideoPublication, quality, selectQuality,
     captions = { available: false, text: "" },
@@ -130,6 +138,7 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
     // Reports this speaker's OWN mute state to the server so the host renders presence
     // rather than a guess. The host console never writes this for somebody else.
     onMuteChange,
+    onFailure: onStreamFailure,
     audioMuted: muteTouched ? muted : false,
     audioVolume: muteTouched ? volume : 100,
   });
@@ -211,6 +220,70 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
     setSettingsPage("main");
   }, []);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
+
+  // ── Viewer-side playback quality (hooks/usePlaybackQoe.js -> /organization/playback) ─────
+  // One measured session per mode, each on the token GET /events/:id/watch gave this
+  // audience member with the media — staff get none, so they are never measured. This block
+  // only reports the player's facts; what counts as a start, a stall or neither is decided in
+  // data/playbackQoe.js. Separate from the onPlaybackStart/onPlaybackFailure reports above,
+  // which feed the live session ledger, not this.
+  const playerVisible = usePlayerVisible(wrapRef);
+
+  // Live. Playing = the room is up, the watched video is not paused by the SFU (or, with no
+  // video, audio is arriving), and the first frame has actually played — a room connection
+  // or a subscribed track alone is not playback.
+  const [liveRendered, setLiveRendered] = useState(false);
+  // ...and again after every drop of the link. useLiveKitViewer's Reconnected handler (and a
+  // retry's new room) detaches and re-attaches the video, so the element plays a fresh first
+  // frame — its `playing` event again — and the wait for it is part of the stall, not watch
+  // time. Reset on the DROP only (an edge, not "while down"): on the first connect the first
+  // frame may legitimately play before `connected` lands.
+  const liveLinkUp = connected && !reconnecting;
+  const [liveLinkWasUp, setLiveLinkWasUp] = useState(liveLinkUp);
+  if (liveLinkUp !== liveLinkWasUp) {
+    setLiveLinkWasUp(liveLinkUp);
+    if (!liveLinkUp) setLiveRendered(false);
+  }
+  // An audio-only broadcast (no video published at all) has no frame to wait for: its
+  // attached audio track is the media.
+  if (!liveRendered && canStream && hasAudio && !hasVideo && !hasVideoPublication) setLiveRendered(true);
+  const liveQoe = usePlaybackQoe({
+    token: watch?.qoe_token,
+    active: canStream,
+    // `playing` follows the <video> itself (its onPause/onPlay below), so a pause from media
+    // keys, the OS, Picture-in-Picture or headphones is a pause here too — never a stall, and
+    // never watch time.
+    intent: playing,
+    visible: playerVisible,
+    // The broadcaster's media is gone (the server says so, or nothing is published, which
+    // is also "waiting for the host's camera"): not a delivery stall, and not startup time.
+    interrupted: showInterruption || (connected && !reconnecting && !hasVideo && !hasAudio),
+    flowing: liveLinkUp && liveRendered && (hasVideo ? !streamPaused : hasAudio),
+    // The room is gone for good, or the event completed under the viewer (which also ends
+    // this session, canStream going false): the stream ending is not a stall, so a viewer
+    // who was mid-reconnect at that moment is not charged for it.
+    ended: stopped || isEnded,
+  });
+  const liveFail = liveQoe.fail;
+  useEffect(() => {
+    liveFailRef.current = liveFail;
+  }, [liveFail]);
+
+  // Replay: a file in an HTML5 <video>, measured from that element's own media events.
+  const [replayFlowing, setReplayFlowing] = useState(false);
+  const [replaySeeking, setReplaySeeking] = useState(false);
+  const [replayDone, setReplayDone] = useState(false);
+  const { fail: replayFail } = usePlaybackQoe({
+    token: watch?.qoe_token,
+    active: canReplay && replayStarted,
+    // Follows the element too (onPause/onPlay on the replay <video>): a pause that did not
+    // come from this page's button used to leave `playing` on and read as rebuffering.
+    intent: playing,
+    visible: playerVisible,
+    seeking: replaySeeking,
+    flowing: replayFlowing,
+    ended: replayDone,
+  });
 
   // Dismiss desktop Settings popover on outside pointer/click or Escape.
   // Phone sheet dismissal is handled by <Overlay> (backdrop click + Escape stack).
@@ -334,11 +407,12 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
         console.warn("Live video play() rejected:", e?.name || e);
         setPlaying(false);
         if (e?.name === "NotAllowedError") onPlaybackFailure?.("autoplay");
+        liveFail(playRejectionReason(e));
       });
     } else {
       mediaRef.current.pause();
     }
-  }, [canStream, playing, hasVideo, mediaRef, onPlaybackFailure]);
+  }, [canStream, playing, hasVideo, mediaRef, onPlaybackFailure, liveFail]);
 
   // livekit-client's own attachToElement() (called on every track.attach(), including a
   // reconnect's resubscribe) sets `element.muted = mediaStream.getAudioTracks().length ===
@@ -360,11 +434,12 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
       replayRef.current.play().catch((e) => {
         console.warn("Replay video play() rejected:", e?.name || e);
         setPlaying(false);
+        replayFail(playRejectionReason(e));
       });
     } else {
       replayRef.current.pause();
     }
-  }, [canReplay, playing]);
+  }, [canReplay, playing, replayFail]);
 
   useEffect(() => {
     if (!canReplay || !replayRef.current) return;
@@ -640,6 +715,18 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
           // effect's play() call (which fires before the effect that syncs .muted) would
           // otherwise see muted=false on first mount and get NotAllowedError-blocked.
           muted={muted}
+          // The first frame actually playing — what starts a measured live session.
+          onPlaying={() => setLiveRendered(true)}
+          // The element is the truth about play/pause, whoever did it: media keys, the OS
+          // media session, the Picture-in-Picture window, native fullscreen controls,
+          // unplugged headphones, LiveKit resuming it after a background tab. `playing`
+          // follows it, so the button reads right and a paused element is measured as
+          // paused rather than as watch time (or as a stall across a reconnect). Not the
+          // stream's own end, though: isViewerPause leaves an inactive MediaStream to
+          // LiveKit's state, so a delivery problem is never filed as the viewer's pause.
+          onPlay={() => setPlaying(true)}
+          onPause={(e) => { if (isViewerPause(e.currentTarget)) setPlaying(false); }}
+          onError={(e) => liveFail(mediaErrorReason(e.currentTarget.error?.code))}
           className={cx("absolute inset-0 h-full w-full object-contain bg-black", hasVideo ? "opacity-100" : "opacity-0")}
         />
       )}
@@ -653,7 +740,25 @@ export default function VideoPlayer({ event, viewers, watch, onStage = false,
           muted={muted}
           onLoadedMetadata={(e) => setReplayDuration(e.currentTarget.duration || replayDuration)}
           onTimeUpdate={(e) => setReplayTime(e.currentTarget.currentTime || 0)}
-          onEnded={() => setPlaying(false)}
+          // Media events for the replay's quality measurement: playing vs buffering, seeks
+          // (their buffering is not rebuffering), the end, and real media errors.
+          // play/pause are the element's, whoever caused them (this page's button, media
+          // keys, the OS, Picture-in-Picture, native iOS fullscreen, headphones): `playing`
+          // follows them so the button stays honest and a pause is measured as a pause.
+          // `waiting` — buffering while NOT paused — is the only thing that reads as a stall.
+          onPlay={() => { setReplayDone(false); setReplayStarted(true); setPlaying(true); }}
+          onPlaying={() => setReplayFlowing(true)}
+          onWaiting={() => setReplayFlowing(false)}
+          onPause={(e) => {
+            // Reaching the end pauses the element just before `ended`; onEnded owns that.
+            if (e.currentTarget.ended) return;
+            setReplayFlowing(false);
+            if (isViewerPause(e.currentTarget)) setPlaying(false);
+          }}
+          onSeeking={() => setReplaySeeking(true)}
+          onSeeked={() => setReplaySeeking(false)}
+          onError={(e) => replayFail(mediaErrorReason(e.currentTarget.error?.code))}
+          onEnded={() => { setPlaying(false); setReplayFlowing(false); setReplayDone(true); }}
           className={cx("absolute inset-0 h-full w-full object-contain bg-black", replayStarted ? "opacity-100" : "opacity-0")}
         />
       )}

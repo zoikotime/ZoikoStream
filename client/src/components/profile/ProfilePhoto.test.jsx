@@ -224,6 +224,51 @@ describe("the profile header avatar", () => {
     render(<MemoryRouter><ProfileHeader user={USER} /></MemoryRouter>);
     expect(screen.getByRole("button", { name: "Add a profile photo" })).toHaveTextContent("VR");
   });
+
+  // There used to be TWO cameras on the avatar: the centred hover overlay and an always-on
+  // badge at its bottom-left, both decorating the same button — two on every hover.
+  it.each([["with a photo", PHOTO], ["with initials", null]])(
+    "shows exactly one camera, inside the one photo control (%s)", (_case, avatar) => {
+      globalThis.__authOverride = () => ({ user: USER, refresh: vi.fn() });
+      const { container } = render(<MemoryRouter><ProfileHeader user={{ ...USER, avatar_url: avatar }} /></MemoryRouter>);
+      const button = screen.getByRole("button", { name: avatar ? "Change profile photo" : "Add a profile photo" });
+      const cameras = container.querySelectorAll("svg[class*='lucide-camera']");
+      expect(cameras).toHaveLength(1);
+      expect(button.contains(cameras[0])).toBe(true);
+      // One control: nothing interactive nested inside it, and no second photo control beside it.
+      expect(button.querySelector("button, a, input, [tabindex]")).toBeNull();
+      expect(screen.getAllByRole("button", { name: /profile photo/i })).toHaveLength(1);
+      // The avatar itself is untouched: the photo, or the initials when there is none.
+      if (avatar) expect(within(button).getByRole("img", { name: "Profile photo of Vihari Rao" })).toBeInTheDocument();
+      else expect(button).toHaveTextContent("VR");
+    });
+
+  it("keeps the centred camera on hover and focus, and always on a screen that cannot hover", () => {
+    globalThis.__authOverride = () => ({ user: USER, refresh: vi.fn() });
+    const { container } = render(<MemoryRouter><ProfileHeader user={USER} /></MemoryRouter>);
+    const overlay = container.querySelector("[data-avatar-edit]");
+    expect(overlay).toHaveAttribute("aria-hidden", "true");
+    expect(overlay.className).toContain("inset-0");                    // centred over the avatar
+    for (const cls of ["opacity-0", "group-hover:opacity-100", "group-focus-visible:opacity-100",
+                       "[@media(hover:none)]:opacity-100"]) {
+      expect(overlay.className.split(/\s+/)).toContain(cls);
+    }
+  });
+
+  it("opens the photo editor on a click and on Space, and keeps its focus ring", async () => {
+    globalThis.__authOverride = () => ({ user: USER, refresh: vi.fn() });
+    const user = userEvent.setup();
+    render(<MemoryRouter><ProfileHeader user={USER} /></MemoryRouter>);
+    const button = screen.getByRole("button", { name: "Add a profile photo" });
+    expect(button.className).toMatch(/focus-visible:ring/);
+    await user.click(button);
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    button.focus();
+    await user.keyboard(" ");
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
 });
 
 // ── member lists ──────────────────────────────────────────────────────────────────────────

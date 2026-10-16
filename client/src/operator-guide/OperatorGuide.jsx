@@ -14,6 +14,7 @@ import HistoryView from "./parts/HistoryView";
 import SettingsView from "./parts/SettingsView";
 import Thinking from "./parts/Thinking";
 import { safeHref } from "./parts/links";
+import { useGuideLauncher } from "../guide/safeArea";
 import "./operator-guide.css";
 
 const MAX_CHARS = 2000;
@@ -114,8 +115,14 @@ export default function OperatorGuide({ route, routeEventId }) {
   const unavailable = g.bootError && g.bootError.status !== 403 ? g.bootError.message : null;
   const isAdmin = !!g.boot?.user?.is_org_admin;
   const count = g.attention?.count || 0;
+  const hidden = g.bootError?.status === 403;
 
-  if (g.bootError?.status === 403) return null; // not a Guide role — render nothing at all
+  // The console launcher owns the bottom-right corner (order 0): it publishes its footprint so
+  // the console reserves room for it, and it lifts above bottom-docked chrome such as the host
+  // control bar (guide/safeArea.js).
+  useGuideLauncher(launcherRef, { order: 0, enabled: !hidden });
+
+  if (hidden) return null; // not a Guide role — render nothing at all
 
   return (
     <div className="og">

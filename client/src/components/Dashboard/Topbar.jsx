@@ -228,7 +228,8 @@ export default function Topbar({
                 )}
               >
                 <FiUser className="shrink-0 text-[15px]" aria-hidden="true" />
-                Organization profile
+                {/* Same destination, same name as the sidebar's Profile item. */}
+                Profile
               </button>
               <button
                 role="menuitem"

@@ -56,9 +56,12 @@ beforeEach(() => {
   vi.mocked(api.get).mockImplementation((url, cfg) => {
     if (url === "/events/status-counts") return Promise.resolve({ data: { counts: COUNTS } });
     if (url === "/events") {
-      const status = cfg?.params?.status;
+      // The page filters by DISPLAY status (server/app/crud/event.py).
+      const status = cfg?.params?.display_status;
       const items = status === "cancelled" ? [row("c1", "cancelled")]
-        : [row("s1", "scheduled", past), row("d1", "draft", past), row("l1", "live")];
+        : [{ ...row("s1", "scheduled", past), display_status: "missed", start_overdue: true },
+           { ...row("p1", "published", past), display_status: "published", start_overdue: true },
+           row("d1", "draft", past), row("l1", "live")];
       return Promise.resolve({ data: { items, total: status ? items.length : 25, page: cfg.params.page, page_size: 10 } });
     }
     return Promise.resolve({ data: [] });
@@ -72,7 +75,7 @@ describe("the Events list", () => {
     const select = screen.getByRole("combobox", { name: "Filter by status" });
     const options = within(select).getAllByRole("option").map((o) => o.textContent);
     expect(options).toEqual([
-      "All except archived", "Draft", "Published", "Scheduled", "Ready to Arm", "Armed",
+      "All except archived", "Draft", "Published", "Scheduled", "Missed", "Ready to Arm", "Armed",
       "Live", "Degraded", "Ended", "Cancelled", "Archived",
     ]);
     for (const retired of ["Rehearsal", "Ending", "Processing", "Replay Ready", "Blocked"]) {
@@ -94,10 +97,11 @@ describe("the Events list", () => {
   it("filters on the server, from the first page", async () => {
     renderEvents();
     await screen.findByText("Event s1");
-    expect(lastListParams().status).toBeUndefined();          // all except archived
+    expect(lastListParams().display_status).toBeUndefined();  // all except archived
+    expect(lastListParams().status).toBeUndefined();
     fireEvent.change(screen.getByRole("combobox", { name: "Filter by status" }), { target: { value: "cancelled" } });
     await screen.findByText("Event c1");
-    expect(lastListParams()).toMatchObject({ status: "cancelled", page: 1 });
+    expect(lastListParams()).toMatchObject({ display_status: "cancelled", page: 1 });
     expect(screen.queryByText("Event s1")).toBeNull();
   });
 
@@ -108,12 +112,19 @@ describe("the Events list", () => {
     await waitFor(() => expect(lastListParams().page).toBe(2));
   });
 
-  it("marks a pre-live event whose start has passed, without changing its status", async () => {
+  it("shows a Scheduled event that never went live as Missed — one status, no second warning", async () => {
     renderEvents();
-    const scheduled = (await screen.findByText("Event s1")).closest("tr");
-    expect(within(scheduled).getByText("Scheduled")).toBeInTheDocument();
-    expect(within(scheduled).getByText("Start time passed")).toBeInTheDocument();
+    const missed = (await screen.findByText("Event s1")).closest("tr");
+    expect(within(missed).getByText("Missed")).toBeInTheDocument();
+    expect(within(missed).queryByText("Scheduled")).toBeNull();
+    expect(within(missed).queryByText("Start time passed")).toBeNull();
+    // Other pre-live statuses keep their own badge and note the passed start, as the API says.
+    const published = screen.getByText("Event p1").closest("tr");
+    expect(within(published).getByText("Published")).toBeInTheDocument();
+    expect(within(published).getByText("Start time passed")).toBeInTheDocument();
+    // A draft's old tentative time is never a missed start.
     expect(within(screen.getByText("Event d1").closest("tr")).queryByText("Start time passed")).toBeNull();
+    expect(within(screen.getByText("Event d1").closest("tr")).getByText("Draft")).toBeInTheDocument();
   });
 
   it("re-reads statuses while open, so a host going live shows up without a reload", async () => {
