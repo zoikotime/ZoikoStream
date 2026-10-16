@@ -191,11 +191,11 @@ def test_shared_no_secrets_or_tracking_in_any_security_template():
         assert 'width="1"' not in low, "no 1x1 pixel"
 
 
-def test_shared_sender_is_zoiko_steam_security():
+def test_shared_sender_is_zoiko_stream_security():
     """003/6, 004/7, 005/7."""
     with patch.object(settings, "MAIL_FROM", "ZoikoStream <info@zoikostream.com>"):
         assert email_mod._sender_identity(email_mod.SENDER_SECURITY) == \
-            "Zoiko Steam Security <info@zoikostream.com>"
+            "Zoiko Stream Security <info@zoikostream.com>"
 
 
 def test_shared_cta_uses_configured_base_url_and_no_localhost_in_production():
@@ -289,8 +289,8 @@ def test_003_2_and_4_first_login_creates_history_and_sends_idn_003():
 
         payload = cap.of(IDN_003)
         assert payload["to"] == [email.lower()], "only the account holder"
-        assert payload["from"].startswith("Zoiko Steam Security <")
-        assert payload["subject"] == "New sign-in to your Zoiko Steam account"
+        assert payload["from"].startswith("Zoiko Stream Security <")
+        assert payload["subject"] == "New sign-in to your Zoiko Stream account"
         assert payload["html"] and payload["text"], "HTML and plain text both required"
         assert "A new sign-in was recorded." in payload["html"]
         assert "A new sign-in was recorded." in payload["text"]
@@ -426,8 +426,8 @@ def test_004_3_to_10_sustained_failures_block_and_notify():
 
         payload = cap.of(IDN_004)
         assert payload["to"] == [email.lower()]
-        assert payload["from"].startswith("Zoiko Steam Security <")
-        assert payload["subject"] == "Zoiko Steam blocked a suspicious sign-in"
+        assert payload["from"].startswith("Zoiko Stream Security <")
+        assert payload["subject"] == "Zoiko Stream blocked a suspicious sign-in"
         assert payload["html"] and payload["text"]
         assert "We blocked an attempt to access your account." in payload["text"]
         assert "Approximate location" in payload["text"]
@@ -596,13 +596,13 @@ def test_005_4_to_13_successful_reset_sends_idn_005():
         assert cap.subjects.count(IDN_005) == 1, f"exactly one IDN-005, got {cap.subjects}"
         payload = cap.of(IDN_005)
         assert payload["to"] == [email.lower()]
-        assert payload["from"].startswith("Zoiko Steam Security <")
-        assert payload["subject"] == "Your Zoiko Steam sign-in method was changed"
+        assert payload["from"].startswith("Zoiko Stream Security <")
+        assert payload["subject"] == "Your Zoiko Stream sign-in method was changed"
         assert payload["html"] and payload["text"]
 
         text = payload["text"]
         assert "Your sign-in credentials were updated." in text
-        assert "The password associated with your Zoiko Steam identity" in text
+        assert "The password associated with your Zoiko Stream identity" in text
         assert "UTC" in text, "timestamp must carry its timezone"
         # The truth about this platform: stateless JWTs cannot be revoked.
         assert "Existing sessions were not revoked and remain active until they expire." in text

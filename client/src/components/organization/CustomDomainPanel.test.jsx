@@ -119,6 +119,27 @@ describe("pending DNS", () => {
   });
 });
 
+// sr-only is position:absolute. Inside a horizontal scroller it must resolve against something
+// at or inside that scroller; otherwise it escapes the overflow and widens a phone's page
+// (measured: 451px on a 360px screen). Returns the sr-only elements that would escape.
+const POSITIONED = /(^|\s)(relative|absolute|fixed|sticky)(\s|$)/;
+const srOnlyEscapingScrollers = (root) =>
+  [...root.querySelectorAll(".overflow-x-auto .sr-only")].filter((el) => {
+    for (let n = el.parentElement; n; n = n.parentElement) {
+      if (POSITIONED.test(n.getAttribute("class") || "")) return false;
+      if (n.classList.contains("overflow-x-auto")) return true;
+    }
+    return true;
+  });
+
+describe("on a phone", () => {
+  it("keeps the records table's screen-reader header inside its scroller", () => {
+    const { container } = panel(PENDING);
+    expect(screen.getByText("Actions")).toHaveClass("sr-only");
+    expect(srOnlyEscapingScrollers(container)).toEqual([]);
+  });
+});
+
 describe("certificate pending, active, failed, disabled", () => {
   it("certificate pending", () => {
     panel(VERIFIED);

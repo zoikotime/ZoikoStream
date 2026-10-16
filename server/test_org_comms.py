@@ -244,12 +244,12 @@ def _events(org_id, kind=None):
 # ══ shared ══════════════════════════════════════════════════════════════════════
 
 def test_shared_senders_and_link_safety():
-    """ORG-001/002 are Class C (Zoiko Steam); ORG-003/004 are Class A (Zoiko Steam Security)."""
+    """ORG-001/002 are Class C (Zoiko Stream); ORG-003/004 are Class A (Zoiko Stream Security)."""
     with patch.object(settings, "MAIL_FROM", "ZoikoStream <info@zoikostream.com>"):
         assert email_mod._sender_identity(email_mod.SENDER_DEFAULT) == \
-            "Zoiko Steam <info@zoikostream.com>"
+            "Zoiko Stream <info@zoikostream.com>"
         assert email_mod._sender_identity(email_mod.SENDER_SECURITY) == \
-            "Zoiko Steam Security <info@zoikostream.com>"
+            "Zoiko Stream Security <info@zoikostream.com>"
     for bad in ("http://localhost:5173", "https://127.0.0.1:5173"):
         with patch.object(settings, "ENVIRONMENT", "production"), \
              patch.object(settings, "APP_URL", bad):
@@ -294,8 +294,8 @@ def test_001_base_carries_role_scope_exact_expiry_and_timezone():
 
         payload = cap.of(ORG_001.format(org=fx.org_name))
         assert payload["to"] == [invitee.lower()]
-        assert payload["from"].startswith("Zoiko Steam <"), "ORG-001 is Class C"
-        assert not payload["from"].startswith("Zoiko Steam Security"), "not the security identity"
+        assert payload["from"].startswith("Zoiko Stream <"), "ORG-001 is Class C"
+        assert not payload["from"].startswith("Zoiko Stream Security"), "not the security identity"
         assert payload["html"] and payload["text"], "HTML and plain text are both required"
 
         text = payload["text"]
@@ -370,7 +370,7 @@ def test_001_reminder_variant_and_single_fire():
 
         payload = cap.of(ORG_001_REMINDER)
         assert payload["to"] == [invitee.lower()]
-        assert payload["from"].startswith("Zoiko Steam <")
+        assert payload["from"].startswith("Zoiko Stream <")
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert "IST" in text, "exact expiry with timezone"
@@ -574,7 +574,7 @@ def test_002_acceptance_notifies_inviter_and_admins_deduplicated():
         assert len(got) == len(set(got)), "no duplicate recipients"
 
         payload = cap.of(subject)
-        assert payload["from"].startswith("Zoiko Steam <"), "ORG-002 is Class C"
+        assert payload["from"].startswith("Zoiko Stream <"), "ORG-002 is Class C"
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert "Newly Joined" in text and fx.org_name in text
@@ -692,7 +692,7 @@ def test_003_unrelated_update_sends_nothing_and_role_change_sends():
         assert len(got) == len(set(got)), "recipients deduplicate"
 
         payload = cap.of(ORG_003)
-        assert payload["from"].startswith("Zoiko Steam Security <"), "ORG-003 is Class A"
+        assert payload["from"].startswith("Zoiko Stream Security <"), "ORG-003 is Class A"
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert "Previous: Role: Viewer" in text, f"previous access wrong:\n{text}"
@@ -819,7 +819,7 @@ def test_004_removal_notifies_member_and_admins_with_identity_line():
         member_copy = [c["payload"] for c in cap.calls
                        if c["payload"]["subject"] == subject
                        and c["payload"]["to"] == [member_email.lower()]][0]
-        assert member_copy["from"].startswith("Zoiko Steam Security <"), "ORG-004 is Class A"
+        assert member_copy["from"].startswith("Zoiko Stream Security <"), "ORG-004 is Class A"
         assert member_copy["html"] and member_copy["text"]
         text = member_copy["text"]
         assert ("This does not delete your Zoiko identity or affect access to other "

@@ -79,7 +79,7 @@ ESCALATION_NOTE = (
 # ORG-008: truthful step-up status. There is no re-authentication, MFA or step-up token
 # mechanism in this codebase, so the copy says what actually protects the transfer.
 STEP_UP_NOTE = (
-    "Both parties must confirm from a signed-in Zoiko Steam session and re-enter their "
+    "Both parties must confirm from a signed-in Zoiko Stream session and re-enter their "
     "password at the moment of confirmation. This email carries no confirmation link."
 )
 
@@ -98,13 +98,13 @@ def _preserved(state: str) -> str:
 RECOVERY = {
     "billing_commercial_requirement": "Resolve the outstanding billing requirement.",
     "security_requirement": (
-        "Contact Zoiko Steam Support to complete the required security review."
+        "Contact Zoiko Stream Support to complete the required security review."
     ),
     "policy_compliance_requirement": (
-        "Contact Zoiko Steam Support to complete the required policy review."
+        "Contact Zoiko Stream Support to complete the required policy review."
     ),
     "administrative_restriction": (
-        "Contact Zoiko Steam Support to review this administrative restriction."
+        "Contact Zoiko Stream Support to review this administrative restriction."
     ),
 }
 STATE_LABELS = {
@@ -619,7 +619,7 @@ def notify_org_state(db: Session, background, event: OrgOperationalEvent) -> Non
            effective_display=effective, reason_label=reason_label,
            affected_capabilities=_capabilities(event.state),
            recovery_criteria=RECOVERY.get(event.reason_category or "",
-                                          "Contact Zoiko Steam Support to review this."),
+                                          "Contact Zoiko Stream Support to review this."),
            preserved_access=_preserved(event.state))
 
 

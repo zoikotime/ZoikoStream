@@ -389,6 +389,10 @@ export default function SupportStatus() {
         <p className={cx("text-[12px]", CONSOLE.faint)}>
           © {new Date().getFullYear()} Zoiko Group. All rights reserved.
         </p>
+        {/* The links are inline-flex items-center because in the Android app the 44px
+            touch-target floor (index.css) makes each one 44px tall with its text pinned to the
+            top, 13px above the plain-text items beside it. Centering keeps the full target and
+            puts the text back on the row. No effect on web, where links are text-height. */}
         <nav className="flex flex-wrap items-center gap-x-6 gap-y-2">
           {/* Only destinations that exist are links; the rest render as text, not 404s. */}
           {["Privacy", "Terms"].map((label) => (
@@ -396,15 +400,15 @@ export default function SupportStatus() {
           ))}
           {/* The public Trust Center (pages/Trust.jsx), not Settings → Security — that is the
               change-password form, the same wrong destination the trust cards had. */}
-          <Link to="/trust" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
+          <Link to="/trust" className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
             Trust Center
           </Link>
-          <Link to="/organization/dashboard" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
+          <Link to="/organization/dashboard" className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
             Incident History
           </Link>
           {/* The real contact form, not the settings page — this footer link has pointed at
               Settings since before /contact existed. */}
-          <Link to="/contact" className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
+          <Link to="/contact" className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
             Contact
           </Link>
         </nav>

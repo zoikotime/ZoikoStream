@@ -15,7 +15,7 @@ a human cannot mark them complete while the underlying facts say otherwise:
 The fourth, accessibility, has NO backing domain. There is no captions engine (MED-010 is
 unsupported), no interpretation booking, no accommodation record. It is therefore
 operator-attested only: `evaluate()` never completes it, and its message says explicitly that
-Zoiko Steam does not itself produce captions or translation, so the customer arranges them.
+Zoiko Stream does not itself produce captions or translation, so the customer arranges them.
 Auto-completing it, or describing caption delivery, would be the exact fabrication this family
 is supposed to prevent.
 
@@ -299,7 +299,7 @@ def notify_reopened(db: Session, background, intake: EventIntake) -> bool:
 ATTESTED_ONLY = ("accessibility",)
 
 ACCESSIBILITY_NOTE = (
-    "Zoiko Steam does not generate captions, subtitles, translation or interpretation. If your "
+    "Zoiko Stream does not generate captions, subtitles, translation or interpretation. If your "
     "event needs them, arrange them with a provider and record the arrangement here."
 )
 

@@ -188,6 +188,22 @@ describe("the rest of the footer and the trust cards are unchanged", () => {
   });
 });
 
+// In the Android app the 44px touch-target floor (index.css) made each footer link 44px tall
+// with its text pinned to the top, 13px above Privacy and Terms on the same row. jsdom cannot
+// lay that out; the geometry was measured in Chromium against the mobile build (320–768px:
+// text level on every row, links still 44px). This pins what keeps the text centred.
+describe("the footer on a phone", () => {
+  it("centres every link's text in its touch target", async () => {
+    renderAt("/organization/support");
+    await supportLoaded();
+    const links = within(footer()).getAllByRole("link");
+    expect(links.map((a) => a.textContent.trim())).toEqual(["Trust Center", "Incident History", "Contact"]);
+    for (const a of links) {
+      expect(a.className.split(/\s+/)).toEqual(expect.arrayContaining(["inline-flex", "items-center"]));
+    }
+  });
+});
+
 // Every "Trust Center" label in the app, checked at the source: the nearest link target before
 // the label must not be Account Security. Legitimate Account Security links (labelled
 // "Security" / "Security Settings") are untouched by this and are not matched.

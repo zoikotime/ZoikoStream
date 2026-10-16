@@ -266,8 +266,8 @@ def test_011_no_general_integration_domain_exists():
 
     code = "\n".join(l for l in open(email_mod.__file__, encoding="utf-8").read().splitlines()
                      if not l.lstrip().startswith("#"))
-    for claim in ("reconnect your Zoiko Steam integration", "integration health is degraded",
-                  "Zoiko Steam integration recovered"):
+    for claim in ("reconnect your Zoiko Stream integration", "integration health is degraded",
+                  "Zoiko Stream integration recovered"):
         assert claim not in code, \
             f"{claim!r} must not exist without an authoritative integration domain"
 
@@ -358,7 +358,7 @@ def test_008_emails_carry_fingerprints_never_secrets():
         assert signing_rotation.fingerprint(new_secret) in text, "4 — new fingerprint"
         assert signing_rotation.fingerprint(original) in text, "4 — old fingerprint"
         assert o.owner_email.lower() in cap.to(DEV_008_STARTED), "10 — owner notified"
-        assert payload["from"].startswith("Zoiko Steam Developer Platform <")
+        assert payload["from"].startswith("Zoiko Stream Developer Platform <")
         assert "IST" in text, "exact overlap end with timezone"
 
         # 9/13 — the ending notice fires once.

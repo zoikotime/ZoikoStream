@@ -298,7 +298,7 @@ def test_001_created_input_notifies_with_truthful_facts():
 
         payload = cap.of(MED_001)
         assert payload["html"] and payload["text"], "12 — both parts"
-        assert payload["from"].startswith("Zoiko Steam Media Operations <")
+        assert payload["from"].startswith("Zoiko Stream Media Operations <")
         assert w.owner_email.lower() in cap.to(MED_001), "3/4 — owner and operators"
         text = payload["text"]
         assert "RTMP" in text, "5 — protocol from input_type, not a label"

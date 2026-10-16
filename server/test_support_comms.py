@@ -473,9 +473,9 @@ def test_escalation_uses_real_state(w):
         ticket = db.get(SupportTicket, tid)
         assert sc.escalate(db, ticket, level=2, reason_category="not_a_reason") is None
         escalation = sc.escalate(db, ticket, level=2, reason_category="impact",
-                                 owner_after="Zoiko Steam Live Operations")
+                                 owner_after="Zoiko Stream Live Operations")
         assert escalation is not None and escalation.escalated_at is not None
-        assert escalation.owner_before == "Zoiko Steam Support"
+        assert escalation.owner_before == "Zoiko Stream Support"
 
         cap, ctx = _capture()
         with ctx:
@@ -531,22 +531,22 @@ def test_owner_change_ignores_internal_reassignment(w):
     try:
         ticket = db.get(SupportTicket, tid)
         # 6 - same team: not a customer-facing change.
-        changed, previous = sc.change_owner(db, ticket, owner_after="Zoiko Steam Support")
-        assert changed is False and previous == "Zoiko Steam Support"
+        changed, previous = sc.change_owner(db, ticket, owner_after="Zoiko Stream Support")
+        assert changed is False and previous == "Zoiko Stream Support"
         cap, ctx = _capture()
         with ctx:
             assert sc.notify_owner_changed(db, _Bg(), ticket, previous=previous) is False
         assert cap.calls == []
 
         changed, previous = sc.change_owner(db, ticket,
-                                            owner_after="Zoiko Steam Media Operations")
+                                            owner_after="Zoiko Stream Media Operations")
         assert changed is True
-        assert ticket.assigned_owner == "Zoiko Steam Media Operations"
+        assert ticket.assigned_owner == "Zoiko Stream Media Operations"
         cap2, ctx2 = _capture()
         with ctx2:
             assert sc.notify_owner_changed(db, _Bg(), ticket, previous=previous) is True
         text = cap2.of(OWNER.format(case=ticket.case_reference))["text"]
-        assert "Zoiko Steam Support" in text and "Media Operations" in text
+        assert "Zoiko Stream Support" in text and "Media Operations" in text
     finally:
         db.close()
 

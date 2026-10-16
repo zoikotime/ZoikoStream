@@ -50,7 +50,7 @@ def _send(
 
     `text_body` adds the plain-text alternative required for every HTML email
     (ZST-EC-001 doctrine rule 9). `sender` overrides the default identity for templates
-    that must ship from a specific approved sender, e.g. Zoiko Steam Security. `reply_to`
+    that must ship from a specific approved sender, e.g. Zoiko Stream Security. `reply_to`
     sets where a recipient's reply goes; it is only ever a configured address, never a value
     taken from a request.
     """
@@ -92,11 +92,11 @@ def _send(
 # around that same authenticated address — changing the address instead would send from an
 # unauthenticated domain and fail SPF/DKIM alignment. When more addresses are verified in
 # Resend, this is the one place that has to change.
-SENDER_SECURITY = "Zoiko Steam Security"
+SENDER_SECURITY = "Zoiko Stream Security"
 # Developer-platform identity (ZST-EC-001 DEV-002). Same authenticated address, different
 # approved display name - a developer receiving credential mail should see it come from the
 # platform surface they issued the credential on, not from generic security mail.
-SENDER_DEVELOPER = "Zoiko Steam Developer Platform"
+SENDER_DEVELOPER = "Zoiko Stream Developer Platform"
 
 
 def _mail_from_address() -> str:
@@ -179,14 +179,14 @@ def _header(title: str) -> str:
 
 
 # ── IDN-002 Account ready ───────────────────────────────────────────────────────────────
-# Class C (Transactional) · Sender: Zoiko Steam · Recipient: account holder.
+# Class C (Transactional) · Sender: Zoiko Stream · Recipient: account holder.
 # Trigger: identity verified AND access activated — never registration.
 #
 # This replaces the former "Welcome to ZoikoStream" template, which fired at registration
 # and asserted "Your account is active and ready to go" against an address nobody had
 # verified. Corrected in place rather than duplicated so the wrong copy cannot be reached.
 #
-# Sender is Zoiko Steam, NOT Zoiko Steam Security: this is Class C, and routing routine
+# Sender is Zoiko Stream, NOT Zoiko Stream Security: this is Class C, and routing routine
 # transactional mail through the security identity dilutes the signal that identity
 # carries for genuine Class A messages.
 #
@@ -194,16 +194,16 @@ def _header(title: str) -> str:
 # to you" instead of promising unrestricted production access, which matters because this
 # platform has no MFA, policy-acceptance or step-up subsystem to qualify it further.
 
-IDN_002_SUBJECT = "Your Zoiko Steam access is ready"
+IDN_002_SUBJECT = "Your Zoiko Stream access is ready"
 IDN_002_PREHEADER = "Sign in and complete your account setup."
-IDN_002_HEADLINE = "Welcome to Zoiko Steam."
+IDN_002_HEADLINE = "Welcome to Zoiko Stream."
 IDN_002_BODY = (
-    "Your identity has been verified and your Zoiko Steam access is active. Available "
+    "Your identity has been verified and your Zoiko Stream access is active. Available "
     "Organizations, workspaces, roles, and modes are determined by the access granted to you."
 )
-IDN_002_CTA = "Open Zoiko Steam"
+IDN_002_CTA = "Open Zoiko Stream"
 
-SENDER_DEFAULT = "Zoiko Steam"
+SENDER_DEFAULT = "Zoiko Stream"
 
 
 def account_ready_url() -> str:
@@ -217,7 +217,7 @@ def account_ready_url() -> str:
 
 
 # --- IDN-003 / IDN-004 / IDN-005 - Identity security -----------------------------------
-# All three are Class A (Security), sender Zoiko Steam Security, recipient the account
+# All three are Class A (Security), sender Zoiko Stream Security, recipient the account
 # holder. They are mandatory: no preference, marketing or organization setting may suppress
 # them, and nothing in this module consults one.
 #
@@ -279,13 +279,13 @@ def _security_shell(header_title, headline, preheader, rows, body, cta_label, ct
 def _security_text(headline, preheader, rows, body, cta_label, cta_url, footer_note):
     lines = [headline, "", body, "", preheader, ""]
     lines += [f"{k}: {v}" for k, v in rows]
-    lines += ["", f"{cta_label}: {cta_url}", "", footer_note, "", "Zoiko Steam Security"]
+    lines += ["", f"{cta_label}: {cta_url}", "", footer_note, "", "Zoiko Stream Security"]
     return chr(10).join(lines)
 
 
 # --- IDN-003 New sign-in detected ------------------------------------------------------
 
-IDN_003_SUBJECT = "New sign-in to your Zoiko Steam account"
+IDN_003_SUBJECT = "New sign-in to your Zoiko Stream account"
 IDN_003_PREHEADER = "Review the time, device, and approximate location."
 IDN_003_HEADLINE = "A new sign-in was recorded."
 IDN_003_CTA = "Review account security"
@@ -299,14 +299,14 @@ def send_new_sign_in_email(to, *, signed_in_at, authentication_method, device, l
                            session_reference):
     """IDN-003. `location` is already the display string, including the unavailable case."""
     body = (
-        "Your account was used to sign in to Zoiko Steam at "
+        "Your account was used to sign in to Zoiko Stream at "
         + html.escape(signed_in_at)
         + " using "
         + html.escape(authentication_method)
         + ". Review the approximate location, device, browser, and session reference."
     )
     text_body = (
-        f"Your account was used to sign in to Zoiko Steam at {signed_in_at} using "
+        f"Your account was used to sign in to Zoiko Stream at {signed_in_at} using "
         f"{authentication_method}. Review the approximate location, device, browser, "
         "and session reference."
     )
@@ -330,7 +330,7 @@ def send_new_sign_in_email(to, *, signed_in_at, authentication_method, device, l
 
 # --- IDN-004 Suspicious sign-in blocked ------------------------------------------------
 
-IDN_004_SUBJECT = "Zoiko Steam blocked a suspicious sign-in"
+IDN_004_SUBJECT = "Zoiko Stream blocked a suspicious sign-in"
 IDN_004_PREHEADER = "No access was granted. Review the attempted sign-in."
 IDN_004_HEADLINE = "We blocked an attempt to access your account."
 IDN_004_CTA = "Secure your account"
@@ -349,13 +349,13 @@ def send_suspicious_sign_in_email(to, *, attempted_at, device, location, session
     or credential revocation on a block.
     """
     body = (
-        "Zoiko Steam blocked a sign-in attempt at "
+        "Zoiko Stream blocked a sign-in attempt at "
         + html.escape(attempted_at)
         + " because it did not meet the required security checks. Review the approximate "
         "location, device, and recovery options."
     )
     text_body = (
-        f"Zoiko Steam blocked a sign-in attempt at {attempted_at} because it did not meet "
+        f"Zoiko Stream blocked a sign-in attempt at {attempted_at} because it did not meet "
         "the required security checks. Review the approximate location, device, and "
         "recovery options."
     )
@@ -382,7 +382,7 @@ def send_suspicious_sign_in_email(to, *, attempted_at, device, location, session
 # "passkey removed" variants are NOT built: no passkey subsystem exists in this codebase and
 # inventing one to satisfy a template would be worse than reporting the gap.
 
-IDN_005_SUBJECT = "Your Zoiko Steam sign-in method was changed"
+IDN_005_SUBJECT = "Your Zoiko Stream sign-in method was changed"
 IDN_005_PREHEADER = "Review this security change."
 IDN_005_HEADLINE = "Your sign-in credentials were updated."
 IDN_005_CTA = "Review account security"
@@ -404,14 +404,14 @@ def send_credential_changed_email(to, *, credential_type, changed_at, session_ef
     body = (
         "The "
         + html.escape(credential_type)
-        + " associated with your Zoiko Steam identity was changed on "
+        + " associated with your Zoiko Stream identity was changed on "
         + html.escape(changed_at)
         + ". Existing sessions were "
         + html.escape(session_effect)
         + "."
     )
     text_body = (
-        f"The {credential_type} associated with your Zoiko Steam identity was changed on "
+        f"The {credential_type} associated with your Zoiko Stream identity was changed on "
         f"{changed_at}. Existing sessions were {session_effect}."
     )
     rows = [
@@ -432,7 +432,7 @@ def send_credential_changed_email(to, *, credential_type, changed_at, session_ef
 
 
 # --- IDN-006 / IDN-007 / IDN-008 - Security, recovery and account lifecycle -------------
-# All Class A (IDN-008 is Security/legal). Sender Zoiko Steam Security, recipient the
+# All Class A (IDN-008 is Security/legal). Sender Zoiko Stream Security, recipient the
 # account holder (IDN-007 additionally copies an APPROVED recovery contact). Mandatory:
 # nothing in this module consults a preference, and three tests assert that.
 #
@@ -455,11 +455,11 @@ def recovery_contact_url(token):
 # The two MFA variants are deliberately NOT built. `organizations.security.require_2fa` is
 # stored and reported (services/org.py) but nothing enforces it: there is no MFA challenge,
 # no enrolment and no verification step anywhere in this codebase. Emitting "MFA is now
-# enabled for your Zoiko Steam account" when flipping that flag changes no security property
+# enabled for your Zoiko Stream account" when flipping that flag changes no security property
 # would be a false security assurance -- the single worst thing a Class A message can do.
 # Reported as a missing subsystem instead.
 
-IDN_006_SUBJECT = "Zoiko Steam security settings changed"
+IDN_006_SUBJECT = "Zoiko Stream security settings changed"
 IDN_006_PREHEADER = "MFA or recovery information was updated."
 IDN_006_HEADLINE = "Review your account-security change."
 IDN_006_CTA = "Review security settings"
@@ -508,13 +508,13 @@ def send_recovery_contact_verification_email(to, *, confirm_url, expires_at):
     would be an account-takeover primitive.
     """
     headline = "Confirm this recovery address."
-    body = ("This address was nominated as a recovery destination for a Zoiko Steam "
+    body = ("This address was nominated as a recovery destination for a Zoiko Stream "
             "account. It will only be used for recovery once you confirm it below.")
     rows = [("Expires at", expires_at)]
     note = "If you did not expect this, you can safely ignore this email."
     return _send(
         to,
-        "Confirm your Zoiko Steam recovery address",
+        "Confirm your Zoiko Stream recovery address",
         _security_shell("Confirm recovery address", headline,
                         "Confirm this address before it is used for recovery.", rows,
                         html.escape(body), "Confirm recovery address", confirm_url, note),
@@ -526,10 +526,10 @@ def send_recovery_contact_verification_email(to, *, confirm_url, expires_at):
 
 # --- IDN-007 Account recovery lifecycle -------------------------------------------------
 
-IDN_007_SUBJECT_STARTED = "Zoiko Steam account recovery started"
-IDN_007_SUBJECT_VERIFICATION = "Action required to recover your Zoiko Steam account"
-IDN_007_SUBJECT_COMPLETED = "Your Zoiko Steam account recovery is complete"
-IDN_007_SUBJECT_CANCELED = "Your Zoiko Steam account recovery request was canceled"
+IDN_007_SUBJECT_STARTED = "Zoiko Stream account recovery started"
+IDN_007_SUBJECT_VERIFICATION = "Action required to recover your Zoiko Stream account"
+IDN_007_SUBJECT_COMPLETED = "Your Zoiko Stream account recovery is complete"
+IDN_007_SUBJECT_CANCELED = "Your Zoiko Stream account recovery request was canceled"
 
 IDN_007_PREHEADER = "Review the request and required security steps."
 IDN_007_HEADLINE = "An account-recovery request is in progress."
@@ -538,18 +538,18 @@ IDN_007_CTA = "Review recovery request"
 # Mandated verbatim wherever a one-time code appears. This is the anti-social-engineering
 # line: the single most effective countermeasure against a caller talking a code out of
 # someone, and its absence was a recorded audit finding.
-CODE_NEVER_READ_ALOUD = "Zoiko Steam Support will never ask you to read this code aloud."
+CODE_NEVER_READ_ALOUD = "Zoiko Stream Support will never ask you to read this code aloud."
 
 
 def send_recovery_started_email(to, *, started_at, security_reference):
     body = (
-        "A recovery request for your Zoiko Steam identity began at "
+        "A recovery request for your Zoiko Stream identity began at "
         + html.escape(started_at)
         + ". No access changes are complete until all required verification and risk "
         "checks pass."
     )
     text_body = (
-        f"A recovery request for your Zoiko Steam identity began at {started_at}. No access "
+        f"A recovery request for your Zoiko Stream identity began at {started_at}. No access "
         "changes are complete until all required verification and risk checks pass."
     )
     note = ("If you did not start this, no action is required -- the request cannot complete "
@@ -575,7 +575,7 @@ def send_recovery_verification_email(to, *, code, expires_at):
     requested by email -- the baseline forbids it and nothing here asks for them.
     """
     headline = "Action required to recover your account."
-    body = ("Use the verification code below to continue recovering your Zoiko Steam "
+    body = ("Use the verification code below to continue recovering your Zoiko Stream "
             "account. We will never ask for identity documents by email.")
     rows = [("Verification code", code), ("Expires at", expires_at)]
     url = security_url()
@@ -594,12 +594,12 @@ def send_recovery_completed_email(to, *, completed_at, credentials_reset, sessio
                                    security_reference):
     headline = "Your account recovery is complete."
     body = (
-        "Recovery of your Zoiko Steam identity completed at "
+        "Recovery of your Zoiko Stream identity completed at "
         + html.escape(completed_at)
         + ". Review your account security now."
     )
     text_body = (
-        f"Recovery of your Zoiko Steam identity completed at {completed_at}. Review your "
+        f"Recovery of your Zoiko Stream identity completed at {completed_at}. Review your "
         "account security now."
     )
     note = ("If you did not perform this recovery, contact support immediately -- someone "
@@ -624,12 +624,12 @@ def send_recovery_completed_email(to, *, completed_at, credentials_reset, sessio
 def send_recovery_canceled_email(to, *, canceled_at, account_state, security_reference):
     headline = "Your account recovery request was canceled."
     body = (
-        "The recovery request for your Zoiko Steam identity was canceled at "
+        "The recovery request for your Zoiko Stream identity was canceled at "
         + html.escape(canceled_at)
         + ". No credentials or sessions were changed."
     )
     text_body = (
-        f"The recovery request for your Zoiko Steam identity was canceled at {canceled_at}. "
+        f"The recovery request for your Zoiko Stream identity was canceled at {canceled_at}. "
         "No credentials or sessions were changed."
     )
     note = "If you did not expect this, review your account security."
@@ -659,9 +659,9 @@ def send_recovery_canceled_email(to, *, canceled_at, account_state, security_ref
 # cancellation window nothing can enforce, which is exactly the kind of false statement the
 # residual-records rule exists to prevent. Reported as a product gap.
 
-IDN_008_SUBJECT_RESTRICTED = "Your Zoiko Steam account is restricted"
-IDN_008_SUBJECT_REACTIVATED = "Your Zoiko Steam account access was restored"
-IDN_008_SUBJECT_DELETED = "Your Zoiko Steam account deletion was completed"
+IDN_008_SUBJECT_RESTRICTED = "Your Zoiko Stream account is restricted"
+IDN_008_SUBJECT_REACTIVATED = "Your Zoiko Stream account access was restored"
+IDN_008_SUBJECT_DELETED = "Your Zoiko Stream account deletion was completed"
 
 IDN_008_PREHEADER = "Review the reason category and available next steps."
 IDN_008_HEADLINE = "Your access has changed."
@@ -683,7 +683,7 @@ def send_account_restricted_email(to, *, account_state, effective_at, org_effect
     subject = IDN_008_SUBJECT_REACTIVATED if reactivated else IDN_008_SUBJECT_RESTRICTED
     headline = "Your access has been restored." if reactivated else IDN_008_HEADLINE
     body = (
-        "Your Zoiko Steam identity is currently "
+        "Your Zoiko Stream identity is currently "
         + html.escape(account_state)
         + " effective "
         + html.escape(effective_at)
@@ -691,11 +691,11 @@ def send_account_restricted_email(to, *, account_state, effective_at, org_effect
         "recovery route, and any effect on Organization access."
     )
     text_body = (
-        f"Your Zoiko Steam identity is currently {account_state} effective {effective_at}. "
+        f"Your Zoiko Stream identity is currently {account_state} effective {effective_at}. "
         "Review the secure account record for scope, reason category, appeal or recovery "
         "route, and any effect on Organization access."
     )
-    note = ("To ask about this decision, contact Zoiko Steam Support with the security "
+    note = ("To ask about this decision, contact Zoiko Stream Support with the security "
             "reference above.")
     rows = [
         ("Account state", account_state),
@@ -718,16 +718,16 @@ def send_account_deleted_email(to, *, effective_at, org_effect, security_referen
     """IDN-008 'Deletion completed'."""
     headline = "Your account deletion was completed."
     body = (
-        "Your Zoiko Steam account was deleted effective "
+        "Your Zoiko Stream account was deleted effective "
         + html.escape(effective_at)
         + ". "
         + RESIDUAL_RECORDS_NOTE
     )
     text_body = (
-        f"Your Zoiko Steam account was deleted effective {effective_at}. "
+        f"Your Zoiko Stream account was deleted effective {effective_at}. "
         + RESIDUAL_RECORDS_NOTE
     )
-    note = ("To ask about this deletion or about retained records, contact Zoiko Steam "
+    note = ("To ask about this deletion or about retained records, contact Zoiko Stream "
             "Support with the security reference above.")
     rows = [
         ("Deleted effective", effective_at),
@@ -776,7 +776,7 @@ def _account_ready_text(app_url: str) -> str:
         "",
         f"{IDN_002_CTA}: {app_url}",
         "",
-        "Zoiko Steam",
+        "Zoiko Stream",
     ])
 
 
@@ -797,7 +797,7 @@ def send_account_ready_email(to: str, app_url: str) -> bool:
 
 
 # ── IDN-001 Email verification and passwordless sign-in ─────────────────────────────────
-# Class A (Security) · Sender: Zoiko Steam Security · Recipient: account holder.
+# Class A (Security) · Sender: Zoiko Stream Security (IDN_001_SENDER) · Recipient: account holder.
 # Copy below is the approved production copy from ZST-EC-001 v2.0 and must not be reworded
 # without a governance decision.
 #
@@ -819,8 +819,13 @@ def send_account_ready_email(to: str, app_url: str) -> bool:
 # What did NOT change, because it is what makes the message safe: one dominant action, no
 # claim that the account is usable yet, and the explicit statement that sign-in comes after
 # verification. IDN-002 remains the only message allowed to say access is active.
-IDN_001_SUBJECT = "Verify your email for Zoiko Steam"
-IDN_001_HEADLINE = "Welcome to Zoiko Steam"
+#
+# IDN_001_SENDER is the shared security identity. It was briefly a separate, correctly
+# spelled copy while SENDER_SECURITY still carried the brand misspelling; now that both read
+# "Zoiko Stream Security" it is an alias, so the two can never drift apart again.
+IDN_001_SENDER = SENDER_SECURITY
+IDN_001_SUBJECT = "Verify your email for Zoiko Stream"
+IDN_001_HEADLINE = "Welcome to Zoiko Stream"
 IDN_001_BODY = (
     "Thanks for creating your Zoiko Stream account. Before you can sign in, please "
     "verify your email address using the secure button below."
@@ -884,7 +889,7 @@ def _verification_text(verify_url: str, expiry_minutes: int, expires_at_utc: str
         "",
         IDN_001_IGNORE,
         "",
-        "Zoiko Steam Security",
+        IDN_001_SENDER,
     ])
 
 
@@ -902,7 +907,7 @@ def send_email_verification_email(
         IDN_001_SUBJECT,
         _verification_html(verify_url, expiry_minutes, expires_at_utc),
         _verification_text(verify_url, expiry_minutes, expires_at_utc),
-        sender=_sender_identity(SENDER_SECURITY),
+        sender=_sender_identity(IDN_001_SENDER),
     )
 
 
@@ -923,7 +928,7 @@ def _otp_html(name: str, otp: str) -> str:
 
 
 # == ORG-001 Organization invitation lifecycle ===========================================
-# Class C (Transactional) - Sender: Zoiko Steam - Recipient: invitee (+ inviter where the
+# Class C (Transactional) - Sender: Zoiko Stream - Recipient: invitee (+ inviter where the
 # variant calls for it). Four approved variants: base, Reminder, Expired, Revoked.
 #
 # This REPLACES the former "You're invited" template, which said only "This link expires
@@ -937,13 +942,13 @@ def _otp_html(name: str, otp: str) -> str:
 # that real implicit workspace and mode access is OMITTED rather than invented. See the
 # reported domain gap.
 
-ORG_001_SUBJECT = "You were invited to {org} on Zoiko Steam"
+ORG_001_SUBJECT = "You were invited to {org} on Zoiko Stream"
 ORG_001_PREHEADER = "Review the role, workspace, and invitation expiry."
 ORG_001_CTA = "Review invitation"
 
-ORG_001_REMINDER_SUBJECT = "Reminder: your Zoiko Steam invitation expires soon"
-ORG_001_EXPIRED_SUBJECT = "Your Zoiko Steam invitation expired"
-ORG_001_REVOKED_SUBJECT = "Your Zoiko Steam invitation was revoked"
+ORG_001_REMINDER_SUBJECT = "Reminder: your Zoiko Stream invitation expires soon"
+ORG_001_EXPIRED_SUBJECT = "Your Zoiko Stream invitation expired"
+ORG_001_REVOKED_SUBJECT = "Your Zoiko Stream invitation was revoked"
 
 # Load-bearing: an invitation is an offer, not access. Every variant states this so the
 # message can never read as though membership already exists.
@@ -1019,7 +1024,7 @@ def _invitation_rows(*, role_name, workspace_scope, expires_display, mode_access
 def send_invitation_email(to, *, org_name, inviter_name, role_name, workspace_scope,
                           expires_display, invite_url, mode_access=None):
     """ORG-001 base variant."""
-    headline = f"Join {org_name} on Zoiko Steam."
+    headline = f"Join {org_name} on Zoiko Stream."
     body_txt = (
         f"{inviter_name} invited you to access {org_name} with role {role_name} across "
         f"{workspace_scope}. Review the mode access and expiration before accepting."
@@ -1032,7 +1037,7 @@ def send_invitation_email(to, *, org_name, inviter_name, role_name, workspace_sc
         _org_shell("You're invited", headline, ORG_001_PREHEADER, rows,
                    html.escape(body_txt), ORG_001_CTA, invite_url, ORG_001_NOT_YET_MEMBER),
         _org_text(headline, ORG_001_PREHEADER, rows, body_txt, ORG_001_CTA, invite_url,
-                  ORG_001_NOT_YET_MEMBER, "Zoiko Steam"),
+                  ORG_001_NOT_YET_MEMBER, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
@@ -1054,7 +1059,7 @@ def send_invitation_reminder_email(to, *, org_name, inviter_name, role_name, wor
         _org_shell("Invitation expiring", headline, ORG_001_PREHEADER, rows,
                    html.escape(body_txt), ORG_001_CTA, invite_url, ORG_001_NOT_YET_MEMBER),
         _org_text(headline, ORG_001_PREHEADER, rows, body_txt, ORG_001_CTA, invite_url,
-                  ORG_001_NOT_YET_MEMBER, "Zoiko Steam"),
+                  ORG_001_NOT_YET_MEMBER, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
@@ -1075,7 +1080,7 @@ def send_invitation_expired_email(to, *, org_name, role_name, expires_display):
         _org_shell("Invitation expired", headline, ORG_001_PREHEADER, rows,
                    html.escape(body_txt), None, None, footer),
         _org_text(headline, ORG_001_PREHEADER, rows, body_txt, None, None,
-                  footer, "Zoiko Steam"),
+                  footer, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
@@ -1095,13 +1100,13 @@ def send_invitation_revoked_email(to, *, org_name, role_name, effective_at):
         _org_shell("Invitation revoked", headline, ORG_001_PREHEADER, rows,
                    html.escape(body_txt), None, None, footer),
         _org_text(headline, ORG_001_PREHEADER, rows, body_txt, None, None,
-                  footer, "Zoiko Steam"),
+                  footer, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
 
 # == ORG-007 Access review lifecycle =====================================================
-# Class A (Security / governance) - Sender: Zoiko Steam Security - Recipients: assigned
+# Class A (Security / governance) - Sender: Zoiko Stream Security - Recipients: assigned
 # reviewers + Organization owner.
 #
 # The controls that matter here are in the domain, not the copy: a reviewer's silence leaves
@@ -1109,8 +1114,8 @@ def send_invitation_revoked_email(to, *, org_name, role_name, effective_at):
 # believes inaction equals approval will use inaction as approval.
 
 ORG_007_SUBJECT = "Access review assigned for {org}"
-ORG_007_REMINDER_SUBJECT = "Reminder: Zoiko Steam access review is due soon"
-ORG_007_OVERDUE_SUBJECT = "Action required: Zoiko Steam access review is overdue"
+ORG_007_REMINDER_SUBJECT = "Reminder: Zoiko Stream access review is due soon"
+ORG_007_OVERDUE_SUBJECT = "Action required: Zoiko Stream access review is overdue"
 ORG_007_COMPLETED_SUBJECT = "Access review completed for {org}"
 ORG_007_PREHEADER = "Review member access by {due}."
 ORG_007_HEADLINE = "Confirm that access remains necessary."
@@ -1143,7 +1148,7 @@ def send_access_review_assigned_email(to, *, org_name, due_display, outstanding,
         _org_shell("Access review", ORG_007_HEADLINE, pre, rows,
                    html.escape(ORG_007_BODY), ORG_007_CTA, url, ORG_007_NO_IMPLICIT_APPROVAL),
         _org_text(ORG_007_HEADLINE, pre, rows, ORG_007_BODY, ORG_007_CTA, url,
-                  ORG_007_NO_IMPLICIT_APPROVAL, "Zoiko Steam Security"),
+                  ORG_007_NO_IMPLICIT_APPROVAL, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1162,7 +1167,7 @@ def send_access_review_reminder_email(to, *, org_name, due_display, outstanding)
         _org_shell("Review due soon", headline, pre, rows, html.escape(body),
                    ORG_007_CTA, url, ORG_007_NO_IMPLICIT_APPROVAL),
         _org_text(headline, pre, rows, body, ORG_007_CTA, url,
-                  ORG_007_NO_IMPLICIT_APPROVAL, "Zoiko Steam Security"),
+                  ORG_007_NO_IMPLICIT_APPROVAL, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1183,7 +1188,7 @@ def send_access_review_overdue_email(to, *, org_name, due_display, outstanding,
         _org_shell("Review overdue", headline, ORG_007_PREHEADER.format(due=due_display),
                    rows, html.escape(body), ORG_007_CTA, url, footer),
         _org_text(headline, ORG_007_PREHEADER.format(due=due_display), rows, body,
-                  ORG_007_CTA, url, footer, "Zoiko Steam Security"),
+                  ORG_007_CTA, url, footer, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1208,28 +1213,28 @@ def send_access_review_completed_email(to, *, org_name, completed_display, appro
         _org_shell("Review completed", headline, "The access review is closed.", rows,
                    html.escape(body), "Review current access", url, footer),
         _org_text(headline, "The access review is closed.", rows, body,
-                  "Review current access", url, footer, "Zoiko Steam Security"),
+                  "Review current access", url, footer, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
 
 # == ORG-008 Organization ownership transfer =============================================
-# Class A (Security) - Sender: Zoiko Steam Security - Recipients: current owner, proposed
+# Class A (Security) - Sender: Zoiko Stream Security - Recipients: current owner, proposed
 # owner, security administrators.
 #
 # The CTA lands on the authenticated console. It is NOT a confirmation link: clicking a link
 # from an inbox is not authentication, and ownership of a tenant is not something an inbox
 # should be able to move.
 
-ORG_008_SUBJECT = "Confirm the transfer of Zoiko Steam Organization ownership"
-ORG_008_COMPLETED_SUBJECT = "Zoiko Steam Organization ownership transferred"
-ORG_008_EXPIRED_SUBJECT = "Zoiko Steam ownership-transfer request expired"
-ORG_008_CANCELED_SUBJECT = "Zoiko Steam ownership-transfer request canceled"
+ORG_008_SUBJECT = "Confirm the transfer of Zoiko Stream Organization ownership"
+ORG_008_COMPLETED_SUBJECT = "Zoiko Stream Organization ownership transferred"
+ORG_008_EXPIRED_SUBJECT = "Zoiko Stream ownership-transfer request expired"
+ORG_008_CANCELED_SUBJECT = "Zoiko Stream ownership-transfer request canceled"
 ORG_008_PREHEADER = "An ownership transfer is awaiting confirmation."
 ORG_008_HEADLINE = "Review the proposed ownership transfer."
 ORG_008_CTA = "Review transfer"
 ORG_008_NO_LINK_AUTH = (
-    "Confirm this transfer by signing in to Zoiko Steam. Confirmation is never completed "
+    "Confirm this transfer by signing in to Zoiko Stream. Confirmation is never completed "
     "from an email link."
 )
 ORG_008_OWNERSHIP_UNCHANGED = "Ownership did not change."
@@ -1256,7 +1261,7 @@ def send_ownership_transfer_email(to, *, org_name, current_owner, proposed_owner
         _org_shell("Ownership transfer", ORG_008_HEADLINE, ORG_008_PREHEADER, rows,
                    html.escape(body), ORG_008_CTA, url, footer),
         _org_text(ORG_008_HEADLINE, ORG_008_PREHEADER, rows, body, ORG_008_CTA, url,
-                  footer, "Zoiko Steam Security"),
+                  footer, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1276,11 +1281,11 @@ def send_ownership_transferred_email(to, *, org_name, previous_owner, new_owner,
         to, ORG_008_COMPLETED_SUBJECT,
         _org_shell("Ownership transferred", headline, "Ownership has moved.", rows,
                    html.escape(body), "Review Organization settings", url,
-                   "If you did not expect this, contact Zoiko Steam Support immediately."),
+                   "If you did not expect this, contact Zoiko Stream Support immediately."),
         _org_text(headline, "Ownership has moved.", rows, body,
                   "Review Organization settings", url,
-                  "If you did not expect this, contact Zoiko Steam Support immediately.",
-                  "Zoiko Steam Security"),
+                  "If you did not expect this, contact Zoiko Stream Support immediately.",
+                  "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1302,7 +1307,7 @@ def send_ownership_transfer_expired_email(to, *, org_name, expired_display, curr
         _org_text(headline, ORG_008_OWNERSHIP_UNCHANGED, rows, body,
                   "Review Organization settings", url,
                   "Start a new transfer request if ownership still needs to move.",
-                  "Zoiko Steam Security"),
+                  "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1326,13 +1331,13 @@ def send_ownership_transfer_canceled_email(to, *, org_name, canceled_display, ca
         _org_text(headline, ORG_008_OWNERSHIP_UNCHANGED, rows, body,
                   "Review Organization settings", url,
                   "No permissions changed as a result of this request.",
-                  "Zoiko Steam Security"),
+                  "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
 
 # == ORG-009 Authorized support access lifecycle =========================================
-# Class A (Security) - Sender: Zoiko Steam Security - Recipients: Organization approver +
+# Class A (Security) - Sender: Zoiko Stream Security - Recipients: Organization approver +
 # affected administrators.
 #
 # Every CTA in this family lands on the TENANT console. Nothing here may link a customer to
@@ -1340,10 +1345,10 @@ def send_ownership_transfer_canceled_email(to, *, org_name, canceled_display, ca
 # investigation detail. The engineer is named by an approved professional identity so the
 # customer can tell who was authorized without being handed an internal account record.
 
-ORG_009_SUBJECT = "Approval requested for Zoiko Steam Support access"
-ORG_009_STARTED_SUBJECT = "Zoiko Steam Support session started"
-ORG_009_EXPIRING_SUBJECT = "Zoiko Steam Support session expires soon"
-ORG_009_ENDED_SUBJECT = "Zoiko Steam Support session ended"
+ORG_009_SUBJECT = "Approval requested for Zoiko Stream Support access"
+ORG_009_STARTED_SUBJECT = "Zoiko Stream Support session started"
+ORG_009_EXPIRING_SUBJECT = "Zoiko Stream Support session expires soon"
+ORG_009_ENDED_SUBJECT = "Zoiko Stream Support session ended"
 ORG_009_EMERGENCY_SUBJECT = "Important: emergency support access was used"
 ORG_009_PREHEADER = "Review a time-limited, scoped support-session request."
 ORG_009_HEADLINE = "Support access requires your approval."
@@ -1372,7 +1377,7 @@ def _support_rows(*, case_reference, engineer, scope, allowed_actions, duration)
 def send_support_access_requested_email(to, *, org_name, case_reference, engineer, scope,
                                         allowed_actions, duration, reason_category):
     body = (
-        f"Zoiko Steam Support requested scoped access for case {case_reference}. Review "
+        f"Zoiko Stream Support requested scoped access for case {case_reference}. Review "
         f"permitted resources, allowed actions, duration, assigned engineer, and audit terms."
     )
     rows = [("Organization", org_name)] + _support_rows(
@@ -1386,7 +1391,7 @@ def send_support_access_requested_email(to, *, org_name, case_reference, enginee
         _org_shell("Support access", ORG_009_HEADLINE, ORG_009_PREHEADER, rows,
                    html.escape(body), ORG_009_CTA, url, footer),
         _org_text(ORG_009_HEADLINE, ORG_009_PREHEADER, rows, body, ORG_009_CTA, url,
-                  footer, "Zoiko Steam Security"),
+                  footer, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1410,7 +1415,7 @@ def send_support_access_started_email(to, *, org_name, case_reference, engineer,
                    rows, html.escape(body), "Review support access", url,
                    ORG_009_AUDIT_TERMS),
         _org_text(headline, "A scoped support session is active.", rows, body,
-                  "Review support access", url, ORG_009_AUDIT_TERMS, "Zoiko Steam Security"),
+                  "Review support access", url, ORG_009_AUDIT_TERMS, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1431,7 +1436,7 @@ def send_support_access_expiring_email(to, *, org_name, case_reference, engineer
                    rows, html.escape(body), "Review support access", url,
                    ORG_009_NO_OPEN_ENDED),
         _org_text(headline, "No action is required to end it.", rows, body,
-                  "Review support access", url, ORG_009_NO_OPEN_ENDED, "Zoiko Steam Security"),
+                  "Review support access", url, ORG_009_NO_OPEN_ENDED, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1452,7 +1457,7 @@ def send_support_access_ended_email(to, *, org_name, case_reference, engineer,
         _org_shell("Support session ended", headline, "Access has been withdrawn.", rows,
                    html.escape(body), "View action history", url, ORG_009_AUDIT_TERMS),
         _org_text(headline, "Access has been withdrawn.", rows, body,
-                  "View action history", url, ORG_009_AUDIT_TERMS, "Zoiko Steam Security"),
+                  "View action history", url, ORG_009_AUDIT_TERMS, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1478,21 +1483,21 @@ def send_support_access_emergency_email(to, *, org_name, case_reference, enginee
         _org_shell("Emergency access", headline, "Review this access now.", rows,
                    html.escape(body), "Review support access", url, footer),
         _org_text(headline, "Review this access now.", rows, body,
-                  "Review support access", url, footer, "Zoiko Steam Security"),
+                  "Review support access", url, footer, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
 
 # == ORG-010 Organization operational restriction ========================================
-# Class A (Security / legal) - Sender: Zoiko Steam Security - Recipients: Organization owner
+# Class A (Security / legal) - Sender: Zoiko Stream Security - Recipients: Organization owner
 # + security administrators.
 #
 # The reason is a coarse approved category only. Fraud rules, detection logic, risk scores,
 # employee notes, investigation detail and any mention of another customer are all absent by
 # construction: the send function accepts a category and a recovery line, and nothing else.
 
-ORG_010_SUBJECT = "Your Zoiko Steam Organization is {state}"
-ORG_010_REACTIVATED_SUBJECT = "Your Zoiko Steam Organization is active again"
+ORG_010_SUBJECT = "Your Zoiko Stream Organization is {state}"
+ORG_010_REACTIVATED_SUBJECT = "Your Zoiko Stream Organization is active again"
 ORG_010_PREHEADER = "Review the scope, effective time, and required action."
 ORG_010_HEADLINE = "Organization access has changed."
 ORG_010_CTA = "Review Organization status"
@@ -1527,11 +1532,11 @@ def send_organization_restricted_email(to, *, org_name, state_label, effective_d
         to, ORG_010_SUBJECT.format(state=state_label.lower()),
         _org_shell("Organization status", ORG_010_HEADLINE, ORG_010_PREHEADER, rows,
                    html.escape(body), ORG_010_CTA, url,
-                   "Contact Zoiko Steam Support through your Organization's support route "
+                   "Contact Zoiko Stream Support through your Organization's support route "
                    "to resolve this."),
         _org_text(ORG_010_HEADLINE, ORG_010_PREHEADER, rows, body, ORG_010_CTA, url,
-                  "Contact Zoiko Steam Support through your Organization's support route "
-                  "to resolve this.", "Zoiko Steam Security"),
+                  "Contact Zoiko Stream Support through your Organization's support route "
+                  "to resolve this.", "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -1552,19 +1557,19 @@ def send_organization_reactivated_email(to, *, org_name, effective_display,
         to, ORG_010_REACTIVATED_SUBJECT,
         _org_shell("Organization active", headline, "Access has been restored.", rows,
                    html.escape(body), ORG_010_CTA, url,
-                   "If anything still appears limited, contact Zoiko Steam Support."),
+                   "If anything still appears limited, contact Zoiko Stream Support."),
         _org_text(headline, "Access has been restored.", rows, body, ORG_010_CTA, url,
-                  "If anything still appears limited, contact Zoiko Steam Support.",
-                  "Zoiko Steam Security"),
+                  "If anything still appears limited, contact Zoiko Stream Support.",
+                  "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
 
 # == ORG-002 Member joined ===============================================================
-# Class C (Transactional) - Sender: Zoiko Steam - Recipients: inviter + org administrators.
+# Class C (Transactional) - Sender: Zoiko Stream - Recipients: inviter + org administrators.
 # Trigger: invitation accepted AND membership committed.
 
-ORG_002_SUBJECT = "{member} joined {org} on Zoiko Steam"
+ORG_002_SUBJECT = "{member} joined {org} on Zoiko Stream"
 ORG_002_PREHEADER = "The Organization invitation was accepted."
 ORG_002_HEADLINE = "A new member joined your Organization."
 ORG_002_CTA = "View members"
@@ -1594,13 +1599,13 @@ def send_member_joined_email(to, *, member_name, org_name, inviter_name, accepte
         _org_shell("New member", ORG_002_HEADLINE, ORG_002_PREHEADER, rows,
                    html.escape(body_txt), ORG_002_CTA, url, ORG_002_REASON),
         _org_text(ORG_002_HEADLINE, ORG_002_PREHEADER, rows, body_txt, ORG_002_CTA, url,
-                  ORG_002_REASON, "Zoiko Steam"),
+                  ORG_002_REASON, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
 
 # == DEV-002 Credential created ==========================================================
-# Class A (Security) - Sender: Zoiko Steam Developer Platform - Recipients: the creator plus
+# Class A (Security) - Sender: Zoiko Stream Developer Platform - Recipients: the creator plus
 # the Organization's administrators.
 #
 # This message exists as a DETECTION mechanism. An administrator who did not expect it must
@@ -1612,7 +1617,7 @@ def send_member_joined_email(to, *, member_name, org_name, inviter_name, accepte
 # by a hash-derived fingerprint instead. `prefix` is deliberately NOT used for that: it is
 # raw[:12], which is eight characters of banner plus four characters of the real token.
 
-DEV_002_SUBJECT = "A new Zoiko Steam API credential was created"
+DEV_002_SUBJECT = "A new Zoiko Stream API credential was created"
 DEV_002_PREHEADER = "Review the fingerprint, scope, and creator."
 DEV_002_HEADLINE = "A new API credential was created."
 DEV_002_CTA = "Review API credentials"
@@ -1653,24 +1658,24 @@ def send_api_credential_created_email(to, *, org_name, credential_name, fingerpr
         _org_shell("API credential created", DEV_002_HEADLINE, DEV_002_PREHEADER, rows,
                    html.escape(body_txt), DEV_002_CTA, url, footer),
         _org_text(DEV_002_HEADLINE, DEV_002_PREHEADER, rows, body_txt, DEV_002_CTA, url,
-                  footer, "Zoiko Steam Developer Platform"),
+                  footer, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
 
 # == DEV-003 Credential expiry ===========================================================
-# Class A - Sender: Zoiko Steam Developer Platform.
+# Class A - Sender: Zoiko Stream Developer Platform.
 #
 # The DORMANCY variant is deliberately NOT built. Dormancy can only be asserted from real
-# `last_used_at` telemetry, and no Zoiko Steam endpoint authenticates an API key, so nothing
+# `last_used_at` telemetry, and no Zoiko Stream endpoint authenticates an API key, so nothing
 # records a use. Inferring "dormant" from `created_at` would be asserting a fact about usage
 # nobody measured. Reported as a gap instead.
 #
 # The expiry copy is likewise careful: it says the credential is MARKED expired, never that
 # access was blocked, because no authentication path enforces it yet.
 
-DEV_003_WARNING_SUBJECT = "Action required: Zoiko Steam API credential expires soon"
-DEV_003_EXPIRED_SUBJECT = "Zoiko Steam API credential expired"
+DEV_003_WARNING_SUBJECT = "Action required: Zoiko Stream API credential expires soon"
+DEV_003_EXPIRED_SUBJECT = "Zoiko Stream API credential expired"
 DEV_003_PREHEADER = "Review the credential and rotate it before it lapses."
 DEV_003_CTA = "Rotate credential"
 DEV_003_ROTATION_GUIDANCE = (
@@ -1696,7 +1701,7 @@ def send_credential_expiring_email(to, *, org_name, credential_name, fingerprint
                    DEV_003_ROTATION_GUIDANCE),
         _org_text("An API credential expires soon.", DEV_003_PREHEADER, rows, body_txt,
                   DEV_003_CTA, url, DEV_003_ROTATION_GUIDANCE,
-                  "Zoiko Steam Developer Platform"),
+                  "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1718,17 +1723,17 @@ def send_credential_expired_email(to, *, org_name, credential_name, fingerprint,
                    DEV_003_ROTATION_GUIDANCE),
         _org_text("An API credential has expired.", DEV_003_PREHEADER, rows, body_txt,
                   DEV_003_CTA, url, DEV_003_ROTATION_GUIDANCE,
-                  "Zoiko Steam Developer Platform"),
+                  "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
 
 # == DEV-004 Credential rotation and revocation ==========================================
-# Class A - Sender: Zoiko Steam Developer Platform. Never carries either secret.
+# Class A - Sender: Zoiko Stream Developer Platform. Never carries either secret.
 
-DEV_004_REVOKED_SUBJECT = "A Zoiko Steam API credential was revoked"
-DEV_004_ROTATED_SUBJECT = "A Zoiko Steam API credential was rotated"
-DEV_004_EMERGENCY_SUBJECT = "Important: Zoiko Steam API credential was revoked for security"
+DEV_004_REVOKED_SUBJECT = "A Zoiko Stream API credential was revoked"
+DEV_004_ROTATED_SUBJECT = "A Zoiko Stream API credential was rotated"
+DEV_004_EMERGENCY_SUBJECT = "Important: Zoiko Stream API credential was revoked for security"
 DEV_004_PREHEADER = "Review the credential and who changed it."
 DEV_004_CTA = "Review API credentials"
 
@@ -1751,7 +1756,7 @@ def send_credential_revoked_email(to, *, org_name, credential_name, fingerprint,
         _org_shell("Credential revoked", "An API credential was revoked.",
                    DEV_004_PREHEADER, rows, html.escape(body_txt), DEV_004_CTA, url, footer),
         _org_text("An API credential was revoked.", DEV_004_PREHEADER, rows, body_txt,
-                  DEV_004_CTA, url, footer, "Zoiko Steam Developer Platform"),
+                  DEV_004_CTA, url, footer, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1775,7 +1780,7 @@ def send_credential_rotated_email(to, *, org_name, credential_name, old_fingerpr
         _org_shell("Credential rotated", "An API credential was rotated.",
                    DEV_004_PREHEADER, rows, html.escape(body_txt), DEV_004_CTA, url, footer),
         _org_text("An API credential was rotated.", DEV_004_PREHEADER, rows, body_txt,
-                  DEV_004_CTA, url, footer, "Zoiko Steam Developer Platform"),
+                  DEV_004_CTA, url, footer, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1797,7 +1802,7 @@ def send_credential_emergency_revoked_email(to, *, org_name, credential_name, fi
                    "Review credential security", url, next_steps),
         _org_text("An API credential was revoked for security.", "Review this credential now.",
                   rows, body_txt, "Review credential security", url, next_steps,
-                  "Zoiko Steam Developer Platform"),
+                  "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1805,7 +1810,7 @@ def send_credential_emergency_revoked_email(to, *, org_name, credential_name, fi
 # == DEV-006 Webhook endpoint verification ===============================================
 # Class A - production events are withheld until the endpoint proves control of the URL.
 
-DEV_006_VERIFY_SUBJECT = "Verify your Zoiko Steam webhook endpoint"
+DEV_006_VERIFY_SUBJECT = "Verify your Zoiko Stream webhook endpoint"
 DEV_006_RESET_SUBJECT = "Webhook verification was reset"
 DEV_006_PREHEADER = "Production events are withheld until this endpoint is verified."
 DEV_006_CTA = "Review webhook endpoint"
@@ -1836,7 +1841,7 @@ def send_webhook_verification_email(to, *, org_name, endpoint_url, expires_at,
                    DEV_006_WITHHELD),
         _org_text("This webhook endpoint needs verification.", DEV_006_PREHEADER, rows,
                   body_txt, DEV_006_CTA, url, DEV_006_WITHHELD,
-                  "Zoiko Steam Developer Platform"),
+                  "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1856,7 +1861,7 @@ def send_webhook_verification_reset_email(to, *, org_name, endpoint_url, reset_a
                    DEV_006_PREHEADER, rows, html.escape(body_txt), DEV_006_CTA, url,
                    DEV_006_WITHHELD),
         _org_text("Webhook verification was reset.", DEV_006_PREHEADER, rows, body_txt,
-                  DEV_006_CTA, url, DEV_006_WITHHELD, "Zoiko Steam Developer Platform"),
+                  DEV_006_CTA, url, DEV_006_WITHHELD, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1864,9 +1869,9 @@ def send_webhook_verification_reset_email(to, *, org_name, endpoint_url, reset_a
 # == DEV-007 Webhook delivery health =====================================================
 # One notification per health-state TRANSITION, never one per retry attempt.
 
-DEV_007_FAILING_SUBJECT = "Action required: Zoiko Steam webhook delivery is failing"
-DEV_007_RECOVERED_SUBJECT = "Zoiko Steam webhook delivery recovered"
-DEV_007_DISABLED_SUBJECT = "Zoiko Steam webhook endpoint was disabled"
+DEV_007_FAILING_SUBJECT = "Action required: Zoiko Stream webhook delivery is failing"
+DEV_007_RECOVERED_SUBJECT = "Zoiko Stream webhook delivery recovered"
+DEV_007_DISABLED_SUBJECT = "Zoiko Stream webhook endpoint was disabled"
 DEV_007_PREHEADER = "Review the endpoint and its recent delivery outcomes."
 DEV_007_CTA = "Review webhook delivery"
 
@@ -1891,7 +1896,7 @@ def send_webhook_degraded_email(to, *, org_name, endpoint_url, consecutive_failu
         _org_shell("Delivery failing", "Webhook delivery is failing.", DEV_007_PREHEADER,
                    rows, html.escape(body_txt), DEV_007_CTA, url, footer),
         _org_text("Webhook delivery is failing.", DEV_007_PREHEADER, rows, body_txt,
-                  DEV_007_CTA, url, footer, "Zoiko Steam Developer Platform"),
+                  DEV_007_CTA, url, footer, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1913,7 +1918,7 @@ def send_webhook_recovered_email(to, *, org_name, endpoint_url, recovered_at,
         _org_shell("Delivery recovered", "Webhook delivery has recovered.",
                    DEV_007_PREHEADER, rows, html.escape(body_txt), DEV_007_CTA, url, footer),
         _org_text("Webhook delivery has recovered.", DEV_007_PREHEADER, rows, body_txt,
-                  DEV_007_CTA, url, footer, "Zoiko Steam Developer Platform"),
+                  DEV_007_CTA, url, footer, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1934,15 +1939,15 @@ def send_webhook_disabled_email(to, *, org_name, endpoint_url, disabled_at, reas
                    DEV_007_PREHEADER, rows, html.escape(body_txt), DEV_007_CTA, url,
                    reenable_route),
         _org_text("A webhook endpoint was disabled.", DEV_007_PREHEADER, rows, body_txt,
-                  DEV_007_CTA, url, reenable_route, "Zoiko Steam Developer Platform"),
+                  DEV_007_CTA, url, reenable_route, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
 
 # == DEV-008 Webhook signing-secret rotation =============================================
-# Class A - Sender: Zoiko Steam Developer Platform. Fingerprints only, never secrets.
+# Class A - Sender: Zoiko Stream Developer Platform. Fingerprints only, never secrets.
 
-DEV_008_STARTED_SUBJECT = "Zoiko Steam webhook signing secret rotation started"
+DEV_008_STARTED_SUBJECT = "Zoiko Stream webhook signing secret rotation started"
 DEV_008_ENDING_SUBJECT = "Action required: webhook signing-secret rotation ends soon"
 DEV_008_PREHEADER = "Update your integration before the overlap window closes."
 DEV_008_CTA = "Review webhook signing"
@@ -1968,7 +1973,7 @@ def send_signing_rotation_started_email(to, *, org_name, endpoint_url, old_finge
         _org_shell("Signing rotation", "A webhook signing secret was rotated.",
                    DEV_008_PREHEADER, rows, html.escape(body_txt), DEV_008_CTA, url, footer),
         _org_text("A webhook signing secret was rotated.", DEV_008_PREHEADER, rows, body_txt,
-                  DEV_008_CTA, url, footer, "Zoiko Steam Developer Platform"),
+                  DEV_008_CTA, url, footer, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1990,7 +1995,7 @@ def send_signing_rotation_ending_email(to, *, org_name, endpoint_url, new_finger
         _org_shell("Rotation ending", "A signing-secret rotation is about to close.",
                    DEV_008_PREHEADER, rows, html.escape(body_txt), DEV_008_CTA, url, footer),
         _org_text("A signing-secret rotation is about to close.", DEV_008_PREHEADER, rows,
-                  body_txt, DEV_008_CTA, url, footer, "Zoiko Steam Developer Platform"),
+                  body_txt, DEV_008_CTA, url, footer, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -1998,7 +2003,7 @@ def send_signing_rotation_ending_email(to, *, org_name, endpoint_url, new_finger
 # == DEV-010 Rate-limit and API anomaly ==================================================
 # Sent only from a durable, committed threshold event - never from a counter in memory.
 
-DEV_010_SUBJECT = "Zoiko Steam API usage requires attention"
+DEV_010_SUBJECT = "Zoiko Stream API usage requires attention"
 DEV_010_PREHEADER = "Review the affected integration and the observed window."
 DEV_010_CTA = "Review API usage"
 
@@ -2016,14 +2021,14 @@ def send_api_usage_email(to, *, org_name, rule_label, observed_window, observed_
             ("Current state", current_state), ("Resets", resets_at),
             ("Recommended action", recommended_action)]
     url = api_credentials_url()
-    footer = ("Zoiko Steam does not disclose exact anti-abuse thresholds. Contact support if "
+    footer = ("Zoiko Stream does not disclose exact anti-abuse thresholds. Contact support if "
               "you expect this level of traffic.")
     return _send(
         to, DEV_010_SUBJECT,
         _org_shell("API usage", "Your API usage needs attention.", DEV_010_PREHEADER, rows,
                    html.escape(body_txt), DEV_010_CTA, url, footer),
         _org_text("Your API usage needs attention.", DEV_010_PREHEADER, rows, body_txt,
-                  DEV_010_CTA, url, footer, "Zoiko Steam Developer Platform"),
+                  DEV_010_CTA, url, footer, "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
     )
 
@@ -2031,9 +2036,9 @@ def send_api_usage_email(to, *, org_name, rule_label, observed_window, observed_
 # == DEV-012 Developer data export =======================================================
 # Class C transactional. The download link is short-lived, purpose-bound and carries no PII.
 
-DEV_012_READY_SUBJECT = "Your Zoiko Steam developer data export is ready"
-DEV_012_EXPIRED_SUBJECT = "Your Zoiko Steam developer data export expired"
-DEV_012_FAILED_SUBJECT = "Zoiko Steam could not generate your developer data export"
+DEV_012_READY_SUBJECT = "Your Zoiko Stream developer data export is ready"
+DEV_012_EXPIRED_SUBJECT = "Your Zoiko Stream developer data export expired"
+DEV_012_FAILED_SUBJECT = "Zoiko Stream could not generate your developer data export"
 DEV_012_PREHEADER = "Download it before the link expires."
 DEV_012_CTA = "Download export"
 DEV_012_NO_SECRETS = (
@@ -2061,7 +2066,7 @@ def send_export_ready_email(to, *, org_name, export_type, requested_at, complete
                    DEV_012_PREHEADER, rows, html.escape(body_txt), DEV_012_CTA,
                    download_url, DEV_012_NO_SECRETS),
         _org_text("Your developer data export is ready.", DEV_012_PREHEADER, rows, body_txt,
-                  DEV_012_CTA, download_url, DEV_012_NO_SECRETS, "Zoiko Steam"),
+                  DEV_012_CTA, download_url, DEV_012_NO_SECRETS, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
@@ -2081,20 +2086,20 @@ def send_export_expired_email(to, *, org_name, export_type, expired_at):
                    "Create a new export", url, DEV_012_NO_SECRETS),
         _org_text("Your developer data export expired.",
                   "Create a new export if you still need it.", rows, body_txt,
-                  "Create a new export", url, DEV_012_NO_SECRETS, "Zoiko Steam"),
+                  "Create a new export", url, DEV_012_NO_SECRETS, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
 
 def send_export_failed_email(to, *, org_name, export_type, export_reference, failure_category):
     body_txt = (
-        f"Zoiko Steam could not generate the {export_type} export for {org_name}."
+        f"Zoiko Stream could not generate the {export_type} export for {org_name}."
     )
     rows = [("Organization", org_name), ("Export", export_type),
             ("Reference", export_reference), ("Reason", failure_category),
             ("Current state", "Failed")]
     url = developer_exports_url()
-    footer = "Try again from the Developer console, or contact Zoiko Steam Support."
+    footer = "Try again from the Developer console, or contact Zoiko Stream Support."
     return _send(
         to, DEV_012_FAILED_SUBJECT,
         _org_shell("Export failed", "Your developer data export could not be generated.",
@@ -2102,13 +2107,13 @@ def send_export_failed_email(to, *, org_name, export_type, export_reference, fai
                    "Create a new export", url, footer),
         _org_text("Your developer data export could not be generated.",
                   "No data was produced.", rows, body_txt, "Create a new export", url,
-                  footer, "Zoiko Steam"),
+                  footer, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
 
 # == MED-001 / MED-002 / MED-004 / MED-005 — media operations ============================
-# Operator-facing, Sender: Zoiko Steam Media Operations. Every one of these reports
+# Operator-facing, Sender: Zoiko Stream Media Operations. Every one of these reports
 # committed media state; none of them is an audience communication.
 #
 # `[TEST MODE]` comes from Organization.is_test — a real stored flag, the same one
@@ -2118,7 +2123,7 @@ def send_export_failed_email(to, *, org_name, export_type, export_reference, fai
 # No template here accepts a stream key, ingest credential or LiveKit token. There is no
 # parameter that could carry one, which is the structural reason none can leak.
 
-SENDER_MEDIA = "Zoiko Steam Media Operations"
+SENDER_MEDIA = "Zoiko Stream Media Operations"
 TEST_MODE_PREFIX = "[TEST MODE] "
 
 
@@ -2137,7 +2142,7 @@ def live_sessions_url() -> str:
 
 # ── MED-001 Live input created ──────────────────────────────────────────────────────────
 
-MED_001_SUBJECT = "Live input created in Zoiko Steam"
+MED_001_SUBJECT = "Live input created in Zoiko Stream"
 MED_001_PREHEADER = "Review the protocol, region, and owner."
 MED_001_HEADLINE = "Your live input is ready."
 MED_001_CTA = "Review live input"
@@ -2164,16 +2169,16 @@ def send_live_input_created_email(to, *, event_title, input_name, owner, org_nam
         _org_shell("Live input created", MED_001_HEADLINE, MED_001_PREHEADER, rows,
                    html.escape(body_txt), MED_001_CTA, url, MED_001_NO_CREDENTIALS),
         _org_text(MED_001_HEADLINE, MED_001_PREHEADER, rows, body_txt, MED_001_CTA, url,
-                  MED_001_NO_CREDENTIALS, "Zoiko Steam Media Operations"),
+                  MED_001_NO_CREDENTIALS, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
 
 # ── MED-002 Input interruption and recovery ─────────────────────────────────────────────
 
-MED_002_INTERRUPTED_SUBJECT = "Action required: Zoiko Steam live input was interrupted"
-MED_002_INTERMITTENT_SUBJECT = "Zoiko Steam live input is intermittent"
-MED_002_RECOVERED_SUBJECT = "Zoiko Steam live input recovered"
+MED_002_INTERRUPTED_SUBJECT = "Action required: Zoiko Stream live input was interrupted"
+MED_002_INTERMITTENT_SUBJECT = "Zoiko Stream live input is intermittent"
+MED_002_RECOVERED_SUBJECT = "Zoiko Stream live input recovered"
 MED_002_PREHEADER = "Review the input and its current ingest state."
 MED_002_CTA = "Review live input"
 
@@ -2195,7 +2200,7 @@ def send_input_interrupted_email(to, *, event_title, input_name, interrupted_at,
         _org_shell("Input interrupted", "A live input lost usable signal.",
                    MED_002_PREHEADER, rows, html.escape(body_txt), MED_002_CTA, url, footer),
         _org_text("A live input lost usable signal.", MED_002_PREHEADER, rows, body_txt,
-                  MED_002_CTA, url, footer, "Zoiko Steam Media Operations"),
+                  MED_002_CTA, url, footer, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2218,7 +2223,7 @@ def send_input_intermittent_email(to, *, event_title, input_name, window, interr
         _org_shell("Input intermittent", "A live input is dropping repeatedly.",
                    MED_002_PREHEADER, rows, html.escape(body_txt), MED_002_CTA, url, footer),
         _org_text("A live input is dropping repeatedly.", MED_002_PREHEADER, rows, body_txt,
-                  MED_002_CTA, url, footer, "Zoiko Steam Media Operations"),
+                  MED_002_CTA, url, footer, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2241,7 +2246,7 @@ def send_input_recovered_email(to, *, event_title, input_name, recovered_at, out
         _org_text("A live input recovered.", MED_002_PREHEADER, rows, body_txt,
                   MED_002_CTA, url,
                   "Signal has been stable long enough to be considered recovered.",
-                  "Zoiko Steam Media Operations"),
+                  "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2250,8 +2255,8 @@ def send_input_recovered_email(to, *, event_title, input_name, recovered_at, out
 # INTERNAL operator communication. Starting a broadcast session must never reach an
 # audience — see services/media_comms.py, which has no access to any audience sender.
 
-MED_004_STARTED_SUBJECT = "Zoiko Steam streaming session started"
-MED_004_ENDED_SUBJECT = "Zoiko Steam streaming session ended"
+MED_004_STARTED_SUBJECT = "Zoiko Stream streaming session started"
+MED_004_ENDED_SUBJECT = "Zoiko Stream streaming session ended"
 MED_004_PREHEADER = "Internal operations notice for this session."
 MED_004_CTA = "Open the operations view"
 
@@ -2271,7 +2276,7 @@ def send_session_started_email(to, *, event_title, session_reference, started_at
         _org_shell("Session started", "A streaming session is live.", MED_004_PREHEADER,
                    rows, html.escape(body_txt), MED_004_CTA, url, footer),
         _org_text("A streaming session is live.", MED_004_PREHEADER, rows, body_txt,
-                  MED_004_CTA, url, footer, "Zoiko Steam Media Operations"),
+                  MED_004_CTA, url, footer, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2293,16 +2298,16 @@ def send_session_ended_email(to, *, event_title, session_reference, started_at, 
         _org_shell("Session ended", "A streaming session has ended.", MED_004_PREHEADER,
                    rows, html.escape(body_txt), MED_004_CTA, url, footer),
         _org_text("A streaming session has ended.", MED_004_PREHEADER, rows, body_txt,
-                  MED_004_CTA, url, footer, "Zoiko Steam Media Operations"),
+                  MED_004_CTA, url, footer, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
 
 # ── MED-005 Streaming-session health ────────────────────────────────────────────────────
 
-MED_005_FAILED_SUBJECT = "Action required: Zoiko Steam streaming session failed"
-MED_005_DEGRADED_SUBJECT = "Zoiko Steam streaming session is degraded"
-MED_005_RECOVERED_SUBJECT = "Zoiko Steam streaming session recovered"
+MED_005_FAILED_SUBJECT = "Action required: Zoiko Stream streaming session failed"
+MED_005_DEGRADED_SUBJECT = "Zoiko Stream streaming session is degraded"
+MED_005_RECOVERED_SUBJECT = "Zoiko Stream streaming session recovered"
 MED_005_PREHEADER = "Review the session's current health."
 MED_005_CTA = "Open the operations view"
 
@@ -2342,7 +2347,7 @@ def send_session_health_email(to, *, variant, event_title, session_reference, co
         _org_shell("Session health", headline, MED_005_PREHEADER, rows,
                    html.escape(body_txt), MED_005_CTA, url, footer),
         _org_text(headline, MED_005_PREHEADER, rows, body_txt, MED_005_CTA, url, footer,
-                  "Zoiko Steam Media Operations"),
+                  "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2360,10 +2365,10 @@ def send_session_health_email(to, *, variant, event_title, session_reference, co
 # are MED-008 and MED-009 respectively, and collapsing them is exactly how an operator ends
 # up telling a customer a replay is ready before anything checked the file.
 
-MED_007_STARTED_SUBJECT = "Zoiko Steam recording started"
-MED_007_DEGRADED_SUBJECT = "Action required: Zoiko Steam recording health is degraded"
-MED_007_RECOVERED_SUBJECT = "Zoiko Steam recording recovered"
-MED_007_STOPPED_SUBJECT = "Zoiko Steam recording stopped"
+MED_007_STARTED_SUBJECT = "Zoiko Stream recording started"
+MED_007_DEGRADED_SUBJECT = "Action required: Zoiko Stream recording health is degraded"
+MED_007_RECOVERED_SUBJECT = "Zoiko Stream recording recovered"
+MED_007_STOPPED_SUBJECT = "Zoiko Stream recording stopped"
 MED_007_PREHEADER = "Review the recording and its current capture state."
 MED_007_CTA = "Review recording"
 
@@ -2403,7 +2408,7 @@ def send_recording_started_email(to, *, event_title, recording_reference, starte
         _org_shell("Recording started", "A recording has started.", MED_007_PREHEADER, rows,
                    html.escape(body_txt), MED_007_CTA, url, MED_007_NOT_REPLAY),
         _org_text("A recording has started.", MED_007_PREHEADER, rows, body_txt,
-                  MED_007_CTA, url, MED_007_NOT_REPLAY, "Zoiko Steam Media Operations"),
+                  MED_007_CTA, url, MED_007_NOT_REPLAY, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2434,7 +2439,7 @@ def send_recording_degraded_email(to, *, event_title, recording_reference, degra
                    MED_007_PREHEADER, rows, html.escape(body_txt), MED_007_CTA, url,
                    MED_007_NOT_REPLAY),
         _org_text("Recording health is degraded.", MED_007_PREHEADER, rows, body_txt,
-                  MED_007_CTA, url, MED_007_NOT_REPLAY, "Zoiko Steam Media Operations"),
+                  MED_007_CTA, url, MED_007_NOT_REPLAY, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2457,7 +2462,7 @@ def send_recording_recovered_email(to, *, event_title, recording_reference, reco
         _org_shell("Recording recovered", "Recording health recovered.", MED_007_PREHEADER,
                    rows, html.escape(body_txt), MED_007_CTA, url, MED_007_NOT_REPLAY),
         _org_text("Recording health recovered.", MED_007_PREHEADER, rows, body_txt,
-                  MED_007_CTA, url, MED_007_NOT_REPLAY, "Zoiko Steam Media Operations"),
+                  MED_007_CTA, url, MED_007_NOT_REPLAY, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2481,12 +2486,12 @@ def send_recording_stopped_email(to, *, event_title, recording_reference, stoppe
         _org_shell("Recording stopped", "A recording has stopped.", MED_007_PREHEADER, rows,
                    html.escape(body_txt), MED_007_CTA, url, MED_007_NOT_REPLAY),
         _org_text("A recording has stopped.", MED_007_PREHEADER, rows, body_txt,
-                  MED_007_CTA, url, MED_007_NOT_REPLAY, "Zoiko Steam Media Operations"),
+                  MED_007_CTA, url, MED_007_NOT_REPLAY, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
 
-MED_007_REDUNDANCY_SUBJECT = "Action required: Zoiko Steam independent recording is missing"
+MED_007_REDUNDANCY_SUBJECT = "Action required: Zoiko Stream independent recording is missing"
 
 
 def send_recording_redundancy_email(to, *, event_title, recording_reference, detected_at,
@@ -2516,7 +2521,7 @@ def send_recording_redundancy_email(to, *, event_title, recording_reference, det
         _org_shell("Independent recording missing", "Required recording redundancy is missing.",
                    MED_007_PREHEADER, rows, html.escape(body_txt), MED_007_CTA, url, footer),
         _org_text("Required recording redundancy is missing.", MED_007_PREHEADER, rows,
-                  body_txt, MED_007_CTA, url, footer, "Zoiko Steam Media Operations"),
+                  body_txt, MED_007_CTA, url, footer, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2531,10 +2536,10 @@ def send_recording_redundancy_email(to, *, event_title, recording_reference, det
 # duration plausibility, and audio/video track presence, plus a duration comparison between
 # paths when the event records two.
 
-MED_008_READY_SUBJECT = "Zoiko Steam recording validation completed"
-MED_008_PARTIAL_SUBJECT = "Zoiko Steam recording completed with partial media"
-MED_008_FAILED_SUBJECT = "Action required: Zoiko Steam recording finalization failed"
-MED_008_RECOVERED_SUBJECT = "Zoiko Steam recording asset was recovered"
+MED_008_READY_SUBJECT = "Zoiko Stream recording validation completed"
+MED_008_PARTIAL_SUBJECT = "Zoiko Stream recording completed with partial media"
+MED_008_FAILED_SUBJECT = "Action required: Zoiko Stream recording finalization failed"
+MED_008_RECOVERED_SUBJECT = "Zoiko Stream recording asset was recovered"
 MED_008_PREHEADER = "Review the validation result for this recording."
 MED_008_CTA = "Review recording"
 
@@ -2604,7 +2609,7 @@ def send_recording_finalized_email(to, *, variant, event_title, recording_refere
         _org_shell(titles.get(variant, "Validation"), headline, MED_008_PREHEADER, rows,
                    html.escape(body_txt), MED_008_CTA, url, MED_008_REPLAY_SEPARATION),
         _org_text(headline, MED_008_PREHEADER, rows, body_txt, MED_008_CTA, url,
-                  MED_008_REPLAY_SEPARATION, "Zoiko Steam Media Operations"),
+                  MED_008_REPLAY_SEPARATION, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2621,11 +2626,11 @@ def send_recording_finalized_email(to, *, variant, event_title, recording_refere
 # this codebase, so the disclosure rows say so explicitly instead of rendering a blank that
 # reads as "none configured".
 
-MED_009_PREPARED_SUBJECT = "Zoiko Steam replay is prepared for review"
-MED_009_PUBLISHED_SUBJECT = "Zoiko Steam replay was published"
-MED_009_ACCESS_SUBJECT = "Zoiko Steam replay access changed"
-MED_009_WITHDRAWN_SUBJECT = "Zoiko Steam replay was withdrawn"
-MED_009_EXPIRED_SUBJECT = "Zoiko Steam replay availability expired"
+MED_009_PREPARED_SUBJECT = "Zoiko Stream replay is prepared for review"
+MED_009_PUBLISHED_SUBJECT = "Zoiko Stream replay was published"
+MED_009_ACCESS_SUBJECT = "Zoiko Stream replay access changed"
+MED_009_WITHDRAWN_SUBJECT = "Zoiko Stream replay was withdrawn"
+MED_009_EXPIRED_SUBJECT = "Zoiko Stream replay availability expired"
 MED_009_PREHEADER = "Review the replay and its access configuration."
 MED_009_CTA = "Review replay"
 
@@ -2636,7 +2641,7 @@ MED_009_NOT_PUBLIC = (
 # Stated verbatim on every MED-009 message that discloses access configuration.
 MED_009_UNSUPPORTED = (
     "Captions, translated language tracks, geographic restrictions and viewer concurrency "
-    "limits are not supported by Zoiko Steam and are therefore not configured on any replay."
+    "limits are not supported by Zoiko Stream and are therefore not configured on any replay."
 )
 
 
@@ -2665,7 +2670,7 @@ def send_replay_prepared_email(to, *, event_title, asset_reference, source_recor
         _org_shell("Replay prepared", "A replay is prepared for review.", MED_009_PREHEADER,
                    rows, html.escape(body_txt), MED_009_CTA, url, footer),
         _org_text("A replay is prepared for review.", MED_009_PREHEADER, rows, body_txt,
-                  MED_009_CTA, url, footer, "Zoiko Steam Media Operations"),
+                  MED_009_CTA, url, footer, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2695,7 +2700,7 @@ def send_replay_published_email(to, *, event_title, asset_reference, published_a
         _org_shell("Replay published", "A replay was published.", MED_009_PREHEADER, rows,
                    html.escape(body_txt), MED_009_CTA, url, MED_009_UNSUPPORTED),
         _org_text("A replay was published.", MED_009_PREHEADER, rows, body_txt,
-                  MED_009_CTA, url, MED_009_UNSUPPORTED, "Zoiko Steam Media Operations"),
+                  MED_009_CTA, url, MED_009_UNSUPPORTED, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2718,7 +2723,7 @@ def send_replay_access_changed_email(to, *, event_title, asset_reference, previo
         _org_shell("Replay access changed", "Replay access changed.", MED_009_PREHEADER,
                    rows, html.escape(body_txt), MED_009_CTA, url, MED_009_UNSUPPORTED),
         _org_text("Replay access changed.", MED_009_PREHEADER, rows, body_txt, MED_009_CTA,
-                  url, MED_009_UNSUPPORTED, "Zoiko Steam Media Operations"),
+                  url, MED_009_UNSUPPORTED, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2727,7 +2732,7 @@ def send_replay_withdrawn_email(to, *, event_title, asset_reference, effective_a
                                 reason, entitlement_effect, org_name, test_mode=False):
     """`entitlement_effect` is the one field a withdrawal notice can get badly wrong.
 
-    Zoiko Steam has no refund or entitlement-reversal behaviour attached to withdrawal, so
+    Zoiko Stream has no refund or entitlement-reversal behaviour attached to withdrawal, so
     the caller passes what the platform actually does — stops serving the replay — and this
     template never speculates about refunds.
     """
@@ -2742,7 +2747,7 @@ def send_replay_withdrawn_email(to, *, event_title, asset_reference, effective_a
         _org_shell("Replay withdrawn", "A replay was withdrawn.", MED_009_PREHEADER, rows,
                    html.escape(body_txt), MED_009_CTA, url, footer),
         _org_text("A replay was withdrawn.", MED_009_PREHEADER, rows, body_txt, MED_009_CTA,
-                  url, footer, "Zoiko Steam Media Operations"),
+                  url, footer, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2764,7 +2769,7 @@ def send_replay_expired_email(to, *, event_title, asset_reference, expired_at, o
         _org_shell("Replay expired", "Replay availability expired.", MED_009_PREHEADER,
                    rows, html.escape(body_txt), MED_009_CTA, url, footer),
         _org_text("Replay availability expired.", MED_009_PREHEADER, rows, body_txt,
-                  MED_009_CTA, url, footer, "Zoiko Steam Media Operations"),
+                  MED_009_CTA, url, footer, "Zoiko Stream Media Operations"),
         sender=_sender_identity(SENDER_MEDIA),
     )
 
@@ -2772,20 +2777,20 @@ def send_replay_expired_email(to, *, event_title, asset_reference, expired_at, o
 # == MED-011 Retention, legal hold and deletion ==========================================
 # Recipients: asset owner, data-governance contacts, and (for hold messages) legal-hold
 # contacts — a real stored list (models.media_governance.LegalHoldContact), because the
-# person who asked for a hold is frequently not a Zoiko Steam user at all.
+# person who asked for a hold is frequently not a Zoiko Stream user at all.
 #
 # No template here carries a legal instruction, counsel's reasoning, or a cloud storage
 # path. Holds are described by a closed category plus an opaque reference.
 
-SENDER_GOVERNANCE = "Zoiko Steam Data Governance"
+SENDER_GOVERNANCE = "Zoiko Stream Data Governance"
 
-MED_011_WARNING_SUBJECT = "Action required: Zoiko Steam recording retention period is ending"
-MED_011_HOLD_SUBJECT = "Zoiko Steam recording is under legal hold"
-MED_011_HOLD_RELEASED_SUBJECT = "Zoiko Steam legal hold was released"
-MED_011_EXTENSION_REQUESTED_SUBJECT = "Approval requested: Zoiko Steam retention extension"
-MED_011_EXTENSION_DECIDED_SUBJECT = "Zoiko Steam retention extension was {decision}"
-MED_011_DELETED_SUBJECT = "Zoiko Steam recording deletion completed"
-MED_011_DELETE_FAILED_SUBJECT = "Action required: Zoiko Steam recording deletion failed"
+MED_011_WARNING_SUBJECT = "Action required: Zoiko Stream recording retention period is ending"
+MED_011_HOLD_SUBJECT = "Zoiko Stream recording is under legal hold"
+MED_011_HOLD_RELEASED_SUBJECT = "Zoiko Stream legal hold was released"
+MED_011_EXTENSION_REQUESTED_SUBJECT = "Approval requested: Zoiko Stream retention extension"
+MED_011_EXTENSION_DECIDED_SUBJECT = "Zoiko Stream retention extension was {decision}"
+MED_011_DELETED_SUBJECT = "Zoiko Stream recording deletion completed"
+MED_011_DELETE_FAILED_SUBJECT = "Action required: Zoiko Stream recording deletion failed"
 MED_011_PREHEADER = "Review this asset's retention state."
 MED_011_CTA = "Review recording"
 
@@ -2809,13 +2814,13 @@ def send_retention_warning_email(to, *, event_title, asset_reference, retention_
             ("What happens at the deadline", deletion_behaviour)]
     url = recordings_url()
     footer = ("To keep this recording longer, request a retention extension. Extensions are "
-              "granted by Zoiko Steam platform governance, not by the Organization.")
+              "granted by Zoiko Stream platform governance, not by the Organization.")
     return _send(
         to, MED_011_WARNING_SUBJECT,
         _org_shell("Retention ending", "A recording's retention period is ending.",
                    MED_011_PREHEADER, rows, html.escape(body_txt), MED_011_CTA, url, footer),
         _org_text("A recording's retention period is ending.", MED_011_PREHEADER, rows,
-                  body_txt, MED_011_CTA, url, footer, "Zoiko Steam Data Governance"),
+                  body_txt, MED_011_CTA, url, footer, "Zoiko Stream Data Governance"),
         sender=_sender_identity(SENDER_GOVERNANCE),
     )
 
@@ -2843,14 +2848,14 @@ def send_legal_hold_email(to, *, event_title, asset_reference, placed_at, hold_r
     rows.append(("Deletion", "Permitted again, subject to the retention policy" if released
                  else "Blocked — this recording cannot be deleted while the hold is open"))
     url = recordings_url()
-    footer = ("Legal holds are placed and released by Zoiko Steam platform governance. "
+    footer = ("Legal holds are placed and released by Zoiko Stream platform governance. "
               "Contact platform support with the hold reference for any question about it.")
     return _send(
         to, subject,
         _org_shell("Legal hold", headline, MED_011_PREHEADER, rows, html.escape(body_txt),
                    MED_011_CTA, url, footer),
         _org_text(headline, MED_011_PREHEADER, rows, body_txt, MED_011_CTA, url, footer,
-                  "Zoiko Steam Data Governance"),
+                  "Zoiko Stream Data Governance"),
         sender=_sender_identity(SENDER_GOVERNANCE),
     )
 
@@ -2874,7 +2879,7 @@ def send_retention_extension_requested_email(to, *, event_title, asset_reference
         _org_shell("Retention extension requested", "A retention extension was requested.",
                    MED_011_PREHEADER, rows, html.escape(body_txt), MED_011_CTA, url, footer),
         _org_text("A retention extension was requested.", MED_011_PREHEADER, rows, body_txt,
-                  MED_011_CTA, url, footer, "Zoiko Steam Data Governance"),
+                  MED_011_CTA, url, footer, "Zoiko Stream Data Governance"),
         sender=_sender_identity(SENDER_GOVERNANCE),
     )
 
@@ -2907,7 +2912,7 @@ def send_retention_extension_decided_email(to, *, event_title, asset_reference, 
         _org_shell("Retention extension", headline, MED_011_PREHEADER, rows,
                    html.escape(body_txt), MED_011_CTA, url, footer),
         _org_text(headline, MED_011_PREHEADER, rows, body_txt, MED_011_CTA, url, footer,
-                  "Zoiko Steam Data Governance"),
+                  "Zoiko Stream Data Governance"),
         sender=_sender_identity(SENDER_GOVERNANCE),
     )
 
@@ -2933,14 +2938,14 @@ def send_recording_deleted_email(to, *, event_title, asset_reference, deleted_at
             ("Residual copies", residual_copies),
             ("Retained records", retained_metadata)]
     url = recordings_url()
-    footer = ("Zoiko Steam does not claim that every copy everywhere has been erased. The "
+    footer = ("Zoiko Stream does not claim that every copy everywhere has been erased. The "
               "rows above describe exactly what was removed.")
     return _send(
         to, MED_011_DELETED_SUBJECT,
         _org_shell("Deletion completed", "A recording was deleted.", MED_011_PREHEADER,
                    rows, html.escape(body_txt), MED_011_CTA, url, footer),
         _org_text("A recording was deleted.", MED_011_PREHEADER, rows, body_txt,
-                  MED_011_CTA, url, footer, "Zoiko Steam Data Governance"),
+                  MED_011_CTA, url, footer, "Zoiko Stream Data Governance"),
         sender=_sender_identity(SENDER_GOVERNANCE),
     )
 
@@ -2966,23 +2971,23 @@ def send_recording_deletion_failed_email(to, *, event_title, asset_reference, fa
         _org_shell("Deletion failed", "A recording deletion failed.", MED_011_PREHEADER,
                    rows, html.escape(body_txt), MED_011_CTA, url, footer),
         _org_text("A recording deletion failed.", MED_011_PREHEADER, rows, body_txt,
-                  MED_011_CTA, url, footer, "Zoiko Steam Data Governance"),
+                  MED_011_CTA, url, footer, "Zoiko Stream Data Governance"),
         sender=_sender_identity(SENDER_GOVERNANCE),
     )
 
 
 # == ORG-012 Organization notification preferences ========================================
-# Class C (Transactional) - Sender: Zoiko Steam - Recipients: preference owner, plus the
+# Class C (Transactional) - Sender: Zoiko Stream - Recipients: preference owner, plus the
 # Organization owner when organization-wide routing changed.
 #
 # The mandatory-communications sentence is load-bearing and is not decoration: this is the
-# one message whose reader has just been told they control what Zoiko Steam sends them, so
+# one message whose reader has just been told they control what Zoiko Stream sends them, so
 # it is exactly where the limits of that control have to be stated.
 #
 # The body renders labelled On/Off transitions, never the stored JSON. A settings page that
 # hands a reader `{"member_joined": false}` has told them nothing they can act on.
 
-ORG_012_SUBJECT = "Your Zoiko Steam notification preferences changed"
+ORG_012_SUBJECT = "Your Zoiko Stream notification preferences changed"
 ORG_012_PREHEADER = "Review the current recipients, thresholds, and channels."
 ORG_012_HEADLINE = "Notification settings were updated."
 ORG_012_CTA = "Review notification preferences"
@@ -3015,13 +3020,13 @@ def send_notification_preferences_email(to, *, change_summary, effective_at, sco
         _org_shell("Notification preferences", ORG_012_HEADLINE, ORG_012_PREHEADER, rows,
                    html.escape(body_txt), ORG_012_CTA, url, ORG_012_MANDATORY_NOTE),
         _org_text(ORG_012_HEADLINE, ORG_012_PREHEADER, rows, body_txt, ORG_012_CTA, url,
-                  ORG_012_MANDATORY_NOTE, "Zoiko Steam"),
+                  ORG_012_MANDATORY_NOTE, "Zoiko Stream"),
         sender=_sender_identity(SENDER_DEFAULT),
     )
 
 
 # == ORG-003 Role, workspace and mode access changed =====================================
-# Class A (Security) - Sender: Zoiko Steam Security - Recipients: affected member +
+# Class A (Security) - Sender: Zoiko Stream Security - Recipients: affected member +
 # relevant administrators. Mandatory: no notification preference is consulted.
 #
 # The canonical control list requires step-up authentication and possibly dual approval for
@@ -3029,7 +3034,7 @@ def send_notification_preferences_email(to, *, change_summary, effective_at, sco
 # approval workflow and no privileged-grant model. The notification is therefore sent for
 # real committed changes only, and the copy never claims either control was applied.
 
-ORG_003_SUBJECT = "Your Zoiko Steam access changed"
+ORG_003_SUBJECT = "Your Zoiko Stream access changed"
 ORG_003_PREHEADER = "Review your current Organization and workspace permissions."
 ORG_003_HEADLINE = "Your access permissions were updated."
 ORG_003_CTA = "Review current access"
@@ -3067,13 +3072,13 @@ def send_access_changed_email(to, *, org_name, effective_at, previous_access,
         _org_shell("Access changed", ORG_003_HEADLINE, ORG_003_PREHEADER, rows,
                    html.escape(body_txt), ORG_003_CTA, url, ORG_003_FOOTER),
         _org_text(ORG_003_HEADLINE, ORG_003_PREHEADER, rows, body_txt, ORG_003_CTA, url,
-                  ORG_003_FOOTER, "Zoiko Steam Security"),
+                  ORG_003_FOOTER, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
 
 # == ORG-004 Membership removed ==========================================================
-# Class A (Security) - Sender: Zoiko Steam Security - Recipients: removed member +
+# Class A (Security) - Sender: Zoiko Stream Security - Recipients: removed member +
 # relevant administrators.
 #
 # The identity-preservation line is mandatory and is what keeps ORG-004 distinct from
@@ -3082,7 +3087,7 @@ def send_access_changed_email(to, *, org_name, effective_at, previous_access,
 # is sent separately and says so in its own words; ORG-004 never makes that claim.
 
 ORG_004_SUBJECT = "Your access to {org} was removed"
-ORG_004_PREHEADER = "You can no longer access this Organization in Zoiko Steam."
+ORG_004_PREHEADER = "You can no longer access this Organization in Zoiko Stream."
 ORG_004_HEADLINE = "Your Organization membership ended."
 ORG_004_CTA = "View your Organizations"
 ORG_004_IDENTITY_PRESERVED = (
@@ -3110,7 +3115,7 @@ def send_membership_removed_email(to, *, org_name, effective_at, is_affected_mem
         _org_shell("Membership ended", headline, ORG_004_PREHEADER, rows,
                    html.escape(body_txt), ORG_004_CTA, url, ORG_004_IDENTITY_PRESERVED),
         _org_text(headline, ORG_004_PREHEADER, rows, body_txt, ORG_004_CTA, url,
-                  ORG_004_IDENTITY_PRESERVED, "Zoiko Steam Security"),
+                  ORG_004_IDENTITY_PRESERVED, "Zoiko Stream Security"),
         sender=_sender_identity(SENDER_SECURITY),
     )
 
@@ -3645,7 +3650,7 @@ if __name__ == "__main__":
     assert _logo_attachment() and _logo_attachment()["content_id"] == LOGO_CID, "logo attachment missing"
     # ORG-001 replaced _invite_html. Same escaping guarantee, checked through the shell the
     # four invitation variants now share.
-    invite = _org_shell("You're invited", "Join <b>Acme</b> on Zoiko Steam.",
+    invite = _org_shell("You're invited", "Join <b>Acme</b> on Zoiko Stream.",
                         ORG_001_PREHEADER, [("Role", "<i>Bob</i>")], "body",
                         ORG_001_CTA, "https://x/accept-invite?token=abc",
                         ORG_001_NOT_YET_MEMBER)
@@ -3697,7 +3702,7 @@ if __name__ == "__main__":
 # No template here accepts a contributor joining token, a LiveKit token, an access-link
 # token or a stream key. There is no parameter that could carry one.
 
-SENDER_EVENTS = "Zoiko Steam Event Operations"
+SENDER_EVENTS = "Zoiko Stream Event Operations"
 
 
 def event_url(event_id: str) -> str:
@@ -3726,10 +3731,10 @@ def _bullets(items) -> str:
 
 # -- LVE-001 Proposal and booking lifecycle ----------------------------------------------
 
-LVE_001_READY_SUBJECT = "Your Zoiko Steam event proposal is ready"
-LVE_001_ACCEPTED_SUBJECT = "Your Zoiko Steam event booking is confirmed"
-LVE_001_CHANGED_SUBJECT = "Your Zoiko Steam event booking changed"
-LVE_001_EXPIRED_SUBJECT = "Your Zoiko Steam event proposal expired"
+LVE_001_READY_SUBJECT = "Your Zoiko Stream event proposal is ready"
+LVE_001_ACCEPTED_SUBJECT = "Your Zoiko Stream event booking is confirmed"
+LVE_001_CHANGED_SUBJECT = "Your Zoiko Stream event booking changed"
+LVE_001_EXPIRED_SUBJECT = "Your Zoiko Stream event proposal expired"
 LVE_001_PREHEADER = "Review the scope, responsibilities and validity period."
 
 
@@ -3743,7 +3748,7 @@ def send_proposal_ready_email(to, *, name, event_title, reference, scope, servic
             ("Organization", org_name), ("Approved scope", scope),
             ("Included services", _bullets(services)),
             ("Your responsibilities", _bullets(customer_responsibilities)),
-            ("Zoiko Steam responsibilities", _bullets(zoiko_responsibilities)),
+            ("Zoiko Stream responsibilities", _bullets(zoiko_responsibilities)),
             ("Assumptions", _bullets(assumptions)),
             ("Amount", amount), ("Valid until", valid_until)]
     return _lve_send(to, LVE_001_READY_SUBJECT, "Proposal ready",
@@ -3794,11 +3799,11 @@ def send_proposal_expired_email(to, *, name, event_title, reference, expired_at,
 
 # -- LVE-002 Event intake lifecycle -------------------------------------------------------
 
-LVE_002_OPENED_SUBJECT = "Action required: complete your Zoiko Steam event intake"
-LVE_002_REMINDER_SUBJECT = "Reminder: your Zoiko Steam event intake is due"
-LVE_002_INCOMPLETE_SUBJECT = "Action required: your Zoiko Steam event intake is incomplete"
-LVE_002_COMPLETED_SUBJECT = "Your Zoiko Steam event intake is complete"
-LVE_002_REOPENED_SUBJECT = "Action required: your Zoiko Steam event intake was reopened"
+LVE_002_OPENED_SUBJECT = "Action required: complete your Zoiko Stream event intake"
+LVE_002_REMINDER_SUBJECT = "Reminder: your Zoiko Stream event intake is due"
+LVE_002_INCOMPLETE_SUBJECT = "Action required: your Zoiko Stream event intake is incomplete"
+LVE_002_COMPLETED_SUBJECT = "Your Zoiko Stream event intake is complete"
+LVE_002_REOPENED_SUBJECT = "Action required: your Zoiko Stream event intake was reopened"
 LVE_002_PREHEADER = "Complete the required sections in your event console."
 LVE_002_CTA = "Complete intake"
 LVE_002_FOOTER = ("Sign in to complete the intake. The link opens your event in the Zoiko "
@@ -3863,9 +3868,9 @@ def send_intake_reopened_email(to, *, name, event_title, reopened_at, due_at, se
 
 # -- LVE-003 Event details and assigned team ----------------------------------------------
 
-LVE_003_APPROVED_SUBJECT = "Your Zoiko Steam event is confirmed"
-LVE_003_TEAM_ASSIGNED_SUBJECT = "Your Zoiko Steam event team has been assigned"
-LVE_003_TEAM_CHANGED_SUBJECT = "Your Zoiko Steam event team changed"
+LVE_003_APPROVED_SUBJECT = "Your Zoiko Stream event is confirmed"
+LVE_003_TEAM_ASSIGNED_SUBJECT = "Your Zoiko Stream event team has been assigned"
+LVE_003_TEAM_CHANGED_SUBJECT = "Your Zoiko Stream event team changed"
 LVE_003_PREHEADER = "Review the confirmed details for your event."
 
 
@@ -3940,9 +3945,9 @@ def send_planning_action_email(to, *, name, category, category_label, event_titl
 
 # -- LVE-005 Rehearsal lifecycle ----------------------------------------------------------
 
-LVE_005_SCHEDULED_SUBJECT = "Zoiko Steam rehearsal scheduled for {event}"
-LVE_005_REMINDER_SUBJECT = "Reminder: Zoiko Steam rehearsal for {event}"
-LVE_005_COMPLETED_SUBJECT = "Zoiko Steam rehearsal completed for {event}"
+LVE_005_SCHEDULED_SUBJECT = "Zoiko Stream rehearsal scheduled for {event}"
+LVE_005_REMINDER_SUBJECT = "Reminder: Zoiko Stream rehearsal for {event}"
+LVE_005_COMPLETED_SUBJECT = "Zoiko Stream rehearsal completed for {event}"
 LVE_005_REPEAT_SUBJECT = "Action required: another rehearsal is needed for {event}"
 LVE_005_PREHEADER = "Rehearsal details for your event."
 LVE_005_CTA = "Open event"
@@ -4003,9 +4008,9 @@ def send_rehearsal_repeat_email(to, *, name, event_title, scheduled_at, zone, lo
 
 # -- LVE-006 Readiness gate lifecycle -----------------------------------------------------
 
-LVE_006_CONDITIONAL_SUBJECT = "Zoiko Steam event readiness is conditional"
+LVE_006_CONDITIONAL_SUBJECT = "Zoiko Stream event readiness is conditional"
 LVE_006_BLOCKED_SUBJECT = "Action required: {event} is blocked from readiness"
-LVE_006_PASSED_SUBJECT = "{event} passed Zoiko Steam readiness checks"
+LVE_006_PASSED_SUBJECT = "{event} passed Zoiko Stream readiness checks"
 LVE_006_REGRESSED_SUBJECT = "Action required: {event} readiness changed"
 LVE_006_PREHEADER = "Review the current readiness position for your event."
 
@@ -4054,7 +4059,7 @@ def send_readiness_email(to, *, name, variant, event_title, reference, current_s
 
 # -- LVE-007 Final event-day brief --------------------------------------------------------
 
-LVE_007_SUBJECT = "Your Zoiko Steam event-day brief is ready"
+LVE_007_SUBJECT = "Your Zoiko Stream event-day brief is ready"
 LVE_007_PREHEADER = "The approved brief for your event day."
 
 
@@ -4109,7 +4114,7 @@ def send_schedule_change_email(to, *, name, audience, event_title, reference, pr
 # -- LVE-009 Event-day activation ---------------------------------------------------------
 
 LVE_009_ARMED_SUBJECT = "{event} is armed for live operation"
-LVE_009_LIVE_SUBJECT = "{event} is live on Zoiko Steam"
+LVE_009_LIVE_SUBJECT = "{event} is live on Zoiko Stream"
 LVE_009_PREHEADER = "Internal operations notice for your event team."
 
 
@@ -4173,7 +4178,7 @@ def send_event_incident_email(to, *, name, variant, event_title, reference, reas
     # default and no "shortly" - an uncommitted promise is worse than none.
     if next_update:
         rows.append(("Next update", next_update))
-    footer = ("We share a reason category rather than investigation detail. Your Zoiko Steam "
+    footer = ("We share a reason category rather than investigation detail. Your Zoiko Stream "
               "team can give you more once the review is complete.")
     return _lve_send(to, subject, "Event update", headline, LVE_010_PREHEADER, rows, body,
                      "View event", event_url(event_id), footer, test_mode)
@@ -4181,11 +4186,11 @@ def send_event_incident_email(to, *, name, variant, event_title, reference, reas
 
 # -- LVE-011 Completion and replay --------------------------------------------------------
 
-LVE_011_ENDED_SUBJECT = "Your Zoiko Steam event has ended"
-LVE_011_PROCESSING_SUBJECT = "Your Zoiko Steam replay is being prepared"
-LVE_011_APPROVAL_SUBJECT = "Action required: review your Zoiko Steam replay"
-LVE_011_PUBLISHED_SUBJECT = "Your Zoiko Steam replay is published"
-LVE_011_UNAVAILABLE_SUBJECT = "Zoiko Steam replay is unavailable"
+LVE_011_ENDED_SUBJECT = "Your Zoiko Stream event has ended"
+LVE_011_PROCESSING_SUBJECT = "Your Zoiko Stream replay is being prepared"
+LVE_011_APPROVAL_SUBJECT = "Action required: review your Zoiko Stream replay"
+LVE_011_PUBLISHED_SUBJECT = "Your Zoiko Stream replay is published"
+LVE_011_UNAVAILABLE_SUBJECT = "Zoiko Stream replay is unavailable"
 LVE_011_PREHEADER = "Where your recording and replay currently stand."
 
 
@@ -4235,10 +4240,10 @@ def send_replay_lifecycle_email(to, *, name, variant, event_title, reference, re
 
 # -- LVE-012 Post-event evidence and retention --------------------------------------------
 
-LVE_012_READY_SUBJECT = "Your Zoiko Steam post-event report is ready"
-LVE_012_FAILED_SUBJECT = "Zoiko Steam could not generate your post-event report"
-LVE_012_REVIEW_SUBJECT = "Zoiko Steam event incident review is ready"
-LVE_012_CLOSED_SUBJECT = "Zoiko Steam event record is closed"
+LVE_012_READY_SUBJECT = "Your Zoiko Stream post-event report is ready"
+LVE_012_FAILED_SUBJECT = "Zoiko Stream could not generate your post-event report"
+LVE_012_REVIEW_SUBJECT = "Zoiko Stream event incident review is ready"
+LVE_012_CLOSED_SUBJECT = "Zoiko Stream event record is closed"
 LVE_012_PREHEADER = "Post-event evidence for your event."
 
 
@@ -4304,7 +4309,7 @@ def send_record_closed_email(to, *, name, event_title, reference, closed_at, rep
 # carries is a contributor access token, which is exchanged server-side for a short-lived
 # media credential (services/contributor_access.issue_media_credential).
 
-SENDER_CONTRIBUTOR = "Zoiko Steam Event Team"
+SENDER_CONTRIBUTOR = "Zoiko Stream Event Team"
 
 
 def contributor_url(event_id: str) -> str:
@@ -4324,7 +4329,7 @@ def _con_send(to, subject, header, headline, preheader, rows, body, cta, url, fo
 
 # -- CON-001 Contributor invitation lifecycle ---------------------------------------------
 
-CON_001_INVITE_SUBJECT = "You're invited to contribute to {event} on Zoiko Steam"
+CON_001_INVITE_SUBJECT = "You're invited to contribute to {event} on Zoiko Stream"
 CON_001_ACCEPTED_SUBJECT = "You're confirmed for {event}"
 CON_001_REMINDER_SUBJECT = "Reminder: action needed before {event}"
 CON_001_REVOKED_SUBJECT = "Your contributor access for {event} was revoked"
@@ -4544,7 +4549,7 @@ def send_contributor_session_ended_email(to, *, name, event_title, role, starts,
 # No template here accepts a card number, CVV, processor token, API key or storage secret -
 # there is no parameter through which one could travel.
 
-SENDER_BILLING = "Zoiko Steam Billing"
+SENDER_BILLING = "Zoiko Stream Billing"
 
 
 def billing_date(moment) -> str:
@@ -4575,10 +4580,10 @@ def _com_send(to, subject, header, headline, preheader, rows, body, cta, url, fo
 
 # -- COM-006 Invoice and payment confirmation ---------------------------------------------
 
-COM_006_INVOICE_SUBJECT = "Your Zoiko Steam invoice is available"
-COM_006_RECEIVED_SUBJECT = "Payment received for your Zoiko Steam invoice"
-COM_006_REFUND_SUBJECT = "A refund was issued for your Zoiko Steam account"
-COM_006_CREDIT_SUBJECT = "A credit note was issued for your Zoiko Steam account"
+COM_006_INVOICE_SUBJECT = "Your Zoiko Stream invoice is available"
+COM_006_RECEIVED_SUBJECT = "Payment received for your Zoiko Stream invoice"
+COM_006_REFUND_SUBJECT = "A refund was issued for your Zoiko Stream account"
+COM_006_CREDIT_SUBJECT = "A credit note was issued for your Zoiko Stream account"
 COM_006_PREHEADER = "Billing details for your account."
 
 
@@ -4648,8 +4653,8 @@ def send_credit_note_email(to, *, name, amount, reference, issued_at, invoice_nu
 # -- COM-007 Payment problem lifecycle ----------------------------------------------------
 
 COM_007_FAILED_SUBJECT = "Action required: we could not complete your payment"
-COM_007_OVERDUE_SUBJECT = "Action required: your Zoiko Steam invoice is overdue"
-COM_007_RESOLVED_SUBJECT = "Your Zoiko Steam billing issue is resolved"
+COM_007_OVERDUE_SUBJECT = "Action required: your Zoiko Stream invoice is overdue"
+COM_007_RESOLVED_SUBJECT = "Your Zoiko Stream billing issue is resolved"
 COM_007_PREHEADER = "Please review your billing details."
 
 
@@ -4693,9 +4698,9 @@ def send_payment_problem_email(to, *, name, variant, invoice_number, order_refer
                      "Open billing", billing_url, footer)
 
 
-COM_007_DISPUTE_OPENED_SUBJECT = "A payment dispute was opened on your Zoiko Steam account"
+COM_007_DISPUTE_OPENED_SUBJECT = "A payment dispute was opened on your Zoiko Stream account"
 COM_007_DISPUTE_ACTION_SUBJECT = "Action required: evidence needed for a payment dispute"
-COM_007_DISPUTE_RESOLVED_SUBJECT = "A payment dispute on your Zoiko Steam account is resolved"
+COM_007_DISPUTE_RESOLVED_SUBJECT = "A payment dispute on your Zoiko Stream account is resolved"
 
 
 def send_dispute_email(to, *, name, variant, dispute_reference, provider_reference, amount,
@@ -4730,10 +4735,10 @@ def send_dispute_email(to, *, name, variant, dispute_reference, provider_referen
 
 # -- COM-008 Usage and entitlement lifecycle ----------------------------------------------
 
-COM_008_LIMIT_SUBJECT = "Your Zoiko Steam {metric} limit has been reached"
-COM_008_CHANGED_SUBJECT = "Your Zoiko Steam entitlements changed"
-COM_008_REPORT_SUBJECT = "Your Zoiko Steam usage report is ready"
-COM_008_CORRECTED_SUBJECT = "Your Zoiko Steam usage report was corrected"
+COM_008_LIMIT_SUBJECT = "Your Zoiko Stream {metric} limit has been reached"
+COM_008_CHANGED_SUBJECT = "Your Zoiko Stream entitlements changed"
+COM_008_REPORT_SUBJECT = "Your Zoiko Stream usage report is ready"
+COM_008_CORRECTED_SUBJECT = "Your Zoiko Stream usage report was corrected"
 COM_008_PREHEADER = "Usage and entitlements for your account."
 
 
@@ -4799,7 +4804,7 @@ def send_usage_corrected_email(to, *, name, org_name, period, changes, reason, c
 #     services/support_comms.next_update_note(). No template composes a time, so an invented
 #     SLA is impossible here rather than merely discouraged.
 
-SENDER_SUPPORT = "Zoiko Steam Support"
+SENDER_SUPPORT = "Zoiko Stream Support"
 
 
 def support_case_url(ticket_id: str) -> str:
@@ -4817,7 +4822,7 @@ def _sup_send(to, subject, header, headline, preheader, rows, body, cta, url, fo
 
 
 SUP_CTA = "View support case"
-SUP_PREHEADER = "An update on your Zoiko Steam support case."
+SUP_PREHEADER = "An update on your Zoiko Stream support case."
 
 
 def _case_rows(case_reference, subject, category, priority, status, owner, org_name):
@@ -4829,7 +4834,7 @@ def _case_rows(case_reference, subject, category, priority, status, owner, org_n
 
 # -- SUP-001 Support case opened ----------------------------------------------------------
 
-SUP_001_SUBJECT = "Zoiko Steam support case {case} was opened"
+SUP_001_SUBJECT = "Zoiko Stream support case {case} was opened"
 
 
 def send_support_case_opened_email(to, *, name, case_reference, subject, category, priority,
@@ -4953,7 +4958,7 @@ def send_support_incident_linked_email(to, *, name, case_reference, subject, cat
 SUP_004_RESOLVED_SUBJECT = "Support case {case} was resolved"
 SUP_004_CLOSED_SUBJECT = "Support case {case} was closed"
 SUP_004_REOPENED_SUBJECT = "Support case {case} was reopened"
-SUP_004_FEEDBACK_SUBJECT = "Tell us about your Zoiko Steam support experience"
+SUP_004_FEEDBACK_SUBJECT = "Tell us about your Zoiko Stream support experience"
 
 
 def send_support_resolved_email(to, *, name, case_reference, subject, category, priority,
@@ -5021,7 +5026,7 @@ def send_support_feedback_email(to, *, name, case_reference, subject, category, 
 # services/security_comms (containment_note / disclosure_next_update), so no template can
 # compose a containment claim or invent an ETA.
 
-SENDER_SECURITY_OPS = "Zoiko Steam Security"
+SENDER_SECURITY_OPS = "Zoiko Stream Security"
 
 
 def security_center_url() -> str:
@@ -5038,17 +5043,17 @@ def _sec_send(to, subject, header, headline, preheader, rows, body, cta, url, fo
 
 
 SEC_CTA = "Open Security Center"
-SEC_PREHEADER = "A security notice for your Zoiko Steam organization."
+SEC_PREHEADER = "A security notice for your Zoiko Stream organization."
 # Repeated deliberately: the single most useful anti-phishing line we can carry, given these
 # are exactly the messages an attacker would imitate.
-NEVER_ASK = ("Zoiko Steam never asks for your password, recovery codes, MFA codes or API "
+NEVER_ASK = ("Zoiko Stream never asks for your password, recovery codes, MFA codes or API "
              "keys by email.")
 
 
 # -- SEC-006 Security contact verification ------------------------------------------------
 
-SEC_006_VERIFY_SUBJECT = "Verify your Zoiko Steam security contact"
-SEC_006_VIOLATION_SUBJECT = "Security action required for your Zoiko Steam account"
+SEC_006_VERIFY_SUBJECT = "Verify your Zoiko Stream security contact"
+SEC_006_VIOLATION_SUBJECT = "Security action required for your Zoiko Stream account"
 
 
 def send_security_contact_verify_email(to, *, name, org_name, reason, scope, expires_at,
@@ -5080,9 +5085,9 @@ def send_security_violation_email(to, *, name, account, org_name, occurred_at, c
 
 # -- SEC-001 Urgent security alert --------------------------------------------------------
 
-SEC_001_ALERT_SUBJECT = "Urgent security alert for your Zoiko Steam account"
-SEC_001_CONTAINED_SUBJECT = "Security event contained for your Zoiko Steam account"
-SEC_001_RESOLVED_SUBJECT = "Security event resolved for your Zoiko Steam account"
+SEC_001_ALERT_SUBJECT = "Urgent security alert for your Zoiko Stream account"
+SEC_001_CONTAINED_SUBJECT = "Security event contained for your Zoiko Stream account"
+SEC_001_RESOLVED_SUBJECT = "Security event resolved for your Zoiko Stream account"
 
 
 def send_security_alert_email(to, *, name, variant, reference, account, org_name, category,
@@ -5120,8 +5125,8 @@ def send_security_alert_email(to, *, name, variant, reference, account, org_name
 
 # -- SEC-002 Break-glass lifecycle --------------------------------------------------------
 
-SEC_002_STARTED_SUBJECT = "Emergency access started for your Zoiko Steam organization"
-SEC_002_ENDED_SUBJECT = "Emergency access ended for your Zoiko Steam organization"
+SEC_002_STARTED_SUBJECT = "Emergency access started for your Zoiko Stream organization"
+SEC_002_ENDED_SUBJECT = "Emergency access ended for your Zoiko Stream organization"
 SEC_002_REVIEW_SUBJECT = "Action required: emergency-access review is overdue"
 
 
@@ -5129,7 +5134,7 @@ def send_breakglass_started_email(to, *, name, org_name, reference, reason, scop
                                   approval, security_url, started_at, expires_at):
     """`expires_at` is the elevation's real expiry, which services/ops.current_elevation
     enforces - the email quotes an enforced deadline, it does not assert one."""
-    body = (f"Hi {name}, a Zoiko Steam engineer has started emergency access to {org_name} "
+    body = (f"Hi {name}, a Zoiko Stream engineer has started emergency access to {org_name} "
             f"under independent authorization.")
     rows = [("Organization", org_name), ("Reference", reference), ("Started", started_at),
             ("Access expires", expires_at), ("Purpose", reason),
@@ -5173,10 +5178,10 @@ def send_breakglass_review_email(to, *, name, org_name, reference, reason, scope
 
 # -- SEC-003 Organization security incident -----------------------------------------------
 
-SEC_003_OPENED_SUBJECT = "Security incident opened for your Zoiko Steam organization"
-SEC_003_UPDATE_SUBJECT = "Update on the security incident for your Zoiko Steam organization"
-SEC_003_CONTAINED_SUBJECT = "Security incident contained for your Zoiko Steam organization"
-SEC_003_RESOLVED_SUBJECT = "Security incident resolved for your Zoiko Steam organization"
+SEC_003_OPENED_SUBJECT = "Security incident opened for your Zoiko Stream organization"
+SEC_003_UPDATE_SUBJECT = "Update on the security incident for your Zoiko Stream organization"
+SEC_003_CONTAINED_SUBJECT = "Security incident contained for your Zoiko Stream organization"
+SEC_003_RESOLVED_SUBJECT = "Security incident resolved for your Zoiko Stream organization"
 
 
 def send_security_incident_email(to, *, name, variant, reference, org_name, status,
@@ -5222,8 +5227,8 @@ def send_security_incident_email(to, *, name, variant, reference, org_name, stat
 
 # -- SEC-004 Abuse report lifecycle -------------------------------------------------------
 
-SEC_004_RECEIVED_SUBJECT = "We received your Zoiko Steam report"
-SEC_004_CLOSED_SUBJECT = "Our review of your Zoiko Steam report is complete"
+SEC_004_RECEIVED_SUBJECT = "We received your Zoiko Stream report"
+SEC_004_CLOSED_SUBJECT = "Our review of your Zoiko Stream report is complete"
 
 
 def send_abuse_received_email(to, *, name, reference, received_at, category, promise,
@@ -5256,9 +5261,9 @@ def send_abuse_closed_email(to, *, name, reference, closed_at, outcome, security
 
 # -- SEC-005 Content restriction and appeal -----------------------------------------------
 
-SEC_005_RESTRICTED_SUBJECT = "Access to Zoiko Steam content was restricted"
+SEC_005_RESTRICTED_SUBJECT = "Access to Zoiko Stream content was restricted"
 SEC_005_APPEAL_RECEIVED_SUBJECT = "We received your appeal"
-SEC_005_APPEAL_DECIDED_SUBJECT = "Decision on your Zoiko Steam content appeal"
+SEC_005_APPEAL_DECIDED_SUBJECT = "Decision on your Zoiko Stream content appeal"
 SEC_005_REMOVED_SUBJECT = "Content removal completed"
 
 
@@ -5334,7 +5339,7 @@ def send_content_removed_email(to, *, name, reference, org_name, content, comple
 # deletion residue sentence from deletion_sentence(), so no template can invent a statutory
 # date or claim total erasure.
 
-SENDER_PRIVACY = "Zoiko Steam Privacy"
+SENDER_PRIVACY = "Zoiko Stream Privacy"
 
 
 def privacy_center_url() -> str:
@@ -5351,8 +5356,8 @@ def _prv_send(to, subject, header, headline, preheader, rows, body, cta, url, fo
 
 
 PRV_CTA = "Open Privacy Center"
-PRV_PREHEADER = "About your Zoiko Steam privacy request."
-NEVER_ASK_PRV = ("Zoiko Steam never asks for your password, recovery codes, MFA codes or "
+PRV_PREHEADER = "About your Zoiko Stream privacy request."
+NEVER_ASK_PRV = ("Zoiko Stream never asks for your password, recovery codes, MFA codes or "
                  "API keys by email.")
 
 
@@ -5365,8 +5370,8 @@ def _request_rows(reference, request_type, status):
 
 # -- PRV-001 Intake and verification ------------------------------------------------------
 
-PRV_001_RECEIVED_SUBJECT = "We received your Zoiko Steam privacy request"
-PRV_001_VERIFY_SUBJECT = "Action required: verify your Zoiko Steam privacy request"
+PRV_001_RECEIVED_SUBJECT = "We received your Zoiko Stream privacy request"
+PRV_001_VERIFY_SUBJECT = "Action required: verify your Zoiko Stream privacy request"
 
 
 def send_privacy_received_email(to, *, name, reference, request_type, status,
@@ -5459,10 +5464,10 @@ def send_privacy_decision_email(to, *, name, reference, request_type, status,
 
 # -- PRV-003 Export and deletion ----------------------------------------------------------
 
-PRV_003_EXPORT_SUBJECT = "Your Zoiko Steam privacy export is ready"
-PRV_003_EXPIRED_SUBJECT = "Your Zoiko Steam privacy export link expired"
-PRV_003_DELETED_SUBJECT = "Your Zoiko Steam deletion request was completed"
-PRV_003_DELETION_UPDATE_SUBJECT = "Update on your Zoiko Steam deletion request"
+PRV_003_EXPORT_SUBJECT = "Your Zoiko Stream privacy export is ready"
+PRV_003_EXPIRED_SUBJECT = "Your Zoiko Stream privacy export link expired"
+PRV_003_DELETED_SUBJECT = "Your Zoiko Stream deletion request was completed"
+PRV_003_DELETION_UPDATE_SUBJECT = "Update on your Zoiko Stream deletion request"
 
 
 def send_privacy_export_ready_email(to, *, name, reference, request_type, status,
@@ -5518,9 +5523,9 @@ def send_privacy_deletion_email(to, *, name, variant, reference, request_type, s
 
 # -- PRV-004 Notice, consent, subprocessors, retention exception --------------------------
 
-PRV_004_NOTICE_SUBJECT = "Zoiko Steam privacy notice was updated"
-PRV_004_CONSENT_SUBJECT = "Action required: your choice about the Zoiko Steam privacy notice"
-PRV_004_SUBPROCESSOR_SUBJECT = "Zoiko Steam subprocessor list was updated"
+PRV_004_NOTICE_SUBJECT = "Zoiko Stream privacy notice was updated"
+PRV_004_CONSENT_SUBJECT = "Action required: your choice about the Zoiko Stream privacy notice"
+PRV_004_SUBPROCESSOR_SUBJECT = "Zoiko Stream subprocessor list was updated"
 PRV_004_RETENTION_SUBJECT = "Update on privacy request {reference}"
 
 
@@ -5592,7 +5597,7 @@ def send_privacy_retention_email(to, *, name, reference, request_type, status,
 # record. Next-update wording always arrives ready-made from next_update_note(), so no
 # template can invent an ETA.
 
-SENDER_STATUS = "Zoiko Steam Status"
+SENDER_STATUS = "Zoiko Stream Status"
 
 
 def public_status_url() -> str:
@@ -5608,24 +5613,24 @@ def _sts_send(to, subject, header, headline, preheader, rows, body, cta, url, fo
     )
 
 
-STS_PREHEADER = "An update from the Zoiko Steam status page."
+STS_PREHEADER = "An update from the Zoiko Stream status page."
 # Repeated on every subscriber message: status is its own communication domain, and somebody
 # unsubscribing here must understand they have not opted out of security or billing mail.
-STS_SCOPE = ("You are receiving this because you subscribed to Zoiko Steam status updates. "
+STS_SCOPE = ("You are receiving this because you subscribed to Zoiko Stream status updates. "
              "Account, security, billing and privacy emails are separate.")
 
 
 # -- STS-001 Subscription lifecycle -------------------------------------------------------
 
-STS_001_VERIFY_SUBJECT = "Confirm your Zoiko Steam status subscription"
-STS_001_CONFIRMED_SUBJECT = "Your Zoiko Steam status subscription is active"
-STS_001_PREFERENCES_SUBJECT = "Your Zoiko Steam status preferences changed"
-STS_001_UNSUBSCRIBED_SUBJECT = "You unsubscribed from Zoiko Steam status updates"
+STS_001_VERIFY_SUBJECT = "Confirm your Zoiko Stream status subscription"
+STS_001_CONFIRMED_SUBJECT = "Your Zoiko Stream status subscription is active"
+STS_001_PREFERENCES_SUBJECT = "Your Zoiko Stream status preferences changed"
+STS_001_UNSUBSCRIBED_SUBJECT = "You unsubscribed from Zoiko Stream status updates"
 
 
 def send_status_verify_email(to, *, components, regions, expires_at, confirm_url,
                              status_url):
-    body = ("Please confirm this address so we can send you Zoiko Steam status updates.")
+    body = ("Please confirm this address so we can send you Zoiko Stream status updates.")
     rows = [("Components", _bullets(components)), ("Regions", _bullets(regions)),
             ("Link expires", expires_at)]
     return _sts_send(to, STS_001_VERIFY_SUBJECT, "Status updates",
@@ -5636,7 +5641,7 @@ def send_status_verify_email(to, *, components, regions, expires_at, confirm_url
 
 def send_status_confirmed_email(to, *, components, regions, notify_kinds, status_url,
                                 manage_url):
-    body = "Your Zoiko Steam status subscription is active."
+    body = "Your Zoiko Stream status subscription is active."
     rows = [("Components", _bullets(components)), ("Regions", _bullets(regions)),
             ("You will receive", _bullets(notify_kinds))]
     return _sts_send(to, STS_001_CONFIRMED_SUBJECT, "Status updates",
@@ -5649,7 +5654,7 @@ def send_status_preferences_email(to, *, previous_components, previous_regions,
                                   manage_url):
     """Only sent for a materially changed selection - update_preferences() returns False
     for a no-op, so an unchanged re-save reaches nothing."""
-    body = "Your Zoiko Steam status preferences have been updated."
+    body = "Your Zoiko Stream status preferences have been updated."
     rows = [("Previous components", _bullets(previous_components)),
             ("Previous regions", _bullets(previous_regions)),
             ("Current components", _bullets(current_components)),
@@ -5662,7 +5667,7 @@ def send_status_preferences_email(to, *, previous_components, previous_regions,
 def send_status_unsubscribed_email(to, *, scope_note, status_url):
     """`scope_note` states explicitly what was NOT affected, so leaving the status list is
     never mistaken for opting out of security or billing mail."""
-    body = ("You will no longer receive Zoiko Steam status updates. " + scope_note)
+    body = ("You will no longer receive Zoiko Stream status updates. " + scope_note)
     rows = [("Status updates", "Stopped"), ("What is unaffected", scope_note)]
     return _sts_send(to, STS_001_UNSUBSCRIBED_SUBJECT, "Status updates",
                      "You have unsubscribed.", STS_PREHEADER, rows, body,
@@ -5671,13 +5676,13 @@ def send_status_unsubscribed_email(to, *, scope_note, status_url):
 
 # -- STS-002 / STS-003 / STS-004 Public incidents -----------------------------------------
 
-STS_002_INVESTIGATING_SUBJECT = "Zoiko Steam is investigating a service issue"
-STS_002_IDENTIFIED_SUBJECT = "Cause identified for Zoiko Steam service issue"
-STS_003_MONITORING_SUBJECT = "Zoiko Steam service has recovered and is being monitored"
-STS_003_RESOLVED_SUBJECT = "Zoiko Steam service incident resolved"
-STS_003_REOPENED_SUBJECT = "Zoiko Steam service incident reopened"
+STS_002_INVESTIGATING_SUBJECT = "Zoiko Stream is investigating a service issue"
+STS_002_IDENTIFIED_SUBJECT = "Cause identified for Zoiko Stream service issue"
+STS_003_MONITORING_SUBJECT = "Zoiko Stream service has recovered and is being monitored"
+STS_003_RESOLVED_SUBJECT = "Zoiko Stream service incident resolved"
+STS_003_REOPENED_SUBJECT = "Zoiko Stream service incident reopened"
 STS_003_RESIDUAL_SUBJECT = "Service restored — follow-up work continues"
-STS_004_CORRECTION_SUBJECT = "Correction to Zoiko Steam incident update"
+STS_004_CORRECTION_SUBJECT = "Correction to Zoiko Stream incident update"
 STS_004_REVIEW_SUBJECT = "Post-incident review published for {reference}"
 
 
@@ -5779,14 +5784,14 @@ def send_status_review_email(to, *, reference, title, impact, components, region
 
 # -- STS-005 / STS-006 Maintenance --------------------------------------------------------
 
-STS_005_SCHEDULED_SUBJECT = "Scheduled Zoiko Steam maintenance"
-STS_005_REMINDER_SUBJECT = "Reminder: upcoming Zoiko Steam maintenance"
-STS_005_CHANGED_SUBJECT = "Zoiko Steam scheduled maintenance changed"
-STS_005_CANCELED_SUBJECT = "Zoiko Steam scheduled maintenance canceled"
-STS_006_STARTED_SUBJECT = "Zoiko Steam scheduled maintenance has started"
-STS_006_EXTENDED_SUBJECT = "Zoiko Steam maintenance is taking longer than expected"
-STS_006_COMPLETED_SUBJECT = "Zoiko Steam scheduled maintenance is complete"
-STS_006_EMERGENCY_SUBJECT = "Emergency Zoiko Steam maintenance is underway"
+STS_005_SCHEDULED_SUBJECT = "Scheduled Zoiko Stream maintenance"
+STS_005_REMINDER_SUBJECT = "Reminder: upcoming Zoiko Stream maintenance"
+STS_005_CHANGED_SUBJECT = "Zoiko Stream scheduled maintenance changed"
+STS_005_CANCELED_SUBJECT = "Zoiko Stream scheduled maintenance canceled"
+STS_006_STARTED_SUBJECT = "Zoiko Stream scheduled maintenance has started"
+STS_006_EXTENDED_SUBJECT = "Zoiko Stream maintenance is taking longer than expected"
+STS_006_COMPLETED_SUBJECT = "Zoiko Stream scheduled maintenance is complete"
+STS_006_EMERGENCY_SUBJECT = "Emergency Zoiko Stream maintenance is underway"
 
 
 def send_status_maintenance_email(to, *, variant, reference, title, components, regions,
@@ -5872,8 +5877,8 @@ def send_status_maintenance_email(to, *, variant, reference, title, components, 
 # contents, or a monitoring payload. There is no parameter through which any of those could
 # travel - which is why the test suite asserts on the signatures rather than on the copy.
 
-SENDER_TRUST = "Zoiko Steam Trust"
-SENDER_SECURITY_ADVISORY = "Zoiko Steam Security"
+SENDER_TRUST = "Zoiko Stream Trust"
+SENDER_SECURITY_ADVISORY = "Zoiko Stream Security"
 
 
 def trust_center_url() -> str:
@@ -5892,11 +5897,11 @@ def _trust_send(to, subject, header, headline, preheader, rows, body, cta, url, 
 
 # -- TRU-001 Security advisory lifecycle --------------------------------------------------
 
-TRU_001_PUBLISHED_SUBJECT = "Zoiko Steam security advisory {reference}"
-TRU_001_UPDATED_SUBJECT = "Update to Zoiko Steam security advisory {reference}"
-TRU_001_REMEDIATION_SUBJECT = ("Remediation available for Zoiko Steam security advisory "
+TRU_001_PUBLISHED_SUBJECT = "Zoiko Stream security advisory {reference}"
+TRU_001_UPDATED_SUBJECT = "Update to Zoiko Stream security advisory {reference}"
+TRU_001_REMEDIATION_SUBJECT = ("Remediation available for Zoiko Stream security advisory "
                                "{reference}")
-TRU_001_CLOSED_SUBJECT = "Zoiko Steam security advisory {reference} closed"
+TRU_001_CLOSED_SUBJECT = "Zoiko Stream security advisory {reference} closed"
 
 ADVISORY_VARIANT_SUBJECT = {
     "advisory_published": TRU_001_PUBLISHED_SUBJECT,
@@ -6021,18 +6026,18 @@ def send_security_advisory_email(to, *, reference, variant, title, severity, sum
         footer = ADVISORY_SCOPE
 
     return _trust_send(to, subject, "Security advisory", headline,
-                       f"Zoiko Steam security advisory {reference}.", rows, body,
+                       f"Zoiko Stream security advisory {reference}.", rows, body,
                        "View in the Trust Center", trust_center_url(), footer,
                        sender=SENDER_SECURITY_ADVISORY)
 
 
 # -- TRU-002 Trust evidence request and access --------------------------------------------
 
-TRU_002_RECEIVED_SUBJECT = "We received your Zoiko Steam Trust Center request"
-TRU_002_APPROVED_SUBJECT = "Your Zoiko Steam Trust Center document is available"
-TRU_002_DENIED_SUBJECT = "About your Zoiko Steam Trust Center request"
-TRU_002_EXPIRED_SUBJECT = "Your Zoiko Steam Trust Center access expired"
-TRU_002_REVOKED_SUBJECT = "Your Zoiko Steam Trust Center access was withdrawn"
+TRU_002_RECEIVED_SUBJECT = "We received your Zoiko Stream Trust Center request"
+TRU_002_APPROVED_SUBJECT = "Your Zoiko Stream Trust Center document is available"
+TRU_002_DENIED_SUBJECT = "About your Zoiko Stream Trust Center request"
+TRU_002_EXPIRED_SUBJECT = "Your Zoiko Stream Trust Center access expired"
+TRU_002_REVOKED_SUBJECT = "Your Zoiko Stream Trust Center access was withdrawn"
 
 EVIDENCE_DECISION_SUBJECT = {
     "denied": TRU_002_DENIED_SUBJECT,
@@ -6142,8 +6147,8 @@ def send_trust_request_decided_email(to, *, reference, requester_name, variant,
 
 # -- TRU-003 Vulnerability disclosure -----------------------------------------------------
 
-TRU_003_RECEIVED_SUBJECT = "We received your Zoiko Steam security report"
-TRU_003_UPDATE_SUBJECT = "Update on your Zoiko Steam security report {reference}"
+TRU_003_RECEIVED_SUBJECT = "We received your Zoiko Stream security report"
+TRU_003_UPDATE_SUBJECT = "Update on your Zoiko Stream security report {reference}"
 
 # What acknowledgement is allowed to say, and what it deliberately does not.
 #
@@ -6186,7 +6191,7 @@ def send_vulnerability_received_email(to, *, reference, reporter_name, received_
             ("Safe handling", VULN_SAFE_HANDLING)]
     return _trust_send(to, TRU_003_RECEIVED_SUBJECT, "Security report",
                        "We received your security report.",
-                       "Your report is with the Zoiko Steam security team.", rows, body,
+                       "Your report is with the Zoiko Stream security team.", rows, body,
                        "Track your report", portal_url,
                        "Use the secure link above to follow your report or send us more "
                        "information. Please do not include credentials.",
@@ -6216,7 +6221,7 @@ def send_vulnerability_update_email(to, *, reference, reporter_name, stage, body
         rows.append(("Next step",
                      "If you can, please confirm the fix resolves what you reported."))
     return _trust_send(to, subject, "Security report", headline,
-                       "An update on your Zoiko Steam security report.", rows, body,
+                       "An update on your Zoiko Stream security report.", rows, body,
                        "View your report", trust_center_url(),
                        VULN_SAFE_HANDLING, sender=SENDER_SECURITY_ADVISORY)
 
@@ -6233,11 +6238,11 @@ def send_vulnerability_update_email(to, *, reference, reporter_name, stage, body
 # reach messages that carry it. The two properties are the same guarantee seen from either
 # end, and the test suite asserts both by inspecting the signatures.
 
-SENDER_MARKETING = "Zoiko Steam"
+SENDER_MARKETING = "Zoiko Stream"
 
 # On every promotional message. States the basis, not just the mechanism: somebody who does
 # not remember opting in should be able to tell what they are looking at.
-MKT_SCOPE = ("You are receiving this because you subscribed to Zoiko Steam product updates. "
+MKT_SCOPE = ("You are receiving this because you subscribed to Zoiko Stream product updates. "
              "This is separate from your account, security, billing and privacy emails, "
              "which are not affected if you unsubscribe.")
 
@@ -6265,16 +6270,16 @@ def _mkt_send(to, subject, header, headline, preheader, rows, body, cta, url,
 
 # -- MKT foundation: consent lifecycle ----------------------------------------------------
 
-MKT_VERIFY_SUBJECT = "Confirm your Zoiko Steam product updates"
-MKT_CONFIRMED_SUBJECT = "You're subscribed to Zoiko Steam product updates"
-MKT_PREFERENCES_SUBJECT = "Your Zoiko Steam email preferences changed"
-MKT_UNSUBSCRIBED_SUBJECT = "You unsubscribed from Zoiko Steam product updates"
+MKT_VERIFY_SUBJECT = "Confirm your Zoiko Stream product updates"
+MKT_CONFIRMED_SUBJECT = "You're subscribed to Zoiko Stream product updates"
+MKT_PREFERENCES_SUBJECT = "Your Zoiko Stream email preferences changed"
+MKT_UNSUBSCRIBED_SUBJECT = "You unsubscribed from Zoiko Stream product updates"
 
 
 def send_marketing_verify_email(to, *, topics, expires_at, confirm_url):
     """Double opt-in confirmation. Transactional - it is the consent request itself, so it
     carries no unsubscribe link because there is nothing yet to unsubscribe from."""
-    body = ("Please confirm this address so we can send you the Zoiko Steam updates you "
+    body = ("Please confirm this address so we can send you the Zoiko Stream updates you "
             "asked for. If you did not request this, ignore this email and nothing will be "
             "sent.")
     rows = [("You asked for", _bullets(topics)),
@@ -6282,11 +6287,11 @@ def send_marketing_verify_email(to, *, topics, expires_at, confirm_url):
     return _send(
         to, MKT_VERIFY_SUBJECT,
         _org_shell("Product updates", "Confirm your subscription.",
-                   "Confirm your Zoiko Steam product updates.", rows, html.escape(body),
+                   "Confirm your Zoiko Stream product updates.", rows, html.escape(body),
                    "Confirm subscription", confirm_url,
                    "You will not receive anything until you confirm."),
         _org_text("Confirm your subscription.",
-                  "Confirm your Zoiko Steam product updates.", rows, body,
+                  "Confirm your Zoiko Stream product updates.", rows, body,
                   "Confirm subscription", confirm_url,
                   "You will not receive anything until you confirm.", SENDER_MARKETING),
         sender=_sender_identity(SENDER_MARKETING),
@@ -6294,25 +6299,25 @@ def send_marketing_verify_email(to, *, topics, expires_at, confirm_url):
 
 
 def send_marketing_confirmed_email(to, *, topics, manage_url, unsubscribe_url):
-    body = "Thanks - you're subscribed to the Zoiko Steam updates you chose."
+    body = "Thanks - you're subscribed to the Zoiko Stream updates you chose."
     rows = [("You will receive", _bullets(topics)),
             ("Not affected",
              "Account, security, billing and privacy emails are separate and are never "
              "affected by this subscription.")]
     return _mkt_send(to, MKT_CONFIRMED_SUBJECT, "Product updates",
-                     "You're subscribed.", "Your Zoiko Steam subscription is active.",
+                     "You're subscribed.", "Your Zoiko Stream subscription is active.",
                      rows, body, "Manage what you receive", manage_url,
                      unsubscribe_url=unsubscribe_url, manage_url=manage_url)
 
 
 def send_marketing_preferences_email(to, *, previous_topics, current_topics, manage_url,
                                      unsubscribe_url):
-    body = "Your Zoiko Steam email preferences have been updated."
+    body = "Your Zoiko Stream email preferences have been updated."
     rows = [("Previously", _bullets(previous_topics) if previous_topics else "Nothing"),
             ("Now", _bullets(current_topics) if current_topics else "Nothing")]
     return _mkt_send(to, MKT_PREFERENCES_SUBJECT, "Product updates",
                      "Your preferences changed.",
-                     "Your Zoiko Steam email preferences changed.", rows, body,
+                     "Your Zoiko Stream email preferences changed.", rows, body,
                      "Manage what you receive", manage_url,
                      unsubscribe_url=unsubscribe_url, manage_url=manage_url)
 
@@ -6323,7 +6328,7 @@ def send_marketing_unsubscribed_email(to, *, resubscribe_url):
     Transactional - it is the receipt for an action, and offering to unsubscribe from an
     unsubscribe confirmation would be absurd.
     """
-    body = ("You have been unsubscribed from Zoiko Steam product updates. This takes effect "
+    body = ("You have been unsubscribed from Zoiko Stream product updates. This takes effect "
             "immediately.")
     rows = [("Product updates", "Stopped"),
             ("Still active",
@@ -6332,11 +6337,11 @@ def send_marketing_unsubscribed_email(to, *, resubscribe_url):
     return _send(
         to, MKT_UNSUBSCRIBED_SUBJECT,
         _org_shell("Product updates", "You have unsubscribed.",
-                   "You unsubscribed from Zoiko Steam product updates.", rows,
+                   "You unsubscribed from Zoiko Stream product updates.", rows,
                    html.escape(body), "Subscribe again", resubscribe_url,
                    "Security, billing and privacy emails are not affected."),
         _org_text("You have unsubscribed.",
-                  "You unsubscribed from Zoiko Steam product updates.", rows, body,
+                  "You unsubscribed from Zoiko Stream product updates.", rows, body,
                   "Subscribe again", resubscribe_url,
                   "Security, billing and privacy emails are not affected.",
                   SENDER_MARKETING),
@@ -6346,7 +6351,7 @@ def send_marketing_unsubscribed_email(to, *, resubscribe_url):
 
 # -- MKT-001 Release notes digest ---------------------------------------------------------
 
-MKT_001_SUBJECT = "What's new in Zoiko Steam"
+MKT_001_SUBJECT = "What's new in Zoiko Stream"
 
 
 def send_release_digest_email(to, *, title, summary, entries, period_start, period_end,
@@ -6367,7 +6372,7 @@ def send_release_digest_email(to, *, title, summary, entries, period_start, peri
             value += f" Documentation: {public_base_url()}{entry['documentation_path']}"
         rows.append((label, value))
     return _mkt_send(to, MKT_001_SUBJECT, "Product updates", title or "What's new.",
-                     "What's new in Zoiko Steam.", rows, body,
+                     "What's new in Zoiko Stream.", rows, body,
                      "Read the release notes", f"{public_base_url()}/releases",
                      unsubscribe_url=unsubscribe_url, manage_url=manage_url)
 
@@ -6416,9 +6421,9 @@ def send_feature_announcement_email(to, *, subject, feature_name, lifecycle,
 # -- MKT-003 Developer onboarding series --------------------------------------------------
 
 MKT_003_SUBJECT = {
-    "welcome": "Getting started with the Zoiko Steam API",
-    "build": "Building your Zoiko Steam integration",
-    "production_readiness": "Taking your Zoiko Steam integration to production",
+    "welcome": "Getting started with the Zoiko Stream API",
+    "build": "Building your Zoiko Stream integration",
+    "production_readiness": "Taking your Zoiko Stream integration to production",
 }
 
 # Each step's copy is tied to the milestone that unlocked it, so the message describes
@@ -6426,7 +6431,7 @@ MKT_003_SUBJECT = {
 # seen API traffic: that milestone is not observable here (no API-key request authentication,
 # no per-key telemetry), so it is not used and not implied.
 MKT_003_BODY = {
-    "welcome": ("Welcome. Here's the short path to your first Zoiko Steam API call: create "
+    "welcome": ("Welcome. Here's the short path to your first Zoiko Stream API call: create "
                 "a credential in your organization's developer settings, read the quickstart, "
                 "and try a request against a test event."),
     "build": ("You've created a credential - nice. Next up: webhooks. Register an endpoint, "
@@ -6451,14 +6456,14 @@ def send_developer_onboarding_email(to, *, step, milestone, manage_url, unsubscr
     rows = [MKT_003_STEP_ROW.get(step, MKT_003_STEP_ROW["welcome"]),
             ("Part of", "Developer education - a short series, not a drip campaign.")]
     return _mkt_send(to, subject, "Developer education",
-                     subject + ".", "Developer education from Zoiko Steam.", rows, body,
+                     subject + ".", "Developer education from Zoiko Stream.", rows, body,
                      "Open the developer docs", f"{public_base_url()}/developers",
                      unsubscribe_url=unsubscribe_url, manage_url=manage_url)
 
 
 # -- MKT-004 Guides and webinars ----------------------------------------------------------
 
-MKT_004_GUIDE_SUBJECT = "Your Zoiko Steam guide: {guide}"
+MKT_004_GUIDE_SUBJECT = "Your Zoiko Stream guide: {guide}"
 MKT_004_CONFIRMATION_SUBJECT = "You're registered: {title}"
 MKT_004_REMINDER_SUBJECT = "Starting soon: {title}"
 MKT_004_RESCHEDULED_SUBJECT = "New time for {title}"
@@ -6504,11 +6509,11 @@ def send_guide_email(to, *, name, guide, guide_label, subscribed):
     return _send(
         to, subject,
         _org_shell("Live Events education", f"Your guide: {guide_label}.",
-                   f"Your Zoiko Steam guide: {guide_label}.", rows, html.escape(body),
+                   f"Your Zoiko Stream guide: {guide_label}.", rows, html.escape(body),
                    "Read the guide", f"{public_base_url()}/guides/{guide}",
                    "You asked for this guide. We have not subscribed you to anything else."),
         _org_text(f"Your guide: {guide_label}.",
-                  f"Your Zoiko Steam guide: {guide_label}.", rows, body,
+                  f"Your Zoiko Stream guide: {guide_label}.", rows, body,
                   "Read the guide", f"{public_base_url()}/guides/{guide}",
                   "You asked for this guide. We have not subscribed you to anything else.",
                   SENDER_MARKETING),

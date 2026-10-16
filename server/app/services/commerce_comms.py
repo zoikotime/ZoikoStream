@@ -312,7 +312,7 @@ def notify_invoice_available(db: Session, background, invoice: Invoice) -> bool:
            tax_summary=(f"{money(invoice.tax_amount, invoice.currency)}"
                         + (f" ({invoice.tax_treatment})" if invoice.tax_treatment else "")
                         if invoice.tax_amount is not None else "Not determined"),
-           billing_entity=invoice.seller_legal_entity_id or "Zoiko Steam",
+           billing_entity=invoice.seller_legal_entity_id or "Zoiko Stream",
            org_name=org.name if org else "your Organization",
            billing_url=billing_url())
     return True
@@ -777,7 +777,7 @@ def notify_limit_reached(db: Session, background, org: Organization, metric: str
            limit=str(row.last_limit),
            blocked_action=(blocked_action
                            or "Further use of this entitlement is blocked"),
-           next_step=("Free up capacity, or contact your Zoiko Steam team to raise this "
+           next_step=("Free up capacity, or contact your Zoiko Stream team to raise this "
                       "limit."),
            billing_url=billing_url())
     return True

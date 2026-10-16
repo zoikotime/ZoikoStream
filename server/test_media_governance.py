@@ -1396,7 +1396,7 @@ def test_deletion_completed_is_truthful_about_residual_copies():
         assert deleted is True, reason
         assert _rec(rid) is None
         body = cap.of(MED_011_DELETED)["text"]
-        assert "outside Zoiko Steam's control" in body
+        assert "outside Zoiko Stream's control" in body
         assert "permanently erased" not in body.lower()
         assert "all copies" not in body.lower()
         assert "Retained records" in body

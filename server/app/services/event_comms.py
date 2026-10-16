@@ -97,7 +97,7 @@ def event_timestamp(event: Event | None, moment: datetime | None,
 # There is no User.timezone column anywhere in this codebase, so no recipient has an
 # authoritative zone to convert into. LVE explicitly forbids converting without one.
 RECIPIENT_LOCAL_SUPPORTED = False
-LOCAL_TIME_NOTE = ("All times are shown in the event's timezone. Zoiko Steam does not store a "
+LOCAL_TIME_NOTE = ("All times are shown in the event's timezone. Zoiko Stream does not store a "
                    "personal timezone, so no local conversion is shown.")
 
 
@@ -284,7 +284,7 @@ CUSTOMER_OBLIGATIONS = {
 }
 ZOIKO_OBLIGATIONS = {
     "requires_dual_recording": "Capture two independent recordings of the event",
-    "requires_command_owner": "Assign a named Zoiko Steam command owner to the event",
+    "requires_command_owner": "Assign a named Zoiko Stream command owner to the event",
     "managed_only": "Run the event as a managed delivery rather than self-service",
     "requires_reserved_capacity": "Reserve dedicated delivery capacity for the event window",
     "requires_change_freeze": "Apply a change freeze ahead of the event",
@@ -339,10 +339,10 @@ def responsibilities(profile: ServiceProfile | None) -> tuple[list[str], list[st
     return customer, zoiko
 
 
-# Zoiko Steam has no venue/location column and no in-person delivery concept anywhere in the
+# Zoiko Stream has no venue/location column and no in-person delivery concept anywhere in the
 # model - every event is delivered through the streaming platform. Stated as a constant so
 # the proposal and approval messages describe the delivery model without inventing a venue.
-DELIVERY_MODEL = "Virtual - delivered through the Zoiko Steam streaming platform"
+DELIVERY_MODEL = "Virtual - delivered through the Zoiko Stream streaming platform"
 
 
 # == LVE-001 - proposal and booking lifecycle ===========================================

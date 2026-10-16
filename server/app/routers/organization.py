@@ -1232,7 +1232,7 @@ def rotate_developer_api_key(key_id: str, background: BackgroundTasks,
 
     The replacement secret is in this response and nowhere else. There is deliberately no
     overlap window: an overlap is a promise about what an authentication path will accept,
-    and no Zoiko Steam endpoint authenticates an API key yet.
+    and no Zoiko Stream endpoint authenticates an API key yet.
     """
     retired, replacement = admin_crud.rotate_api_key(db, org, key_id, actor_id=admin.id)
     if replacement is None:

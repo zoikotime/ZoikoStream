@@ -63,7 +63,7 @@ ACTIVE_STATUSES = ("recording", "paused")
 # hardcoded here where possible; this is the fallback wording for an evidence-free row.
 NOT_CHECKED_DEFAULT = (
     "Frame-level gap and black-frame detection, caption quality, and cryptographic "
-    "integrity verification are not performed by Zoiko Steam"
+    "integrity verification are not performed by Zoiko Stream"
 )
 
 # Closed set. A provider exception string is never surfaced — cloud and encoder errors
@@ -431,7 +431,7 @@ def _not_checked(evidence: dict | None) -> str:
     if (evidence or {}).get("caption_qa") == "not implemented":
         gaps.append("caption quality")
     gaps.append("cryptographic integrity verification")
-    return f"{', '.join(gaps).capitalize()} — these are not performed by Zoiko Steam"
+    return f"{', '.join(gaps).capitalize()} — these are not performed by Zoiko Stream"
 
 
 def _missing_components(evidence: dict | None) -> str:

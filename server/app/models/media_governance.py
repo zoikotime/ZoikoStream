@@ -164,7 +164,7 @@ class LegalHoldContact(Base):
 
     Legal-hold notification has a recipient the product otherwise has no way to name: the
     person who asked for the hold is frequently outside the tenant (counsel, a compliance
-    officer) and is not a Zoiko Steam user at all. Without this table the only truthful
+    officer) and is not a Zoiko Stream user at all. Without this table the only truthful
     options were to email org admins and call them "legal contacts", or to skip the
     notification. This is a real, stored, super_admin-managed list instead.
     """

@@ -157,6 +157,6 @@ def capability_summary(state: str) -> str:
 
 def preserved_summary(state: str) -> str:
     if state == ORG_STATE_DELETED:
-        return "Contact Zoiko Steam Support for billing, export and privacy records"
+        return "Contact Zoiko Stream Support for billing, export and privacy records"
     return ("Billing, export, privacy, account security and support routes remain "
             "available")

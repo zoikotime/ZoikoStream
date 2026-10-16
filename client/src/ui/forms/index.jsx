@@ -112,6 +112,12 @@ export function Checkbox({ className = "", ...props }) {
 // <input type="checkbox"> inside a <label>, so keyboard, space-to-toggle, form semantics
 // and every existing checked/onChange handler behave exactly as before — only the paint
 // is ours. The tick scales in; the box fills violet.
+//
+// `!min-h-0`: the app's 44px touch-target floor (index.css, `html.native` + coarse pointer)
+// sets min-height on every checkbox. A browser-painted checkbox stays square under it — the
+// glyph is centred in the taller box — but this input IS the painted box, so the floor
+// stretched it into a 20×44 bar. The <label> around box and text is the touch target here.
+// `!` because that rule is unlayered and would otherwise beat any utility.
 export function CheckField({ label, error, className = "", ...props }) {
   return (
     <div className={className}>
@@ -119,7 +125,7 @@ export function CheckField({ label, error, className = "", ...props }) {
         <span className="relative mt-px grid h-5 w-5 shrink-0 place-items-center">
           <input
             type="checkbox"
-            className="peer h-5 w-5 cursor-pointer appearance-none rounded-[7px] border-2 border-slate-300 bg-white transition duration-200 checked:border-violet-600 checked:bg-violet-600 hover:border-violet-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-violet-500/25 checked:hover:bg-violet-500 dark:border-slate-600 dark:bg-slate-900 dark:checked:border-violet-500 dark:checked:bg-violet-500"
+            className="peer h-5 w-5 !min-h-0 cursor-pointer appearance-none rounded-[7px] border-2 border-slate-300 bg-white transition duration-200 checked:border-violet-600 checked:bg-violet-600 hover:border-violet-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-violet-500/25 checked:hover:bg-violet-500 dark:border-slate-600 dark:bg-slate-900 dark:checked:border-violet-500 dark:checked:bg-violet-500"
             {...props}
           />
           <FiCheck
