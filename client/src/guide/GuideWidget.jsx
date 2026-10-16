@@ -19,6 +19,7 @@ import SupportStep from "./parts/SupportStep";
 import LeadForm from "./parts/LeadForm";
 import Actions from "./parts/Actions";
 import { isSafeHref } from "./parts/actionUtils";
+import { useGuideLauncher } from "./safeArea";
 
 // Quick intents that start a typed flow directly instead of asking the model (Conversation
 // Flow §4: quick actions route to the same engines as free text).
@@ -100,11 +101,22 @@ function StatePanel({ icon: Icon, title, text, children, role = "status" }) {
   );
 }
 
-export default function GuideWidget({ page, pathname }) {
+export default function GuideWidget({ page, pathname, suppressed = false }) {
   const navigate = useNavigate();
   const [boot, setBoot] = useState(null); // bootstrap config; null until loaded
   const [open, setOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Entering a console page closes the panel (adjusted during render, not in an effect): the
+  // public Guide never shares the screen with the Operator Guide. The conversation itself is
+  // server-side, so the launcher on the next public page picks it up again.
+  const [wasSuppressed, setWasSuppressed] = useState(suppressed);
+  if (suppressed !== wasSuppressed) {
+    setWasSuppressed(suppressed);
+    if (suppressed) {
+      setOpen(false);
+      setMenuOpen(false);
+    }
+  }
   const [draft, setDraft] = useState("");
   const [atBottom, setAtBottom] = useState(true);
   const launcherRef = useRef(null);
@@ -247,7 +259,12 @@ export default function GuideWidget({ page, pathname }) {
     el.style.height = `${Math.min(144, Math.max(40, el.scrollHeight))}px`;
   }, [draft]);
 
-  if (!boot?.enabled) return null;
+  // Second in the shared bottom-right stack (guide/safeArea.js): if a console launcher were
+  // ever mounted too, this one sits above it rather than on the same spot.
+  const showLauncher = !!boot?.enabled && !suppressed && !!page && !open;
+  useGuideLauncher(launcherRef, { order: 1, enabled: showLauncher });
+
+  if (!boot?.enabled || suppressed) return null;
   if (!page && !open) return null; // ineligible page: no launcher
 
   const maxChars = boot.limits?.max_message_chars || 4000;

@@ -29,6 +29,9 @@ import { CONSOLE, cx } from "../../ui/tokens";
 //
 // An optional `detail` is a short line under the value saying what it is made of
 // ("3 of 12 registered viewers attended").
+//
+// A fact whose answer is not one figure (a breakdown, a list) passes `content` instead of
+// `value`: it renders under the same label, in place of the figure.
 const COLUMNS = {
   2: "sm:grid-cols-2",
   3: "sm:grid-cols-2 lg:grid-cols-3",
@@ -38,8 +41,16 @@ const COLUMNS = {
 export default function FactGrid({ facts = [], columns = 4, className = "" }) {
   return (
     <dl className={cx("grid grid-cols-1 gap-x-6 gap-y-5", COLUMNS[columns] || COLUMNS[4], className)}>
-      {facts.map(({ label, value, reason, tone, detail }) => {
+      {facts.map(({ label, value, reason, tone, detail, content }) => {
         const missing = value == null;
+        if (content !== undefined) {
+          return (
+            <div key={label} className="min-w-0">
+              <dt className={cx("truncate text-[13px]", CONSOLE.muted)}>{label}</dt>
+              <dd className="mt-1 min-w-0">{content}</dd>
+            </div>
+          );
+        }
         return (
           <div key={label} className="min-w-0">
             <dt className={cx("truncate text-[13px]", CONSOLE.muted)}>{label}</dt>

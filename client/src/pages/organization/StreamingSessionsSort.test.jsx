@@ -334,3 +334,58 @@ describe("Recent sessions when the rows go away", () => {
     expectNeutral();
   });
 });
+
+// Peak audience is a measured count: a session nobody watched peaked at 0, and that is a
+// value, not a gap. The column used `peak_viewers || "—"`, which showed every one as a dash.
+describe("Peak audience values", () => {
+  const session = (id, title, peak_viewers) => ({
+    id, event_id: `e-${id}`, title, mode: "ended", state: "Ended",
+    started_at: ago(300), ended_at: ago(240), peak_viewers,
+  });
+  // Server order matches no peak order, so a sorted table is provably sorted.
+  const PEAKS = [
+    session("p5", "Five watched", 5),
+    session("p0", "Nobody watched", 0),
+    session("pn", "Not recorded", null),
+    session("p40", "Forty watched", 40),
+  ];
+  beforeEach(() => {
+    byRange["24h"] = PEAKS;
+  });
+
+  const peakCell = (title) => {
+    const row = [...document.querySelectorAll("tbody tr")].find((tr) => tr.querySelector("td p")?.textContent === title);
+    return row.querySelectorAll("td")[COLUMNS.indexOf("Peak audience")].querySelector("span");
+  };
+  const showsPeaks = () => waitFor(() => expect(titles()).toHaveLength(PEAKS.length));
+
+  it("shows a zero peak as 0, in the same tone as any other count", async () => {
+    renderPage();
+    await showsPeaks();
+    expect(peakCell("Nobody watched")).toHaveTextContent(/^0$/);
+    expect(peakCell("Nobody watched").className).toBe(peakCell("Five watched").className);
+  });
+
+  it("shows a positive peak as its number", async () => {
+    renderPage();
+    await showsPeaks();
+    expect(peakCell("Five watched")).toHaveTextContent(/^5$/);
+    expect(peakCell("Forty watched")).toHaveTextContent(/^40$/);
+  });
+
+  it("shows a missing peak as a faint dash, distinct from 0", async () => {
+    renderPage();
+    await showsPeaks();
+    expect(peakCell("Not recorded")).toHaveTextContent(/^—$/);
+    expect(peakCell("Not recorded").className).not.toBe(peakCell("Nobody watched").className);
+  });
+
+  it("sorts 0 as the lowest count, with a missing peak last either way", async () => {
+    renderPage();
+    await showsPeaks();
+    fireEvent.click(header("Peak audience"));
+    await waitFor(() => expect(titles()).toEqual(["Nobody watched", "Five watched", "Forty watched", "Not recorded"]));
+    fireEvent.click(header("Peak audience"));
+    await waitFor(() => expect(titles()).toEqual(["Forty watched", "Five watched", "Nobody watched", "Not recorded"]));
+  });
+});

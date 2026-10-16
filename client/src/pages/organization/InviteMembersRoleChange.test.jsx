@@ -101,8 +101,8 @@ describe("InviteMembers role-change error handling and state management", () => 
 
     // Exactly one toast, with correct business message and NO DB unreachable toast
     expect(notify.error).toHaveBeenCalledTimes(1);
-    expect(notify.error).toHaveBeenCalledWith("You cannot demote or deactivate yourself");
-    expect(notify.error).not.toHaveBeenCalledWith(expect.stringMatching(/database is unreachable/i));
+    expect(notify.error).toHaveBeenCalledWith("You cannot demote or deactivate yourself", { id: "member-role:self-change-forbidden" });
+    expect(notify.error).not.toHaveBeenCalledWith(expect.stringMatching(/database is unreachable/i), expect.anything());
     expect(notify.success).not.toHaveBeenCalled();
 
     // Dropdown state is cleanly restored to Admin
@@ -136,7 +136,7 @@ describe("InviteMembers role-change error handling and state management", () => 
     expect(api.patch).toHaveBeenCalledWith("/organization/users/u2", { role: "viewer" });
 
     await waitFor(() => {
-      expect(notify.success).toHaveBeenCalledWith("Sam Host is now Viewer");
+      expect(notify.success).toHaveBeenCalledWith("Sam Host is now Viewer", { id: "member-role:u2" });
     });
     expect(notify.error).not.toHaveBeenCalled();
   });
@@ -169,7 +169,8 @@ describe("InviteMembers role-change error handling and state management", () => 
     });
 
     expect(notify.error).toHaveBeenCalledWith(
-      "Service temporarily unavailable - the database is unreachable. Please try again."
+      "Service temporarily unavailable - the database is unreachable. Please try again.",
+      { id: "member-role:u2" }
     );
     expect(samSelect.value).toBe("host");
   });
@@ -202,9 +203,10 @@ describe("InviteMembers role-change error handling and state management", () => 
     });
 
     expect(notify.error).toHaveBeenCalledWith(
-      "Organization admin access is required to modify member roles"
+      "Organization admin access is required to modify member roles",
+      { id: "member-role:u2" }
     );
-    expect(notify.error).not.toHaveBeenCalledWith(expect.stringMatching(/database is unreachable/i));
+    expect(notify.error).not.toHaveBeenCalledWith(expect.stringMatching(/database is unreachable/i), expect.anything());
     expect(samSelect.value).toBe("host");
   });
 
@@ -243,7 +245,7 @@ describe("InviteMembers role-change error handling and state management", () => 
     // Resolve in-flight request
     resolvePatch({ data: { id: "u2", role: "speaker" } });
     await waitFor(() => {
-      expect(notify.success).toHaveBeenCalledWith("Sam Host is now Speaker");
+      expect(notify.success).toHaveBeenCalledWith("Sam Host is now Speaker", { id: "member-role:u2" });
     });
     await waitFor(() => {
       const refreshedSelect = screen.getByLabelText("Role for Sam Host");

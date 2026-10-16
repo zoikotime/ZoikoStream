@@ -22,3 +22,13 @@ export function formatWatchTime(hours) {
 export function formatEngagement(score) {
   return score == null ? NOT_MEASURED : `${score}%`;
 }
+
+/** A watch-hours axis tick, as a plain number: 0.025 -> "0.025", 1 -> "1". Rounded to twelve
+ *  significant digits so binary floating-point noise (0.07500000000000001) can never reach the
+ *  axis, without fixing the precision ("0.050"). The axis appends its own unit ("h"), which is
+ *  also what labels the value in the chart's tooltip. */
+export function formatHoursTick(value) {
+  const n = Number(value);
+  if (value == null || !Number.isFinite(n)) return "";
+  return String(Number(n.toPrecision(12)));
+}

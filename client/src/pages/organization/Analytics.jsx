@@ -32,7 +32,7 @@ import { ChartCard, ChartTooltip, PieChart } from "../../ui/charts";
 import DataTable from "../../components/admin/DataTable";
 import ViewingSessionsPanel from "../../components/organization/ViewingSessionsPanel";
 import { fmtDate } from "../../data/events";
-import { formatEngagement, formatWatchTime } from "../../utils/analyticsFormat";
+import { formatEngagement, formatHoursTick, formatWatchTime } from "../../utils/analyticsFormat";
 
 const CHART = { violet: "#7c3aed", blue: "#3b82f6", emerald: "#10b981", amber: "#f59e0b", rose: "#f43f5e" };
 
@@ -62,14 +62,33 @@ const reportColumns = [
   { key: "date", header: "Date", sortable: true, sortValue: (r) => (r.date ? new Date(r.date).getTime() : 0), className: "whitespace-nowrap", render: (r) => (r.date ? fmtDate(r.date) : "—") },
   { key: "viewers", header: "Peak Viewers", align: "right", sortable: true, className: "whitespace-nowrap", render: (r) => r.viewers.toLocaleString() },
   { key: "watch_hours", header: "Watch Time", align: "right", sortable: true, className: "whitespace-nowrap", render: (r) => formatWatchTime(r.watch_hours) },
-  { key: "engagement", header: "Engagement", sortable: true, className: "whitespace-nowrap", render: (r) => (
-    <div className="flex items-center gap-2">
-      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-        <div className="h-full rounded-full" style={{ width: `${r.engagement}%`, background: engTone(r.engagement) }} />
+  // A measured score — 0 included — is a number; null means there was nothing to measure it
+  // against (no telemetry, or no audience: the score is interactions PER viewer). This cell
+  // used to interpolate the raw value, so a null rendered a bare "%" and an invalid
+  // `width: null%`, which the browser dropped — leaving a full-width bar, coloured rose
+  // because engTone(null) fell through to "low". Sorting stays on the raw value (DataTable:
+  // numbers numerically, nulls last), never on this text.
+  { key: "engagement", header: "Engagement", sortable: true, className: "whitespace-nowrap", render: (r) => {
+    const measured = r.engagement != null;
+    return (
+      <div className="flex items-center gap-2">
+        <div aria-hidden="true" className="h-1.5 w-24 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+          {measured && (
+            <div
+              className="h-full rounded-full"
+              style={{ width: `${Math.min(100, Math.max(0, r.engagement))}%`, background: engTone(r.engagement) }}
+            />
+          )}
+        </div>
+        <span
+          className={cx("tabular-nums font-medium", measured ? "text-slate-700 dark:text-slate-200" : "text-slate-400 dark:text-slate-500")}
+          title={measured ? undefined : "Not measured"}
+        >
+          {formatEngagement(r.engagement)}
+        </span>
       </div>
-      <span className="tabular-nums font-medium text-slate-700 dark:text-slate-200">{r.engagement}%</span>
-    </div>
-  ) },
+    );
+  } },
 ];
 
 // Segmented control — the page's one interaction primitive, used for the chart type and the
@@ -375,7 +394,11 @@ export default function OrganizationAnalytics() {
           >
             <div style={{ height: 300 }}>
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={trend} margin={{ left: -12, right: -12, top: 8 }}>
+                {/* No negative margins, and Y axes sized to their own labels (width="auto").
+                    A Y axis's labels are anchored to its inner edge, so a fixed narrow width
+                    plus `left/right: -12` pushed long labels past the SVG's edge, where they
+                    were clipped: 0.025h read "025h", and 12000 viewers lost a digit. */}
+                <ComposedChart data={trend} margin={{ left: 0, right: 0, top: 8 }}>
                   <defs>
                     <linearGradient id="zk-an-viewers" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor={CHART.violet} stopOpacity={0.35} />
@@ -384,8 +407,8 @@ export default function OrganizationAnalytics() {
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-slate-100 dark:text-slate-800" vertical={false} />
                   <XAxis dataKey="label" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" />
-                  <YAxis yAxisId="v" fontSize={11} tickLine={false} axisLine={false} stroke={CHART.violet} width={40} />
-                  <YAxis yAxisId="w" orientation="right" fontSize={11} tickLine={false} axisLine={false} stroke={CHART.blue} width={44} unit="h" />
+                  <YAxis yAxisId="v" fontSize={11} tickLine={false} axisLine={false} stroke={CHART.violet} width="auto" />
+                  <YAxis yAxisId="w" orientation="right" fontSize={11} tickLine={false} axisLine={false} stroke={CHART.blue} width="auto" unit="h" tickFormatter={formatHoursTick} />
                   <ChartTooltip
                     formatter={(v, name) => [name === "Watch hours" ? `${v} hrs` : v.toLocaleString(), name]}
                   />
@@ -460,10 +483,12 @@ export default function OrganizationAnalytics() {
             >
               <div style={{ height: 260 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <ScatterChart margin={{ left: -12, right: 8, top: 8, bottom: 4 }}>
+                  {/* Same rule as the trend chart: no negative left margin, and a Y axis as wide
+                      as its widest label — watch hours under an hour read 0.025h, not 25h. */}
+                  <ScatterChart margin={{ left: 0, right: 8, top: 8, bottom: 4 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-slate-100 dark:text-slate-800" />
                     <XAxis type="number" dataKey="x" name="Peak viewers" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" />
-                    <YAxis type="number" dataKey="y" name="Watch hours" unit="h" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" width={44} />
+                    <YAxis type="number" dataKey="y" name="Watch hours" unit="h" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" width="auto" tickFormatter={formatHoursTick} />
                     <ChartTooltip
                       cursor={{ strokeDasharray: "3 3" }}
                       formatter={(v, name) => [name === "Watch hours" ? `${v} hrs` : v.toLocaleString(), name]}

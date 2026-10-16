@@ -106,7 +106,11 @@ export function AreaChart({ title, subtitle, data, keys, type = "area", suffix =
     <ChartCard title={title} subtitle={subtitle} loading={loading} empty={empty} height={height}>
       <div style={{ height }}>
         <ResponsiveContainer width="100%" height="100%">
-          <Chart data={data} margin={{ left: -12, right: 8, top: 8 }}>
+          {/* No negative left margin, and a Y axis as wide as its widest label (width="auto").
+              The axis anchors its labels to its inner edge, so the old fixed 44px axis pulled
+              12px off-canvas left about 24px for a label: "0.025" and "1050k" were clipped at
+              the SVG border. Same fix as the Organization Analytics charts. */}
+          <Chart data={data} margin={{ left: 0, right: 8, top: 8 }}>
             {type === "area" && (
               <defs>
                 {keys.map((k) => (
@@ -119,7 +123,7 @@ export function AreaChart({ title, subtitle, data, keys, type = "area", suffix =
             )}
             <CartesianGrid strokeDasharray="3 3" stroke={grid} vertical={false} />
             <XAxis dataKey="label" stroke={axis} fontSize={11} tickLine={false} axisLine={false} />
-            <YAxis stroke={axis} fontSize={11} tickLine={false} axisLine={false} width={44} tickFormatter={tick} />
+            <YAxis stroke={axis} fontSize={11} tickLine={false} axisLine={false} width="auto" tickFormatter={tick} />
             <ChartTooltip formatter={fmt} />
             {multi && <RLegend wrapperStyle={{ fontSize: 12 }} iconType="circle" />}
             {keys.map((k) =>

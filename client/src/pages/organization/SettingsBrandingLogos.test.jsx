@@ -236,7 +236,7 @@ describe("the branding preview dialog follows the theme", () => {
     const user = userEvent.setup();
     open("dark");
     await user.type(await darkInput(), "https://cdn.acme.com/unsaved-dark.svg");
-    fireEvent.click(screen.getByRole("button", { name: "Go Live — open branding preview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sample Button — open branding preview" }));
     const dialog = await screen.findByRole("dialog", { name: "Branding preview" });
     expect(within(dialog).getByAltText("Acme Live logo")).toHaveAttribute("src", "https://cdn.acme.com/unsaved-dark.svg");
     expect(api.patch).not.toHaveBeenCalled();
@@ -249,7 +249,7 @@ describe("the branding preview dialog follows the theme", () => {
     branding = { ...branding, logo_url_dark: DARK };
     open(theme);
     await lightInput();
-    fireEvent.click(screen.getByRole("button", { name: "Go Live — open branding preview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sample Button — open branding preview" }));
     const dialog = await screen.findByRole("dialog", { name: "Branding preview" });
     expect(within(dialog).getByAltText("Acme Live logo")).toHaveAttribute("src", expected);
   });

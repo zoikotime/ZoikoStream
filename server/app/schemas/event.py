@@ -16,6 +16,9 @@ CreateStatus = Literal["draft", "published", "scheduled"]  # other states only v
 # Derived from the one definition (models/event.py EVENT_STATUSES), never re-typed here. A
 # retired value ("rehearsal", "processing", ...) is a 422, not a status anyone can set.
 EventStatus = Literal[EVENT_STATUSES]
+# What the console filters and labels by: every canonical status plus the derived "missed"
+# (crud/event.py). Accepted only as a list filter, never as a status to write.
+DisplayStatus = Literal[EVENT_STATUSES + ("missed",)]
 
 _SLUG = r"^[a-z0-9][a-z0-9-]*$"
 
@@ -116,6 +119,16 @@ class EventOut(BaseModel):
     # from whatever origin the organizer happens to be browsing (localhost, a preview URL).
     public_watch_url: str | None = None
 
+    # What the console shows as the status (crud/event.display_states): the canonical status,
+    # except a Scheduled event past start + grace that never went live, which is "missed".
+    # Populated by the list, detail and edit routes; None elsewhere (the client then shows
+    # `status`). Never stored and never accepted on input.
+    display_status: str | None = None
+    # A pre-live, non-draft event whose start time (plus grace) has passed without it going
+    # live. For a Missed event this is already what the label says; for published / ready /
+    # armed the console adds a "start time passed" note.
+    start_overdue: bool = False
+
     @computed_field
     @property
     def duration_minutes(self) -> int | None:
@@ -193,6 +206,11 @@ class WatchOut(BaseModel):
     # the page offers the same optional Country / Region field once. Nothing else is revealed
     # about the registration.
     country_prompt: bool = False
+    # A signed, short-lived token for ONE playback session's quality beacons (POST
+    # /api/playback/qoe, services/playback_qoe.py). Issued only alongside media (a live token
+    # or a replay URL) and only to the audience: never to staff of the organizing
+    # organization or a contributor's monitor feed, who are not viewers.
+    qoe_token: str | None = None
 
 
 class RegistrationCountryUpdate(BaseModel):

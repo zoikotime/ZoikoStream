@@ -27,6 +27,7 @@ from ..db import get_db
 from ..email import UnsafeLinkError
 from ..services import account_lifecycle as lifecycle
 from ..services import audience as audience_svc
+from ..services import playback_qoe as playback_qoe_svc
 from ..services import payments as payment_svc
 from ..models.plan import RETIRED_PLAN_SLUGS, Plan
 from ..models.subscription import (
@@ -630,6 +631,23 @@ def audience_insights(
     if event_id is not None and event_crud.get_event(db, org.id, event_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
     return audience_svc.insights(db, org, range_key=range_, event_id=event_id)
+
+
+@router.get("/playback/qoe")
+def playback_qoe_summary(
+    window: str = Query("all", pattern="^(24h|7d|30d|all)$"),
+    event_id: uuid.UUID | None = Query(None),
+    org: Organization = Depends(get_my_org),
+    db: Session = Depends(get_db),
+):
+    """The Playback page's viewer-side measurement: playback starts, rebuffer ratio and
+    failures by reason, reported by viewers' own players (services/playback_qoe.py), live and
+    replay kept apart. Aggregated here over every session in the window, never from rows the
+    browser happens to hold. Org comes from the token; another organization's event reads as
+    not found. Readable by any member, same posture as /analytics."""
+    if event_id is not None and event_crud.get_event(db, org.id, event_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    return playback_qoe_svc.summarize(db, org.id, event_id=event_id, window=window)
 
 
 @router.get("/events/{event_id}/recordings", response_model=list[EventRecordingOut])

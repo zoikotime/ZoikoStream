@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { FiShield, FiGlobe, FiFileText, FiAlertOctagon, FiHeadphones, FiRefreshCw } from "react-icons/fi";
 import api from "../../api";
@@ -9,39 +8,21 @@ import { ConsoleButton } from "../../ui/Button";
 import Skeleton from "../../ui/Skeleton";
 import Panel from "../../components/admin/Panel";
 import HealthDot from "../../components/admin/HealthDot";
-import { activeIncidents, incidentFreeCell, monitoredServices } from "../../data/supportStatus";
+import {
+  STATUS_DOT, STATUS_LABEL, STATUS_NOTE, activeIncidents, formatMaintenanceWindow, headlineIncident, headlineOf,
+  incidentsCell, maintenanceLabel, maintenanceState, monitoredServices, shownServices, staleNotice,
+} from "../../data/supportStatus";
 
 // Support & Status — this organization's view of platform availability.
 //
-// Everything here is derived from /organization/overview, the payload the Overview page
-// already polls: `lifecycle` carries per-stage status/availability/open-incident counts,
-// `service_health` the single headline verdict. No new endpoint, no widened scope — an org
-// admin sees platform health filtered to the services their organization touches.
+// Service health comes from `service_status` on /organization/overview (services/org.
+// customer_status), the payload the Overview page already polls: only the services the
+// platform can actually check (Live streaming, Recording & replay, Management API), each
+// with a status from real probes, recorded incidents and — for recordings — this
+// organization's own recent recording starts. Rules for what may be claimed live in
+// data/supportStatus.js. Internal states ("not configured", unprobed stages) are not shown
+// here; they stay on the Super Admin console.
 const REFRESH_MS = 60_000;
-
-// Headline copy per verdict. Matched to services/org.service_health's four statuses.
-const VERDICT = {
-  ok: { pill: "All systems operational", title: "ZoikoStream is operating normally." },
-  warn: { pill: "Degraded performance", title: "ZoikoStream is partially degraded." },
-  down: { pill: "Service disruption", title: "ZoikoStream is experiencing a disruption." },
-  not_configured: { pill: "Not configured", title: "Platform health is not yet reporting." },
-};
-
-// Worst-first ordering for picking which open incident to headline. Mirrors ops._RANK.
-const SEVERITY_RANK = { down: 3, warn: 2, not_configured: 1, ok: 0 };
-
-// Stage → the service an operator recognises. The status and uptime beside it are live;
-// only the name is editorial, because `lifecycle` speaks in stages, not product surfaces.
-const SERVICE_NAME = {
-  contribute: "Contribution endpoints",
-  ingest: "Ingest & live inputs",
-  produce: "Transcoding & packaging",
-  secure: "Access & playback tokens",
-  deliver: "Origin & CDN delivery",
-  understand: "Analytics & metering",
-  preserve: "Media storage & replay",
-  platform: "Management API",
-};
 
 // Trust surfaces. Nothing here links to a route that doesn't exist.
 const TRUST = [
@@ -96,16 +77,6 @@ export default function SupportStatus() {
   );
   useInterval(reload, REFRESH_MS);
 
-  const stages = useMemo(() => data?.lifecycle || [], [data]);
-  // The stage carrying an incident, worst first — the page shows the one that matters.
-  const incident = useMemo(
-    () =>
-      stages
-        .filter((s) => s.open_incidents > 0)
-        .sort((a, b) => (SEVERITY_RANK[b.status] || 0) - (SEVERITY_RANK[a.status] || 0))[0],
-    [stages]
-  );
-
   if (loading && !data) return <StatusSkeleton />;
 
   if (error && !data) {
@@ -124,13 +95,22 @@ export default function SupportStatus() {
     );
   }
 
-  const monitored = monitoredServices(stages);
+  // A payload without service_status (an older API, or a status subsystem the server isolated
+  // after it failed) is "unavailable", never green.
+  const serviceStatus = data?.service_status;
+  const reported = Boolean(serviceStatus);
+  const services = shownServices(serviceStatus);
+  // The last refresh failed but an older answer is on screen (useApi keeps it): it stays, as
+  // the best information there is, but is never headlined as the current state.
+  const stale = Boolean(error && data);
+  const verdict = headlineOf(serviceStatus, services, { stale });
+  const monitored = monitoredServices(services, reported);
+  const notice = serviceStatus?.platform_notice || null;
   // `0` only when the feed actually answered — see data/supportStatus.activeIncidents.
-  const incidents = activeIncidents(stages, Boolean(data));
-
-  const health = data?.service_health || {};
-  const verdict = VERDICT[health.status] || VERDICT.not_configured;
-  const region = data?.organization?.region || "Global";
+  const incidents = activeIncidents(services, reported, notice);
+  const incident = headlineIncident(services, notice);
+  // Published windows, or which honest empty state — see data/supportStatus.maintenanceState.
+  const maintenance = maintenanceState(data?.maintenance);
 
   // Server-stamped, so the page never renders a clock read during render.
   const stamp = data?.generated_at ? new Date(data.generated_at) : null;
@@ -145,16 +125,26 @@ export default function SupportStatus() {
       {/* ── Verdict + posture tiles ────────────────────────────────────────── */}
       <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr] lg:items-start">
         <div className="min-w-0">
-          <HealthDot status={health.status || "neutral"} label={verdict.pill} pulse badge />
+          <HealthDot status={verdict.dot} label={verdict.pill} pulse badge />
           <h1 className={cx("mt-3 text-[26px] font-bold leading-tight tracking-tight sm:text-[30px]", CONSOLE.heading)}>
             {verdict.title}
           </h1>
           <p className={cx("mt-1.5 text-[13px]", CONSOLE.muted)}>
-            Real-time availability across contribution, delivery, and platform services.
+            Current status of the ZoikoStream services your organization uses.
           </p>
           {stamp && (
             <p className={cx("mt-2 text-[11px]", type.mono, CONSOLE.faint)}>
-              {localTime} · {utcTime} · updated every 60 seconds
+              {stale ? "Last updated " : ""}{localTime} · {utcTime} ·{" "}
+              {stale ? "retrying every 60 seconds" : "updated every 60 seconds"}
+            </p>
+          )}
+          {stale && (
+            <p
+              role="status"
+              data-testid="status-stale"
+              className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300"
+            >
+              {staleNotice(data?.generated_at)}
             </p>
           )}
 
@@ -173,13 +163,9 @@ export default function SupportStatus() {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-          <StatTile
-            label="90-day uptime"
-            value="—"
-            tone={CONSOLE.faint}
-            title="The availability probe retains 30 days at most — no 90-day window to report"
-          />
+        {/* No uptime tile: nothing here measures uptime over 90 days (or any window), and a
+            tile that could only ever read "—" was a placeholder on a page about trust. */}
+        <div className="grid grid-cols-2 gap-3">
           <StatTile
             label="Monitored services"
             value={monitored.text}
@@ -195,22 +181,10 @@ export default function SupportStatus() {
         </div>
       </div>
 
-      {/* ── Delivery footprint ─────────────────────────────────────────────── */}
-      {/* `region` is Organization.region — free text the org configured, not something any
-          probe confirmed. Titled as configuration so it cannot be read as a measured
-          delivery footprint. */}
-      <Panel
-        eyebrow="Global delivery regions"
-        title={region === "Global" ? "No region configured" : `Configured region · ${region}`}
-      >
-        <div className={cx("grid place-items-center rounded-lg px-4 py-6 text-center", CONSOLE.inset)}>
-          <p className={cx("text-[13px]", CONSOLE.muted)}>
-            {region === "Global"
-              ? "No delivery region has been configured for this organization."
-              : `Your organization is configured for the ${region} delivery region.`}
-          </p>
-        </div>
-      </Panel>
+      {/* No "delivery region" panel. Organization.region is a label on the account (it defaults
+          to "US East" for every organization) and routes nothing: media goes through one
+          LiveKit deployment and one storage bucket whatever it says. Presenting it as delivery
+          infrastructure claimed something that does not exist. */}
 
       {/* ── Service health ─────────────────────────────────────────────────── */}
       <section className="space-y-4">
@@ -219,49 +193,56 @@ export default function SupportStatus() {
         </h2>
 
         <Panel flush>
-          <div className="overflow-x-auto">
+          <div className={cx("overflow-x-auto", stale && "opacity-60")} aria-describedby={stale ? "status-stale-note" : undefined}>
+            {stale && <span id="status-stale-note" className="sr-only">Last known state, not current.</span>}
             <table className="w-full min-w-[420px]">
               <thead>
                 <tr className={cx("border-b", CONSOLE.divider)}>
                   <th scope="col" className={cx(th, CONSOLE.faint)}>Service</th>
                   <th scope="col" className={cx(th, CONSOLE.faint)}>Status</th>
-                  {/* Labelled for what the number IS. services/ops.availability() computes
-                      100 − (recorded incident minutes ÷ window), so with an empty incident
-                      log every row reads 100.00%. Under the old heading "Uptime (24 h)" that
-                      claimed a measurement nothing in this deployment takes. The Region
-                      column went with it: it repeated the ORGANISATION's configured region
-                      on all eight rows, which implied per-service regional telemetry that
-                      does not exist. The region is stated once, above. */}
+                  {/* A count of recorded incidents. It used to be "Incident-free (24 h)", a
+                      percentage that read 100.00% whenever the incident log was empty — a
+                      figure about the log, presented as one about the service. */}
                   <th
                     scope="col"
                     className={cx(th, "text-right", CONSOLE.faint)}
-                    title="Share of the last 24 hours with no recorded incident. From the incident log, not an uptime probe."
+                    title="Incidents recorded against each service in the last 24 hours."
                   >
-                    Incident-free (24 h)
+                    Incidents (24 h)
                   </th>
                 </tr>
               </thead>
               <tbody className={cx("divide-y", CONSOLE.divideY)}>
-                {stages.map((s) => (
-                  <tr key={s.stage} className="hover:bg-slate-50 dark:hover:bg-white/[0.03]">
-                    <td className={cx(td, "font-medium", CONSOLE.heading)}>
-                      {SERVICE_NAME[s.stage] || s.label}
-                    </td>
-                    <td className={td}>
-                      <HealthDot status={s.status} />
-                    </td>
-                    <td className={cx(td, "text-right", type.mono)}>
-                      {(() => {
-                        const cell = incidentFreeCell(s);
-                        return (
-                          <span className={cell.measured ? CONSOLE.body : CONSOLE.faint} title={cell.title}>
-                            {cell.text}
-                          </span>
-                        );
-                      })()}
+                {services.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className={cx(td, "py-8 text-center", CONSOLE.muted)}>
+                      Live service status is temporarily unavailable.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  services.map((s) => {
+                    const cell = incidentsCell(s.incidents_24h);
+                    return (
+                      <tr key={s.id} className="hover:bg-slate-50 dark:hover:bg-white/[0.03]">
+                        <td className={td}>
+                          <span className={cx("block font-medium", CONSOLE.heading)}>{s.name}</span>
+                          {s.summary && (
+                            <span className={cx("mt-0.5 block text-[12px]", CONSOLE.faint)}>{s.summary}</span>
+                          )}
+                          {STATUS_NOTE[s.status] && (
+                            <span className={cx("mt-0.5 block text-[12px]", CONSOLE.muted)}>{STATUS_NOTE[s.status]}</span>
+                          )}
+                        </td>
+                        <td className={td}>
+                          <HealthDot status={STATUS_DOT[s.status]} label={STATUS_LABEL[s.status]} />
+                        </td>
+                        <td className={cx(td, "text-right", type.mono, CONSOLE.body)} title={cell.title}>
+                          {cell.text}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
@@ -275,11 +256,11 @@ export default function SupportStatus() {
           action={
             incident && (
               <span className={cx("rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider",
-                incident.status === "down"
+                incident.severity === "major"
                   ? "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400"
                   : "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400")}
               >
-                {incident.status === "down" ? "Major" : "Minor"}
+                {incident.severity === "major" ? "Major" : "Minor"}
               </span>
             )
           }
@@ -291,16 +272,11 @@ export default function SupportStatus() {
           ) : (
             <>
               <h3 className={cx("text-[14px] font-semibold leading-snug", CONSOLE.heading)}>
-                {incident.detail || `${incident.label} degradation`}
+                {incident.title}
               </h3>
               <p className={cx("mt-1 text-[11px]", type.mono, CONSOLE.faint)}>
-                Affects the {incident.label} stage · {incident.open_incidents}{" "}
-                {incident.open_incidents === 1 ? "report" : "reports"} open
-              </p>
-              <p className={cx("mt-3 text-[13px] leading-[20px]", CONSOLE.body)}>
-                {incident.availability == null
-                  ? "Availability for this stage is not being measured while the incident is open."
-                  : `Measured availability for this stage is ${incident.availability.toFixed(2)}% over the last 24 hours.`}
+                Affects {incident.affects} · {incident.open}{" "}
+                {incident.open === 1 ? "open incident" : "open incidents"}
               </p>
               <Link
                 to="/organization/dashboard"
@@ -313,25 +289,49 @@ export default function SupportStatus() {
         </Panel>
 
         <Panel title="Scheduled maintenance">
-          {data?.security_support?.maintenance_window ? (
-            <div className="flex items-start justify-between gap-3">
-              <p className={cx("text-[13px]", CONSOLE.body)}>{data.security_support.maintenance_window}</p>
-              <span className="shrink-0 rounded-full bg-blue-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-700 dark:bg-blue-500/15 dark:text-blue-400">
-                Upcoming
-              </span>
-            </div>
+          {maintenance.kind === "upcoming" ? (
+            <ul className={cx("divide-y", CONSOLE.divideY)}>
+              {maintenance.items.map((w) => {
+                const time = formatMaintenanceWindow(w.starts_at, w.ends_at);
+                const label = maintenanceLabel(w);
+                return (
+                  <li key={w.reference || `${w.title}-${w.starts_at}`} className="py-3 first:pt-0 last:pb-0">
+                    <div className="flex items-start justify-between gap-3">
+                      <h3 className={cx("text-[14px] font-semibold leading-snug", CONSOLE.heading)}>{w.title}</h3>
+                      <span
+                        className={cx(
+                          "shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider",
+                          label === "Emergency"
+                            ? "bg-rose-100 text-rose-700 dark:bg-rose-500/15 dark:text-rose-400"
+                            : label === "Scheduled"
+                              ? "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400"
+                              : "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400"
+                        )}
+                      >
+                        {label}
+                      </span>
+                    </div>
+                    {time && (
+                      <p className={cx("mt-1 text-[12px]", CONSOLE.body)}>
+                        {time.when}
+                        {time.duration && <span className={CONSOLE.faint}> · {time.duration}</span>}
+                      </p>
+                    )}
+                    {w.components?.length > 0 && (
+                      <p className={cx("mt-1 text-[12px]", CONSOLE.faint)}>
+                        Affects {w.components.join(", ")}
+                        {w.regions?.length > 0 && ` · ${w.regions.join(", ")}`}
+                      </p>
+                    )}
+                    {w.impact && <p className={cx("mt-2 text-[13px] leading-[20px]", CONSOLE.body)}>{w.impact}</p>}
+                  </li>
+                );
+              })}
+            </ul>
           ) : (
-            // `security_support.maintenance_window` is hardcoded None in services/org.py —
-            // "No findings scanner, review scheduler or maintenance calendar in this stack."
-            // So nothing here can confirm an absence, and "No maintenance scheduled" claimed
-            // a fact nobody checked.
-            <div className="py-6 text-center">
-              <p className={cx("text-[13px]", CONSOLE.muted)}>No maintenance calendar is connected.</p>
-              <p className={cx("mx-auto mt-1 max-w-xs text-[12px]", CONSOLE.faint)}>
-                This deployment has no maintenance scheduler, so planned work cannot be listed
-                here. It does not mean none is planned.
-              </p>
-            </div>
+            // Calm, like the incident panel beside it — and true: "No scheduled maintenance"
+            // only when the server says an empty schedule is authoritative.
+            <p className={cx("py-6 text-center text-[13px]", CONSOLE.muted)}>{maintenance.text}</p>
           )}
         </Panel>
       </div>

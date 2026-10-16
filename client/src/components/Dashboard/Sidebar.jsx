@@ -1,6 +1,6 @@
 import { NavLink } from "react-router-dom";
 import {
-  FiX, FiGrid, FiLayers, FiUsers,
+  FiX, FiGrid, FiUser, FiUsers,
   FiActivity, FiFilm, FiRadio, FiUserCheck, FiBarChart2,
   FiCreditCard, FiLifeBuoy, FiSettings,
 } from "react-icons/fi";
@@ -19,7 +19,7 @@ import Logo from "../../ui/Logo";
 // Ordered by how often somebody needs the destination, not by which subsystem owns it:
 //
 //   primary    the event workflow — what this product is for
-//   secondary  the integration surface and org identity, reached occasionally
+//   secondary  your own profile, reached occasionally
 //   footer     Analytics, Billing, Settings — management, deliberately last
 //
 // Every `to` is a route that exists in App.jsx. `badge` names a counter on
@@ -50,7 +50,10 @@ const NAV = [
     // live input, from the event it belongs to).
     rule: true,
     items: [
-      { to: "/organization/profile", label: "Organization", icon: FiLayers },
+      // The signed-in member's OWN profile (photo, name, username, email, role, membership),
+      // so it is "Profile". It was labelled "Organization", which read as organization
+      // management; that lives in Members, Billing and Settings, whose labels are unchanged.
+      { to: "/organization/profile", label: "Profile", icon: FiUser },
     ],
   },
   {

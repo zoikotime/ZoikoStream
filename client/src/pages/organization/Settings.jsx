@@ -654,18 +654,19 @@ export default function OrganizationSettings() {
                       type="button"
                       onClick={() => setPreviewOpen(true)}
                       aria-haspopup="dialog"
-                      aria-label="Go Live — open branding preview"
-                      title="Open a preview. Nothing is started."
+                      aria-label="Sample Button — open branding preview"
+                      title="Open the branding preview"
                       className={cx(
-                        "inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110",
+                        "inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold transition hover:brightness-110",
                         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2 dark:focus-visible:ring-white dark:focus-visible:ring-offset-slate-900",
-                        ACCENT[settings.accent].solid
+                        ACCENT[settings.accent].solid,
+                        ACCENT[settings.accent].onSolid
                       )}
                     >
-                      Go Live
+                      Sample Button
                     </button>
                     <span className="text-xs text-slate-500 dark:text-slate-400">
-                      Opens a preview — nothing is started.
+                      Opens the full branding preview.
                     </span>
                   </div>
                 </div>

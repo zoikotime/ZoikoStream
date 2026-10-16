@@ -242,7 +242,8 @@ describe("An organization still on a retired tier", () => {
 
   it("still sees its real plan name and status in the subscription card", async () => {
     await renderBilling(onPro);
-    expect(screen.getByRole("heading", { name: /Pro Plan/i })).toBeTruthy();
+    // The tier's own name, as everywhere else on the page — not "Pro Plan".
+    expect(screen.getByRole("heading", { name: "Pro" })).toBeTruthy();
     expect(screen.getByText("active")).toBeTruthy();
   });
 

@@ -188,3 +188,55 @@ def test_a_reassigned_hostname_maps_to_its_new_owner(live, feature):
     activate(live, feature, live.b, h)
     assert on(h).get(f"/api/events/{live.event_b.id}/watch").status_code == 200
     assert on(h).get(f"/api/events/{live.event_a.id}/watch").status_code == 404
+
+# ── the viewer player's playback-quality beacon ──────────────────────────────────────────
+
+def _qoe_beacon(c, event_id):
+    import json
+    from app.services import playback_qoe
+    token = playback_qoe.issue_token(event_id, "live")
+    body = {"token": token, "seq": 1, "started": True, "startup_ms": 400, "playback_ms": 1_000}
+    return c.post("/api/playback/qoe", content=json.dumps(body),
+                  headers={"Content-Type": "text/plain;charset=UTF-8"}), token
+
+
+def _qoe_rows(token):
+    import uuid
+    from app.db import SessionLocal
+    from app.models import PlaybackSession
+    from app.services import playback_qoe
+    db = SessionLocal()
+    try:
+        sid = uuid.UUID(playback_qoe.read_token(token)["sid"])
+        return db.query(PlaybackSession).filter(PlaybackSession.id == sid).all()
+    finally:
+        db.close()
+
+
+def test_a_branded_domain_viewer_reports_playback_quality(live):
+    r, token = _qoe_beacon(on(live.host_a), live.event_a.id)
+    assert r.status_code == 204, r.text
+    (row,) = _qoe_rows(token)
+    assert row.org_id == live.a.id and row.event_id == live.event_a.id
+
+
+def test_another_organizations_playback_token_is_refused_on_this_domain(live):
+    # B's token names B's event; A's hostname carries only A's audience — the same rule the
+    # middleware applies to an event named in the path.
+    r, token = _qoe_beacon(on(live.host_a), live.event_b.id)
+    assert r.status_code == 404
+    assert _qoe_rows(token) == []
+    # ...while B's own domain, and the platform host, accept it.
+    assert _qoe_beacon(on(live.host_b), live.event_b.id)[0].status_code == 204
+    assert _qoe_beacon(client_for(), live.event_b.id)[0].status_code == 204
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/api/playback/qoe"),                   # only POST is open
+    ("post", "/api/playback/qoe/extra"),
+    ("post", "/api/playback"),
+    ("get", "/api/organization/playback/qoe"),      # the organization's own figures stay private
+])
+def test_only_the_beacon_itself_is_open_on_a_customer_domain(live, method, path):
+    c = on(live.host_a, live.admin_a)
+    assert getattr(c, method)(path).status_code == 404

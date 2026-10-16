@@ -41,7 +41,7 @@ const ROUTES = [
   ["/organization/users", "Members"],
   ["/organization/recordings", "Recordings"],
   ["/organization/sessions", "Streaming Sessions"],
-  ["/organization/profile", "Organization"],
+  ["/organization/profile", "Profile"],
   ["/organization/analytics", "Analytics"],
   ["/organization/billing", "Billing"],
   ["/organization/settings", "Settings"],
@@ -181,6 +181,15 @@ describe("active navigation", () => {
     expect(activeLink()).toHaveTextContent(label);
   });
 
+  it("marks Profile — and only Profile — current on /organization/profile", async () => {
+    renderShell("/organization/profile");
+    await screen.findByRole("heading", { level: 1 });
+    const current = within(rail()).getAllByRole("link").filter((a) => a.getAttribute("aria-current") === "page");
+    expect(current).toHaveLength(1);
+    expect(current[0]).toHaveAccessibleName("Profile");
+    expect(current[0]).toHaveAttribute("href", "/organization/profile");
+  });
+
   it("resolves a nested event route to its parent item", async () => {
     renderShell("/organization/events/abc-123");
     await screen.findByText("event detail page");
@@ -191,6 +200,56 @@ describe("active navigation", () => {
     renderShell("/organization/billing");
     await screen.findByRole("heading", { level: 1 });
     expect(activeLink()).not.toHaveTextContent("Dashboard");
+  });
+});
+
+// /organization/profile is the signed-in member's own profile, so its rail item is
+// "Profile". It used to read "Organization", which named organization management — and that
+// lives in Members, Billing and Settings, whose items must not change with it.
+describe("the profile item", () => {
+  const profileLink = () => within(rail()).getByRole("link", { name: "Profile" });
+
+  it("is called Profile everywhere in the rail, with no stale Organization item", async () => {
+    renderShell("/organization/profile");
+    await screen.findByRole("heading", { level: 1 });
+    expect(profileLink()).toHaveAttribute("href", "/organization/profile");
+    expect(within(rail()).queryByRole("link", { name: /organization/i })).not.toBeInTheDocument();
+    expect(within(rail()).queryByText("Organization")).not.toBeInTheDocument();
+    // The icon is decoration: the name comes from the label alone.
+    expect(profileLink().querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("keeps its name, tooltip and current state in the collapsed rail", async () => {
+    renderShell("/organization/profile");
+    await screen.findByRole("heading", { level: 1 });
+    await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    const link = profileLink();                       // aria-label, now that the text is hidden
+    expect(link).toHaveAttribute("aria-label", "Profile");
+    expect(link).toHaveAttribute("aria-current", "page");
+    const tip = [...link.querySelectorAll("[aria-hidden='true']")].find((el) => el.textContent === "Profile");
+    expect(tip).toBeTruthy();                         // the hover tooltip says Profile too
+    expect(within(rail()).queryByText("Organization")).not.toBeInTheDocument();
+  });
+
+  it("is the same item in the mobile drawer", async () => {
+    renderShell("/organization/profile");
+    await screen.findByRole("heading", { level: 1 });
+    await userEvent.click(screen.getByRole("button", { name: /toggle menu/i }));
+    expect(rail().closest("aside").className).toContain("translate-x-0");
+    expect(profileLink()).toHaveAttribute("aria-current", "page");
+    expect(railLinks()).toContain("Profile");
+    expect(railLinks()).not.toContain("Organization");
+  });
+
+  it("leaves the organization-management items exactly as they were", async () => {
+    renderShell("/organization/profile");
+    await screen.findByRole("heading", { level: 1 });
+    for (const [name, href] of [["Members", "/organization/users"], ["Billing", "/organization/billing"],
+                                ["Settings", "/organization/settings"]]) {
+      const link = within(rail()).getByRole("link", { name });
+      expect(link).toHaveAttribute("href", href);
+      expect(link).not.toHaveAttribute("aria-current");
+    }
   });
 });
 
@@ -309,7 +368,7 @@ describe("technical surfaces are not primary navigation", () => {
     expect(railLinks()).toEqual([
       "Dashboard", "Events", "Audience", "Members", "Recordings",
       "Streaming Sessions",
-      "Organization",
+      "Profile",
       "Analytics", "Billing", "Settings", "Support & Status",
     ]);
   });
@@ -334,5 +393,17 @@ describe("technical surfaces are not primary navigation", () => {
     // signed-in member to their role home. No custom redirect was added for this.
     const { container } = renderShell("/organization/webhooks");
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("room for the floating Guide", () => {
+  it("the console's scroll area reserves the launcher's footprint after the last row", async () => {
+    renderShell("/organization/dashboard");
+    await screen.findByRole("heading", { name: /dashboard page/i });
+    // index.css: .zk-guide-safe::after is var(--guide-safe-bottom) tall, which the mounted
+    // launcher publishes (guide/safeArea.js) — so a page's last control is never under it.
+    const main = document.querySelector("main");
+    expect(main).not.toBeNull();
+    expect(main.classList.contains("zk-guide-safe")).toBe(true);
   });
 });

@@ -318,6 +318,20 @@ class IncidentCreate(BaseModel):
     kind: str = "security"
     org_id: uuid.UUID | None = None
     commander: str | None = None
+    # Optional: the lifecycle stage the incident affects (models.platform_ops.LIFECYCLE_STAGES).
+    # Only the operator can say which service an incident touches — nothing infers it — and an
+    # operational incident that names one escalates that service's row on the customer Support
+    # page (services/org.customer_status); without one it is a platform-wide notice there.
+    stage: str | None = None
+
+    @field_validator("stage")
+    @classmethod
+    def _known_stage(cls, v: str | None) -> str | None:
+        from ..models.platform_ops import LIFECYCLE_STAGES
+
+        if v is not None and v not in LIFECYCLE_STAGES:
+            raise ValueError(f"stage must be one of {', '.join(LIFECYCLE_STAGES)}")
+        return v
 
 
 class IncidentUpdate(BaseModel):

@@ -331,6 +331,14 @@ class Settings(BaseSettings):
     # deactivated. Long enough to survive a DNS provider migration; short enough that an
     # abandoned hostname stops serving.
     CUSTOM_DOMAIN_GRACE_HOURS: int = 72
+    # How long after its scheduled start a Scheduled event that never went live is still shown
+    # as Scheduled, before the console calls it "Missed" (crud/event.py display status). Going
+    # live late is allowed and unaffected; this only decides the label, counts and filter.
+    EVENT_START_GRACE_MINUTES: int = 15
+    # How long a viewer playback-quality session row (playback_sessions) is kept before the
+    # leader's daily sweep deletes it (services/playback_qoe.purge_expired). About 13 months,
+    # so a year-over-year comparison still has its year. 0 disables the purge.
+    PLAYBACK_QOE_RETENTION_DAYS: int = 400
     # Cloudflare for SaaS. Server-side only; never returned by any API or logged.
     CLOUDFLARE_ZONE_ID: str = ""
     CLOUDFLARE_API_TOKEN: str = ""
