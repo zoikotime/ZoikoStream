@@ -237,6 +237,10 @@ export default function StreamingSessions() {
             serverSort={sort.sortField ? { key: sort.sortField, dir: sort.sortDirection } : null}
             onSortChange={(_, field) => setSort((s) => nextSort(s, field))}
             minWidth={720}
+            // On a phone this 720px table scrolls sideways, and its empty state was centred
+            // in the full width: the icon off-screen, the message clipped, blank space where
+            // they should be. Pinned, it fills the visible width instead.
+            pinEmpty
             rowActions={(s) => (
               <ConsoleButton
                 variant="ghost"

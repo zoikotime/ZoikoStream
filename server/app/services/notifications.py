@@ -298,7 +298,7 @@ CATALOG = [
     {
         "key": "event_starting",
         "label": "Event starting soon",
-        "description": "Not available yet — Zoiko Steam does not send this notification.",
+        "description": "Not available yet — Zoiko Stream does not send this notification.",
         "family": None, "message_class": CLASS_B, "mandatory": False,
         "configurable": False, "available": False,
         "scope": "organization", "channel": "email",
@@ -324,7 +324,7 @@ CATALOG = [
     {
         "key": "weekly_summary",
         "label": "Weekly summary",
-        "description": "Not available yet — Zoiko Steam does not send this notification.",
+        "description": "Not available yet — Zoiko Stream does not send this notification.",
         "family": None, "message_class": CLASS_B, "mandatory": False,
         "configurable": False, "available": False,
         "scope": "organization", "channel": "email",
@@ -332,7 +332,7 @@ CATALOG = [
     {
         "key": "mentions",
         "label": "Mentions",
-        "description": "Not available yet — Zoiko Steam does not send this notification.",
+        "description": "Not available yet — Zoiko Stream does not send this notification.",
         "family": None, "message_class": CLASS_B, "mandatory": False,
         "configurable": False, "available": False,
         "scope": "organization", "channel": "email",

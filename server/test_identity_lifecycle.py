@@ -250,7 +250,7 @@ def _support_session(client, staff_auth, target_email, capability="tenant.member
         created = client.post("/api/admin/support-access", headers=staff_auth, json={
             "org_id": org_id, "case_reference": f"CASE-{uuid.uuid4().hex[:6].upper()}",
             "reason_category": "customer_reported_issue",
-            "engineer_display": "Zoiko Steam Support Engineer",
+            "engineer_display": "Zoiko Stream Support Engineer",
             "requested_scope": "Member administration for this case",
             "allowed_actions": [capability], "minutes": 60,
         })
@@ -300,7 +300,7 @@ def test_shared_no_secrets_no_pixel_no_marketing():
 def test_shared_sender_and_https_cta():
     with patch.object(settings, "MAIL_FROM", "ZoikoStream <info@zoikostream.com>"):
         assert email_mod._sender_identity(email_mod.SENDER_SECURITY) == \
-            "Zoiko Steam Security <info@zoikostream.com>"
+            "Zoiko Stream Security <info@zoikostream.com>"
     for bad in ("http://localhost:5173", "https://127.0.0.1:5173"):
         with patch.object(settings, "ENVIRONMENT", "production"), \
              patch.object(settings, "APP_URL", bad):
@@ -361,7 +361,7 @@ def test_006_4_to_12_recovery_method_change_sends_masked_destination():
         assert r.status_code == 200, r.text
         assert IDN_006 not in cap.subjects, "an unconfirmed nomination is not a change"
         assert _load(email).recovery_email is None, "not honoured until confirmed"
-        confirm = cap.of("Confirm your Zoiko Steam recovery address")
+        confirm = cap.of("Confirm your Zoiko Stream recovery address")
         assert confirm["to"] == [recovery_addr.lower()], \
             "verification must go to the NOMINATED address, not the account"
         confirm_token = confirm["text"].split("token=", 1)[1].split()[0]
@@ -383,8 +383,8 @@ def test_006_4_to_12_recovery_method_change_sends_masked_destination():
 
         payload = cap2.of(IDN_006)
         assert payload["to"] == [email.lower()], "IDN-006 goes to the account holder"
-        assert payload["from"].startswith("Zoiko Steam Security <")
-        assert payload["subject"] == "Zoiko Steam security settings changed"
+        assert payload["from"].startswith("Zoiko Stream Security <")
+        assert payload["subject"] == "Zoiko Stream security settings changed"
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert "Review your account-security change." in text
@@ -457,7 +457,7 @@ def test_007_11_support_never_reads_code_aloud_line_is_present():
         _code, cap = _forgot(client, email)
         payload = cap.of(IDN_007_VERIFY)
         for part in (payload["html"], payload["text"]):
-            assert "Zoiko Steam Support will never ask you to read this code aloud." in part
+            assert "Zoiko Stream Support will never ask you to read this code aloud." in part
         assert "identity documents" in payload["text"], \
             "must state that documents are never requested by email"
     finally:
@@ -557,7 +557,7 @@ def test_007_9_completed_only_after_credential_change_and_reaches_recovery_conta
         assert rec.status == RECOVERY_COMPLETED and rec.completed_at is not None
 
         payload = cap.of(IDN_007_DONE)
-        assert payload["from"].startswith("Zoiko Steam Security <")
+        assert payload["from"].startswith("Zoiko Stream Security <")
         assert payload["html"] and payload["text"]
         assert sorted(cap.to(IDN_007_DONE)) == sorted([email.lower(), recovery_addr.lower()])
         text = payload["text"]
@@ -676,8 +676,8 @@ def test_008_1_to_5_suspension_notifies_after_commit():
 
         payload = cap.of(IDN_008_RESTRICTED)
         assert payload["to"] == [email.lower()], "only the affected account holder"
-        assert payload["from"].startswith("Zoiko Steam Security <")
-        assert payload["subject"] == "Your Zoiko Steam account is restricted"
+        assert payload["from"].startswith("Zoiko Stream Security <")
+        assert payload["subject"] == "Your Zoiko Stream account is restricted"
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert "Your access has changed." in text

@@ -547,7 +547,7 @@ def _breakglass_shared(db: Session, req: SupportAccessRequest, org) -> dict:
         "reason": (req.reason_category or "operational").replace("_", " ").title(),
         "scope": ", ".join(support_access.actions_list(req.allowed_actions))
                  or "Not recorded",
-        "operator": req.engineer_display or "A Zoiko Steam engineer",
+        "operator": req.engineer_display or "A Zoiko Stream engineer",
         # The independent approval is stated because it is what makes the access legitimate.
         "approval": (f"Independently authorized by {authorizer.email}" if authorizer
                      else "Independent authorization not recorded"),

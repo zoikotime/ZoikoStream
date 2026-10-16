@@ -14,7 +14,7 @@ its evidence cannot drift apart.
     visibility/registration columns, recording and replay from `recording_enabled` and the
     ReplayEntitlement. The fourth, accessibility, has no backing domain at all and is
     therefore operator-attested only - it is never auto-completed, and its message says
-    plainly that Zoiko Steam does not itself produce captions or translation.
+    plainly that Zoiko Stream does not itself produce captions or translation.
 
   * **EventRehearsal** (LVE-005) - a scheduled rehearsal. `ServiceProfile.requires_full_rehearsal`
     and the `full_rehearsal` readiness check already recorded that a rehearsal was REQUIRED,

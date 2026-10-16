@@ -166,7 +166,7 @@ def consume_email_verification(db: Session, challenge: IdentityChallenge) -> Use
 def access_is_active(db: Session, user: User) -> bool:
     """True only when the account really can be used right now.
 
-    IDN-002 states "your Zoiko Steam access is active". Sending that to a deactivated,
+    IDN-002 states "your Zoiko Stream access is active". Sending that to a deactivated,
     soft-deleted or suspended-organization account would be a false statement, so this is
     checked before the message is queued rather than after.
 

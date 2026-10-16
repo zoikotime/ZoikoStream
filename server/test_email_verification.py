@@ -199,9 +199,9 @@ def test_template_copy_is_the_approved_idn_001_copy():
     html = email_mod._verification_html(url, TTL, "01 Jan 2026, 09:00 UTC")
     text = email_mod._verification_text(url, TTL, "01 Jan 2026, 09:00 UTC")
 
-    assert email_mod.IDN_001_SUBJECT == "Verify your email for Zoiko Steam"
+    assert email_mod.IDN_001_SUBJECT == "Verify your email for Zoiko Stream"
     for body in (html, text):
-        assert "Welcome to Zoiko Steam" in body
+        assert "Welcome to Zoiko Stream" in body
         assert "Thanks for creating your Zoiko Stream account." in body
         assert "Before you can sign in, please verify your email address" in body
         # The message must never imply the account is usable yet — that claim belongs to
@@ -218,14 +218,43 @@ def test_template_copy_is_the_approved_idn_001_copy():
         assert banned not in html.lower(), f"{banned!r} must not appear in a Class A email"
 
 
-def test_sender_identity_is_zoiko_steam_security():
+def test_sender_identity_is_zoiko_stream_security():
     with patch.object(settings, "MAIL_FROM", "ZoikoStream <info@zoikostream.com>"):
         assert email_mod._sender_identity(email_mod.SENDER_SECURITY) == \
-            "Zoiko Steam Security <info@zoikostream.com>"
+            "Zoiko Stream Security <info@zoikostream.com>"
     # A bare address (no display name) is handled too.
     with patch.object(settings, "MAIL_FROM", "info@zoikostream.com"):
         assert email_mod._sender_identity(email_mod.SENDER_SECURITY) == \
-            "Zoiko Steam Security <info@zoikostream.com>"
+            "Zoiko Stream Security <info@zoikostream.com>"
+
+
+def test_idn_001_is_branded_zoiko_stream_in_every_part():
+    """Bug 3: the message said "Zoiko Steam" in its subject, headline, sign-off and sender while
+    its own body said "Zoiko Stream". Sent end to end through send_email_verification_email
+    with the Resend transport intercepted: no DB, no network."""
+    url = "https://app.example.com/verify-email?token=tok_abc-123_XYZ"
+    cap, ctx = _capture()
+    with ctx, patch.object(settings, "RESEND_API_KEY", "re_dummy_key_for_tests"), \
+            patch.object(settings, "MAIL_FROM", "ZoikoStream <info@zoikostream.com>"):
+        sent = email_mod.send_email_verification_email(
+            "holder@example.com", url, TTL, "01 Jan 2026, 09:00 UTC")
+
+    assert sent is True
+    assert len(cap.calls) == 1 and cap.last["url"] == email_mod.RESEND_URL
+    p = cap.payload
+    assert p["to"] == ["holder@example.com"]
+    assert p["subject"] == "Verify your email for Zoiko Stream"
+    assert p["from"] == "Zoiko Stream Security <info@zoikostream.com>"
+    for part in ("subject", "from", "html", "text"):
+        assert "zoiko steam" not in p[part].lower(), f"misspelled brand in {part}"
+    # HTML and plain text carry the same brand: headline in both, sign-off in the text part.
+    for body in (p["html"], p["text"]):
+        assert "Welcome to Zoiko Stream" in body
+        assert "Thanks for creating your Zoiko Stream account." in body
+    assert p["text"].rstrip().splitlines()[-1] == "Zoiko Stream Security"
+    # The link and its token are untouched by the copy change, in both parts.
+    assert f'href="{url}"' in p["html"]
+    assert f"Verify email: {url}" in p["text"]
 
 
 def test_token_hash_is_one_way_and_purpose_bound():
@@ -351,9 +380,9 @@ def test_05_idn_001_is_sent_through_the_existing_resend_integration():
         call = cap.last
         assert call["url"] == email_mod.RESEND_URL == "https://api.resend.com/emails"
         assert call["headers"]["Authorization"].startswith("Bearer "), "Resend bearer auth"
-        assert call["payload"]["subject"] == "Verify your email for Zoiko Steam"
-        assert call["payload"]["from"].startswith("Zoiko Steam Security <"), \
-            "IDN-001 must ship from the Zoiko Steam Security identity"
+        assert call["payload"]["subject"] == "Verify your email for Zoiko Stream"
+        assert call["payload"]["from"].startswith("Zoiko Stream Security <"), \
+            "IDN-001 must ship from the Zoiko Stream Security identity"
         assert "@zoikostream.com" in call["payload"]["from"] or \
                "@" in call["payload"]["from"], "sender must use the authenticated address"
     finally:
@@ -378,7 +407,7 @@ def test_07_html_version_exists():
         _, cap = _register(client, email)
         html = cap.payload["html"]
         assert html and "<" in html, "HTML body must be present"
-        assert "Welcome to Zoiko Steam" in html
+        assert "Welcome to Zoiko Stream" in html
         assert "font-size:16px" in html, "body text must be at least 16px"
     finally:
         _cleanup(email)
@@ -392,7 +421,7 @@ def test_08_plain_text_version_exists():
         text = cap.payload.get("text")
         assert text, "a plain-text alternative is mandatory — never send HTML-only"
         assert "<" not in text.replace("<", "") or "</" not in text, "text must not be markup"
-        assert "Welcome to Zoiko Steam" in text
+        assert "Welcome to Zoiko Stream" in text
         assert "token=" in text, "the link must be reachable from the text part too"
     finally:
         _cleanup(email)
@@ -412,7 +441,7 @@ def test_10_and_14_valid_token_verifies_the_user_and_stamps_the_time():
         body = resp.json()
         assert body["status"] == "verified"
         assert body["message"] == \
-            "Email verified successfully. You can now continue to Zoiko Steam."
+            "Email verified successfully. You can now continue to Zoiko Stream."
         # Verification is proof of control, not authentication — no session handed back.
         assert "access_token" not in body
 
@@ -618,7 +647,7 @@ def test_19_security_email_is_not_suppressed_by_organization_preferences():
         assert resp.status_code == 200
         assert len(cap.calls) == 1, \
             "IDN-001 is Class A and must send regardless of notification preferences"
-        assert cap.payload["subject"] == "Verify your email for Zoiko Steam"
+        assert cap.payload["subject"] == "Verify your email for Zoiko Stream"
     finally:
         _cleanup(email)
 

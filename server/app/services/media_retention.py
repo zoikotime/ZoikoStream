@@ -73,11 +73,11 @@ DEFAULT_POLICY = {
 FAILURE_STORAGE_UNAVAILABLE = "Storage was unavailable or the object could not be removed"
 FAILURE_NOT_CONFIGURED = "Object storage is not configured for this platform"
 
-# What a completed deletion may truthfully claim. Zoiko Steam manages its own objects; it
+# What a completed deletion may truthfully claim. Zoiko Stream manages its own objects; it
 # cannot speak for its cloud provider's backup retention, so it does not.
 RESIDUAL_COPIES = (
-    "Zoiko Steam does not retain its own additional copies. Backup retention inside the "
-    "underlying cloud storage provider is outside Zoiko Steam's control and is not claimed "
+    "Zoiko Stream does not retain its own additional copies. Backup retention inside the "
+    "underlying cloud storage provider is outside Zoiko Stream's control and is not claimed "
     "to be erased."
 )
 RETAINED_METADATA = (
@@ -283,7 +283,7 @@ def contacts(db: Session, org_id, kind: str) -> list[str]:
     """Stored governance / legal-hold contacts for one Organization.
 
     This list exists because the person who asked for a legal hold is frequently not a
-    Zoiko Steam user at all — counsel, or a compliance officer at the customer. Without it
+    Zoiko Stream user at all — counsel, or a compliance officer at the customer. Without it
     the only options were to mail org admins and call them "legal contacts", or to skip the
     notification entirely.
     """
@@ -569,7 +569,7 @@ def notify_retention_warning(db: Session, background, recording: LiveRecording) 
                        # There is no automatic deletion scheduler. Saying the recording
                        # "will be deleted" on this date would be false.
                        deletion_behaviour=(
-                           "The recording becomes eligible for deletion. Zoiko Steam does "
+                           "The recording becomes eligible for deletion. Zoiko Stream does "
                            "not delete it automatically — an authorized administrator must "
                            "act. Until then it remains available."),
                        org_name=org.name if org else "your Organization")

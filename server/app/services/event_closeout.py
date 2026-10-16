@@ -322,7 +322,7 @@ def notify_replay(db: Session, background, event: Event) -> str | None:
                    else "Not applicable"),
            next_action=("Review and publish the replay" if state == "ready_for_review"
                         else "No action is needed" if state == "published"
-                        else "Contact your Zoiko Steam team if you need it restored"),
+                        else "Contact your Zoiko Stream team if you need it restored"),
            event_id=str(event.id),
            org_name=org.name if org else "your Organization",
            test_mode=is_test_org(org))
@@ -335,7 +335,7 @@ def notify_replay(db: Session, background, event: Event) -> str | None:
 # anywhere in this repository. Until a policy is published, per-segment audience figures are
 # not disclosed at all and this stays False - the honest record of an absent control.
 PRIVACY_POLICY_AVAILABLE = False
-PRIVACY_NOTE = ("Only whole-event totals are shown. Zoiko Steam has no approved disclosure "
+PRIVACY_NOTE = ("Only whole-event totals are shown. Zoiko Stream has no approved disclosure "
                 "threshold for audience segments, so no segment breakdown is included here.")
 
 
@@ -422,7 +422,7 @@ def notify_report(db: Session, background, event: Event, row: PostEventReport) -
                    f"{event_timestamp(event, row.window_end, org)}"),
            metrics=_headline_metrics(db, row),
            privacy_note=PRIVACY_NOTE,
-           failure_note=("We could not generate the report. Your Zoiko Steam team is "
+           failure_note=("We could not generate the report. Your Zoiko Stream team is "
                          "looking into it."),
            event_id=str(event.id),
            org_name=org.name if org else "your Organization",

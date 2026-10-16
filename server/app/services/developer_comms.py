@@ -36,16 +36,16 @@ log = logging.getLogger(__name__)
 
 # Truthful stand-ins for capabilities this platform does not model. Kept as named constants
 # so a future scope subsystem replaces one value rather than hunting through templates.
-NO_SCOPES = "Not scoped — Zoiko Steam does not currently support scoped credentials"
+NO_SCOPES = "Not scoped — Zoiko Stream does not currently support scoped credentials"
 NO_API_AUTH = (
-    "No Zoiko Steam API endpoint currently accepts API-key authentication, so this "
+    "No Zoiko Stream API endpoint currently accepts API-key authentication, so this "
     "credential grants no access yet"
 )
 
 # There is no separate developer/test environment in the product. The raw key carries a
 # literal `zk_live_` banner, which is a string constant rather than authoritative state, so
 # it is NOT treated as a mode signal — see the reported DEV-001 gap.
-ENVIRONMENT_LABEL = "Production (Zoiko Steam has no separate test environment)"
+ENVIRONMENT_LABEL = "Production (Zoiko Stream has no separate test environment)"
 
 
 def recipients(db: Session, org: Organization, creator: User | None) -> list[str]:

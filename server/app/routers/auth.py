@@ -414,7 +414,7 @@ def verify_email(data: VerifyEmailIn, background: BackgroundTasks,
 
     return VerificationResultOut(
         status="verified",
-        message="Email verified successfully. You can now continue to Zoiko Steam.",
+        message="Email verified successfully. You can now continue to Zoiko Stream.",
     )
 
 

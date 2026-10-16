@@ -151,9 +151,12 @@ export default function Login() {
                 checked={remember}
                 onChange={(e) => setRemember(e.target.checked)}
               />
+              {/* inline-flex items-center: in the Android app the 44px touch-target floor
+                  (index.css) makes this link taller than its text — keep the text centred so
+                  it stays level with Remember Me. No effect on web, where it is text-height. */}
               <Link
                 to="/forgot-password"
-                className="rounded-lg text-sm font-semibold text-emerald-700 underline-offset-4 transition-colors duration-200 hover:text-fuchsia-600 hover:underline dark:text-emerald-400 dark:hover:text-fuchsia-400"
+                className="inline-flex items-center rounded-lg text-sm font-semibold text-emerald-700 underline-offset-4 transition-colors duration-200 hover:text-fuchsia-600 hover:underline dark:text-emerald-400 dark:hover:text-fuchsia-400"
               >
                 Forgot Password?
               </Link>

@@ -424,7 +424,7 @@ def notify_ended(db: Session, background, req: SupportAccessRequest) -> None:
            org_name=f["org_name"], case_reference=f["case_reference"], engineer=f["engineer"],
            ended_display=org_comms.org_timestamp(f["org"], req.ended_at),
            outcome="Expired automatically" if req.status == SUPPORT_EXPIRED
-           else "Ended by Zoiko Steam Support",
+           else "Ended by Zoiko Stream Support",
            action_count=action_count(db, req))
 
 
@@ -448,7 +448,7 @@ def notify_emergency(db: Session, background, req: SupportAccessRequest) -> None
            expires_display=org_comms.org_timestamp(f["org"], req.expires_at),
            emergency_reason=req.emergency_reason or "Not recorded",
            dual_authorization=dual,
-           review_note="This access is subject to review by Zoiko Steam and by your "
+           review_note="This access is subject to review by Zoiko Stream and by your "
                        "Organization.")
 
 

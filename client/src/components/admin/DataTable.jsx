@@ -97,6 +97,14 @@ function CheckBox({ checked, indeterminate = false, onChange, label }) {
   );
 }
 
+// Holds the empty state in the visible part of a horizontally scrolling table (see `pinEmpty`):
+// as wide as the scroller's visible width (100cqw, less the cell's px-4 either side), and
+// sticky at its left edge. Off, it returns its children untouched, so the DOM is unchanged.
+function PinToView({ on, children }) {
+  if (!on) return children;
+  return <div className="sticky left-4 w-[calc(100cqw-2rem)]">{children}</div>;
+}
+
 export default function DataTable({
   columns,
   rows,
@@ -116,6 +124,11 @@ export default function DataTable({
   initialSort = null,
   pageSize,
   minWidth = 640,
+  // A table wider than its scroller (minWidth on a phone) centres its empty state across the
+  // FULL table width, so on a 360px screen most of it sits off to the right and the visible
+  // column is blank space between the header row and a clipped message. pinEmpty sizes the
+  // empty state to the visible width instead. Opt-in; where the table fits, nothing moves.
+  pinEmpty = false,
   maxHeight,
   className = "",
   // search (opt-in)
@@ -308,7 +321,10 @@ export default function DataTable({
         </div>
       )}
 
-      <div className={cx("overflow-auto", className)} style={maxHeight ? { maxHeight } : undefined}>
+      <div
+        className={cx("overflow-auto", pinEmpty && !loading && sorted.length === 0 && "@container", className)}
+        style={maxHeight ? { maxHeight } : undefined}
+      >
         <table className="w-full border-collapse" style={{ minWidth }}>
           <thead
             className={cx("bg-slate-50/90 backdrop-blur dark:bg-white/[0.04]", maxHeight && "sticky top-0 z-10")}
@@ -458,6 +474,7 @@ export default function DataTable({
                     began. Content-driven height reads as "nothing here yet" rather
                     than as a page that failed to load. */}
                 <td colSpan={colCount} className="px-4 py-12 text-center">
+                  <PinToView on={pinEmpty}>
                   {empty ? (
                     <div className="zk-fade-in mx-auto max-w-sm">
                       {empty.icon && (
@@ -492,6 +509,7 @@ export default function DataTable({
                   ) : (
                     <p className="text-sm text-slate-400">No results.</p>
                   )}
+                  </PinToView>
                 </td>
               </tr>
             )}

@@ -132,7 +132,7 @@ def _cleanup(email):
 # ══ template shape (pure) ═══════════════════════════════════════════════════════
 
 def test_09_subject_is_canonical():
-    assert email_mod.IDN_002_SUBJECT == "Your Zoiko Steam access is ready"
+    assert email_mod.IDN_002_SUBJECT == "Your Zoiko Stream access is ready"
 
 
 def test_10_and_11_html_and_plain_text_both_exist_with_canonical_copy():
@@ -144,10 +144,10 @@ def test_10_and_11_html_and_plain_text_both_exist_with_canonical_copy():
     assert text and "<div" not in text, "plain-text body must exist and not be markup"
 
     for body in (html, text):
-        assert "Welcome to Zoiko Steam." in body
-        assert "Your identity has been verified and your Zoiko Steam access is active." in body
+        assert "Welcome to Zoiko Stream." in body
+        assert "Your identity has been verified and your Zoiko Stream access is active." in body
         assert "determined by the access granted to you" in body
-        assert "Open Zoiko Steam" in body
+        assert "Open Zoiko Stream" in body
         assert url in body
     assert "Sign in and complete your account setup." in html, "preheader must be present"
     assert "Sign in and complete your account setup." in text
@@ -187,10 +187,10 @@ def test_13_no_localhost_in_production_configuration():
                 raise AssertionError(f"{bad!r} must be refused in production")
 
 
-def test_08_sender_display_name_is_zoiko_steam_not_security():
+def test_08_sender_display_name_is_zoiko_stream_not_security():
     with patch.object(settings, "MAIL_FROM", "ZoikoStream <info@zoikostream.com>"):
         sender = email_mod._sender_identity(email_mod.SENDER_DEFAULT)
-    assert sender == "Zoiko Steam <info@zoikostream.com>"
+    assert sender == "Zoiko Stream <info@zoikostream.com>"
     assert "Security" not in sender, "IDN-002 is Class C — not the security identity"
 
 
@@ -269,7 +269,7 @@ def test_07_correct_recipient_receives_the_email():
         payload = cap.of(IDN_002)
         assert payload["to"] == [email.lower()], "only the account holder is addressed"
         assert len(payload["to"]) == 1
-        assert payload["from"].startswith("Zoiko Steam <"), payload["from"]
+        assert payload["from"].startswith("Zoiko Stream <"), payload["from"]
         assert payload["html"] and payload["text"], "both parts must ship"
     finally:
         _cleanup(email)

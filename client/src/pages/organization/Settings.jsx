@@ -781,7 +781,10 @@ export default function OrganizationSettings() {
                 title="Role capabilities"
                 desc="What each role can do today. Enforced by the platform — the Owner always has full access."
               >
-                <div className="overflow-x-auto">
+                {/* `relative`: the cells' sr-only labels are position:absolute. Without a
+                    positioned scroller they resolve against the page, escape this overflow, and
+                    widen a phone's page to ~544px instead of scrolling inside the table. */}
+                <div className="relative overflow-x-auto">
                   <table className="w-full min-w-[560px] text-sm">
                     <caption className="sr-only">Capabilities granted to each organization role</caption>
                     <thead>

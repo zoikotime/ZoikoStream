@@ -1020,7 +1020,7 @@ def claim_key_notification(db, org: Organization, key_id: str,
 def mark_key_expired(db, org: Organization, key_id: str) -> dict | None:
     """Move a lapsed credential into the EXPIRED state.
 
-    This records lifecycle state. It does NOT block access, because no Zoiko Steam endpoint
+    This records lifecycle state. It does NOT block access, because no Zoiko Stream endpoint
     authenticates an API key - see the reported DEV-003 gap, and note that the expiry email
     is worded accordingly.
     """

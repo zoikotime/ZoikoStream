@@ -745,7 +745,7 @@ def test_event_html_and_text(w):
             event_comms.notify_event_approved(db, _Bg(), ev)
         payload = cap.of(APPROVED)
         assert payload["html"].strip() and payload["text"].strip()
-        assert payload["from"].startswith("Zoiko Steam Event Operations"), payload["from"]
+        assert payload["from"].startswith("Zoiko Stream Event Operations"), payload["from"]
     finally:
         db.close()
 

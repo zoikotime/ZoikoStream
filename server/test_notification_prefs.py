@@ -426,9 +426,9 @@ def test_012_change_persists_records_snapshot_and_sends_one_email():
         assert ev.notified_at is not None
 
         payload = cap.of(ORG_012)
-        assert payload["subject"] == "Your Zoiko Steam notification preferences changed"
-        assert payload["from"].startswith("Zoiko Steam <"), "ORG-012 is Class C"
-        assert not payload["from"].startswith("Zoiko Steam Security")
+        assert payload["subject"] == "Your Zoiko Stream notification preferences changed"
+        assert payload["from"].startswith("Zoiko Stream <"), "ORG-012 is Class C"
+        assert not payload["from"].startswith("Zoiko Stream Security")
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert "Member joined: On -> Off" in text, f"readable summary missing:\n{text}"

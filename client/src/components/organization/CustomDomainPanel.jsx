@@ -60,7 +60,9 @@ function StatusNote({ view }) {
 function Records({ records, check, onCopy }) {
   const ok = { CNAME: check?.cname_ok, TXT: check?.txt_ok };
   return (
-    <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+    // `relative`: the Actions header is sr-only (position:absolute). Without a positioned
+    // scroller it resolves against the page, escapes this overflow and widens a phone's page.
+    <div className="relative mt-4 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
       <table className="w-full min-w-[560px] text-left text-sm">
         <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
           <tr>
