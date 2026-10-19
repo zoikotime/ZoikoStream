@@ -142,6 +142,45 @@ def record_refusal(principal: str, rule: str,
         return count
 
 
+_WINDOW_PREFIX = "zoiko:window:"
+# Process-local fallback for count_in_window, kept apart from the refusal counts above (a key
+# here must never be read as a refusal). Bounded: stale keys are dropped once it grows.
+_window_local: dict[str, tuple[int, float]] = {}
+_WINDOW_LOCAL_MAX = 50_000
+
+
+def count_in_window(rule: str, principal: str, window_seconds: int) -> int:
+    """Count one hit for `principal` under `rule`; return the total in the current fixed window.
+
+    A general budget counter for limits that must hold across workers (e.g. the playback-QoE
+    new-session budget), on the same Redis as the refusal counter but under its own prefix, so
+    nothing counted here reaches DEV-010 accounting. The window is created and counted in one
+    MULTI/EXEC, so a worker dying between the two can't leave a key without an expiry (which
+    would be a budget that never resets). Per process when Redis is unavailable."""
+    key = f"{_WINDOW_PREFIX}{rule}:{principal}"
+    client = _client()
+    if client is not None:
+        try:
+            pipe = client.pipeline(transaction=True)
+            pipe.set(key, 0, ex=window_seconds, nx=True)
+            pipe.incr(key)
+            return int(pipe.execute()[-1])
+        except Exception:  # noqa: BLE001 — a counter outage must never fail the request
+            log.warning("Window counter write failed; using local count")
+
+    now = time.monotonic()
+    with _local_lock:
+        if len(_window_local) >= _WINDOW_LOCAL_MAX:
+            for stale in [k for k, (_, started) in _window_local.items() if now - started > window_seconds]:
+                del _window_local[stale]
+        count, started = _window_local.get(key, (0, now))
+        if now - started > window_seconds:
+            count, started = 0, now
+        count += 1
+        _window_local[key] = (count, started)
+        return count
+
+
 def window_reset_at(principal: str, rule: str,
                     window_seconds: int = RATE_LIMIT_EVENT_WINDOW_SECONDS) -> datetime:
     key = f"{_KEY_PREFIX}{rule}:{principal}"

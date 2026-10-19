@@ -19,6 +19,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
   errMsg: (e) => e?.message ?? "Something went wrong.",
+  // The page asks this to tell "the server never answered" apart from an answer it did
+  // not like, so the stub has to answer it too.
+  transportMessage: (e) => (e?.response ? null : "Couldn't reach the ZoikoStream server."),
+  // Billing now diagnoses a failed load instead of saying "try refreshing", so the stub
+  // has to answer this too.
+  diagnoseLoadError: (e, path) => (
+    e?.response?.status
+      ? `The platform API returned ${e.response.status}`
+      : `The platform API is unreachable — check that the API server is running and that VITE_API_URL points at it.`
+  ),
 }));
 
 vi.mock("../../ui/Toast", () => ({
@@ -232,7 +242,8 @@ describe("An organization still on a retired tier", () => {
 
   it("still sees its real plan name and status in the subscription card", async () => {
     await renderBilling(onPro);
-    expect(screen.getByRole("heading", { name: /Pro Plan/i })).toBeTruthy();
+    // The tier's own name, as everywhere else on the page — not "Pro Plan".
+    expect(screen.getByRole("heading", { name: "Pro" })).toBeTruthy();
     expect(screen.getByText("active")).toBeTruthy();
   });
 

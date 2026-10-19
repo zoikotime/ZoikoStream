@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FiChevronDown, FiChevronLeft, FiChevronRight, FiChevronUp, FiSearch } from "react-icons/fi";
 import { CONSOLE, cx, focusRing } from "../../ui/tokens";
+import useMediaQuery from "../../hooks/useMediaQuery";
 
 // Reusable data grid for every table (Organizations, Users, Events, Billing, …).
 // Features: client-side sortable columns with clear indicators, optional pagination
@@ -33,12 +34,37 @@ function SortIcon({ active, dir }) {
   return dir === "asc" ? <FiChevronUp aria-hidden="true" /> : <FiChevronDown aria-hidden="true" />;
 }
 
-function PageBtn({ disabled, active, onClick, children }) {
+// The page numbers to draw: first, last, and the current page with one neighbour each side,
+// with "gap" marking each run that was skipped. Rendering every page put 44 buttons in one
+// row for Identity & Access (2,173 accounts / 50) and pushed them past the card's edge.
+// A gap is only used where it hides two or more pages; a single hidden page is cheaper to
+// show than to replace with an ellipsis of the same width.
+//
+// `siblings` is 0 on phones: nine controls (‹ 1 2 3 4 5 … 44 ›) need ~320px and a 375px
+// card offers ~310, so the Next arrow wrapped onto a line of its own. Without neighbours the
+// row is at most seven controls. Computed rather than hidden with `sm:` classes, because
+// hiding the neighbours would leave sequences like "1 2 4" with no gap marker between them.
+function pageWindow(current, pageCount, siblings = 1) {
+  const shown = new Set([1, pageCount, current - siblings, current, current + siblings]);
+  const pages = [...shown].filter((p) => p >= 1 && p <= pageCount).sort((a, b) => a - b);
+  const out = [];
+  pages.forEach((p, i) => {
+    const prev = pages[i - 1];
+    if (prev != null && p - prev === 2) out.push(prev + 1);
+    else if (prev != null && p - prev > 2) out.push(`gap-${prev}`);
+    out.push(p);
+  });
+  return out;
+}
+
+function PageBtn({ disabled, active, onClick, children, ...rest }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-current={active ? "page" : undefined}
+      {...rest}
       className={cx(
         "grid h-8 min-w-8 place-items-center rounded-md px-2 text-sm font-medium transition duration-150 motion-reduce:transition-none",
         focusRing,
@@ -71,6 +97,14 @@ function CheckBox({ checked, indeterminate = false, onChange, label }) {
   );
 }
 
+// Holds the empty state in the visible part of a horizontally scrolling table (see `pinEmpty`):
+// as wide as the scroller's visible width (100cqw, less the cell's px-4 either side), and
+// sticky at its left edge. Off, it returns its children untouched, so the DOM is unchanged.
+function PinToView({ on, children }) {
+  if (!on) return children;
+  return <div className="sticky left-4 w-[calc(100cqw-2rem)]">{children}</div>;
+}
+
 export default function DataTable({
   columns,
   rows,
@@ -79,10 +113,22 @@ export default function DataTable({
   skeletonRows = 6,
   empty,
   rowActions,
+  // Heading for the rowActions column. Omitted, the column stays unlabelled as before; a table
+  // that also has other icon columns names it ("Actions") so each icon's column says what it is.
+  rowActionsHeader,
+  // Row actions are revealed on row hover / keyboard focus by default (a quiet table whose
+  // actions are secondary). A table whose actions are primary controls — the Events list's
+  // View and Delete — shows them at rest instead: never hidden, hover only adds emphasis.
+  alwaysShowRowActions = false,
   onRowClick,
   initialSort = null,
   pageSize,
   minWidth = 640,
+  // A table wider than its scroller (minWidth on a phone) centres its empty state across the
+  // FULL table width, so on a 360px screen most of it sits off to the right and the visible
+  // column is blank space between the header row and a clipped message. pinEmpty sizes the
+  // empty state to the visible width instead. Opt-in; where the table fits, nothing moves.
+  pinEmpty = false,
   maxHeight,
   className = "",
   // search (opt-in)
@@ -190,6 +236,8 @@ export default function DataTable({
     ? sorted
     : pageSize ? sorted.slice((current - 1) * pageSize, current * pageSize) : sorted;
   const goToPage = serverPaged ? onPageChange : setPage;
+  // Same phone breakpoint VideoPlayer uses; see pageWindow for why the window narrows there.
+  const isPhone = useMediaQuery("(max-width: 639.98px)");
 
   // An empty table has nothing to order, so its sort controls are disabled and no column reads
   // as active — whatever the sort state holds. Clicks over zero rows used to flip the arrows.
@@ -273,7 +321,10 @@ export default function DataTable({
         </div>
       )}
 
-      <div className={cx("overflow-auto", className)} style={maxHeight ? { maxHeight } : undefined}>
+      <div
+        className={cx("overflow-auto", pinEmpty && !loading && sorted.length === 0 && "@container", className)}
+        style={maxHeight ? { maxHeight } : undefined}
+      >
         <table className="w-full border-collapse" style={{ minWidth }}>
           <thead
             className={cx("bg-slate-50/90 backdrop-blur dark:bg-white/[0.04]", maxHeight && "sticky top-0 z-10")}
@@ -329,7 +380,13 @@ export default function DataTable({
                   )}
                 </th>
               ))}
-              {rowActions && <th className="w-12 px-4 py-2.5" />}
+              {rowActions && (rowActionsHeader ? (
+                <th className="whitespace-nowrap px-4 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-neutral-500">
+                  {rowActionsHeader}
+                </th>
+              ) : (
+                <th className="w-12 px-4 py-2.5" />
+              ))}
             </tr>
           </thead>
 
@@ -395,7 +452,14 @@ export default function DataTable({
                     ))}
                     {rowActions && (
                       <td className="px-4 py-3.5 text-right">
-                        <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
+                        <div
+                          data-row-actions
+                          className={cx(
+                            "flex items-center justify-end gap-1",
+                            !alwaysShowRowActions &&
+                              "opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none"
+                          )}
+                        >
                           {rowActions(row)}
                         </div>
                       </td>
@@ -410,6 +474,7 @@ export default function DataTable({
                     began. Content-driven height reads as "nothing here yet" rather
                     than as a page that failed to load. */}
                 <td colSpan={colCount} className="px-4 py-12 text-center">
+                  <PinToView on={pinEmpty}>
                   {empty ? (
                     <div className="zk-fade-in mx-auto max-w-sm">
                       {empty.icon && (
@@ -444,6 +509,7 @@ export default function DataTable({
                   ) : (
                     <p className="text-sm text-slate-400">No results.</p>
                   )}
+                  </PinToView>
                 </td>
               </tr>
             )}
@@ -462,19 +528,25 @@ export default function DataTable({
               : Math.min(current * pageSize, sorted.length)}{" "}
             of {serverPaged ? (serverTotal ?? sorted.length) : sorted.length}
           </p>
-          <div className="flex items-center gap-1">
-            <PageBtn disabled={current === 1} onClick={() => goToPage(current - 1)}>
-              <FiChevronLeft />
+          <nav aria-label="Pagination" className="flex min-w-0 flex-wrap items-center gap-1">
+            <PageBtn disabled={current === 1} onClick={() => goToPage(current - 1)} aria-label="Previous page">
+              <FiChevronLeft aria-hidden="true" />
             </PageBtn>
-            {Array.from({ length: pageCount }, (_, i) => i + 1).map((p) => (
-              <PageBtn key={p} active={p === current} onClick={() => goToPage(p)}>
-                {p}
-              </PageBtn>
-            ))}
-            <PageBtn disabled={current === pageCount} onClick={() => goToPage(current + 1)}>
-              <FiChevronRight />
+            {pageWindow(current, pageCount, isPhone ? 0 : 1).map((p) =>
+              typeof p === "number" ? (
+                <PageBtn key={p} active={p === current} onClick={() => goToPage(p)}>
+                  {p}
+                </PageBtn>
+              ) : (
+                <span key={p} aria-hidden="true" className="grid h-8 min-w-8 place-items-center text-sm text-slate-400 dark:text-neutral-500">
+                  …
+                </span>
+              )
+            )}
+            <PageBtn disabled={current === pageCount} onClick={() => goToPage(current + 1)} aria-label="Next page">
+              <FiChevronRight aria-hidden="true" />
             </PageBtn>
-          </div>
+          </nav>
         </div>
       )}
     </div>

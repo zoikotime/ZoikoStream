@@ -55,7 +55,7 @@ log = logging.getLogger(__name__)
 # due date was given. Named and in one place rather than guessed per call site.
 ACTION_REMINDER_HOURS = 72
 # The customer-facing owning team a case starts with. A team name, never a person.
-DEFAULT_OWNER_TEAM = "Zoiko Steam Support"
+DEFAULT_OWNER_TEAM = "Zoiko Stream Support"
 
 
 def _now() -> datetime:

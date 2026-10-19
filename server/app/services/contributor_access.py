@@ -284,7 +284,7 @@ def expire_due(db: Session, background=None) -> int:
 
 CONSENT_NOTICE = (
     "Taking part means your camera, microphone and name are visible to the event audience, "
-    "and the session may be recorded and made available as a replay. Zoiko Steam processes "
+    "and the session may be recorded and made available as a replay. Zoiko Stream processes "
     "your details only to run this event - contributing does not subscribe you to marketing "
     "or to any mailing list."
 )
@@ -526,7 +526,7 @@ REQUIRED_CHECK_LABELS = [
     "Camera permission and a working camera",
     "Microphone permission and a working microphone",
 ]
-NETWORK_NOTE = ("Zoiko Steam does not run a network speed test. Use a wired connection or "
+NETWORK_NOTE = ("Zoiko Stream does not run a network speed test. Use a wired connection or "
                 "strong Wi-Fi where you can - we cannot verify it for you.")
 
 

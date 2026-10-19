@@ -21,6 +21,8 @@ import { logoUrlError } from "../../utils/orgLogo";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import ApiCredentials from "../../components/organization/ApiCredentials";
 import ChangePasswordForm from "../../components/organization/profile/ChangePasswordForm";
+import ProfilePhotoEditor from "../../components/profile/ProfilePhotoEditor";
+import { useAuth } from "../../auth/AuthContext";
 import BrandingPreview from "../../components/organization/BrandingPreview";
 import LogoField from "../../components/organization/LogoField";
 import CustomDomainPanel from "../../components/organization/CustomDomainPanel";
@@ -306,6 +308,8 @@ const changedFields = (key, form, base) => {
 
 export default function OrganizationSettings() {
   const { data, loading, error, reload } = useApi(loadSettings);
+  // The signed-in person, for their own profile photo (General tab).
+  const me = useAuth()?.user || null;
   // Server-described notification controls. null on an older API build, which the panel
   // falls back to handling.
   const catalog = data?.notifCatalog ?? null;
@@ -508,6 +512,12 @@ export default function OrganizationSettings() {
           {/* ── GENERAL: Organization Profile + Custom Domain ── */}
           {tab === "general" && (
             <>
+              {/* "Edit Profile" on /organization/profile lands here. The photo is the person's
+                  own, saved on its own (Save photo) — separate from the organization fields
+                  below and their Save. */}
+              <Panel title="Your profile photo" desc="Shown wherever your name appears in this organization">
+                <ProfilePhotoEditor user={me} />
+              </Panel>
               <Panel title="Organization Profile" desc="Basic information about your organization">
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <Field label="Organization Name" error={errors.name}>
@@ -644,18 +654,19 @@ export default function OrganizationSettings() {
                       type="button"
                       onClick={() => setPreviewOpen(true)}
                       aria-haspopup="dialog"
-                      aria-label="Go Live — open branding preview"
-                      title="Open a preview. Nothing is started."
+                      aria-label="Sample Button — open branding preview"
+                      title="Open the branding preview"
                       className={cx(
-                        "inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110",
+                        "inline-flex items-center rounded-lg px-4 py-2 text-sm font-semibold transition hover:brightness-110",
                         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2 dark:focus-visible:ring-white dark:focus-visible:ring-offset-slate-900",
-                        ACCENT[settings.accent].solid
+                        ACCENT[settings.accent].solid,
+                        ACCENT[settings.accent].onSolid
                       )}
                     >
-                      Go Live
+                      Sample Button
                     </button>
                     <span className="text-xs text-slate-500 dark:text-slate-400">
-                      Opens a preview — nothing is started.
+                      Opens the full branding preview.
                     </span>
                   </div>
                 </div>
@@ -770,7 +781,10 @@ export default function OrganizationSettings() {
                 title="Role capabilities"
                 desc="What each role can do today. Enforced by the platform — the Owner always has full access."
               >
-                <div className="overflow-x-auto">
+                {/* `relative`: the cells' sr-only labels are position:absolute. Without a
+                    positioned scroller they resolve against the page, escape this overflow, and
+                    widen a phone's page to ~544px instead of scrolling inside the table. */}
+                <div className="relative overflow-x-auto">
                   <table className="w-full min-w-[560px] text-sm">
                     <caption className="sr-only">Capabilities granted to each organization role</caption>
                     <thead>

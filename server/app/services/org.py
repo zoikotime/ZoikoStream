@@ -27,6 +27,7 @@ Documented gaps (no ingest in this stack — see ORG_GAPS at the bottom):
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 
@@ -75,6 +76,8 @@ RANGES = {"1h": timedelta(hours=1), "24h": timedelta(hours=24),
 # drives the Overview toolbar's operational window; this one drives historical reporting).
 ANALYTICS_RANGES = {"7d": timedelta(days=7), "30d": timedelta(days=30),
                      "90d": timedelta(days=90), "12m": timedelta(days=365)}
+
+log = logging.getLogger(__name__)
 
 # Threshold at which an entitlement becomes an "attention required" item.
 USAGE_WARN_RATIO = 0.8
@@ -153,12 +156,17 @@ def _stage_usage(db: Session, org_id) -> dict:
     }
 
 
-def stage_health(db: Session, org_id, since: datetime) -> list[dict]:
+def stage_health(db: Session, org_id, since: datetime, health: dict | None = None) -> list[dict]:
     """Per-stage status for this org: the platform probe result, escalated by any Incident
-    scoped to this organization (or global), and flagged with whether the org uses it."""
-    health = admin_svc.platform_health(db)
+    scoped to this organization (or global), and flagged with whether the org uses it.
+
+    Only this organization's own and platform-wide incidents count — in the escalation and
+    in the availability figure alike (ops.stage_health's org_id). Another tenant's incident
+    used to degrade this one's stages."""
+    health = health or admin_svc.platform_health(db)
     usage = _stage_usage(db, org_id)
-    stages = ops_svc.stage_health(db, health, since, tuple(s[0] for s in ops_svc.STAGES))
+    stages = ops_svc.stage_health(db, health, since, tuple(s[0] for s in ops_svc.STAGES),
+                                  org_id=org_id)
 
     # Incidents that affect this org: its own, plus platform-wide ones (org_id NULL).
     mine = db.scalars(
@@ -209,6 +217,291 @@ def service_health(stages: list[dict]) -> dict:
     if worst["status"] in ("warn", "down"):
         cause = f"{worst['label']} · {worst['detail'] or 'degraded'}"
     return {"status": worst["status"], "label": label, "cause": cause}
+
+
+# ── customer-facing service status (/organization/support) ────────────────────
+
+# What the Support & Status page may tell a customer, and from what evidence. Each row is a
+# product surface a customer recognises, carried by REAL checks (services/admin.platform_health):
+#
+#   Live streaming      <- "streaming": the background LiveKit probe, an authenticated API round
+#                          trip every 5 minutes (services/provider_health). Going live and
+#                          watching live both run through that one media server, so it is one
+#                          row; separate "contribution", "ingest" and "viewer delivery" rows would
+#                          have repeated the same signal under three names.
+#   Recording & replay  <- "storage": the background bucket probe, PLUS this organization's own
+#                          recent recording starts (_recording_start_evidence). LiveKit Egress
+#                          cannot be probed without starting a job, so a start that Egress
+#                          refused is the only evidence of its health there is.
+#   Management API      <- "api" (this response was served) and "database" (SELECT 1).
+#
+# `stages` are the lifecycle stages whose recorded incidents a row answers for; every stage
+# belongs to exactly one row, so no incident is lost.
+#
+# Deliberately absent: "Transcoding & packaging" (the `produce` stage). Its only member is
+# "workers", which services/admin.platform_health hard-codes as "Not yet integrated" — there is
+# no transcoding or packaging service in this platform to be healthy or not. Its incidents, if an
+# operator ever records one, read against Live streaming. Likewise the CDN, which does not exist.
+#
+# A row whose checks have no current verdict (not configured, or a probe result that is absent or
+# stale) is LEFT OUT unless an open incident speaks for it — never shown as "Not configured" or
+# "Not measured". Those states stay on the Super Admin console, which is where they help.
+CUSTOMER_SERVICES = (
+    {"id": "live_streaming", "name": "Live streaming", "summary": "Going live and watching live",
+     "checks": ("streaming",), "stages": ("contribute", "ingest", "produce", "deliver")},
+    {"id": "recording", "name": "Recording & replay", "summary": "Recording broadcasts and playing replays",
+     "checks": ("storage",), "stages": ("preserve",)},
+    {"id": "platform_api", "name": "Management API", "summary": "This console and the ZoikoStream API",
+     "checks": ("api", "database"), "stages": ("platform", "secure", "understand")},
+)
+
+# How far back a recording start still counts as evidence about the recording service.
+RECORDING_EVIDENCE_WINDOW = timedelta(hours=24)
+
+_STATUS_RANK = {"ok": 0, "warn": 1, "down": 2}
+
+
+def _worse(a: str, b: str) -> str:
+    return a if _STATUS_RANK[a] >= _STATUS_RANK[b] else b
+
+
+def _incident_floor(inc: Incident) -> str:
+    return "down" if inc.severity in ("sev1", "sev2") else "warn"
+
+
+def _recording_start_evidence(db: Session, org_id, now: datetime) -> str | None:
+    """What this organization's own recent recording STARTS say about the recording service.
+
+    A start that LiveKit Egress refused is written as status "failed" with no egress_id
+    (routers/events._recording_start — the production `503 no response from servers`). Reading
+    the newest attempts in the window:
+
+      the newest attempt failed to start, and so did the one before it   -> "down"
+      the newest attempt failed to start                                  -> "warn"
+      the newest attempt started (the recorder accepted it)               -> "ok"
+      no attempt in the window                                            -> None (no evidence)
+
+    An ATTEMPT is one start: a dual recording (R2/R3) writes both of its rows in one
+    transaction, so they share created_at and are read as one attempt — one refused click used
+    to read as two consecutive failures, i.e. a "Major outage". An attempt started if any of its
+    rows got an egress id.
+
+    Only this organization's attempts: they are its experience, and another tenant's cannot be
+    used to tell it anything."""
+    rows = db.execute(
+        select(LiveRecording.status, LiveRecording.egress_id, LiveRecording.created_at)
+        .where(LiveRecording.org_id == org_id,
+               LiveRecording.created_at >= now - RECORDING_EVIDENCE_WINDOW)
+        .order_by(LiveRecording.created_at.desc())
+        .limit(10)
+    ).all()
+    attempts: list[list] = []
+    for r in rows:
+        if attempts and attempts[-1][0].created_at == r.created_at:
+            attempts[-1].append(r)
+        else:
+            attempts.append([r])
+    if not attempts:
+        return None
+
+    def refused(attempt) -> bool:
+        return all(r.status == "failed" and not r.egress_id for r in attempt)
+
+    if refused(attempts[0]):
+        return "down" if len(attempts) > 1 and refused(attempts[1]) else "warn"
+    return "ok"
+
+
+# Published public-status components (models/status_page.STATUS_COMPONENTS) -> the customer row
+# that describes the same capability. A fixed definition of what each row covers, not a guess
+# made per incident: a published incident names its components explicitly. Billing and
+# notifications have no row; a published incident on them reaches the page as a platform notice.
+PUBLIC_COMPONENT_ROWS = {
+    "live_streaming": "live_streaming",
+    "recording": "recording",
+    "replay": "recording",
+    "authentication": "platform_api",
+    "event_management": "platform_api",
+    "developer_api": "platform_api",
+    "webhooks": "platform_api",
+}
+_PUBLIC_IMPACT_STATUS = {"degraded": "warn", "partial_outage": "warn", "major_outage": "down"}
+
+# What the page says about an INTERNAL incident. Operator incident titles are internal notes
+# ("INC-… egress pool 3 OOM", a security investigation) and never reach customers; only the
+# public status page's curated titles do.
+_NEUTRAL_INCIDENT_TITLE = {
+    "down": "Service disruption under investigation",
+    "warn": "Degraded performance under investigation",
+}
+
+
+def _notice(status: str, title: str, scope: str) -> dict:
+    return {"title": title, "severity": "major" if status == "down" else "minor", "scope": scope,
+            "_rank": _STATUS_RANK[status]}
+
+
+def _published_incidents(db: Session, since: datetime, now: datetime) -> list:
+    """Public status incidents customers can already read on /status: published, and active at
+    some point in the window. Platform-wide by nature."""
+    from ..models import PublicStatusIncident
+
+    return db.scalars(
+        select(PublicStatusIncident).where(
+            PublicStatusIncident.published_at.isnot(None),
+            or_(PublicStatusIncident.started_at.is_(None), PublicStatusIncident.started_at <= now),
+            or_(PublicStatusIncident.status != "resolved", PublicStatusIncident.resolved_at.is_(None),
+                PublicStatusIncident.resolved_at >= since),
+        )
+    ).all()
+
+
+def customer_status(db: Session, org_id, health: dict, since: datetime, now: datetime) -> dict:
+    """The rows /organization/support shows, each with a status only real evidence supports.
+
+    Per row: the worst of its checks (ok / warn / down), escalated by
+      * open OPERATIONAL incidents recorded against its stages, for this organization or
+        platform-wide (sev1-2 -> down, else warn);
+      * open PUBLISHED public-status incidents on a component the row covers
+        (PUBLIC_COMPONENT_ROWS; degraded / partial outage -> warn, major outage -> down);
+      * for recordings, _recording_start_evidence.
+    `incidents_24h` is a COUNT of those incidents active at any point in the window — not an
+    uptime percentage, which nothing here measures.
+
+    Recording & replay is "ok" only with POSITIVE evidence: storage healthy AND a recording this
+    organization started in the window was accepted by the recorder. Storage alone proves replays
+    can be served, not that recording works (the recorder, LiveKit Egress, has no probe; its
+    production failure mode is refusing starts). With storage healthy and no recording attempt in
+    the window, the row is "idle": shown, faulting nothing, claiming nothing about recording.
+
+    An open operational incident that names NO stage, and a published incident on a component no
+    row covers, cannot be attributed to a row without guessing, so neither is: each becomes the
+    `platform_notice`, which still sets the verdict. Only OPERATIONAL incidents count: security
+    and governance incidents are not availability statements and never change this page. Internal incident titles are never sent; a row or
+    notice shows the published title when there is one, else neutral wording.
+
+    `verdict`: "down" / "warn" from the worst row or notice; "ok" when every row was measured
+    healthy (an idle row faults nothing); "partial" when the shown rows are healthy but some row
+    could not be measured; "unavailable" when no row could be and nothing is known to be wrong."""
+    services = {s["id"]: s for s in health.get("services", [])}
+    incidents = db.scalars(
+        select(Incident).where(
+            Incident.kind == "operational",
+            or_(Incident.org_id == org_id, Incident.org_id.is_(None)),
+            Incident.started_at <= now,
+            or_(Incident.status != "resolved", Incident.resolved_at.is_(None),
+                Incident.resolved_at >= since),
+        )
+    ).all()
+    published = _published_incidents(db, since, now)
+
+    def public_rows(pub) -> set[str]:
+        return {PUBLIC_COMPONENT_ROWS[c] for c in (pub.affected_components or []) if c in PUBLIC_COMPONENT_ROWS}
+
+    rows, unmeasured = [], 0
+    for svc in CUSTOMER_SERVICES:
+        checks = [services.get(c) for c in svc["checks"]]
+        measured = all(c is not None and c["status"] in admin_svc.PROBED_STATUSES for c in checks)
+        mine = [i for i in incidents if i.stage in svc["stages"]]
+        open_now = [i for i in mine if i.status != "resolved"]
+        pub_mine = [p for p in published if svc["id"] in public_rows(p)]
+        pub_open = [p for p in pub_mine if p.status != "resolved" and p.impact in _PUBLIC_IMPACT_STATUS]
+        status = None
+        if measured:
+            status = "ok"
+            for c in checks:
+                status = _worse(status, c["status"])
+        candidates = []
+        for inc in open_now:
+            floor = _incident_floor(inc)
+            status = _worse(status or "ok", floor)
+            candidates.append(_notice(floor, _NEUTRAL_INCIDENT_TITLE[floor], "platform"))
+        for pub in pub_open:
+            floor = _PUBLIC_IMPACT_STATUS[pub.impact]
+            status = _worse(status or "ok", floor)
+            # +0.5: on a tie the published, customer-written title wins over neutral wording.
+            candidates.append({**_notice(floor, pub.title, "platform"), "_rank": _STATUS_RANK[floor] + 0.5})
+        if svc["id"] == "recording":
+            evidence = _recording_start_evidence(db, org_id, now)
+            if evidence in ("warn", "down"):
+                status = _worse(status or "ok", evidence)
+            elif evidence is None and status == "ok":
+                status = "idle"
+        if status is None:
+            unmeasured += 1
+            continue
+        worst = max(candidates, key=lambda n: n["_rank"], default=None)
+        rows.append({
+            "id": svc["id"], "name": svc["name"], "summary": svc["summary"],
+            "status": status,
+            "incidents_24h": len(mine) + len(pub_mine),
+            "open_incidents": len(open_now) + len(pub_open),
+            "incident": None if worst is None else {"title": worst["title"], "severity": worst["severity"]},
+        })
+
+    # What cannot be attributed to a row: an open operational incident with no stage (the only
+    # kind the admin console creates), and a published incident on no row's component.
+    notices = []
+    for inc in incidents:
+        if inc.status != "resolved" and inc.stage is None:
+            floor = _incident_floor(inc)
+            scope = "organization" if inc.org_id is not None else "platform"
+            notices.append(_notice(floor, _NEUTRAL_INCIDENT_TITLE[floor], scope))
+    for pub in published:
+        if pub.status != "resolved" and pub.impact in _PUBLIC_IMPACT_STATUS and not public_rows(pub):
+            floor = _PUBLIC_IMPACT_STATUS[pub.impact]
+            notices.append({**_notice(floor, pub.title, "platform"), "_rank": _STATUS_RANK[floor] + 0.5})
+    top = max(notices, key=lambda n: n["_rank"], default=None)
+    platform_notice = None if top is None else {
+        "title": top["title"], "severity": top["severity"], "scope": top["scope"], "count": len(notices)}
+
+    verdict = None
+    for r in rows:
+        verdict = _worse(verdict or "ok", "ok" if r["status"] == "idle" else r["status"])
+    if platform_notice:
+        verdict = _worse(verdict or "ok", "down" if platform_notice["severity"] == "major" else "warn")
+    if verdict is None:
+        verdict = "unavailable"
+    elif verdict == "ok" and unmeasured:
+        verdict = "partial"
+    return {"verdict": verdict, "services": rows, "platform_notice": platform_notice}
+
+
+# ── scheduled maintenance (/organization/support) ─────────────────────────────
+
+# Whether an EMPTY published schedule may be read as "nothing is planned".
+#
+# Maintenance windows are real, versioned records (scheduled_maintenances, written by
+# status_publication.schedule_maintenance): the public status page announces them and status
+# subscribers are emailed about them. A published window is therefore authoritative and is
+# always shown. But nothing an operator can reach publishes one yet — no console screen and no
+# API route calls schedule_maintenance — so an empty table proves nothing, and the Support page
+# must not say "No scheduled maintenance". Set this to True when operators can publish windows,
+# and the page's empty state becomes exactly that sentence.
+MAINTENANCE_SCHEDULE_AUTHORITATIVE = False
+
+
+def maintenance_schedule(db: Session) -> dict:
+    """Published maintenance windows still ahead or under way (the same set the public status
+    page lists), in customer terms: no ids, components and regions by their public labels,
+    times as UTC instants for the browser to show in the viewer's own zone."""
+    from ..models import COMPONENT_LABELS, REGION_LABELS
+    from . import status_publication as status_pub
+
+    return {
+        "authoritative": MAINTENANCE_SCHEDULE_AUTHORITATIVE,
+        "upcoming": [{
+            "reference": row.public_reference,
+            "title": row.title,
+            "kind": row.kind,
+            "status": row.status,
+            "starts_at": status_pub.as_utc(row.starts_at_utc),
+            "ends_at": status_pub.as_utc(row.ends_at_utc),
+            "impact": row.impact_summary,
+            "components": [COMPONENT_LABELS.get(c, c) for c in (row.affected_components or [])],
+            "regions": [REGION_LABELS.get(r, r) for r in (row.affected_regions or [])],
+        } for row in status_pub.upcoming_maintenance(db)],
+    }
 
 
 # ── entitlements ──────────────────────────────────────────────────────────────
@@ -546,7 +839,7 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
     from . import bus
     from .viewing_sessions import combine as combine_sessions
     from .viewing_sessions import summarize_sessions
-    from .watch_time import build_event_analytics_aggregate
+    from .watch_time import build_event_analytics_aggregate, pick_event_summary
 
     per_event: dict = {}
     session_metrics_by_event: dict = {}
@@ -554,12 +847,14 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
         b_sessions = sessions_by_event.get(e.id, [])
         snaps = snapshots_by_event.get(e.id, [])
 
-        # Check stored summary in BroadcastSession.settings
-        stored_summary = None
-        for bs in b_sessions:
-            if isinstance(bs.settings, dict) and "analytics_summary" in bs.settings:
-                stored_summary = bs.settings["analytics_summary"]
-                break
+        # The most complete finalized summary across this event's sessions — see
+        # watch_time.pick_event_summary for why "the first row carrying one" was wrong.
+        # The bus stays a FALLBACK rather than a competitor here, unlike the single-event
+        # report: this runs once per event in the window, and consulting it unconditionally
+        # would put a Redis round trip per event inside the loop. Nothing is lost by it —
+        # `_end` writes the bus copy onto the session row, so an event with any persisted
+        # summary has already had the bus's figure considered.
+        stored_summary = pick_event_summary(b_sessions)
         if not stored_summary:
             stored_summary = bus.summary_get_sync(e.id)
 
@@ -1317,7 +1612,9 @@ def console_state(db: Session, org: Organization, user: User) -> dict:
             ) or 0,
         },
         "user": {"name": user.full_name, "email": user.email,
-                 "role_label": _role_label(user.role)},
+                 "role_label": _role_label(user.role),
+                 # The console chrome (sidebar, account menu) shows the photo when there is one.
+                 "avatar_url": user.avatar_url},
     }
 
 
@@ -1331,17 +1628,41 @@ def _role_label(role: str | None) -> str:
             "super_admin": "Super Admin"}.get(role or "", "Member")
 
 
+def _isolated(db: Session, label: str, fn, *args):
+    """Run one NON-CRITICAL part of the overview so that its failure cannot take the rest down.
+
+    /organization/overview feeds the Dashboard, Billing, Profile, Streaming Sessions, Developer
+    Platform and the console shell, not only the Support page; a bug or a missing table in the
+    status subsystem must not turn all of them into 500s. The part runs in a SAVEPOINT, so its
+    failed SQL rolls back alone and the surrounding transaction stays usable. A failure is logged
+    with its traceback for operators and returns None, which the Support page renders as
+    "temporarily unavailable" — never as Operational, and never with the exception text."""
+    try:
+        with db.begin_nested():
+            return fn(*args)
+    except Exception:  # noqa: BLE001 — isolation is the point; the traceback goes to the log
+        log.exception("organization overview: %s failed; returning it as unavailable", label)
+        return None
+
+
 def overview(db: Session, org: Organization, user: User, range_: str = "24h",
              include_test: bool = True) -> dict:
     """One call for the whole Organization Overview page."""
     generated_at = _now()
     since = generated_at - RANGES.get(range_, RANGES["24h"])
 
-    stages = stage_health(db, org.id, since)
+    # One probe snapshot for both views of it: the lifecycle stages (unchanged, for the pages
+    # that read them) and the customer-facing service status (/organization/support).
+    health = admin_svc.platform_health(db)
+    stages = stage_health(db, org.id, since, health=health)
     ent = entitlements(db, org)
     sess = sessions(db, org.id, since)
     media = media_assets(db, org.id)
     readiness = upcoming_events(db, org.id, include_test=include_test)
+    # Over a fixed 24 hours whatever the toolbar range, because the Support page's column says so.
+    service_status = _isolated(db, "service status", customer_status, db, org.id, health,
+                               generated_at - RANGES["24h"], generated_at)
+    maintenance = _isolated(db, "maintenance schedule", maintenance_schedule, db)
 
     return {
         "generated_at": generated_at,
@@ -1354,6 +1675,9 @@ def overview(db: Session, org: Organization, user: User, range_: str = "24h",
         "workspaces": workspaces(org),
         "lifecycle": stages,
         "service_health": service_health(stages),
+        # None when that subsystem failed (_isolated): the Support page then says so.
+        "service_status": service_status,
+        "maintenance": maintenance,
         "sessions": sess,
         # Audience over the same window the toolbar selects. Feeds the KPI tiles' sparklines,
         # which until now had no series to draw and always fell back to a flat hairline.
@@ -1390,6 +1714,9 @@ ORG_GAPS = [
      "needs": "a security findings scanner"},
     {"field": "security_support.next_review_days",
      "needs": "an access-review schedule"},
+    # Superseded on the Support page by `maintenance` (maintenance_schedule), which reads the
+    # published windows. What is still missing is a way for operators to publish one.
     {"field": "security_support.maintenance_window",
-     "needs": "a maintenance calendar"},
+     "needs": "a way for operators to publish maintenance windows; until then an empty "
+              "schedule is not proof that nothing is planned"},
 ]

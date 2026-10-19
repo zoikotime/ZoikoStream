@@ -100,6 +100,8 @@ beforeEach(() => {
     if (url === "/organization/audience-attendance") return Promise.resolve({ data: ATTENDANCE });
     if (url === "/organization/audience-insights") return Promise.resolve({ data: INSIGHTS_EMPTY });
     if (url === "/organization/overview") return Promise.resolve({ data: OVERVIEW });
+    // A list endpoint answers a list: `{}` made EventAccessLinks throw once it resolved.
+    if (url.endsWith("/access-links")) return Promise.resolve({ data: [] });
     return Promise.resolve({ data: {} });
   });
 });
@@ -263,11 +265,16 @@ describe("Playback & Access keeps its content, in one column", () => {
     expect(screen.getByRole("link", { name: /edit event/i })).toBeInTheDocument();
   });
 
-  it("keeps viewer-side measurement honest about what is not ingested", async () => {
+  // The figures are measured now (PlaybackQoe.test.jsx); with no sessions reported they stay
+  // an honest dash with its reason — never a 0, and never the old "not ingested".
+  it("keeps viewer-side measurement honest when nothing has been measured", async () => {
     renderPage(PlaybackAccess);
     await screen.findByRole("heading", { level: 1 });
     for (const label of ["Playback starts", "Rebuffer ratio", "Failures by reason"]) {
-      expect(within(screen.getByText(label).closest("div")).getByText("—")).toBeInTheDocument();
+      const fact = screen.getByText(label, { selector: "dt" }).parentElement;
+      expect(await within(fact).findByText("No playback data yet")).toBeInTheDocument();
+      expect(within(fact).getByText("—")).toBeInTheDocument();
     }
+    expect(screen.queryByText(/not ingested/i)).toBeNull();
   });
 });

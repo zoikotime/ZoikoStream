@@ -806,6 +806,7 @@ def create_incident(db, data, commander_default: str | None) -> Incident:
         ref=_incident_ref(now), title=data.title, detail=data.detail,
         severity=data.severity, kind=data.kind, org_id=data.org_id,
         commander=data.commander or commander_default, started_at=now,
+        stage=getattr(data, "stage", None),
     )
     db.add(incident)
     db.commit()
@@ -1019,7 +1020,7 @@ def claim_key_notification(db, org: Organization, key_id: str,
 def mark_key_expired(db, org: Organization, key_id: str) -> dict | None:
     """Move a lapsed credential into the EXPIRED state.
 
-    This records lifecycle state. It does NOT block access, because no Zoiko Steam endpoint
+    This records lifecycle state. It does NOT block access, because no Zoiko Stream endpoint
     authenticates an API key - see the reported DEV-003 gap, and note that the expiry email
     is worded accordingly.
     """

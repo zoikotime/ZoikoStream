@@ -317,7 +317,7 @@ def _support_request(client, fx, staff_headers, *, minutes=60, emergency=False,
     body = {
         "org_id": str(fx.org_id), "case_reference": f"CASE-{uuid.uuid4().hex[:6].upper()}",
         "reason_category": "customer_reported_issue",
-        "engineer_display": "R. Iyer, Zoiko Steam Support Engineer",
+        "engineer_display": "R. Iyer, Zoiko Stream Support Engineer",
         "requested_scope": scope, "allowed_actions": list(actions), "minutes": minutes,
         "emergency": emergency,
     }
@@ -336,7 +336,7 @@ def _support_request(client, fx, staff_headers, *, minutes=60, emergency=False,
 def test_shared_sender_links_and_no_secrets():
     with patch.object(settings, "MAIL_FROM", "ZoikoStream <info@zoikostream.com>"):
         assert email_mod._sender_identity(email_mod.SENDER_SECURITY) == \
-            "Zoiko Steam Security <info@zoikostream.com>"
+            "Zoiko Stream Security <info@zoikostream.com>"
     for bad in ("http://localhost:5173", "https://127.0.0.1:5173"):
         with patch.object(settings, "ENVIRONMENT", "production"), \
              patch.object(settings, "APP_URL", bad):
@@ -432,11 +432,11 @@ def test_009_request_is_durable_notifies_approvers_and_grants_nothing():
         payload = cap.of(ORG_009)
         assert cap.to(ORG_009) == fx.tenant_recipients, \
             f"owner + admins, deduplicated; got {cap.to(ORG_009)}"
-        assert payload["from"].startswith("Zoiko Steam Security <"), "Class A sender"
+        assert payload["from"].startswith("Zoiko Stream Security <"), "Class A sender"
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert body["case_reference"] in text, "case reference"
-        assert "R. Iyer, Zoiko Steam Support Engineer" in text, "engineer identity"
+        assert "R. Iyer, Zoiko Stream Support Engineer" in text, "engineer identity"
         assert "Event delivery logs for case triage" in text, "scope"
         assert "tenant.events.read" in text, "allowed actions"
         assert "60 minutes" in text, "duration"
@@ -875,7 +875,7 @@ def test_010_unrelated_update_silent_suspend_and_reactivate_notify():
         assert cap.to(subject) == fx.tenant_recipients, \
             f"owner + security admins; got {cap.to(subject)}"
         payload = cap.of(subject)
-        assert payload["from"].startswith("Zoiko Steam Security <")
+        assert payload["from"].startswith("Zoiko Stream Security <")
         assert payload["html"] and payload["text"]
         low = payload["html"].lower()
         assert 'width="1"' not in low and '<img src="http' not in low, "no tracking"
@@ -891,7 +891,7 @@ def test_010_unrelated_update_silent_suspend_and_reactivate_notify():
             "the unenforced sign-in claim must be gone"
         assert "Billing / commercial requirement" in text, "coarse category"
         assert "Resolve the outstanding billing requirement." in text, "recovery criteria"
-        assert "Contact Zoiko Steam Support" in text, "support route"
+        assert "Contact Zoiko Stream Support" in text, "support route"
         for leak in ("fraud", "risk score", "detection", "rule", "investigation",
                      "billing_commercial_requirement", fx.staff_email):
             assert leak.lower() not in text.lower(), f"{leak!r} must not be disclosed"
@@ -1018,7 +1018,7 @@ def test_008_initiation_does_not_move_ownership_and_notifies_all_parties():
             assert who in got, f"{who} must receive the request"
         assert len(got) == len(set(got)), "recipients deduplicate"
         payload = cap.of(ORG_008)
-        assert payload["from"].startswith("Zoiko Steam Security <")
+        assert payload["from"].startswith("Zoiko Stream Security <")
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert "Both current and proposed owner" in text, "dual confirmation stated"
@@ -1259,7 +1259,7 @@ def test_007_open_persists_assigns_and_notifies():
         for who in (fx.owner_email.lower(), fx.admin_email.lower()):
             assert who in got, f"{who} must be notified"
         payload = cap.of(ORG_007.format(org=fx.org_name))
-        assert payload["from"].startswith("Zoiko Steam Security <")
+        assert payload["from"].startswith("Zoiko Stream Security <")
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert "IST" in text, "due date with timezone"

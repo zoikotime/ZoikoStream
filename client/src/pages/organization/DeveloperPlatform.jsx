@@ -350,10 +350,14 @@ export default function DeveloperPlatform() {
         <nav className="flex flex-wrap items-center gap-x-6 gap-y-2">
           {FOOTER_LINKS.map(([label, to]) =>
             to ? (
+              // inline-flex items-center: in the Android app the 44px touch-target floor
+              // (index.css) makes a link 44px tall with its text pinned to the top, 13px above
+              // the plain-text items beside it. Centering keeps the target and levels the row.
+              // Same fix as the Support & Status footer; no effect on web.
               <Link
                 key={label}
                 to={to}
-                className={cx("rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}
+                className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}
               >
                 {label}
               </Link>

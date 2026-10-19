@@ -76,7 +76,9 @@
    24 px inset at >= 1440 px and 20 px below; 52 x 52 above the safe area on phones (see the
    mobile block). Accessible name "Open ZoikoStream Guide"; no unread badges. */
 .zg-launcher {
-  position: fixed; right: 20px; bottom: 20px; z-index: 60;
+  /* --guide-lift / --guide-stack come from guide/safeArea.js (0 when unset): lifted over
+     bottom-docked chrome, stacked over any other launcher instead of on top of it. */
+  position: fixed; right: 20px; bottom: calc(20px + var(--guide-lift, 0px) + var(--guide-stack, 0px)); z-index: 60;
   display: inline-grid; place-items: center; width: 56px; height: 56px; padding: 0;
   border-radius: 999px; border: 0; background: var(--zg-grad); color: #fff; cursor: pointer;
   box-shadow: 0 12px 32px rgba(91, 33, 182, 0.38), 0 2px 6px rgba(91, 33, 182, 0.25);
@@ -90,7 +92,9 @@
   background: var(--zg-grad); opacity: 0.35; animation: zg-halo 2.6s ease-out infinite;
 }
 @keyframes zg-halo { 0% { transform: scale(0.96); opacity: 0.45; } 70%, 100% { transform: scale(1.12); opacity: 0; } }
-@media (min-width: 1440px) { .zg-launcher { right: 24px; bottom: 24px; } }
+/* Opted-in controls scrolling past underneath: step out of the way until they have gone by. */
+html[data-guide-yield] .zg-launcher { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 150ms ease, visibility 0s linear 150ms; }
+@media (min-width: 1440px) { .zg-launcher { right: 24px; bottom: calc(24px + var(--guide-lift, 0px) + var(--guide-stack, 0px)); } }
 
 /* WF-10 "Public context": event, public status, public start time. */
 .zg-context { width: 100%; margin: 4px 0 2px; padding: 10px 12px; border-radius: 14px;
@@ -103,9 +107,9 @@
 
 /* ── Shell (WF-02 desktop / WF-18 mobile) ───────────────────────────────────────────── */
 .zg-panel {
-  position: fixed; right: 20px; bottom: 20px; z-index: 61;
+  position: fixed; right: 20px; bottom: calc(20px + var(--guide-lift, 0px)); z-index: 61;
   width: 440px; min-width: 400px; max-width: min(520px, calc(100vw - 40px));
-  height: min(720px, calc(100vh - 40px)); max-height: calc(100vh - 40px);
+  height: min(720px, calc(100vh - 40px - var(--guide-lift, 0px))); max-height: calc(100vh - 40px - var(--guide-lift, 0px));
   display: flex; flex-direction: column;
   background: var(--zg-surface); border-radius: 24px; overflow: hidden;
   box-shadow: var(--zg-shadow-lg); border: 1px solid var(--zg-border);
@@ -362,7 +366,10 @@
   }
   .zg-header { padding-top: calc(14px + env(safe-area-inset-top)); }
   .zg-body { padding: 16px; }
-  .zg-launcher { right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); width: 52px; height: 52px; }
+  .zg-launcher {
+    right: 16px; bottom: calc(16px + env(safe-area-inset-bottom) + var(--guide-lift, 0px) + var(--guide-stack, 0px));
+    width: 52px; height: 52px;
+  }
   .zg-launcher .zg-avatar { width: 44px; height: 44px; }
 }
 @media (max-width: 360px) { .zg-quick { grid-template-columns: 1fr; } }

@@ -388,6 +388,18 @@ p { text-wrap: pretty; }
 .dark .zk-scroll-thin::-webkit-scrollbar-thumb { background-color: rgb(82 82 82); }
 .dark .zk-scroll-thin::-webkit-scrollbar-thumb:hover { background-color: rgb(115 115 115); }
 
+/* Room for the floating Guide launcher at the end of a scrolling console area. The launcher
+   publishes its footprint as --guide-safe-bottom (guide/safeArea.js; unset, so 0, when no
+   launcher is mounted), and this reserves exactly that much after the last row, so a table's
+   "Next page" or a form's Save can always be scrolled clear of it. A pseudo-element, so no
+   page markup changes and the area's own padding stays as designed. */
+.zk-guide-safe::after {
+  content: "";
+  display: block;
+  height: var(--guide-safe-bottom, 0px);
+  pointer-events: none;
+}
+
 /* Skeleton shimmer for loading states. */
 .zk-skeleton { position: relative; overflow: hidden; }
 .zk-skeleton::after {

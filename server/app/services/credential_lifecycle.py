@@ -3,7 +3,7 @@
 Every notice here reports committed credential state, and every claim it makes is bounded by
 what the platform actually enforces. Two boundaries matter enough to state up front:
 
-  * **No Zoiko Steam endpoint authenticates an API key.** `key_hash` is written at creation
+  * **No Zoiko Stream endpoint authenticates an API key.** `key_hash` is written at creation
     and never read. So an expired or revoked credential is marked as such in the record, and
     the email says exactly that — it never claims access was blocked, because nothing blocks
     it. `ACCESS_NOTE` is the single place that wording lives.
@@ -37,12 +37,12 @@ TICKER_INTERVAL_SECONDS = 3600.0
 # The one place the truth about enforcement is worded. If API-key authentication is ever
 # implemented, this constant changes and every DEV-003 message changes with it.
 ACCESS_NOTE = (
-    "This credential is marked expired in Zoiko Steam. API-key authentication is not yet "
-    "enforced by any Zoiko Steam endpoint, so no access was withdrawn"
+    "This credential is marked expired in Zoiko Stream. API-key authentication is not yet "
+    "enforced by any Zoiko Stream endpoint, so no access was withdrawn"
 )
 ACCESS_NOTE_WARNING = (
     "No access change is scheduled: API-key authentication is not yet enforced by any "
-    "Zoiko Steam endpoint"
+    "Zoiko Stream endpoint"
 )
 NO_OVERLAP_NOTE = "Revoked immediately — there is no overlap window"
 
@@ -53,7 +53,7 @@ EMERGENCY_REASONS = {
 }
 EMERGENCY_NEXT_STEPS = (
     "Create a replacement credential from the Developer console and move your integrations "
-    "onto it. If you believe this was unexpected, contact Zoiko Steam Support."
+    "onto it. If you believe this was unexpected, contact Zoiko Stream Support."
 )
 
 

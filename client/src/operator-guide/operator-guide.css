@@ -55,8 +55,13 @@
 }
 
 /* ── Launcher ─────────────────────────────────────────────────────────── */
+/* Bottom-right, above the device's safe area, lifted over bottom-docked chrome (--guide-lift)
+   and stacked over any lower-order launcher (--guide-stack). Both are set by
+   guide/safeArea.js and fall back to 0. */
 .og-launcher {
-  position: fixed; right: 20px; bottom: 20px; z-index: 60;
+  position: fixed; z-index: 60;
+  right: calc(20px + env(safe-area-inset-right, 0px));
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px) + var(--guide-lift, 0px) + var(--guide-stack, 0px));
   display: inline-flex; align-items: center; gap: 8px;
   min-height: 44px; padding: 0 16px 0 12px;
   border: 1px solid var(--og-border); border-radius: 999px;
@@ -64,6 +69,12 @@
   box-shadow: var(--og-shadow); cursor: pointer; font-weight: 600; font-size: 14px;
 }
 .og-launcher img { border-radius: 6px; }
+/* Console controls scrolling past underneath (data-guide-avoid on a phone/tablet layout):
+   step out of the way until they have gone by, rather than cover them. */
+html[data-guide-yield] .og-launcher {
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 0.15s ease, visibility 0s linear 0.15s;
+}
 .og-launcher-badge {
   min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px;
   background: var(--og-danger); color: #fff; font-size: 12px; line-height: 20px; text-align: center;
@@ -72,7 +83,8 @@
 
 /* ── Panel ────────────────────────────────────────────────────────────── */
 .og-panel {
-  position: fixed; top: 12px; right: 12px; bottom: 76px; z-index: 61;
+  position: fixed; top: 12px; right: 12px; z-index: 61;
+  bottom: calc(76px + env(safe-area-inset-bottom, 0px) + var(--guide-lift, 0px)); /* above its launcher */
   width: 440px; max-width: calc(100vw - 24px);
   display: flex; flex-direction: column;
   background: var(--og-surface); border: 1px solid var(--og-border); border-radius: 14px;

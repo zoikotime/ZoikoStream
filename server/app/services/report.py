@@ -40,18 +40,14 @@ def _assigned(db, event_id, role: str) -> list[str]:
 
 def _audience(db, event: Event) -> dict:
     from . import bus
-    from .watch_time import aggregate_event_watch_time
+    from .watch_time import aggregate_event_watch_time, pick_event_summary
     sessions = db.scalars(select(BroadcastSession).where(BroadcastSession.event_id == event.id)).all()
     snapshots = db.scalars(select(AnalyticsSnapshot).where(AnalyticsSnapshot.event_id == event.id)).all()
     peak = max((s.peak_viewers for s in sessions), default=0)
 
-    stored_summary = None
-    for bs in sessions:
-        if isinstance(bs.settings, dict) and "analytics_summary" in bs.settings:
-            stored_summary = bs.settings["analytics_summary"]
-            break
-    if not stored_summary:
-        stored_summary = bus.summary_get_sync(event.id)
+    # Same rule as the organization dashboard, so one event cannot report two different
+    # watch times depending on which screen is asking.
+    stored_summary = pick_event_summary(sessions, bus.summary_get_sync(event.id))
 
     ledger = bus.session_get_all_sync(event.id)
     agg = aggregate_event_watch_time(

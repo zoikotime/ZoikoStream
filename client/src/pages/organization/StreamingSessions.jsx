@@ -148,11 +148,17 @@ export default function StreamingSessions() {
       header: "Peak audience",
       align: "right",
       sortable: true,
-      render: (s) => (
-        <span className={cx("text-[13px]", type.mono, s.peak_viewers ? CONSOLE.heading : CONSOLE.faint)}>
-          {s.peak_viewers || "—"}
-        </span>
-      ),
+      // A peak of 0 is a measurement (nobody watched), so it reads "0" in the normal tone; only
+      // a missing figure is a faint dash. This was `peak_viewers || "—"`, which turned every
+      // zero-audience session into a dash. Sorting reads the raw number (SORT_VALUE above).
+      render: (s) => {
+        const measured = s.peak_viewers != null;
+        return (
+          <span className={cx("text-[13px]", type.mono, measured ? CONSOLE.heading : CONSOLE.faint)}>
+            {measured ? s.peak_viewers : "—"}
+          </span>
+        );
+      },
     },
   ];
 
@@ -231,6 +237,10 @@ export default function StreamingSessions() {
             serverSort={sort.sortField ? { key: sort.sortField, dir: sort.sortDirection } : null}
             onSortChange={(_, field) => setSort((s) => nextSort(s, field))}
             minWidth={720}
+            // On a phone this 720px table scrolls sideways, and its empty state was centred
+            // in the full width: the icon off-screen, the message clipped, blank space where
+            // they should be. Pinned, it fills the visible width instead.
+            pinEmpty
             rowActions={(s) => (
               <ConsoleButton
                 variant="ghost"

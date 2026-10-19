@@ -139,6 +139,33 @@ describe("the menu", () => {
   });
 });
 
+// On a phone the trigger is not near the right edge (request, theme and account controls
+// follow it), so a w-72 panel aligned to the trigger ran 54–146px off the LEFT of a
+// 320–412px screen. jsdom cannot lay that out; the geometry was measured in Chromium against
+// the mobile build (280–1440px). These pin the two decisions that keep it on screen.
+describe("on a phone", () => {
+  const classesOf = (el) => (el.getAttribute("class") || "").split(/\s+/);
+
+  it("anchors the panel to the topbar below sm, and to its trigger from sm up", async () => {
+    renderMenu();
+    await userEvent.click(screen.getByRole("button", { name: /quick actions/i }));
+    const panel = screen.getByRole("menu");
+    // The wrapper must not be the containing block below sm, or the panel follows the trigger.
+    expect(classesOf(panel.parentElement)).toContain("sm:relative");
+    expect(classesOf(panel.parentElement)).not.toContain("relative");
+    expect(classesOf(panel)).toEqual(expect.arrayContaining(["absolute", "left-3", "right-3"]));
+    expect(classesOf(panel)).toEqual(expect.arrayContaining(["sm:left-auto", "sm:right-0", "sm:w-72"]));
+  });
+
+  it("caps its height to the screen and scrolls itself", async () => {
+    // It lives in the sticky topbar: scrolling the page never reveals a bottom that overflows.
+    renderMenu();
+    await userEvent.click(screen.getByRole("button", { name: /quick actions/i }));
+    expect(classesOf(screen.getByRole("menu")))
+      .toEqual(expect.arrayContaining(["max-h-[calc(100dvh-4.5rem)]", "overflow-y-auto"]));
+  });
+});
+
 describe("the topbar slot", () => {
   it("shows Quick Actions instead of the health pill when the page asks", () => {
     renderTopbar({ quickActions: true });

@@ -22,6 +22,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
   errMsg: (e) => e?.message ?? "Something went wrong.",
+  // The page asks this to tell "the server never answered" apart from an answer it did
+  // not like, so the stub has to answer it too.
+  transportMessage: (e) => (e?.response ? null : "Couldn't reach the ZoikoStream server."),
+  // Billing now diagnoses a failed load instead of saying "try refreshing", so the stub
+  // has to answer this too.
+  diagnoseLoadError: (e, path) => (
+    e?.response?.status
+      ? `The platform API returned ${e.response.status}`
+      : `The platform API is unreachable — check that the API server is running and that VITE_API_URL points at it.`
+  ),
 }));
 
 vi.mock("../../ui/Toast", () => ({
@@ -174,7 +184,7 @@ describe("checkout_locked decides purchasability, not a hand-kept status list", 
     });
     await renderBilling({ plan: null, plan_slug: null, status: null, checkout_locked: false });
 
-    expect(ctaText("Developer")).toBe("Upgrade");
+    expect(ctaText("Developer")).toBe("Buy Plan");
     await userEvent.click(within(planCard("Developer")).getByRole("button"));
 
     await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1));
@@ -318,7 +328,10 @@ describe("Resolving an unidentified subscription against Stripe", () => {
     );
     mountBilling();
     await waitFor(() => expect(ctaText("Business")).toBe("Current Plan"));
-    expect(ctaText("Developer")).toBe("Contact us to downgrade");
+    // A move DOWN is the same scheduled plan change as a move up — the backend's
+    // request_plan_change has no notion of direction — so Developer offers it directly
+    // instead of sending a paying customer to a contact form to come back down.
+    expect(ctaText("Developer")).toBe("Downgrade");
     expect(ctaText("Enterprise")).toBe("Talk to an expert");
   });
 

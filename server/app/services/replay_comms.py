@@ -3,7 +3,7 @@
 **The audience distinction this family exists to enforce.** A replay becoming available is
 two different events to two different populations. A purchaser learns their content is
 watchable; an asset owner and the people authorized to publish learn that a decision was
-taken on an asset they are accountable for. Zoiko Steam already had the first. This module
+taken on an asset they are accountable for. Zoiko Stream already had the first. This module
 is the second, and it deliberately cannot reach the first: nothing here imports an
 audience-facing sender, and `test_media_governance.py` asserts that publishing a replay
 sends no purchaser mail from this path.
@@ -48,11 +48,11 @@ ACCESS_LABELS = {
     "deleted_preserved": "Deleted, metadata preserved",
 }
 
-# Zoiko Steam attaches no refund or entitlement reversal to a withdrawal. Stated rather than
+# Zoiko Stream attaches no refund or entitlement reversal to a withdrawal. Stated rather than
 # speculated about: a withdrawal notice that guesses at commercial consequences is worse
 # than one that says exactly what the platform did.
 ENTITLEMENT_EFFECT = (
-    "Existing viewers can no longer watch this replay. Zoiko Steam does not change orders, "
+    "Existing viewers can no longer watch this replay. Zoiko Stream does not change orders, "
     "entitlements or refunds as part of a withdrawal — any commercial consequence is a "
     "separate decision."
 )

@@ -200,8 +200,8 @@ def test_001_no_lifecycle_templates_exist():
     """3 — no fake DEV-001 mail may exist without a domain behind it."""
     code = "\n".join(l for l in open(email_mod.__file__, encoding="utf-8").read().splitlines()
                      if not l.lstrip().startswith("#"))
-    for claim in ("Application created in Zoiko Steam", "Zoiko Steam application archived",
-                  "Zoiko Steam application restored", "Zoiko Steam application deleted"):
+    for claim in ("Application created in Zoiko Stream", "Zoiko Stream application archived",
+                  "Zoiko Stream application restored", "Zoiko Stream application deleted"):
         assert claim not in code, \
             f"{claim!r} must not exist without an authoritative Application domain"
 
@@ -311,11 +311,11 @@ def test_002_3_to_21_successful_creation_sends_a_safe_class_a_notice():
         assert len(got) == len(set(got)), "recipients deduplicate"
 
         # 8 — subject. 9/10 — both parts. 19 — no tracking.
-        assert payload["subject"] == "A new Zoiko Steam API credential was created"
+        assert payload["subject"] == "A new Zoiko Stream API credential was created"
         assert payload["html"] and payload["text"]
         low = payload["html"].lower()
         assert 'width="1"' not in low and '<img src="http' not in low, "no tracking pixel"
-        assert payload["from"].startswith("Zoiko Steam Developer Platform <")
+        assert payload["from"].startswith("Zoiko Stream Developer Platform <")
 
         text = payload["text"]
         # 11 — fingerprint present, and it matches what the console will show.

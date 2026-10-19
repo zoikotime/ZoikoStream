@@ -58,7 +58,22 @@ export const PRE_LIVE_STATUSES = ["draft", "published", "scheduled", "ready_to_a
 export const ON_AIR_STATUSES = ["live", "degraded"];
 // What can be archived (and so what Unarchive restores).
 export const ARCHIVABLE_STATUSES = ["draft", "ended", "cancelled"];
-export const statusMeta = (s) => EVENT_STATUS[s] || { label: s || "—", tone: "neutral" };
+// Display-only states. "missed" is never stored: the API derives it (server/app/crud/event.py)
+// for a Scheduled event whose start time has passed, plus a short grace period, without it
+// ever going live. Its canonical status stays "scheduled", so it can still be rescheduled,
+// cancelled or started late. Kept OUT of EVENT_STATUS so no status picker can ever offer it.
+export const DISPLAY_ONLY_STATUS = {
+  missed: { label: "Missed", tone: "warning" },
+};
+export const statusMeta = (s) =>
+  EVENT_STATUS[s] || DISPLAY_ONLY_STATUS[s] || { label: s || "—", tone: "neutral" };
+// What the console shows for an event: the API's display status when it sent one, else the
+// canonical status. Never re-derived here — one definition, on the server.
+export const displayStatusOf = (ev) => ev?.display_status || ev?.status;
+// The Events page's status filter: every canonical status, with Missed right after Scheduled
+// (which then means still upcoming).
+export const STATUS_FILTER_OPTIONS = Object.entries(EVENT_STATUS).flatMap(([key, meta]) =>
+  key === "scheduled" ? [[key, meta], ["missed", DISPLAY_ONLY_STATUS.missed]] : [[key, meta]]);
 
 export const VISIBILITY_LABEL = { public: "Public", private: "Private", unlisted: "Unlisted" };
 export const visLabel = (v) => VISIBILITY_LABEL[v] || v || "—";

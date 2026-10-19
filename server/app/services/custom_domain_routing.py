@@ -3,8 +3,8 @@
     Host: events.customer-a.com
       -> normalized, matched EXACTLY against organizations.domain (never a suffix match)
       -> only an ACTIVE domain (DNS proven, certificate live, HTTPS probe passed) is served
-      -> only the public viewer experience is reachable: the watch page, its three API calls
-         and its live socket, plus the built static assets
+      -> only the public viewer experience is reachable: the watch page, its three API calls,
+         its live socket and its player's playback-quality beacon, plus the built static assets
       -> any event named in the path must belong to that same organization, so
          events.customer-a.com/events/<customer-b event>/watch is a 404, page and API alike
 
@@ -53,6 +53,10 @@ _ROUTES = (
     ("http", frozenset({"POST"}), re.compile(rf"^/api/events/(?P<event>{_UUID})/register$")),
     ("http", frozenset({"POST"}), re.compile(rf"^/api/events/(?P<event>{_UUID})/invitation$")),
     ("websocket", None, re.compile(rf"^/api/live/events/(?P<event>{_UUID})/ws$")),
+    # The viewer player's playback-quality beacon. No event in the path: the signed token in
+    # the body names it, and routers/playback.py refuses (404) a token whose event belongs to
+    # another organization than this hostname's — the same rule the `event` group enforces.
+    ("http", frozenset({"POST"}), re.compile(r"^/api/playback/qoe$")),
 )
 
 # Load-balancer health checks arrive with whatever Host the balancer uses.

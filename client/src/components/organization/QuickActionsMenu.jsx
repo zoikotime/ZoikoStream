@@ -96,7 +96,9 @@ export default function QuickActionsMenu({ className = "" }) {
   };
 
   return (
-    <div ref={rootRef} className={cx("relative", className)}>
+    // Positioned only from `sm`. Below it the panel anchors to the topbar instead (see the
+    // panel's classes), so the wrapper must not be its containing block there.
+    <div ref={rootRef} className={cx("sm:relative", className)}>
       <button
         ref={triggerRef}
         type="button"
@@ -138,9 +140,15 @@ export default function QuickActionsMenu({ className = "" }) {
           aria-label="Quick actions"
           onKeyDown={onMenuKeyDown}
           className={cx(
-            // `right-0` keeps the panel inside the viewport on narrow screens, where the
-            // trigger sits close to the right edge.
-            "zk-pop-in absolute right-0 top-11 z-30 w-72 overflow-hidden rounded-xl border p-1 shadow-xl",
+            // Phones: the trigger is NOT near the right edge — the request, theme and account
+            // controls follow it — so a 288px panel aligned to its right edge ran 54–146px off
+            // the LEFT of a 320–412px screen, where nothing can scroll to it. Below `sm` it
+            // spans the topbar instead (left/right-3 match the bar's px-3); from `sm` up it is
+            // the original right-aligned w-72.
+            // Height: the panel lives in the sticky topbar, so scrolling the page never brings
+            // its bottom into view; on a short screen (a phone in landscape) it scrolls itself.
+            "zk-pop-in absolute left-3 right-3 top-14 z-30 max-h-[calc(100dvh-4.5rem)] overflow-y-auto rounded-xl border p-1 shadow-xl",
+            "sm:left-auto sm:right-0 sm:top-11 sm:w-72",
             "border-slate-200 bg-white shadow-slate-900/10",
             "dark:border-white/10 dark:bg-neutral-950 dark:shadow-black/60"
           )}

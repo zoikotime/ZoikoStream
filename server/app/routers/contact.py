@@ -23,6 +23,7 @@ from ..schemas.contact import ContactMessageIn, ContactMessageOut
 
 log = logging.getLogger(__name__)
 
+
 router = APIRouter(prefix="/contact", tags=["contact"])
 
 # Per-IP budget on an unauthenticated surface, matching auth.py's approach. Generous for a

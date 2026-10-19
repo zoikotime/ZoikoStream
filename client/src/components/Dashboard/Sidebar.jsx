@@ -1,10 +1,11 @@
 import { NavLink } from "react-router-dom";
 import {
-  FiX, FiGrid, FiLayers, FiUsers,
+  FiX, FiGrid, FiUser, FiUsers,
   FiActivity, FiFilm, FiRadio, FiUserCheck, FiBarChart2,
   FiCreditCard, FiLifeBuoy, FiSettings,
 } from "react-icons/fi";
 import { CONSOLE, brand, cx, focusRing, type } from "../../ui/tokens";
+import UserAvatar from "../../ui/UserAvatar";
 import Logo from "../../ui/Logo";
 
 // Organization console navigation.
@@ -18,7 +19,7 @@ import Logo from "../../ui/Logo";
 // Ordered by how often somebody needs the destination, not by which subsystem owns it:
 //
 //   primary    the event workflow — what this product is for
-//   secondary  the integration surface and org identity, reached occasionally
+//   secondary  your own profile, reached occasionally
 //   footer     Analytics, Billing, Settings — management, deliberately last
 //
 // Every `to` is a route that exists in App.jsx. `badge` names a counter on
@@ -49,7 +50,10 @@ const NAV = [
     // live input, from the event it belongs to).
     rule: true,
     items: [
-      { to: "/organization/profile", label: "Organization", icon: FiLayers },
+      // The signed-in member's OWN profile (photo, name, username, email, role, membership),
+      // so it is "Profile". It was labelled "Organization", which read as organization
+      // management; that lives in Members, Billing and Settings, whose labels are unchanged.
+      { to: "/organization/profile", label: "Profile", icon: FiUser },
     ],
   },
   {
@@ -74,9 +78,6 @@ const NAV = [
 // unmistakably as "you are here".
 const NAV_ON = "bg-violet-50 text-violet-700 dark:bg-violet-500/[0.16] dark:text-violet-200";
 const NAV_OFF = CONSOLE.navOff;
-
-const initials = (name = "") =>
-  name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
 
 // Label shown on hover when the rail is collapsed. Purely visual — the accessible name
 // comes from aria-label on the row itself, so a screen reader never depends on this.
@@ -273,9 +274,11 @@ export default function Sidebar({ open, onClose, state, collapsed = false }) {
               collapsed && "lg:justify-center lg:px-0"
             )}
           >
-            <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white shadow-sm shadow-violet-900/25", brand.chip)}>
-              {initials(person?.name)}
-            </span>
+            <UserAvatar
+              name={person?.name}
+              src={person?.avatar_url}
+              className={cx("h-8 w-8 text-[11px] font-semibold text-white shadow-sm shadow-violet-900/25", brand.chip)}
+            />
             <div className={cx("min-w-0", collapsed && "lg:hidden")}>
               <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>
                 {person?.name || "Member"}

@@ -76,3 +76,11 @@ describe("the legacy /dashboard shell is untouched", () => {
     }
   });
 });
+
+describe("room for the floating Guide", () => {
+  it("the legacy /dashboard shell reserves the launcher's footprint too", async () => {
+    renderLayout(MainLayout, "/dashboard", "legacy page");
+    await screen.findByRole("heading", { name: "legacy page" });
+    expect(document.querySelector("main")?.classList.contains("zk-guide-safe")).toBe(true);
+  });
+});

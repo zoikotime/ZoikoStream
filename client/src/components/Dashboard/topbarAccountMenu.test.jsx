@@ -1,4 +1,4 @@
-// The organization topbar's account menu (avatar → name → Organization profile → Log out).
+// The organization topbar's account menu (avatar → name → Profile → Log out).
 //
 // THE BUG: on Settings (and every page with an OrganizationPageHeader) the menu's upper half
 // rendered blank. The page's own `sticky top-0 z-20` bar painted OVER the menu, because the
@@ -6,7 +6,7 @@
 // topbar now sits on the shared z.header layer, above page content and below overlays.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const auth = vi.hoisted(() => ({ user: null, logout: null }));
@@ -58,13 +58,14 @@ describe("the account menu", () => {
     expect(screen.getByRole("menu")).toHaveTextContent("Vihari Rao");
   });
 
-  it("never throws on a missing name, and shows a neutral initial", async () => {
+  it("never throws on a missing name, and shows a neutral placeholder", async () => {
     auth.user = { full_name: null, email: null };
     const u = userEvent.setup();
     renderTopbar({ user: { name: null } });
     await open(u);
     const menu = screen.getByRole("menu");
-    expect(menu).toHaveTextContent("?");
+    // No name, no initials: the shared avatar falls back to a generic person icon (ui/UserAvatar).
+    expect(menu.querySelector('[data-avatar="icon"]')).not.toBeNull();
     expect(menu).toHaveTextContent("Member");
   });
 
@@ -78,6 +79,23 @@ describe("the account menu", () => {
     await open(u);
     await u.click(screen.getByRole("menuitem", { name: /Log out/ }));
     expect(auth.logout).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls the way to your own profile 'Profile', as the sidebar does, and it opens it", async () => {
+    const Where = () => <p data-testid="where">{useLocation().pathname}</p>;
+    const u = userEvent.setup();
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={["/organization/dashboard"]}>
+          <Topbar state={{ user: { name: "Vihari Rao" } }} unknown={false} onRetry={vi.fn()} />
+          <Routes><Route path="*" element={<Where />} /></Routes>
+        </MemoryRouter>
+      </ThemeProvider>,
+    );
+    await open(u);
+    expect(screen.queryByRole("menuitem", { name: /organization/i })).toBeNull();
+    await u.click(screen.getByRole("menuitem", { name: "Profile" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/organization/profile");
   });
 
   it("sits above the pages' own sticky z-20 bars, on the shared header layer", () => {

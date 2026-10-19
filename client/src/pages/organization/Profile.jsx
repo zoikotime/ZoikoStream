@@ -17,9 +17,10 @@ import { CARD, TXT } from "../../components/organization/profile/styles";
 import { inView, stagger } from "../../components/organization/profile/motion";
 import { activityFeed, roleLabel } from "../../components/organization/profile/derive";
 
-// Organization & Workspaces (/organization/profile) — the org admin's identity screen:
-// who they are, what their organization is entitled to, what has been happening in the
-// workspace, and the actions they reach for from here.
+// Profile (/organization/profile) — the signed-in member's own identity screen: who they
+// are, their membership of the organization and what it is entitled to, what has been
+// happening in the workspace, and the actions they reach for from here. Named "Profile" in
+// the sidebar and the account menu; organization management is Members, Billing, Settings.
 //
 // EVERY figure on this page comes from an endpoint the console already serves:
 //   /organization/console-state  — org, workspace list and service health (fetched once by

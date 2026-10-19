@@ -148,6 +148,11 @@ class User(Base):
     # the Command Center's privileged-activity feed; NULL falls back to the role label.
     department: Mapped[str | None] = mapped_column(String(80))
 
+    # The user's OWN profile photo: the API path it is served from
+    # (/api/avatars/<user_id>/<random>.webp — services/avatars.py), never the image bytes,
+    # which live in object storage. NULL means "no photo": every surface shows initials.
+    avatar_url: Mapped[str | None] = mapped_column(String(255))
+
     # Scopes a super_admin down to one of STAFF_COMMERCIAL_ROLES for commercial actions
     # specifically (see security.commercial_can) — NULL (the default for every existing
     # account) keeps today's unrestricted behavior. Meaningless on a non-super_admin row.

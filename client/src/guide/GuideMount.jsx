@@ -6,6 +6,7 @@ import { Component, Suspense, lazy, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { guidePageFor } from "./pageContext";
+import { isConsolePath } from "../operator-guide/eligibility";
 
 const GuideWidget = lazy(() => import("./GuideWidget"));
 
@@ -43,7 +44,8 @@ export default function GuideMount() {
   const page = guidePageFor(pathname);
   // "/" is the operator dashboard for a signed-in user (LandingOrDashboard): the public Guide
   // never appears inside an authenticated console.
-  const eligible = page && !(user && pathname === "/");
+  const inConsole = isConsolePath(pathname) || (!!user && pathname === "/");
+  const eligible = page && !inConsole;
   // Once loaded, keep the widget mounted across navigation so an open conversation survives a
   // click on one of its own links; it hides itself on ineligible pages.
   const [loaded, setLoaded] = useState(false);
@@ -52,7 +54,9 @@ export default function GuideMount() {
   return (
     <Isolate>
       <Suspense fallback={null}>
-        <GuideWidget page={eligible ? page : null} pathname={pathname} />
+        {/* On a console page the widget closes and renders nothing: the Operator Guide owns
+            that corner, and a public panel left open must not sit on top of it. */}
+        <GuideWidget page={eligible ? page : null} pathname={pathname} suppressed={inConsole} />
       </Suspense>
     </Isolate>
   );

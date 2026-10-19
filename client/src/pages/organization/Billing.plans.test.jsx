@@ -17,6 +17,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
   errMsg: (e) => e?.message ?? "Something went wrong.",
+  // The page asks this to tell "the server never answered" apart from an answer it did
+  // not like, so the stub has to answer it too.
+  transportMessage: (e) => (e?.response ? null : "Couldn't reach the ZoikoStream server."),
+  // Billing now diagnoses a failed load instead of saying "try refreshing", so the stub
+  // has to answer this too.
+  diagnoseLoadError: (e, path) => (
+    e?.response?.status
+      ? `The platform API returned ${e.response.status}`
+      : `The platform API is unreachable — check that the API server is running and that VITE_API_URL points at it.`
+  ),
 }));
 
 vi.mock("../../ui/Toast", () => ({
@@ -155,8 +165,9 @@ describe("Current plan comes from the backend, not the price", () => {
 
   it("offers a purchase to an organization with no plan at all", async () => {
     await renderBilling({ plan: null, plan_slug: null, status: "trial" });
-    expect(ctaText("Developer")).toBe("Upgrade");
-    expect(ctaText("Business")).toBe("Upgrade");
+    // No subscription means no subscription: a first purchase, not a move between tiers.
+    expect(ctaText("Developer")).toBe("Buy Plan");
+    expect(ctaText("Business")).toBe("Buy Plan");
     expect(ctaText("Enterprise")).toBe("Talk to an expert");
   });
 });

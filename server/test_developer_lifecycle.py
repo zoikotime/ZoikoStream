@@ -265,7 +265,7 @@ def test_005_no_compromise_templates_exist():
     """No detection input exists, so no compromise alert may be fabricated."""
     code = "\n".join(l for l in open(email_mod.__file__, encoding="utf-8").read().splitlines()
                      if not l.lstrip().startswith("#"))
-    for claim in ("suspicious activity was detected for a Zoiko Steam API credential",
+    for claim in ("suspicious activity was detected for a Zoiko Stream API credential",
                   "credential appears dormant", "risk score"):
         assert claim not in code, f"{claim!r} must not exist without real telemetry"
 
@@ -395,7 +395,7 @@ def test_004_revocation_commits_first_and_attributes_the_actor():
         assert created["fingerprint"] in text, "4 — fingerprint correct"
         assert created["key"] not in text, "5 — secret absent"
         assert o.owner_email.lower() in text.lower(), "revoked_by shown"
-        assert payload["from"].startswith("Zoiko Steam Developer Platform <")
+        assert payload["from"].startswith("Zoiko Stream Developer Platform <")
 
         # 13 — a repeat revoke does not re-notify.
         _reset_limits()

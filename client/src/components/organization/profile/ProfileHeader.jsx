@@ -1,8 +1,12 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
-import { Building2, CalendarDays, Layers, Mail, Pencil, Sparkles, Star } from "lucide-react";
+import { Building2, CalendarDays, Camera, Layers, Mail, Pencil, Sparkles, Star } from "lucide-react";
 import { cx, focusRing } from "../../../ui/tokens";
 import Skeleton from "../../../ui/Skeleton";
+import Modal from "../../../ui/Modal";
+import UserAvatar from "../../../ui/UserAvatar";
+import ProfilePhotoEditor from "../../profile/ProfilePhotoEditor";
 import { CARD, TXT } from "./styles";
 import { fadeUp, stagger } from "./motion";
 import { fmtDate, roleLabel } from "./derive";
@@ -13,9 +17,6 @@ import { fmtDate, roleLabel } from "./derive";
 // The whole block is one card so the avatar can overlap the cover without escaping a
 // bounding box, and the avatar / name / buttons all sit on ONE bottom edge (items-end)
 // instead of three different ones.
-
-const initials = (name = "") =>
-  name.trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
 
 // Health verdicts use the same vocabulary as the console topbar, so the two never
 // disagree about what "Degraded" means.
@@ -78,6 +79,8 @@ export default function ProfileHeader({
 }) {
   const verdict = VERDICT[health?.status] || VERDICT.not_configured;
   const name = user?.full_name || "—";
+  const [editingPhoto, setEditingPhoto] = useState(false);
+  const hasPhoto = Boolean(user?.avatar_url);
 
   return (
     <motion.section
@@ -117,10 +120,32 @@ export default function ProfileHeader({
             <div className="relative -mt-12 shrink-0 sm:-mt-14">
               {/* Name, email, username and role come from the stored session, which is
                   hydrated synchronously — they are never in a loading state, so they are
-                  rendered directly. Only the API-sourced facts below skeleton. */}
-              <div className="grid h-24 w-24 place-items-center rounded-full bg-[linear-gradient(140deg,#bfe3f5_0%,#cdd2f6_45%,#d8c8f2_100%)] text-[34px] font-bold text-violet-900 shadow-lg shadow-violet-900/10 ring-4 ring-white dark:ring-black sm:h-28 sm:w-28 sm:text-[38px]">
-                {initials(name)}
-              </div>
+                  rendered directly. Only the API-sourced facts below skeleton.
+
+                  The avatar is the way into the photo editor, and it carries ONE camera: the
+                  centred overlay. It appears on hover and on keyboard focus; on a device that
+                  cannot hover (a touch screen) it is always shown, over a lighter scrim, so
+                  the action is still discoverable there. A second, always-on camera badge at
+                  the bottom-left used to do that job, and showed two cameras on every hover. */}
+              <button
+                type="button"
+                onClick={() => setEditingPhoto(true)}
+                aria-label={hasPhoto ? "Change profile photo" : "Add a profile photo"}
+                className={cx("group relative block rounded-full", focusRing)}
+              >
+                <UserAvatar
+                  name={user?.full_name}
+                  src={user?.avatar_url}
+                  className="h-24 w-24 bg-[linear-gradient(140deg,#bfe3f5_0%,#cdd2f6_45%,#d8c8f2_100%)] text-[34px] font-bold text-violet-900 shadow-lg shadow-violet-900/10 ring-4 ring-white dark:ring-black sm:h-28 sm:w-28 sm:text-[38px]"
+                />
+                <span
+                  aria-hidden="true"
+                  data-avatar-edit=""
+                  className="absolute inset-0 grid place-items-center rounded-full bg-slate-900/50 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100 motion-reduce:transition-none [@media(hover:none)]:bg-slate-900/30 [@media(hover:none)]:opacity-100"
+                >
+                  <Camera className="h-6 w-6 drop-shadow" />
+                </span>
+              </button>
               {/* Account-status dot, anchored to the avatar so status reads at a glance. */}
               <span
                 className="absolute bottom-1 right-1 grid h-6 w-6 place-items-center rounded-full bg-white ring-1 ring-slate-200 dark:bg-black dark:ring-white/15"
@@ -201,6 +226,10 @@ export default function ProfileHeader({
           ))}
         </motion.div>
       </div>
+
+      <Modal open={editingPhoto} onClose={() => setEditingPhoto(false)} title="Profile photo" closeOnBackdrop>
+        <ProfilePhotoEditor user={user} onDone={() => setEditingPhoto(false)} />
+      </Modal>
     </motion.section>
   );
 }

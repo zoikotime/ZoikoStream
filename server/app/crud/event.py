@@ -6,13 +6,74 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import asc, case, desc, func, or_, select
+from sqlalchemy import and_, asc, case, desc, exists, func, or_, select
 
+from ..config import settings
 from ..models import (
-    ContributorSession, Event, EventAccessLink, EventAssignment, EventFeedback,
+    BroadcastSession, ContributorSession, Event, EventAccessLink, EventAssignment, EventFeedback,
     EventRegistration, LiveIngressEndpoint, LiveRecording, User,
 )
-from ..models.event import ARCHIVABLE_STATUSES, EVENT_STATUSES, ON_AIR_STATUSES
+from ..models.event import ARCHIVABLE_STATUSES, EVENT_STATUSES, ON_AIR_STATUSES, PRE_LIVE_STATUSES
+
+# ── derived display status: "missed" ─────────────────────────────────────────────────────
+#
+# A Scheduled event whose start time has passed (plus a grace period) and that never went
+# live is shown as MISSED. It is a DISPLAY state, never stored: the canonical status stays
+# "scheduled", so every lifecycle action still applies — reschedule, cancel, archive, or go
+# live late. This is the one definition; the Events list, its filter and its counters all
+# read it from here, and the console shows what the API returns rather than re-deriving it.
+#
+# "Never went live" is decided from the broadcast record, not from the status alone: a
+# BroadcastSession with a real started_at is the platform's own evidence that the event
+# was on air.
+DISPLAY_MISSED = "missed"
+DISPLAY_STATUSES = EVENT_STATUSES + (DISPLAY_MISSED,)
+# Which canonical statuses can become Missed. Only "scheduled": a draft's time is tentative,
+# and published / ready_to_arm / armed keep their own label (with a "start time passed" note).
+MISSED_FROM_STATUSES = ("scheduled",)
+# Pre-live statuses whose start time can be overdue at all (a draft's never is).
+_OVERDUE_FROM_STATUSES = tuple(s for s in PRE_LIVE_STATUSES if s != "draft")
+
+
+def start_grace() -> timedelta:
+    return timedelta(minutes=max(0, int(settings.EVENT_START_GRACE_MINUTES)))
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    return value.replace(tzinfo=timezone.utc) if value is not None and value.tzinfo is None else value
+
+
+def _ever_broadcast():
+    return exists(select(BroadcastSession.id).where(
+        BroadcastSession.event_id == Event.id, BroadcastSession.started_at.isnot(None)))
+
+
+def missed_clause(now: datetime | None = None):
+    """SQL: the event is Missed at `now` (UTC)."""
+    cutoff = (now or datetime.now(timezone.utc)) - start_grace()
+    return and_(Event.status.in_(MISSED_FROM_STATUSES), Event.start_time.isnot(None),
+                Event.start_time < cutoff, ~_ever_broadcast())
+
+
+def display_states(db, events, now: datetime | None = None) -> dict:
+    """{event_id: (display_status, start_overdue)} for a page of events, in one query.
+
+    `start_overdue` is true for any pre-live, non-draft event past start + grace that never
+    went live; a Scheduled one is then shown as Missed, the others keep their status and the
+    console notes the passed start time."""
+    cutoff = (now or datetime.now(timezone.utc)) - start_grace()
+    candidates = [e.id for e in events
+                  if e.status in _OVERDUE_FROM_STATUSES and e.start_time is not None
+                  and _utc(e.start_time) < cutoff]
+    aired = set(db.scalars(select(BroadcastSession.event_id).where(
+        BroadcastSession.event_id.in_(candidates), BroadcastSession.started_at.isnot(None),
+    )).all()) if candidates else set()
+    out = {}
+    for e in events:
+        overdue = e.id in candidates and e.id not in aired
+        status = DISPLAY_MISSED if overdue and e.status in MISSED_FROM_STATUSES else e.status
+        out[e.id] = (status, overdue)
+    return out
 
 # Sortable columns for GET /events, as an explicit map. A whitelist rather than
 # getattr(Event, name): the value arrives from the browser, and a map can only ever yield a
@@ -243,7 +304,8 @@ def unique_event_slug(db, org_id, base: str, exclude_id=None) -> str:
 # ── Events ────────────────────────────────────────────────────────────────────
 
 def list_events(db, org_id, q=None, status=None, host_id=None, date_from=None, date_to=None,
-                sort_by="created_at", order="desc", page=1, page_size=20):
+                sort_by="created_at", order="desc", page=1, page_size=20, display_status=None,
+                now: datetime | None = None):
     stmt = select(Event).where(Event.org_id == org_id, Event.deleted_at.is_(None))
     if q:
         like = f"%{q.lower()}%"
@@ -252,8 +314,18 @@ def list_events(db, org_id, q=None, status=None, host_id=None, date_from=None, d
                               func.lower(Event.slug).like(like)))
     if status:
         stmt = stmt.where(Event.status == status)
-    else:
+    elif not display_status:
         stmt = stmt.where(Event.status != "archived")
+    # The DISPLAY filter (what the Events page shows): "missed" is derived, and "scheduled"
+    # means still upcoming — a Missed event is not offered as Scheduled. Any other value is
+    # the canonical status itself. `status` above keeps its canonical meaning for every
+    # existing caller.
+    if display_status == DISPLAY_MISSED:
+        stmt = stmt.where(missed_clause(now))
+    elif display_status:
+        stmt = stmt.where(Event.status == display_status)
+        if display_status in MISSED_FROM_STATUSES:
+            stmt = stmt.where(~missed_clause(now))
     if host_id:
         stmt = stmt.where(Event.created_by == host_id)
     if date_from:
@@ -291,6 +363,17 @@ def status_counts(db, org_id) -> dict:
     ).all()
     found = dict(rows)
     return {status: int(found.get(status, 0)) for status in EVENT_STATUSES}
+
+
+def display_status_counts(db, org_id, now: datetime | None = None) -> dict:
+    """status_counts as the Events page shows them: Missed counted on its own and NOT in
+    Scheduled, which then means upcoming only."""
+    counts = status_counts(db, org_id)
+    missed = db.scalar(select(func.count()).select_from(Event).where(
+        Event.org_id == org_id, Event.deleted_at.is_(None), missed_clause(now))) or 0
+    counts["scheduled"] = max(0, counts.get("scheduled", 0) - int(missed))
+    counts[DISPLAY_MISSED] = int(missed)
+    return counts
 
 
 def registration_counts(db, event_ids) -> dict:

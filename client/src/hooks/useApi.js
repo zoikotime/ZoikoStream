@@ -21,8 +21,15 @@ export default function useApi(fn) {
     fnRef.current = fn;
   });
 
+  // Whether a request is outstanding, and whether a reload arrived while one was. Refs, not
+  // state: `reload` has to read and write them synchronously within one event, and a state
+  // update would not be visible until the next render.
+  const inFlight = useRef(false);
+  const pending = useRef(false);
+
   useEffect(() => {
     let alive = true;
+    inFlight.current = true;
     fnRef
       .current()
       .then((d) => {
@@ -32,7 +39,18 @@ export default function useApi(fn) {
         }
       })
       .catch((e) => alive && setError(e))
-      .finally(() => alive && setLoading(false));
+      .finally(() => {
+        inFlight.current = false;
+        if (!alive) return;
+        // A reload asked for during this request: serve it now rather than clearing
+        // `loading`, so the pending refresh is the thing that finally clears it.
+        if (pending.current) {
+          pending.current = false;
+          setTick((t) => t + 1);
+          return;
+        }
+        setLoading(false);
+      });
     return () => {
       alive = false;
     };
@@ -45,9 +63,22 @@ export default function useApi(fn) {
   // this hook: as a fresh arrow per render it could not honestly be listed in a dependency
   // array — an effect that re-fetches when a filter changes had to omit it, or loop for ever
   // (see pages/admin/Users.jsx). A stable identity lets that effect declare what it uses.
+  //
+  // THE STUCK-SKELETON BUG: bumping `tick` while a request was already outstanding started a
+  // second one, and the FIRST to settle cleared `loading` — so a page that polls, or one that
+  // reloads on a filter change, could clear its skeleton on a stale answer and then be
+  // overwritten by the newer one. Worse, the superseded effect's cleanup set `alive = false`,
+  // so when the older request lost the race nothing ever cleared `loading` at all and the
+  // skeleton stayed up for good. A reload during a request is now remembered and run when
+  // that request finishes, so exactly one request is ever in flight and the last one to
+  // finish is the one that clears the flag.
   const reload = useCallback(() => {
     setLoading(true);
     setError(null);
+    if (inFlight.current) {
+      pending.current = true;
+      return;
+    }
     setTick((t) => t + 1);
   }, []);
 

@@ -26,19 +26,32 @@ export const toasterProps = {
   },
 };
 
+// Stable ids. `notify.error(message, { id })` REPLACES the toast already showing under that
+// id (its text, kind and timer are refreshed in place) instead of stacking a second copy. Use
+// it wherever the same notification can be raised again before the first one is gone: a
+// request retried by a rapid second click, the same refusal coming back for the same row.
+// Without an id every call adds its own toast, exactly as before, so existing callers are
+// unchanged. An id is any non-empty string (numbers are accepted and stringified); an empty or
+// missing one means "no id".
+const withId = (opts) => {
+  if (!opts || !("id" in opts)) return opts;
+  const { id, ...rest } = opts;
+  return id === undefined || id === null || id === "" ? rest : { ...rest, id: String(id) };
+};
+
 export const notify = {
-  success: (msg, opts) => toast.success(msg, opts),
-  error: (msg, opts) => toast.error(msg, opts),
-  warning: (msg, opts) => toast(msg, { icon: "⚠️", duration: TOAST_DURATIONS.warning, ...opts }),
-  info: (msg, opts) => toast(msg, opts),
-  loading: (msg, opts) => toast.loading(msg, opts),
-  promise: (p, msgs, opts) => toast.promise(p, msgs, opts),
-  dismiss: (id) => toast.dismiss(id),
+  success: (msg, opts) => toast.success(msg, withId(opts)),
+  error: (msg, opts) => toast.error(msg, withId(opts)),
+  warning: (msg, opts) => toast(msg, { icon: "⚠️", duration: TOAST_DURATIONS.warning, ...withId(opts) }),
+  info: (msg, opts) => toast(msg, withId(opts)),
+  loading: (msg, opts) => toast.loading(msg, withId(opts)),
+  promise: (p, msgs, opts) => toast.promise(p, msgs, withId(opts)),
+  dismiss: (id) => toast.dismiss(id == null ? id : String(id)),
   // Live-event activity alert (a viewer's chat/poll/announcement, or an operator's
   // action reaching a viewer) — a bell icon so it reads as "something happened" at a
   // glance, distinct from a plain info toast. Paired with utils/sound.js's chime at every
   // call site; this is the visible half of that alert.
-  alert: (msg, opts) => toast(msg, { icon: "🔔", ...opts }),
+  alert: (msg, opts) => toast(msg, { icon: "🔔", ...withId(opts) }),
 };
 
 export { toast, Toaster };

@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FiUserPlus, FiSearch, FiRefreshCw, FiX, FiTrash2, FiUsers, FiMail, FiSend, FiLock } from "react-icons/fi";
 import api, { errMsg } from "../../api";
+import useStepUp, { STEP_UP_HEADER, isStepUpRequired } from "../../components/auth/useStepUp";
 import useApi from "../../hooks/useApi";
 import { useAuth } from "../../auth/AuthContext";
 import { isOrgAdmin } from "../../auth/orgRole";
@@ -16,6 +17,7 @@ import SectionCard from "../../components/admin/SectionCard";
 import { cx, focusRing } from "../../ui/tokens";
 import { Label } from "../../ui/forms";
 import { fmtDate } from "../../data/events";
+import UserAvatar from "../../ui/UserAvatar";
 
 // Mirrors the backend's ORG_ASSIGNABLE_ROLES (routers/organization.py) — "moderator" was
 // removed from both together, so the form cannot offer a role the API would reject.
@@ -32,6 +34,22 @@ const control = cx(
   focusRing
 );
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+
+// Stable toast ids, so a refusal raised again (a second attempt, the same failure) replaces the
+// toast already on screen instead of stacking copies. One per member, so different members'
+// outcomes stay distinguishable; self-demotion gets its own, since it is always the same refusal.
+const roleToastId = (memberId) => `member-role:${memberId}`;
+const SELF_CHANGE_TOAST_ID = "member-role:self-change-forbidden";
+
+// The structured refusal code ({detail: {code}} from /organization/users, or a top-level code).
+// Read here rather than via api.js's errCode: suites that render this page mock ../../api with
+// a strict factory, and a new named import from it would throw there.
+const refusalCode = (e) => {
+  const data = e?.response?.data;
+  const detail = data?.detail;
+  if (detail && typeof detail === "object" && !Array.isArray(detail) && detail.code) return detail.code;
+  return (data && typeof data === "object" && data.code) || null;
+};
 
 function InviteModal({ open, onClose, onInvited }) {
   const [email, setEmail] = useState("");
@@ -119,6 +137,9 @@ export default function OrganizationMembers() {
           api.get("/organization/invitations", { params: { page_size: 100 } }).then((r) => r.data.items),
         ]).then(([members, invites]) => ({ members, invites }))
   );
+  // Skeletons only for the first load. A refresh after a change keeps the rows on screen, so a
+  // member's newly confirmed role does not blink out behind a skeleton and back.
+  const firstLoad = loading && !data;
   const members = useMemo(() => data?.members || [], [data]);
   const invites = useMemo(() => data?.invites || [], [data]);
   const pending = invites.filter((i) => i.status === "pending");
@@ -129,50 +150,120 @@ export default function OrganizationMembers() {
     return members.filter((m) => (m.full_name || "").toLowerCase().includes(q) || (m.email || "").toLowerCase().includes(q));
   }, [members, query]);
 
-  const [roleOverrides, setRoleOverrides] = useState({});
-  const [updatingMemberId, setUpdatingMemberId] = useState(null);
+  // ── Member mutations ──────────────────────────────────────────────────────────────────
+  // One outstanding mutation PER MEMBER. The ref is the guard: it is read and written
+  // synchronously, so a burst of change events inside one render cannot slip a second request
+  // through. The state mirrors it only so the row can render disabled. A Set, so member B's
+  // request finishing never unlocks member A's.
+  const busyRef = useRef(new Set());
+  const [busyIds, setBusyIds] = useState(() => new Set());
+  const lockMember = (id) => {
+    if (busyRef.current.has(id)) return false;
+    busyRef.current.add(id);
+    setBusyIds(new Set(busyRef.current));
+    return true;
+  };
+  const unlockMember = (id) => {
+    busyRef.current.delete(id);
+    setBusyIds(new Set(busyRef.current));
+  };
+
+  // The role being requested while its PATCH is outstanding (shown, disabled, in the select).
+  const [requestedRoles, setRequestedRoles] = useState({});
+  // The role the server CONFIRMED, tied to the member list it was confirmed against. It bridges
+  // the gap between a successful PATCH and the reload that follows (so the select does not
+  // flicker back to the old role), and it stops applying as soon as fresh server data lands —
+  // so it can never hide a later change made elsewhere.
+  const [confirmedRoles, setConfirmedRoles] = useState({});
+  const membersRef = useRef(members);
+  useEffect(() => {
+    membersRef.current = members;
+  }, [members]);
+  const confirmedRole = (m) => {
+    const c = confirmedRoles[m.id];
+    return c && c.list === members ? c.role : m.role;
+  };
+  const shownRole = (m) => requestedRoles[m.id] ?? confirmedRole(m);
+
+  // Password re-confirmation for the server's high-risk grants (promotion to admin).
+  const stepUp = useStepUp();
 
   const kpis = [
     { label: "Members", value: members.length },
     { label: "Active", value: members.filter((m) => m.is_active).length },
-    { label: "Admins", value: members.filter((m) => (roleOverrides[m.id] ?? m.role) === "org_admin").length },
+    { label: "Admins", value: members.filter((m) => confirmedRole(m) === "org_admin").length },
     { label: "Pending invites", value: pending.length },
   ];
 
   const changeRole = async (m, newRole) => {
-    if (!m?.id || updatingMemberId === m.id) return;
-    const currentRole = roleOverrides[m.id] ?? m.role;
-    if (newRole === currentRole) return;
+    if (!m?.id || m.role === "super_admin") return;
+    if (busyRef.current.has(m.id)) return;          // this member already has a change in flight
+    if (newRole === confirmedRole(m)) return;       // already that role: nothing to send
+    lockMember(m.id);
+    setRequestedRoles((prev) => ({ ...prev, [m.id]: newRole }));
 
-    setUpdatingMemberId(m.id);
-    setRoleOverrides((prev) => ({ ...prev, [m.id]: newRole }));
-
+    const url = `/organization/users/${m.id}`;
+    const body = { role: newRole };
     try {
-      await api.patch(`/organization/users/${m.id}`, { role: newRole });
-      notify.success(`${m.full_name} is now ${roleLabel(newRole)}`);
-      setRoleOverrides((prev) => {
+      let res;
+      try {
+        res = await api.patch(url, body);
+      } catch (e) {
+        if (!isStepUpRequired(e)) throw e;
+        // The server wants proof the acting admin is present before handing over admin
+        // control. Ask once; cancelling sends nothing further and rolls the select back.
+        const reference = await stepUp.request({
+          purpose: e.response.data.detail.purpose || "high_risk_role_grant",
+          title: "Confirm admin access",
+          description:
+            `Granting ${m.full_name || "this member"} ${roleLabel(newRole)} access gives them full control of ` +
+            "this organization. Enter your password to confirm it's you.",
+          confirmLabel: `Grant ${roleLabel(newRole)} access`,
+        });
+        if (!reference) return;
+        try {
+          res = await api.patch(url, body, { headers: { [STEP_UP_HEADER]: reference } });
+        } catch (e2) {
+          if (!isStepUpRequired(e2)) throw e2;
+          // The confirmation was spent or expired between the dialog and the retry.
+          notify.error(
+            `Your password confirmation expired, so ${m.full_name || "the member"}'s role was not changed. Try again.`,
+            { id: roleToastId(m.id) }
+          );
+          return;
+        }
+      }
+      const role = res?.data?.role || newRole;
+      setConfirmedRoles((prev) => ({ ...prev, [m.id]: { role, list: membersRef.current } }));
+      notify.success(`${m.full_name} is now ${roleLabel(role)}`, { id: roleToastId(m.id) });
+      reload();
+    } catch (e) {
+      const id = refusalCode(e) === "SELF_ROLE_CHANGE_FORBIDDEN" ? SELF_CHANGE_TOAST_ID : roleToastId(m.id);
+      notify.error(errMsg(e), { id });
+    } finally {
+      // Success: the confirmed role (above) takes over. Failure or cancel: this falls back to
+      // the last confirmed role — the rollback.
+      setRequestedRoles((prev) => {
         const next = { ...prev };
         delete next[m.id];
         return next;
       });
-      reload();
-    } catch (e) {
-      // Revert the role dropdown immediately so it is not stuck visually
-      setRoleOverrides((prev) => ({ ...prev, [m.id]: m.role }));
-      notify.error(errMsg(e));
-    } finally {
-      setUpdatingMemberId(null);
+      unlockMember(m.id);
     }
   };
 
   const removeMember = async (m) => {
+    if (busyRef.current.has(m.id)) return;
     if (!window.confirm(`Remove ${m.full_name} from the organization?`)) return;
+    if (!lockMember(m.id)) return;
     try {
       await api.delete(`/organization/users/${m.id}`);
       notify.success("Member removed");
       reload();
     } catch (e) {
       notify.error(errMsg(e));
+    } finally {
+      unlockMember(m.id);
     }
   };
 
@@ -204,9 +295,12 @@ export default function OrganizationMembers() {
       sortValue: (r) => (r.full_name || "").toLowerCase(),
       render: (r) => (
         <div className="flex items-center gap-3">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-violet-100 text-xs font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
-            {(r.full_name || "?").split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase()}
-          </span>
+          <UserAvatar
+            name={r.full_name}
+            src={r.avatar_url}
+            alt=""
+            className="h-9 w-9 bg-violet-100 text-xs font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300"
+          />
           <div className="min-w-0">
             <p className="truncate font-medium text-slate-800 dark:text-slate-100">
               {r.full_name}
@@ -221,15 +315,15 @@ export default function OrganizationMembers() {
       key: "role",
       header: "Role",
       sortable: true,
-      sortValue: (r) => roleLabel(roleOverrides[r.id] ?? r.role),
+      sortValue: (r) => roleLabel(shownRole(r)),
       render: (r) => {
-        const currentRole = roleOverrides[r.id] ?? r.role;
-        const isUpdating = updatingMemberId === r.id;
+        const isUpdating = busyIds.has(r.id);
         return (
           <select
-            value={currentRole}
+            value={shownRole(r)}
             onChange={(e) => changeRole(r, e.target.value)}
             disabled={r.role === "super_admin" || isUpdating}
+            aria-busy={isUpdating || undefined}
             aria-label={`Role for ${r.full_name}`}
             className={cx(control, "h-8 w-full max-w-[9rem] disabled:opacity-60")}
           >
@@ -296,7 +390,7 @@ export default function OrganizationMembers() {
       ) : (
         <>
           <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
-            {kpis.map((k) => <StatCard key={k.label} label={k.label} value={k.value} loading={loading} />)}
+            {kpis.map((k) => <StatCard key={k.label} label={k.label} value={k.value} loading={firstLoad} />)}
           </div>
 
           <SectionCard
@@ -321,14 +415,14 @@ export default function OrganizationMembers() {
               columns={memberColumns}
               rows={filteredMembers}
               rowKey={(r) => r.id}
-              loading={loading}
+              loading={firstLoad}
               pageSize={10}
               initialSort={{ key: "full_name", dir: "asc" }}
               minWidth={720}
               empty={{ icon: FiUsers, title: query ? "No members match your search" : "No members yet", description: query ? "Try a different search." : "Invite your first teammate to get started." }}
               rowActions={(r) =>
                 user?.email !== r.email && r.role !== "super_admin" ? (
-                  <Button variant="ghost" size="sm" iconOnly leftIcon={FiTrash2} aria-label={`Remove ${r.full_name}`} className="text-rose-500 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10" onClick={() => removeMember(r)} />
+                  <Button variant="ghost" size="sm" iconOnly leftIcon={FiTrash2} aria-label={`Remove ${r.full_name}`} disabled={busyIds.has(r.id)} className="text-rose-500 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/10" onClick={() => removeMember(r)} />
                 ) : null
               }
             />
@@ -339,7 +433,7 @@ export default function OrganizationMembers() {
               columns={inviteColumns}
               rows={invites}
               rowKey={(r) => r.id}
-              loading={loading}
+              loading={firstLoad}
               pageSize={10}
               initialSort={{ key: "expires_at", dir: "desc" }}
               minWidth={720}
@@ -360,6 +454,7 @@ export default function OrganizationMembers() {
       )}
 
       <InviteModal open={inviteOpen} onClose={() => setInviteOpen(false)} onInvited={reload} />
+      {stepUp.dialog}
     </div>
   );
 }

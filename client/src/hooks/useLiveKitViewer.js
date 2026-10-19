@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Room, RoomEvent, Track, VideoQuality } from "livekit-client";
 import { fatalDisconnect } from "./livekitDisconnect";
+import { connectErrorReason } from "../data/playbackQoe";
 
 // Subscribes to whatever is being published in the room and attaches every remote track
 // (video AND audio, from the host AND from any promoted speaker) to ONE <video> element —
@@ -256,12 +257,26 @@ const primaryVideoTrack = (trackSet) => {
   return screenShare || firstCamera;
 };
 
+// Track.StreamState.Paused, compared by value: some test doubles of livekit-client carry no
+// StreamState enum. It is the SFU telling this subscriber that it stopped forwarding the
+// track (congestion), as opposed to the publisher muting it.
+const STREAM_PAUSED = "paused";
+
 // `audioMuted`/`audioVolume` are the VIEWER's own playback controls. They apply to the
 // dedicated <audio> elements below, because remote audio no longer rides on the <video>.
+//
+// `onFailure(reason)` hears each real connection or subscription failure as a normalized
+// playback-failure reason (data/playbackQoe.js) for the player's quality measurement. It is
+// told nothing that is not a failure: a fatal disconnect (the event ended, another tab took
+// over, the host removed this viewer) ends playback without being a delivery failure.
 export default function useLiveKitViewer({ enabled, url, token, canPublish = false,
-                                          onMuteChange,
+                                          onMuteChange, onFailure,
                                           audioMuted = false, audioVolume = 100 }) {
   const roomRef = useRef(null);
+  const onFailureRef = useRef(onFailure);
+  useEffect(() => {
+    onFailureRef.current = onFailure;
+  }, [onFailure]);
 
   // A callback ref that ALSO exposes `.current`, so consumers can keep doing both
   // `ref={mediaRef}` and `mediaRef.current.play()` (components/watch/VideoPlayer.jsx does
@@ -281,6 +296,8 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [error, setError] = useState(null);
+  // A fatal disconnect (livekitDisconnect.js): this room will not come back by retrying.
+  const [stopped, setStopped] = useState(false);
   // { available, text } — see the TranscriptionReceived handler in the connect effect.
   const [captions, setCaptions] = useState({ available: false, text: "" });
 
@@ -326,6 +343,14 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
     [...audioElsRef.current.keys()].forEach(releaseAudioFor);
   }, [releaseAudioFor]);
 
+  // Whether the SFU has paused the video this viewer is watching — the live equivalent of a
+  // buffering player. Re-read whenever the track set or a track's stream state changes.
+  const [streamPaused, setStreamPaused] = useState(false);
+  const refreshStreamPaused = useCallback(() => {
+    const video = primaryVideoTrack(tracksRef.current);
+    setStreamPaused(Boolean(video && video.streamState === STREAM_PAUSED));
+  }, []);
+
   const bumpTracks = useCallback(() => {
     let hasVideo = false;
     let hasAudio = false;
@@ -334,7 +359,8 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       else if (t.kind === Track.Kind.Audio) hasAudio = true;
     });
     setTracks((prev) => ({ version: prev.version + 1, hasVideo, hasAudio }));
-  }, []);
+    refreshStreamPaused();
+  }, [refreshStreamPaused]);
 
   // This participant's OWN mic, published only while promoted to speaker (canPublish).
   // Separate from hasAudio/hasVideo, which describe REMOTE tracks this viewer is
@@ -530,8 +556,16 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
         }
         logSubscription("remote track published", room, { who: p.identity, source: pub.source });
       });
-      // Dynacast pausing/resuming a layer changes what is actually available.
-      room.on(RoomEvent.TrackStreamStateChanged, refreshLayers);
+      // Dynacast pausing/resuming a layer changes what is actually available — and the SFU
+      // pausing the watched track is a stall the player measures (streamPaused).
+      room.on(RoomEvent.TrackStreamStateChanged, () => {
+        refreshLayers();
+        if (current()) refreshStreamPaused();
+      });
+      // Connected, but the broadcaster's track could not be received.
+      room.on(RoomEvent.TrackSubscriptionFailed, () => {
+        if (current()) onFailureRef.current?.("track_subscription_failed");
+      });
       room.on(RoomEvent.TrackUnpublished, (pub) => {
         if (pub?.kind === Track.Kind.Video && videoPubRef.current === pub) {
           videoPubRef.current = null;
@@ -584,6 +618,7 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
         if (fatal) {
           setReconnecting(false);
           setError(fatal);
+          setStopped(true);
           return;
         }
         scheduleRetry();
@@ -607,7 +642,15 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       setConnected(true);
       setReconnecting(false);
       setError(null);
+      setStopped(false);
       logSubscription("connected", room);
+    };
+
+    // A connect attempt that failed, as a playback-failure reason (null = this page
+    // cancelled it). Every attempt is reported; the player keeps each reason once.
+    const reportConnectFailure = (e) => {
+      const reason = connectErrorReason(e);
+      if (reason) onFailureRef.current?.(reason);
     };
 
     const scheduleRetry = () => {
@@ -624,13 +667,18 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       if (retryTimer) clearTimeout(retryTimer);
       retryTimer = setTimeout(() => {
         if (!current()) return;
-        connectOnce().catch(() => scheduleRetry());
+        connectOnce().catch((e) => {
+          if (!current()) return;
+          reportConnectFailure(e);
+          scheduleRetry();
+        });
       }, delay);
     };
 
     connectOnce().catch((e) => {
       if (!current()) return;
       setError(e?.message || "Couldn't connect to the stream");
+      reportConnectFailure(e);
       scheduleRetry();
     });
 
@@ -640,6 +688,7 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
       clearTracks();
       setConnected(false);
       setReconnecting(false);
+      setStopped(false);
       setCaptions({ available: false, text: "" });
       void disposeRoom();
       // The mic itself is a real getUserMedia capture (see the effect below) — it does
@@ -653,7 +702,7 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
     // releaseAudioFor/releaseAllAudio are stable useCallbacks with stable deps, so naming them
     // cannot re-run this effect (which would tear down and rebuild the room); it just keeps the
     // dependency list honest.
-  }, [enabled, url, token, bumpTracks, releaseAudioFor, releaseAllAudio]);
+  }, [enabled, url, token, bumpTracks, refreshStreamPaused, releaseAudioFor, releaseAllAudio]);
 
   // VIDEO: one track on the shared element, re-attached only when it CHANGES.
   // The old effect attached every subscribed track to the one element on every bump.
@@ -827,6 +876,9 @@ export default function useLiveKitViewer({ enabled, url, token, canPublish = fal
 
   return {
     mediaRef, connected, reconnecting, hasVideo, hasAudio, error,
+    // For the player's quality measurement: the SFU paused the watched video (a stall), and
+    // the room ended for good (a fatal disconnect — not a stall, not a failure).
+    streamPaused, stopped,
     // Quality: the layers the publisher really sent, whether a video publication exists at
     // all (distinct from "one layer"), this viewer's choice, and the setter.
     videoLayers, hasVideoPublication, quality, selectQuality,

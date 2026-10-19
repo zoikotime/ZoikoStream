@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { FiCheckCircle, FiEdit2, FiSlash, FiTrash2, FiUsers, FiSearch } from "react-icons/fi";
-import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, initials, timeAgo } from "../../components/admin";
+import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, timeAgo } from "../../components/admin";
+import UserAvatar from "../../ui/UserAvatar";
 import api, { diagnoseLoadError, errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import UserModal from "./UserModal";
@@ -197,9 +198,12 @@ export default function Users() {
       sortable: true,
       render: (u) => (
         <div className="flex items-center gap-3">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-xs font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-            {initials(u.full_name)}
-          </span>
+          <UserAvatar
+            name={u.full_name}
+            src={u.avatar_url}
+            alt=""
+            className="h-9 w-9 bg-slate-100 text-xs font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+          />
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="font-medium text-slate-800 dark:text-slate-100">{u.full_name}</span>

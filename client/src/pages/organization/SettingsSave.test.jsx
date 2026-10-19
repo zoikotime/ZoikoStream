@@ -74,6 +74,29 @@ beforeEach(() => {
     Promise.resolve({ data: { ...PAYLOADS[url], ...body } }));
 });
 
+// Not about saving, but this file already renders the real page per tab. The Role
+// capabilities table scrolls sideways on a phone; its cells' sr-only labels are
+// position:absolute and must resolve inside that scroller, or they escape it and widen the
+// whole page (measured: 544px on a 360px screen).
+const POSITIONED = /(^|\s)(relative|absolute|fixed|sticky)(\s|$)/;
+const srOnlyEscapingScrollers = (root) =>
+  [...root.querySelectorAll(".overflow-x-auto .sr-only")].filter((el) => {
+    for (let n = el.parentElement; n; n = n.parentElement) {
+      if (POSITIONED.test(n.getAttribute("class") || "")) return false;
+      if (n.classList.contains("overflow-x-auto")) return true;
+    }
+    return true;
+  });
+
+describe("on a phone", () => {
+  it("keeps the Role capabilities table's screen-reader labels inside its scroller", async () => {
+    const { container } = open("security");
+    const table = await screen.findByRole("table", { name: /capabilities granted/i });
+    expect(within(table).getAllByText(/^(Granted|Not granted)$/).length).toBeGreaterThan(0);
+    expect(srOnlyEscapingScrollers(container)).toEqual([]);
+  });
+});
+
 describe("each section saves only itself", () => {
   it("Branding sends only the changed branding field and never touches the domain", async () => {
     open("branding");

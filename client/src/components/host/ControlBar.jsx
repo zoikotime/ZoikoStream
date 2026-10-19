@@ -141,7 +141,10 @@ export default function ControlBar({
   const shareBlocked = broadcast?.settings?.allow_screen_share === false;
 
   return (
-    <div className={cx("shrink-0 border-t", STUDIO.chrome)}>
+    // data-guide-avoid: the floating Guide launcher never covers this deck (End Event, Emergency
+    // stop). Docked at the bottom of the full-height desktop console, the launcher lifts above
+    // it; scrolling past on a phone or tablet, the launcher steps aside (guide/safeArea.js).
+    <div data-guide-avoid="" className={cx("shrink-0 border-t", STUDIO.chrome)}>
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 sm:px-4">
         {/* All tool keys in ONE compact group at a uniform 8px gap. The only flexible space
             in the deck is between this group and the transport track — the transport's

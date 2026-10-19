@@ -7,7 +7,7 @@
 // the client renders the two differently and never converts null into a figure.
 import { describe, expect, it } from "vitest";
 
-import { formatEngagement, formatWatchTime } from "./analyticsFormat";
+import { formatEngagement, formatHoursTick, formatWatchTime } from "./analyticsFormat";
 
 const EM_DASH = "—";
 
@@ -67,5 +67,30 @@ describe("null never becomes a number", () => {
       expect(fn(null)).not.toBe("0%");
       expect(fn(null)).not.toBe("0.0 hrs");
     }
+  });
+});
+
+// The watch-hours axis tick (Audience retention, and the trend chart's right axis). The axis
+// appends its own unit, so the rendered label is this + "h": 0.025 -> "0.025h".
+describe("watch-hours axis ticks", () => {
+  it.each([
+    [0, "0"], [0.025, "0.025"], [0.05, "0.05"], [0.075, "0.075"], [0.1, "0.1"],
+    [1, "1"], [1.5, "1.5"], [1234.5, "1234.5"],
+  ])("%s -> %s", (value, text) => {
+    expect(formatHoursTick(value)).toBe(text);
+  });
+
+  it("drops binary floating-point noise without fixing the precision", () => {
+    expect(formatHoursTick(0.07500000000000001)).toBe("0.075");
+    expect(formatHoursTick(0.1 + 0.2)).toBe("0.3");
+    expect(formatHoursTick(0.05)).not.toBe("0.050");
+  });
+
+  it("never drops the leading zero of a fraction", () => {
+    for (const v of [0.025, 0.05, 0.075]) expect(formatHoursTick(v)).toMatch(/^0\.\d+$/);
+  });
+
+  it("renders nothing for a value that is not a number", () => {
+    for (const v of [null, undefined, NaN, "x"]) expect(formatHoursTick(v)).toBe("");
   });
 });

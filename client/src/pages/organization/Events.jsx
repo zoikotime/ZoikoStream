@@ -11,7 +11,7 @@ import { ConsoleButton as Button } from "../../ui/Button";
 import Badge from "../../ui/Badge";
 import DataTable from "../../components/admin/DataTable";
 import { cx, focusRing } from "../../ui/tokens";
-import { EVENT_STATUS, PRE_LIVE_STATUSES, statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
+import { STATUS_FILTER_OPTIONS, displayStatusOf, statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 import { copyViewerLink } from "../../utils/viewerLink";
 import CreateEventModal from "./CreateEventModal";
 
@@ -39,7 +39,9 @@ function useEventsPage({ status, q, page, sort }) {
           page,
           page_size: PAGE_SIZE,
           q: q || undefined,
-          status: status === "all" ? undefined : status,
+          // The DISPLAY filter: "missed" is derived by the API, and "scheduled" there means
+          // still upcoming — the same split the table and the counters show.
+          display_status: status === "all" ? undefined : status,
           sort_by: (sort && SORT_FIELD[sort.key]) || undefined,
           order: sort && SORT_FIELD[sort.key] ? sort.dir : undefined,
         },
@@ -48,7 +50,12 @@ function useEventsPage({ status, q, page, sort }) {
     ])
       .then(([list, counts]) => {
         if (!alive) return;
-        setState({ key, error: null, data: { items: list.data.items, total: list.data.total, counts: counts.data.counts } });
+        // display_counts: Scheduled is upcoming only and Missed is counted apart. An older API
+        // without it falls back to the canonical counts.
+        setState({ key, error: null, data: {
+          items: list.data.items, total: list.data.total,
+          counts: counts.data.display_counts || counts.data.counts,
+        } });
       })
       .catch((e) => {
         // A failed background refresh keeps what is on screen; only a failure with nothing
@@ -65,10 +72,6 @@ function useEventsPage({ status, q, page, sort }) {
   };
 }
 
-// A pre-live event whose start time has gone by. Shown, never written: the event stays in
-// its real status until someone takes it live, reschedules it or cancels it.
-const startPassed = (r) =>
-  PRE_LIVE_STATUSES.includes(r.status) && r.status !== "draft" && Boolean(r.start_time) && new Date(r.start_time) < new Date();
 
 const control = cx(
   "h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none",
@@ -180,11 +183,16 @@ export default function OrganizationEvents() {
       sortable: true,
       sortValue: (r) => r.status,
       render: (r) => {
-        const m = statusMeta(r.status);
+        // One status, decided by the API: a Scheduled event past its start (plus grace) that
+        // never went live arrives as "missed" and gets that badge alone. Other pre-live
+        // statuses (published, ready, armed) keep their own badge, with the overdue start
+        // noted underneath — also as the API reported it, never re-derived from the clock here.
+        const shown = displayStatusOf(r);
+        const m = statusMeta(shown);
         return (
           <div>
             <Badge tone={m.tone} dot={m.pulse}>{m.label}</Badge>
-            {startPassed(r) && (
+            {r.start_overdue && shown !== "missed" && (
               <span className="mt-1 block text-[11px] font-medium text-amber-600 dark:text-amber-400">Start time passed</span>
             )}
           </div>
@@ -211,12 +219,16 @@ export default function OrganizationEvents() {
       render: (r) => fmtDuration(r.duration_minutes),
     },
     {
-      key: "actions",
-      header: "Actions",
+      // Its own column, named for what it is: the link sat under "Actions" beside View and
+      // Delete, which said nothing about what the icon does. "Viewer link", not "Public link":
+      // private and invite-only events have a viewer URL too (utils/viewerLink decides which).
+      // Icon-only: the label lives in the header, the tooltip and the accessible name. Copy
+      // ONLY — there is deliberately no affordance here that opens the attendee page, and the
+      // URL is never rendered.
+      key: "viewer_link",
+      header: "Viewer link",
       align: "right",
-      // Icon-only: the rail is already six columns wide and the label lives in the tooltip
-      // and the accessible name. Copy ONLY — there is deliberately no affordance here that
-      // opens the attendee page, and the URL is never rendered.
+      headerClassName: "whitespace-nowrap",
       render: (r) => (
         <button
           type="button"
@@ -270,7 +282,7 @@ export default function OrganizationEvents() {
               >
                 {/* Archived events leave the working list; the Archived option brings them back. */}
                 <option value="all">All except archived</option>
-                {Object.entries(EVENT_STATUS).map(([k, v]) => (
+                {STATUS_FILTER_OPTIONS.map(([k, v]) => (
                   <option key={k} value={k}>{v.label}</option>
                 ))}
               </select>
@@ -309,7 +321,13 @@ export default function OrganizationEvents() {
               serverPageCount={Math.max(1, Math.ceil(total / PAGE_SIZE))}
               serverTotal={total}
               onPageChange={setPage}
-              minWidth={820}
+              minWidth={900}
+              // View, Delete and any other management controls: labelled now that the viewer
+              // link has a column of its own, and visible at rest — they used to appear only
+              // while the pointer was over the row, so nothing showed the actions existed.
+              // Hover and keyboard focus only add emphasis (the buttons' own hover and focus ring).
+              rowActionsHeader="Actions"
+              alwaysShowRowActions
               empty={{
                 icon: FiCalendar,
                 title: query || statusFilter !== "all" ? "No events match your filters" : "No events yet",

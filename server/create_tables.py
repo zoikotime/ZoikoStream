@@ -192,6 +192,9 @@ _USER_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS recovery_email VARCHAR(255)",
     "ADD COLUMN IF NOT EXISTS recovery_email_verified_at TIMESTAMPTZ",
     "ADD COLUMN IF NOT EXISTS recovery_email_pending VARCHAR(255)",
+    # The user's own profile photo (services/avatars.py): the path it is served from, never
+    # the image itself. NULL on every existing row, which keeps showing their initials.
+    "ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255)",
 ]
 
 # Backfill the timestamp for the grandfathered rows above so `email_verified` is never
@@ -1008,6 +1011,15 @@ _MKT_RELEASE_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ",
 ]
 
+# Viewer playback quality (models/playback.py). A brand-new table, so create_all() builds it
+# with all three indexes. The registration index was added to the model after the table
+# already existed in some databases, and create_all() never adds an index to an existing
+# table — this covers those. Same name create_all uses, so a fresh database is a no-op here.
+_PLAYBACK_STATEMENTS = [
+    "CREATE INDEX IF NOT EXISTS ix_playback_sessions_registration_id "
+    "ON playback_sessions (registration_id)",
+]
+
 
 # ── statement application ────────────────────────────────────────────────────────────────
 #
@@ -1256,6 +1268,8 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE organization_security_contacts {clause}"))
         for clause in _MKT_RELEASE_COLUMNS:
             conn.execute(text(f"ALTER TABLE releases {clause}"))
+        for stmt in _PLAYBACK_STATEMENTS:
+            conn.execute(text(stmt))
     print("Schema ready!")
 
 

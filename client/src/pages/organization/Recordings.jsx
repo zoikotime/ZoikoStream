@@ -25,6 +25,7 @@ import { Input, Label } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import { fmtDate } from "../../data/events";
 import { recordingState } from "../../data/recordingState";
+import { ALL_CATEGORIES, categoryOptions, matchesCategory } from "./recordingCategories";
 
 // Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
 // as a dependency, and a fresh `[]` literal on every render would defeat every one of them
@@ -394,15 +395,17 @@ export default function OrganizationRecordings() {
   const list = data?.list || NONE;
   const summary = data?.summary || null;
   const [query, setQuery] = useState("");
-  const [category, setCategory] = useState("All");
+  const [category, setCategory] = useState(ALL_CATEGORIES);
   const [sort, setSort] = useState("date-desc");
   const [exporting, setExporting] = useState(null);
   const [playing, setPlaying] = useState(null);
 
-  const categories = useMemo(
-    () => ["All", ...new Set(list.map((r) => r.category).filter(Boolean))],
-    [list]
-  );
+  // The real categories of the recordings listed (their events' categories), each once. Empty
+  // when there is nothing to filter by — no recordings yet, or none with a category — and then
+  // the filter is not shown at all rather than as a dropdown whose only option is "All".
+  const categories = useMemo(() => categoryOptions(list), [list]);
+  // A selection that no longer exists (its last recording went away on a reload) is "All".
+  const activeCategory = categories.some((c) => c.value === category) ? category : ALL_CATEGORIES;
 
   // A captured recording whose size never arrived (the egress_ended webhook carries it, and
   // is the only place it exists) has size_bytes = null. `|| 0` made those files look like
@@ -440,7 +443,7 @@ export default function OrganizationRecordings() {
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
     const out = list.filter(
-      (r) => (category === "All" || r.category === category) && (!q || (r.title || "").toLowerCase().includes(q))
+      (r) => matchesCategory(r, activeCategory) && (!q || (r.title || "").toLowerCase().includes(q))
     );
     const sorters = {
       "date-desc": (a, b) => (b.started_at || "").localeCompare(a.started_at || ""),
@@ -449,7 +452,7 @@ export default function OrganizationRecordings() {
       "name-asc": (a, b) => (a.title || "").localeCompare(b.title || ""),
     };
     return [...out].sort(sorters[sort]);
-  }, [list, query, category, sort]);
+  }, [list, query, activeCategory, sort]);
 
   const onDownload = (r) => {
     if (!r.url) return;
@@ -495,21 +498,24 @@ export default function OrganizationRecordings() {
             />
           </div>
 
-          {/* Filter by category */}
-          <div className="relative">
-            <FiFilter className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <select
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              aria-label="Filter by category"
-              className={cx(control, "appearance-none pl-9 pr-8")}
-            >
-              {categories.map((c) => (
-                <option key={c} value={c}>{c === "All" ? "All categories" : c}</option>
-              ))}
-            </select>
-            <FiChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-          </div>
+          {/* Filter by category — only when the recordings listed have at least one. */}
+          {categories.length > 0 && (
+            <div className="relative">
+              <FiFilter className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <select
+                value={activeCategory}
+                onChange={(e) => setCategory(e.target.value)}
+                aria-label="Filter by category"
+                className={cx(control, "appearance-none pl-9 pr-8")}
+              >
+                <option value={ALL_CATEGORIES}>All categories</option>
+                {categories.map((c) => (
+                  <option key={c.value} value={c.value}>{c.label}</option>
+                ))}
+              </select>
+              <FiChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            </div>
+          )}
 
           {/* Sort */}
           <div className="relative">

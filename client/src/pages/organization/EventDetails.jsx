@@ -21,7 +21,7 @@ import Modal from "../../ui/Modal";
 import AskGuideButton from "../../operator-guide/AskGuideButton";
 import { Input, Label } from "../../ui/forms";
 import { cx, focusRing } from "../../ui/tokens";
-import { ARCHIVABLE_STATUSES, ON_AIR_STATUSES, PRE_LIVE_STATUSES, statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
+import { ARCHIVABLE_STATUSES, ON_AIR_STATUSES, PRE_LIVE_STATUSES, displayStatusOf, statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
 import AssignPeopleModal from "./AssignPeopleModal";
 import { ROLE_PATH } from "./roleConfig";
 import ContributorInviteModal from "./ContributorInviteModal";
@@ -310,7 +310,9 @@ export default function EventDetails() {
   if (error) return <div className="space-y-4">{back}<OrganizationErrorState error={error} onRetry={reload} title="Couldn't load this event" /></div>;
 
   const { event, hosts, speakers, viewers, feedback, recordings } = data;
-  const st = statusMeta(event.status);
+  // The badge shows the API's display status ("Missed" for a Scheduled event that never went
+  // live after its start). Every action below still reads the canonical event.status.
+  const st = statusMeta(displayStatusOf(event));
 
   // Copy only — the console never opens the attendee page, and never renders the URL.
   // The link is built by utils/viewerLink so this screen, the events list and Playback &
