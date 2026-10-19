@@ -58,8 +58,10 @@ def start(db: Session, actor: Actor, first_text: str, context: dict) -> Conversa
 
 def add(db: Session, conv: Conversation, role: str, text: str, *, payload: dict | None = None,
         intent: str | None = None, context: dict | None = None) -> Message:
+    # created_at from the app clock, not the database's transaction time: one request writes
+    # several messages (context notice, question, answer) and their order must survive.
     msg = Message(conversation_id=conv.id, role=role, text=text, payload=payload or {},
-                  intent=intent)
+                  intent=intent, created_at=now())
     db.add(msg)
     conv.updated_at = now()
     conv.purge_after = now() + _retention()

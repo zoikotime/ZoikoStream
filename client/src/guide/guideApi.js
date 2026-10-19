@@ -44,6 +44,27 @@ export const clearSession = () => {
   session = null;
 };
 
+// Last time the server accepted a call on the current session. Every authenticated session
+// call refreshes the server's idle clock (sessions.load_session), so the client can warn before
+// idle expiry without a dedicated keep-alive route (Figma §13 "Timeout/session expiry").
+let lastActivity = 0;
+const activityListeners = new Set();
+export const getLastActivity = () => lastActivity;
+export function onActivity(fn) {
+  activityListeners.add(fn);
+  return () => activityListeners.delete(fn);
+}
+function markActivity() {
+  lastActivity = Date.now();
+  activityListeners.forEach((fn) => {
+    try {
+      fn(lastActivity);
+    } catch {
+      /* listeners never break a request */
+    }
+  });
+}
+
 export const uuid = () =>
   globalThis.crypto?.randomUUID
     ? globalThis.crypto.randomUUID()
@@ -51,11 +72,12 @@ export const uuid = () =>
         (+c ^ (Math.random() * 16) >> (+c / 4)).toString(16),
       );
 
-async function request(method, path, { body, headers = {}, stream = false } = {}) {
+async function request(method, path, { body, headers = {}, stream = false, signal } = {}) {
   const init = {
     method,
     credentials: "include",
     headers: { Accept: stream ? "text/event-stream" : "application/json", ...headers },
+    ...(signal ? { signal } : {}),
   };
   if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
@@ -66,8 +88,10 @@ async function request(method, path, { body, headers = {}, stream = false } = {}
   try {
     res = await fetch(`${GUIDE_BASE}${path}`, init);
   } catch {
+    if (signal?.aborted) throw new GuideError(0, { code: "GUIDE_TIMEOUT", detail: "Guide took too long to answer." });
     throw new GuideError(0, { code: "GUIDE_NETWORK_ERROR", detail: "Guide couldn't be reached." });
   }
+  if (res.ok && path.startsWith("/sessions")) markActivity();
   if (res.status === 204 || res.status === 202) return null;
   if (stream && res.ok && (res.headers.get("content-type") || "").includes("text/event-stream")) {
     return res;
@@ -177,19 +201,40 @@ export function parseSSE(text) {
   return out;
 }
 
+// No byte from the server for this long = the message timed out (Figma §14 "Message timeout").
+export const MESSAGE_TIMEOUT_MS = 60_000;
+
 /**
- * Send a message. `onDelta(text)` receives the growing answer text while it streams.
+ * Send a message. `onDelta(text)` receives the growing answer text while it streams;
+ * `onAccepted()` fires once the server has accepted the message (an OK response), after which
+ * the server holds the answer under this client_message_id and a retry must reuse it.
  * Resolves to { assistant_message, session_state } in the same shape as the JSON API.
  */
-export async function sendMessage({ clientMessageId, text, intentHint }, { onDelta } = {}) {
+export async function sendMessage({ clientMessageId, text, intentHint }, { onDelta, onAccepted } = {}) {
   const body = {
     client_message_id: clientMessageId,
     text,
     ...(intentHint ? { intent_hint: intentHint } : {}),
   };
-  const res = await request("POST", sessionPath("/messages"), { body, stream: true });
-  if (!(res instanceof Response)) return res; // server answered JSON
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let timer = null;
+  const arm = () => {
+    if (!controller) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), MESSAGE_TIMEOUT_MS);
+  };
+  arm();
+  try {
+    const res = await request("POST", sessionPath("/messages"), { body, stream: true, signal: controller?.signal });
+    onAccepted?.();
+    if (!(res instanceof Response)) return res; // server answered JSON
+    return await readStream(res, { onDelta, arm, controller });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
+async function readStream(res, { onDelta, arm, controller }) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -208,7 +253,17 @@ export async function sendMessage({ clientMessageId, text, intentHint }, { onDel
     else if (event === "response.error") throw new GuideError(503, { code: "GUIDE_UNAVAILABLE" });
   };
   for (;;) {
-    const { value, done } = await reader.read();
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch {
+      throw new GuideError(0, {
+        code: controller?.signal.aborted ? "GUIDE_TIMEOUT" : "GUIDE_STREAM_INTERRUPTED",
+        detail: "The answer was interrupted.",
+      });
+    }
+    const { value, done } = chunk;
+    arm();
     buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
     const cut = buffer.lastIndexOf("\n\n");
     if (cut >= 0) {

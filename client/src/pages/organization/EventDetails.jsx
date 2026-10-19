@@ -18,6 +18,7 @@ import StatCard from "../../components/admin/StatCard";
 import { ConsoleButton as Button } from "../../ui/Button";
 import Badge from "../../ui/Badge";
 import Modal from "../../ui/Modal";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 import { Input, Label } from "../../ui/forms";
 import { cx, focusRing } from "../../ui/tokens";
 import { ARCHIVABLE_STATUSES, ON_AIR_STATUSES, PRE_LIVE_STATUSES, statusMeta, visLabel, fmtDateTime, fmtDuration } from "../../data/events";
@@ -447,6 +448,7 @@ export default function EventDetails() {
         <div className="relative flex flex-col gap-2">
           <Badge tone={st.tone} dot={st.pulse} className="w-fit">{st.label}</Badge>
           <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">{event.title || "Untitled event"}</h1>
+          <AskGuideButton question="Is this event ready?" eventId={event.id} className="w-fit" />
           {(event.short_description || event.description) && (
             <p className="max-w-2xl text-sm text-white/80">{event.short_description || event.description}</p>
           )}

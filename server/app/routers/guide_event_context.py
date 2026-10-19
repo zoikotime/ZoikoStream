@@ -1,5 +1,7 @@
 """Issuer of the public Guide's event context token (Guide API §18).
 
+POST /api/guide/event-context/{event_id}; the viewer's credential travels in the JSON body.
+
 The viewer page asks this endpoint for a short-lived signed token describing the event being
 watched; the page hands it to Guide, which verifies it and answers event questions from it
 (start time, live status, replay). Guide itself never reads platform data.
@@ -21,7 +23,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from ..crud import event as crud
@@ -91,12 +94,20 @@ def claims_for(ev) -> dict:
     return {k: v for k, v in claims.items() if v is not None}
 
 
-@router.get("/{event_id}")
+class ViewerCredentials(BaseModel):
+    """The viewer's own stored credential, sent in the request BODY — never the URL, where
+    proxies and access logs would record it."""
+    model_config = ConfigDict(extra="forbid")
+    reg: str | None = Field(None, max_length=2048)
+    link: str | None = Field(None, max_length=2048)
+
+
+@router.post("/{event_id}")
 def issue_event_context(event_id: uuid.UUID, request: Request,
-                        reg: str | None = Query(None, max_length=2048),
-                        link: str | None = Query(None, max_length=2048),
+                        body: ViewerCredentials | None = None,
                         user: User | None = Depends(get_current_user_optional),
                         db: Session = Depends(get_db)):
+    reg, link = (body.reg, body.link) if body else (None, None)
     if not guide_settings().GUIDE_EVENT_CONTEXT_KEY:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Event context unavailable")
     ev = crud.get_event_unscoped(db, event_id)

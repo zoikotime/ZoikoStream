@@ -14,10 +14,11 @@ import HistoryView from "./parts/HistoryView";
 import SettingsView from "./parts/SettingsView";
 import Thinking from "./parts/Thinking";
 import { safeHref } from "./parts/links";
+import { OPEN_EVENT, takePendingAsk } from "./askGuide";
 import "./operator-guide.css";
 
 const MAX_CHARS = 2000;
-export const OPEN_EVENT = "opguide:open";
+export { OPEN_EVENT };
 
 function isShortcut(e) {
   return (e.ctrlKey || e.metaKey) && !e.altKey && e.key === ".";
@@ -27,15 +28,17 @@ export default function OperatorGuide({ route, routeEventId }) {
   const titleId = useId();
   const inputId = useId();
   const navigate = useNavigate();
-  const [open, setOpen] = useState(false);
+  // An "Ask Guide" click that happened before Guide loaded opens it straight away.
+  const [initialAsk] = useState(takePendingAsk);
+  const [open, setOpen] = useState(!!initialAsk);
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState("chat");
   const [draft, setDraft] = useState("");
-  const g = useOperatorGuide({ route, routeEventId });
+  const g = useOperatorGuide({ route, routeEventId, open });
   const launcherRef = useRef(null);
   const inputRef = useRef(null);
   const threadEnd = useRef(null);
-  const pendingAsk = useRef(null);
+  const pendingAsk = useRef(initialAsk);
 
   const close = useCallback(() => {
     setOpen(false);
@@ -54,12 +57,14 @@ export default function OperatorGuide({ route, routeEventId }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Inline entry points elsewhere in the console can open Guide with a question.
+  // Inline "Ask Guide" entry points (askGuide.js) open Guide with a question and, where the
+  // page has one, its event attached: {question, eventId, route?}.
   useEffect(() => {
     const onOpen = (e) => {
+      takePendingAsk(); // handled here; nothing is left for a later mount
       setOpen(true);
       setView("chat");
-      if (e.detail?.question) pendingAsk.current = e.detail.question;
+      if (e.detail?.question) pendingAsk.current = e.detail;
     };
     window.addEventListener(OPEN_EVENT, onOpen);
     return () => window.removeEventListener(OPEN_EVENT, onOpen);
@@ -70,13 +75,15 @@ export default function OperatorGuide({ route, routeEventId }) {
     if (open) inputRef.current?.focus();
   }, [open]);
 
-  const { boot, send } = g;
+  const { boot, send, selectEvent } = g;
   useEffect(() => {
-    if (open && boot && pendingAsk.current) {
-      send(pendingAsk.current);
+    const request = pendingAsk.current;
+    if (open && boot && request) {
       pendingAsk.current = null;
+      if (request.eventId) selectEvent(request.eventId);
+      send(request.question, request.eventId || undefined);
     }
-  }, [open, boot, send]);
+  }, [open, boot, send, selectEvent]);
 
   useEffect(() => {
     threadEnd.current?.scrollIntoView?.({ block: "end" });
@@ -85,7 +92,7 @@ export default function OperatorGuide({ route, routeEventId }) {
   const ask = useCallback((text, eventId) => {
     setView("chat");
     if (eventId) g.selectEvent(eventId);
-    g.send(text);
+    g.send(text, eventId);
   }, [g]);
 
   const go = useCallback((href) => {
@@ -110,7 +117,7 @@ export default function OperatorGuide({ route, routeEventId }) {
     ask, navigate: go, choose: g.choose, apply: g.runStructured, confirm: g.confirm, cancel: g.cancel,
   };
   const live = ["live", "degraded"].includes(g.context?.event?.status);
-  const lastGuide = [...g.messages].reverse().find((m) => m.role === "guide");
+  const lastGuide = [...g.messages].reverse().find((m) => m.role === "guide" && m.intent !== "context.change");
   const unavailable = g.bootError && g.bootError.status !== 403 ? g.bootError.message : null;
   const isAdmin = !!g.boot?.user?.is_org_admin;
   const count = g.attention?.count || 0;
@@ -136,7 +143,7 @@ export default function OperatorGuide({ route, routeEventId }) {
 
       {open && (
         <aside
-          className={`og-panel${expanded ? " og-expanded" : ""}`}
+          className={`og-panel${expanded ? " og-expanded" : ""}${live ? " og-live" : ""}`}
           role="dialog"
           aria-modal="false"
           aria-labelledby={titleId}
@@ -175,11 +182,11 @@ export default function OperatorGuide({ route, routeEventId }) {
             {view === "chat" && !unavailable && (
               <div className="og-thread" aria-label="Conversation">
                 {g.messages.length === 0
-                  ? <Home boot={g.boot} attention={g.attention} onAsk={ask} onNavigate={go} onOpenConversation={g.loadConversation} />
+                  ? <Home boot={g.boot} context={g.context} attention={g.attention} onAsk={ask} onNavigate={go} onOpenConversation={g.loadConversation} />
                   : g.messages.map((m) => (
                     <Message key={m.id} message={m} handlers={handlers} pending={g.pending} isLast={m === lastGuide} />
                   ))}
-                {g.pending && <Thinking />}
+                {g.pending && <Thinking live={live} />}
                 {g.error && <p className="og-error" role="alert">{g.error}</p>}
                 <div ref={threadEnd} />
               </div>

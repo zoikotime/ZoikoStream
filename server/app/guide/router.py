@@ -254,6 +254,9 @@ def put_consent(session_id: uuid.UUID, purpose: ConsentPurpose, body: ConsentPut
 def start_lead_flow(session_id: uuid.UUID, body: LeadFlowStart, request: Request,
                     db: Session = Depends(require_available)):
     session = sessions.load_session(db, request, session_id, mutating=True, lock=True)
+    if not registry.feature_enabled(db, "leads"):
+        raise GuideProblem("GUIDE_UNAVAILABLE", "Requests through Guide are paused. You can "
+                                                "use the contact page directly.")
     flow = leads.start_flow(db, request, session, body.flow_kind, body.source_intent)
     db.commit()
     return leads.render(db, flow)
@@ -323,6 +326,9 @@ def submit_feedback(session_id: uuid.UUID, body: FeedbackSubmit, request: Reques
 def start_support_flow(session_id: uuid.UUID, body: SupportFlowStart, request: Request,
                        db: Session = Depends(require_available)):
     session = sessions.load_session(db, request, session_id, mutating=True, lock=True)
+    if not registry.feature_enabled(db, "viewer_support"):
+        raise GuideProblem("GUIDE_UNAVAILABLE", "Viewer help in Guide is paused. Viewer "
+                                                "support is still available directly.")
     return engine.start_flow(db, request, session, body.flow_type)
 
 

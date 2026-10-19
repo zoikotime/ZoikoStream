@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, within, waitFor } from "@testing-library/react";
+import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import GuideWidget from "./GuideWidget";
@@ -21,7 +21,7 @@ const SESSION = {
   session_id: "s-1",
   csrf_token: "csrf-1",
   session_state: "ACTIVE",
-  welcome: "Welcome",
+  welcome: "Welcome to ZoikoStream Guide. I can help with product questions, pricing and demos, or viewer support.",
   event_context: null,
   suggested_intents: [
     { intent_id: "I-PRODUCT", label: "Product overview", priority: 10 },
@@ -187,7 +187,7 @@ describe("Guide widget", () => {
     expect(box).not.toBeChecked(); // never pre-checked
     await user.type(within(dialog).getByLabelText(/Full name/), "Jamie Rivera");
     await user.type(within(dialog).getByLabelText(/Work email/), "jamie@example.org");
-    await user.click(within(dialog).getByRole("button", { name: "Submit request" }));
+    await user.click(within(dialog).getByRole("button", { name: "Continue" }));
     expect(await within(dialog).findByText(/Please confirm we may contact you/)).toBeInTheDocument();
     expect(calls.some((c) => c.path.endsWith("/submit"))).toBe(false);
   });
@@ -206,7 +206,8 @@ describe("Guide widget", () => {
     await user.type(await within(dialog).findByLabelText(/Full name/), "Jamie Rivera");
     await user.type(within(dialog).getByLabelText(/Work email/), "jamie@example.org");
     await user.click(within(dialog).getByRole("checkbox"));
-    await user.click(within(dialog).getByRole("button", { name: "Submit request" }));
+    await user.click(within(dialog).getByRole("button", { name: "Continue" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Submit demo request" }));
     expect(await within(dialog).findByText("We can't confirm this yet")).toBeInTheDocument();
     expect(within(dialog).queryByText("Request received")).toBeNull();
     const submit = calls.find((c) => c.path.endsWith("/submit"));
@@ -315,5 +316,339 @@ describe("Guide widget on a viewer page (WF-10)", () => {
     expect(within(ctx).getByText(/Monday, October 12.*11:35/)).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Join / access help" })).toBeInTheDocument();
     expect(within(dialog).getByText("Private organizer details are not available in public chat.")).toBeInTheDocument();
+  });
+});
+
+const sse = (events) =>
+  new Response(events.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`).join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+
+const LEAD_WITH_ORG = {
+  ...LEAD,
+  fields: [...LEAD.fields, { field_id: "organization", label: "Organization", type: "text", required: false, max_length: 160 }],
+};
+
+describe("Guide UX requirements", () => {
+  it("renders the canonical welcome sentence from the session (CF §28)", async () => {
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    expect(await within(dialog).findByRole("heading", { name: "Welcome to ZoikoStream Guide." })).toBeInTheDocument();
+    expect(within(dialog).getByText("I can help with product questions, pricing and demos, or viewer support.")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Hi there/)).toBeNull();
+  });
+
+  it("collapses a long answer behind an accessible Show more / Show less toggle (PR-006)", async () => {
+    const tail = "The full detail paragraph explains every option in depth.";
+    const long = `${"Short summary sentence. ".repeat(10)}\n\n${"More context follows here. ".repeat(20)}\n\n${tail}`;
+    installFetch({
+      "POST /sessions/s-1/messages": () => json({ ...ANSWER, assistant_message: { ...ANSWER.assistant_message, text: long } }),
+    });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Product overview" }));
+    const more = await within(dialog).findByRole("button", { name: "Show more" });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    expect(within(dialog).queryByText(tail)).toBeNull();
+    // Sources and actions stay visible while collapsed.
+    expect(within(dialog).getByRole("button", { name: "Source: Use cases" })).toBeInTheDocument();
+    await user.click(more);
+    expect(within(dialog).getByText(tail)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Show less" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps lead form values when Guide is closed (X or Escape) and reopened (Figma §10.1)", async () => {
+    const user = userEvent.setup();
+    renderWidget();
+    let dialog = await openGuide(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Request a demo" }));
+    await user.type(await within(dialog).findByLabelText(/Full name/), "Jamie Rivera");
+    await user.click(within(dialog).getByRole("checkbox"));
+    await user.click(within(dialog).getByRole("button", { name: "Close Guide" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    dialog = await openGuide(user);
+    expect(within(dialog).getByLabelText(/Full name/)).toHaveValue("Jamie Rivera");
+    expect(within(dialog).getByRole("checkbox")).toBeChecked();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    dialog = await openGuide(user);
+    expect(within(dialog).getByLabelText(/Full name/)).toHaveValue("Jamie Rivera");
+    expect(localStorage.length).toBe(0); // never persisted to browser storage
+  });
+
+  it("lead flow: header title, review step, Submit demo request, confirmed (WF-06, Figma §8)", async () => {
+    installFetch({
+      "POST /sessions/s-1/lead-flows": () => json(LEAD_WITH_ORG, 201),
+      "PATCH /sessions/s-1/lead-flows/l-1234567890": () => json({ ...LEAD_WITH_ORG, status: "ready_to_submit" }),
+      "PUT /sessions/s-1/consents/sales_contact": () => json({ receipt_id: "cns_1", status: "granted" }),
+      "POST /sessions/s-1/lead-flows/l-1234567890/submit": () =>
+        json({ outcome: "confirmed", message: "Thanks. The sales team will contact you.", submission_reference: "ZS-123" }),
+    });
+    const events = [];
+    const onEvent = (e) => events.push(e.detail);
+    window.addEventListener("zoikostream:guide-analytics", onEvent);
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Request a demo" }));
+    expect(await within(dialog).findByText("Request a demo", { selector: "#zg-title + p" })).toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText(/Full name/), "Jamie Rivera");
+    await user.type(within(dialog).getByLabelText(/Work email/), "jamie@example.org");
+    // Organization: 2-160 characters (Figma §11), validated after interaction.
+    await user.type(within(dialog).getByLabelText(/Organization/), "A");
+    await user.tab();
+    expect(await within(dialog).findByText("Enter at least 2 characters.")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/Organization/)).toHaveAttribute("maxlength", "160");
+    await user.type(within(dialog).getByLabelText(/Organization/), "cme Events");
+    await user.click(within(dialog).getByRole("checkbox"));
+    await user.click(within(dialog).getByRole("button", { name: "Continue" }));
+    const review = await within(dialog).findByRole("heading", { name: "Review your request" });
+    const card = review.closest("section");
+    expect(within(card).getByText("Acme Events")).toBeInTheDocument();
+    expect(calls.some((c) => c.path.endsWith("/submit"))).toBe(false); // nothing sent before the final step
+    await user.click(within(card).getByRole("button", { name: "Submit demo request" }));
+    expect(await within(dialog).findByText("Request received")).toBeInTheDocument();
+    expect(within(dialog).getByText("Public AI Assistant")).toBeInTheDocument(); // header back to default
+    window.removeEventListener("zoikostream:guide-analytics", onEvent);
+    const names = events.map((e) => e.event);
+    expect(names).toContain("guide_lead_started");
+    expect(names).toContain("guide_lead_submitted");
+    const blob = JSON.stringify(events);
+    expect(blob).not.toMatch(/Jamie|jamie@example\.org|Acme/); // no lead values in analytics
+  });
+
+  it("emits spec analytics events without message text or PII (WF §07, CF §30)", async () => {
+    const events = [];
+    const onEvent = (e) => events.push(e.detail);
+    window.addEventListener("zoikostream:guide-analytics", onEvent);
+    window.dataLayer = [];
+    installFetch({ "POST /sessions/s-1/feedback": () => new Response(null, { status: 202 }) });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Product overview" }));
+    await within(dialog).findByRole("button", { name: "Source: Use cases" });
+    await user.type(within(dialog).getByLabelText("Ask Guide a question"), "my email is jamie@example.org{Enter}");
+    await waitFor(() => expect(events.filter((e) => e.event === "guide_response_rendered")).toHaveLength(2));
+    await user.click(within(dialog).getAllByRole("button", { name: "No, this wasn't helpful" })[0]);
+    await user.click(within(dialog).getByRole("button", { name: "Out of date" }));
+    await within(dialog).findByText("Thanks for the feedback.");
+    window.removeEventListener("zoikostream:guide-analytics", onEvent);
+    const names = events.map((e) => e.event);
+    for (const n of ["guide_launcher_viewed", "guide_opened", "guide_intent_selected", "guide_message_sent", "guide_response_rendered", "guide_feedback_submitted"]) {
+      expect(names).toContain(n);
+    }
+    expect(events.find((e) => e.event === "guide_message_sent").aliases).toContain("guide_message_submitted");
+    expect(events.find((e) => e.event === "guide_intent_selected").intent_id).toBe("I-PRODUCT");
+    expect(window.dataLayer.map((e) => e.event)).toContain("guide_opened");
+    const blob = JSON.stringify(events) + JSON.stringify(window.dataLayer);
+    expect(blob).not.toMatch(/jamie|Families can stream|Product overview|s-1|csrf/);
+    delete window.dataLayer;
+  });
+
+  it("feedback offers exactly the WF-17 reasons", async () => {
+    installFetch({ "POST /sessions/s-1/feedback": () => new Response(null, { status: 202 }) });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Product overview" }));
+    await user.click(await within(dialog).findByRole("button", { name: "No, this wasn't helpful" }));
+    const group = within(dialog).getByRole("group", { name: "Optional: What could be better?" });
+    expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Incorrect", "Out of date", "Not clear", "Did not answer my question", "Skip",
+    ]);
+    await user.click(within(group).getByRole("button", { name: "Did not answer my question" }));
+    await within(dialog).findByText("Thanks for the feedback.");
+    const fb = calls.find((c) => c.path === "/sessions/s-1/feedback");
+    expect(fb.body).toMatchObject({ rating: "down", reason_code: "not_helpful" });
+  });
+
+  it("ended state offers Start new conversation and Close Guide (WF-17)", async () => {
+    installFetch({ "POST /sessions/s-1/end": () => new Response(null, { status: 204 }) });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await within(dialog).findByRole("button", { name: "Product overview" });
+    await user.click(within(dialog).getByRole("button", { name: "Conversation options" }));
+    await user.click(within(dialog).getByRole("menuitem", { name: /End conversation/ }));
+    const panel = (await within(dialog).findByText("Conversation ended")).closest(".zg-state");
+    expect(within(panel).getByRole("button", { name: "Start new conversation" })).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Close Guide" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.getByRole("button", { name: /open zoikostream guide/i })).toHaveFocus());
+  });
+
+  it("network failure keeps the text and Retry re-sends it with a new id (not accepted)", async () => {
+    let n = 0;
+    installFetch({
+      "POST /sessions/s-1/messages": () => (++n === 1 ? Promise.reject(new TypeError("offline")) : json(ANSWER)),
+    });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await within(dialog).findByRole("button", { name: "Product overview" });
+    await user.type(within(dialog).getByLabelText("Ask Guide a question"), "Can you stream a memorial?{Enter}");
+    expect(await within(dialog).findByText(/Guide couldn't be reached/)).toBeInTheDocument();
+    expect(within(dialog).getByText("Can you stream a memorial?")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(dialog.querySelector(".zg-answer")).toHaveTextContent(/Families can stream/));
+    const sent = calls.filter((c) => c.path === "/sessions/s-1/messages");
+    expect(sent).toHaveLength(2);
+    expect(sent[1].body.text).toBe("Can you stream a memorial?");
+    expect(sent[1].body.client_message_id).not.toBe(sent[0].body.client_message_id);
+    expect(within(dialog).queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("interrupted stream is labelled incomplete and Retry reuses the accepted id", async () => {
+    let n = 0;
+    installFetch({
+      "POST /sessions/s-1/messages": () =>
+        ++n === 1
+          ? sse([["response.started", { assistant_message_id: "m-1" }], ["response.text.delta", { delta: "Partial answ" }]])
+          : json(ANSWER),
+    });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await within(dialog).findByRole("button", { name: "Product overview" });
+    await user.type(within(dialog).getByLabelText("Ask Guide a question"), "Tell me more{Enter}");
+    expect(await within(dialog).findByText("Incomplete response")).toBeInTheDocument();
+    expect(within(dialog).getByText(/The answer was interrupted/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(dialog.querySelectorAll(".zg-answer")[1]).toHaveTextContent(/Families can stream/));
+    const sent = calls.filter((c) => c.path === "/sessions/s-1/messages");
+    expect(sent[1].body.client_message_id).toBe(sent[0].body.client_message_id); // server holds it: replay
+  });
+
+  it("429 with Retry-After: RATE_LIMITED state, accessible countdown, composer disabled until it ends", async () => {
+    installFetch({
+      "POST /sessions/s-1/messages": () => json({ code: "GUIDE_RATE_LIMITED" }, 429, { "retry-after": "1" }),
+    });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await within(dialog).findByRole("button", { name: "Product overview" });
+    await user.type(within(dialog).getByLabelText("Ask Guide a question"), "hello{Enter}");
+    const timer = await within(dialog).findByRole("timer");
+    expect(timer).toHaveTextContent("You can try again in 1 second.");
+    expect(within(dialog).getAllByText(/several requests in a short period/)).toHaveLength(1);
+    expect(within(dialog).getByLabelText("Ask Guide a question")).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Retry" })).toBeDisabled();
+    await waitFor(() => expect(within(dialog).getByLabelText("Ask Guide a question")).not.toBeDisabled(), { timeout: 3000 });
+    expect(within(dialog).queryByRole("timer")).toBeNull();
+  });
+
+  it("429 without Retry-After shows no invented countdown", async () => {
+    installFetch({ "POST /sessions/s-1/messages": () => json({ code: "GUIDE_RATE_LIMITED" }, 429) });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Product overview" }));
+    expect(await within(dialog).findByText(/several requests in a short period/)).toBeInTheDocument();
+    expect(within(dialog).queryByRole("timer")).toBeNull();
+  });
+
+  it("degraded answer switches the header to Help temporarily limited (Figma §8)", async () => {
+    installFetch({
+      "POST /sessions/s-1/messages": () => json({ session_state: "DEGRADED", assistant_message: {
+        ...ANSWER.assistant_message, answer_class: "degraded", grounded: false, sources: [], actions: [] } }),
+    });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Product overview" }));
+    expect(await within(dialog).findByText("Help temporarily limited", { selector: "#zg-title + p" })).toBeInTheDocument();
+  });
+
+  it("a chosen follow-up topic shows selected and disables its set (GC-005)", async () => {
+    installFetch({
+      "POST /sessions/s-1/messages": () => json({ session_state: "ACTIVE", assistant_message: {
+        message_id: "m-2", text: "I'm Guide.", answer_class: "conversation", grounded: false,
+        uncertainty: { state: "none", message: null }, sources: [], actions: [],
+        suggestions: [{ intent_id: "I-VIEWER", label: "Viewer help" }, { intent_id: "I-PRICING", label: "Pricing" }] } }),
+    });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await within(dialog).findByRole("button", { name: "Product overview" });
+    await user.type(within(dialog).getByLabelText("Ask Guide a question"), "who are you?{Enter}");
+    const group = await within(dialog).findByRole("group", { name: "Suggested topics" });
+    await user.click(within(group).getByRole("button", { name: "Viewer help" }));
+    expect(within(group).getByRole("button", { name: "Viewer help" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(group).getByRole("button", { name: "Viewer help" })).toBeDisabled();
+    expect(within(group).getByRole("button", { name: "Pricing" })).toBeDisabled();
+  });
+
+  it("warns before idle expiry and Stay in conversation refreshes the session (Figma §13)", async () => {
+    installFetch({
+      "POST /sessions": () => json({ ...SESSION, idle_timeout_seconds: 60 }, 201),
+      "PATCH /sessions/s-1/context": () => json({ ...SESSION, idle_timeout_seconds: 60 }),
+    });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    expect(await within(dialog).findByText(/will end soon because it has been inactive/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Stay in conversation" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH" && c.path === "/sessions/s-1/context")).toBe(true));
+  });
+
+  it("idle expiry ends the conversation and keeps the unsent draft", async () => {
+    installFetch({ "POST /sessions": () => json({ ...SESSION, idle_timeout_seconds: 1 }, 201) });
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    await within(dialog).findByRole("button", { name: "Product overview" });
+    await user.type(within(dialog).getByLabelText("Ask Guide a question"), "half-typed question");
+    expect(await within(dialog).findByText(/ended because it was inactive/, {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Ask Guide a question")).toHaveValue("half-typed question");
+  });
+});
+
+describe("Guide on mobile: Back closes nested detail, then Guide (WF-18 A5)", () => {
+  let width;
+  beforeEach(() => {
+    width = window.innerWidth;
+    window.innerWidth = 375;
+    window.history.replaceState(null, "", "/");
+  });
+  afterEach(() => {
+    window.innerWidth = width;
+  });
+
+  const back = () =>
+    new Promise((resolve) => {
+      window.addEventListener("popstate", () => setTimeout(resolve, 0), { once: true });
+      window.history.back();
+    });
+
+  it("Back closes source detail first, then Guide, without leaving the page", async () => {
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    expect(window.history.state?.zgGuide).toBe(true);
+    await user.click(await within(dialog).findByRole("button", { name: "Product overview" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Source: Use cases" }));
+    expect(within(dialog).getByText("Open public source")).toBeInTheDocument();
+    await act(back);
+    await waitFor(() => expect(within(dialog).queryByText("Open public source")).toBeNull());
+    expect(screen.getByRole("dialog", { name: "Guide" })).toBeInTheDocument();
+    expect(window.history.state?.zgGuide).toBe(true);
+    await act(back);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(window.location.pathname).toBe("/");
+    expect(screen.getByTestId("where")).toHaveTextContent("/");
+  });
+
+  it("closing with X removes the Guide history entry", async () => {
+    const user = userEvent.setup();
+    renderWidget();
+    const dialog = await openGuide(user);
+    expect(window.history.state?.zgGuide).toBe(true);
+    await user.click(within(dialog).getByRole("button", { name: "Close Guide" }));
+    await waitFor(() => expect(window.history.state?.zgGuide).toBeFalsy());
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

@@ -11,6 +11,7 @@ import { ACCENT, CONSOLE, STAGE_COLOR, cx, focusRing, type } from "../../ui/toke
 import { ConsoleButton } from "../../ui/Button";
 import { Input } from "../../ui/forms";
 import HealthDot from "../../components/admin/HealthDot";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 import StatRow from "../../components/admin/StatRow";
 
 // Developer Platform — the org console's build surface: what ZoikoStream is, the docs
@@ -168,6 +169,7 @@ export default function DeveloperPlatform() {
           <ConsoleButton href="/organization/events" variant="secondary">
             Request a Live Event
           </ConsoleButton>
+          <AskGuideButton question="Show our API keys and webhooks" />
         </div>
 
         {/* Filters the catalogue below — a live control, not decoration. */}

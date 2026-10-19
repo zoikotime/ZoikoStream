@@ -10,6 +10,7 @@ import { FiCalendar, FiChevronDown, FiDownload, FiUsers, FiClock, FiTrendingUp, 
 import { CONSOLE, cx } from "../../ui/tokens";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 import Card from "../../ui/Card";
 import Button, { ConsoleButton } from "../../ui/Button";
 import StatsCard from "../../ui/StatsCard";
@@ -293,6 +294,7 @@ export default function OrganizationAnalytics() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Analytics</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">Understand how your live events are performing</p>
+          <AskGuideButton question="How did our events perform?" className="mt-2" />
         </div>
 
         {/* Console vocabulary, not a page-local field style: CONSOLE.select and the console

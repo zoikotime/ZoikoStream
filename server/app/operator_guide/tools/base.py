@@ -15,7 +15,7 @@ from typing import Callable
 from sqlalchemy.orm import Session
 
 from ..policy import Actor
-from ..sources import Source
+from ..sources import Source, iso
 
 RISK_CLASSES = ("R0", "R1", "R2", "R3", "R4", "R5", "R6")
 
@@ -114,8 +114,23 @@ def diagnostic_card(title: str, assessment: str, rows: list[dict], sources: list
 
 
 def timeline_card(title: str, items: list[dict], sources: list[Source]) -> dict:
+    """Items in time order. Only authoritative timestamps — never an inferred time (§8)."""
+    items = sorted((i for i in items if i.get("at")), key=lambda i: i["at"])
     return {"type": "timeline", "title": title, "items": items,
             "source_ids": [s.id for s in sources]}
+
+
+def timeline_item(at, text: str, state: str = "info") -> dict:
+    assert state in STATES, state
+    return {"at": iso(at), "text": text, "state": state}
+
+
+def escalation_card(title: str, text: str, routes: list[dict], *,
+                    context: dict | None = None) -> dict:
+    """Human/support routes the user is permitted (§8). A route is a navigation or a
+    PROPOSAL the user must still confirm — Guide never contacts anyone on its own."""
+    return {"type": "escalation", "title": title, "text": text, "routes": routes,
+            "context": context or {}}
 
 
 def notice(kind: str, text: str, *, rule: str | None = None) -> dict:

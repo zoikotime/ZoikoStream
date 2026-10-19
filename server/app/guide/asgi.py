@@ -72,6 +72,10 @@ def mount_guide(platform_app) -> bool:
         for p in problems:
             log.error("ZoikoStream Guide disabled: %s", p)
         platform_app.mount(MOUNT_PATH, create_app(), name="public-guide")
+        if not problems:
+            # Hourly reconcile + retention purge (one process at a time; never raises).
+            from . import scheduler
+            scheduler.start()
         return True
     except Exception:
         log.exception("ZoikoStream Guide failed to mount; platform continues without it")

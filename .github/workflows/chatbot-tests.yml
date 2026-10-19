@@ -1,0 +1,115 @@
+name: Chatbot tests
+
+# The two Guide assistants' own suites (public Guide + Operator Guide), run whenever their code
+# changes. Kept separate from ci.yml, which is intentionally build-only for the platform.
+# Each suite refuses to run without its own dedicated test database, so CI creates them here.
+
+on:
+  pull_request:
+    paths:
+      - 'server/app/guide/**'
+      - 'server/app/operator_guide/**'
+      - 'server/app/routers/guide_event_context.py'
+      - 'server/guide_tests/**'
+      - 'server/operator_guide_tests/**'
+      - 'server/create_tables.py'
+      - 'client/src/guide/**'
+      - 'client/src/operator-guide/**'
+      - 'requirements.txt'
+      - '.github/workflows/chatbot-tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: chatbot-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend — Guide + Operator Guide suites
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: zoikostream
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U zoikostream" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      ENVIRONMENT: test
+      GUIDE_TEST_DATABASE_URL: postgresql://zoikostream:ci-only-password@localhost:5432/guide_test
+      OPGUIDE_TEST_DATABASE_URL: postgresql://zoikostream:ci-only-password@localhost:5432/opguide_test
+      DATABASE_URL: postgresql://zoikostream:ci-only-password@localhost:5432/platform_unused
+      SECRET_KEY: ci-only-secret-key-not-used-anywhere-else
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Create test databases
+        env:
+          PGPASSWORD: ci-only-password
+        run: |
+          for db in guide_test opguide_test platform_unused; do
+            psql -h localhost -U zoikostream -d postgres -c "CREATE DATABASE $db"
+          done
+      - name: Public Guide suite
+        working-directory: server/guide_tests
+        run: python -m pytest
+      - name: Operator Guide suite
+        working-directory: server/operator_guide_tests
+        run: python -m pytest
+
+  frontend:
+    name: Frontend — chatbot widget tests + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Install dependencies
+        working-directory: client
+        run: npm ci
+      - name: Widget tests
+        working-directory: client
+        run: npx vitest run src/guide src/operator-guide
+      - name: Lint
+        working-directory: client
+        run: npx eslint src/guide src/operator-guide
+
+  security:
+    name: Security scan (advisory)
+    runs-on: ubuntu-latest
+    # Advisory: findings are reported in the job log without blocking the PR, so the existing
+    # platform dependencies don't fail chatbot PRs. Review the output on every run.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install scanners
+        run: pip install bandit pip-audit
+      - name: SAST (bandit) on the chatbot packages
+        run: bandit -q -r server/app/guide server/app/operator_guide server/app/routers/guide_event_context.py
+      - name: Dependency audit (pip-audit)
+        run: pip-audit -r requirements.txt
+      - name: Secret scan (gitleaks) on this PR's commits
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

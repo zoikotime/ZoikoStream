@@ -63,7 +63,7 @@ FIELDS = {
     "country_code": {"label": "Country or region", "type": "country", "required": True,
                      "data_class": "BUSINESS_CONTEXT", "autocomplete": "country"},
     "organization": {"label": "Organization", "type": "text", "required": False, "min": 2,
-                     "max": 120, "data_class": "BUSINESS_CONTEXT",
+                     "max": 160, "data_class": "BUSINESS_CONTEXT",
                      "autocomplete": "organization"},
     "use_case": {"label": "Use case", "type": "select", "required": False,
                  "options": USE_CASES, "data_class": "BUSINESS_CONTEXT"},

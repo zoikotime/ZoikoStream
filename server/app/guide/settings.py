@@ -33,8 +33,13 @@ class GuideSettings(BaseSettings):
 
     # "local" = master key from GUIDE_LOCAL_MASTER_KEY. Development only: production refuses
     # it (see production_problems) because a key in an env file is not a KMS.
-    GUIDE_KEY_PROVIDER: str = "local"
+    GUIDE_KEY_PROVIDER: str = "local"           # local | gcp-kms
     GUIDE_LOCAL_MASTER_KEY: str = ""
+    # "gcp-kms": the crypto key resource (projects/…/locations/…/keyRings/…/cryptoKeys/…) and
+    # the KMS-encrypted key set (base64; see crypto.py). Previous key sets: comma-separated.
+    GUIDE_KMS_KEY_NAME: str = ""
+    GUIDE_KMS_KEYSET: str = ""
+    GUIDE_KMS_PREVIOUS_KEYSETS: str = ""
 
     GUIDE_LLM_PROVIDER: str = "mock"
     # Claude via the Anthropic API. .env values are not exported to os.environ, so the key is
@@ -55,6 +60,13 @@ class GuideSettings(BaseSettings):
     GUIDE_EVENT_CONTEXT_MAX_TTL_SECONDS: int = 4 * 3600
 
     # Security/Privacy §7.1 launch baseline.
+    # Capabilities switched off at deploy time: any of leads, viewer_support, generation
+    # (comma-separated). Runtime switches live in guide_runtime_config (registry.py).
+    GUIDE_DISABLED_FEATURES: str = ""
+
+    # Scheduled reconcile + retention purge thread (scheduler.py); off only for special cases.
+    GUIDE_MAINTENANCE_ENABLED: bool = True
+
     GUIDE_SESSION_IDLE_MINUTES: int = 30
     GUIDE_SESSION_ABSOLUTE_HOURS: int = 24
 
@@ -81,6 +93,8 @@ class GuideSettings(BaseSettings):
 
     # Lead delivery: the platform's existing public contact flow (see adapters.py).
     GUIDE_CONTACT_ENDPOINT: str = "http://127.0.0.1:8000/api/contact"
+    # D1: the platform's PUBLIC status feed (GET /api/status). Empty = status unverifiable.
+    GUIDE_STATUS_ENDPOINT: str = "http://127.0.0.1:8000/api/status"
     GUIDE_CONTACT_TIMEOUT_SECONDS: float = 10.0
     GUIDE_RL_LEAD_SUBMIT_PER_HOUR: int = 5
 
@@ -130,14 +144,25 @@ class GuideSettings(BaseSettings):
                 return None
         return key if len(key) >= 32 else None
 
+    def disabled_features(self) -> set[str]:
+        return {f.strip() for f in self.GUIDE_DISABLED_FEATURES.split(",") if f.strip()}
+
+    def previous_kms_keysets(self) -> list[str]:
+        return [k.strip() for k in self.GUIDE_KMS_PREVIOUS_KEYSETS.split(",") if k.strip()]
+
     def production_problems(self) -> list[str]:
         """Reasons the Guide must stay disabled. Not raised: a bad Guide config disables the
         Guide, it never stops the platform booting."""
         problems = []
         if not self.GUIDE_DATABASE_URL:
             problems.append("GUIDE_DATABASE_URL is not set")
+        if self.GUIDE_KEY_PROVIDER not in ("local", "gcp-kms"):
+            problems.append(f"GUIDE_KEY_PROVIDER={self.GUIDE_KEY_PROVIDER!r} is not supported")
         if self.GUIDE_KEY_PROVIDER == "local" and self.master_key_bytes() is None:
             problems.append("GUIDE_LOCAL_MASTER_KEY is missing or shorter than 32 bytes")
+        if self.GUIDE_KEY_PROVIDER == "gcp-kms" and not (self.GUIDE_KMS_KEY_NAME
+                                                        and self.GUIDE_KMS_KEYSET):
+            problems.append("GUIDE_KMS_KEY_NAME and GUIDE_KMS_KEYSET are required for gcp-kms")
         if self.is_production():
             if self.GUIDE_KEY_PROVIDER == "local":
                 problems.append("GUIDE_KEY_PROVIDER=local is not permitted in production")

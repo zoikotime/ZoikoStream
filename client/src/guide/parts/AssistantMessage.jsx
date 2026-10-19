@@ -1,9 +1,12 @@
-import { useState } from "react";
-import { FileText, Info, ShieldAlert, ThumbsDown, ThumbsUp, WifiOff } from "lucide-react";
+import { useCallback, useId, useState } from "react";
+import { AlertTriangle, FileText, Info, ShieldAlert, ThumbsDown, ThumbsUp, WifiOff } from "lucide-react";
 import Actions from "./Actions";
 import GuideAvatar from "./GuideAvatar";
 import { isSafeHref } from "./actionUtils";
+import { useNestedLayer } from "./nested";
+import { disclosureHead } from "./disclosure";
 import { sendFeedback } from "../guideApi";
+import { track } from "../guideAnalytics";
 
 // Plain text in, React elements out: paragraphs and "- " bullet lists only. Model output is
 // never interpreted as HTML (Security/Privacy §22).
@@ -39,16 +42,36 @@ const BOUNDARY = {
   degraded: { icon: WifiOff, label: "Guide is limited right now" },
 };
 
+// WF-17 "Optional: What could be better?" - exact labels. Codes are the API's reason_code
+// vocabulary (schemas.FeedbackSubmit).
 const REASONS = [
-  ["not_helpful", "Not helpful"],
   ["incorrect", "Incorrect"],
-  ["unclear", "Unclear"],
-  ["too_long", "Too long"],
-  ["other", "Other"],
+  ["out_of_date", "Out of date"],
+  ["unclear", "Not clear"],
+  ["not_helpful", "Did not answer my question"],
 ];
+
+function AnswerText({ text, expanded, onToggle }) {
+  const id = useId();
+  const head = disclosureHead(text);
+  if (!head) return <RichText text={text} />;
+  return (
+    <>
+      <div id={id}>
+        <RichText text={expanded ? text : head} />
+      </div>
+      <button type="button" className="zg-link zg-more" aria-expanded={expanded} aria-controls={id} onClick={onToggle}>
+        {expanded ? "Show less" : "Show more"}
+      </button>
+    </>
+  );
+}
 
 function Sources({ sources, onAction }) {
   const [open, setOpen] = useState(null);
+  // An expanded source detail is a nested layer: Back/Escape closes it before Guide.
+  const closeDetail = useCallback(() => setOpen(null), []);
+  useNestedLayer(open !== null, closeDetail);
   if (!sources?.length) return null;
   const current = sources.find((s) => s.source_id === open);
   return (
@@ -60,7 +83,10 @@ function Sources({ sources, onAction }) {
             type="button"
             className="zg-source"
             aria-expanded={open === s.source_id}
-            onClick={() => setOpen(open === s.source_id ? null : s.source_id)}
+            onClick={() => {
+              if (open !== s.source_id) track("source_opened", { source_id: s.source_id });
+              setOpen(open === s.source_id ? null : s.source_id);
+            }}
           >
             <FileText aria-hidden="true" size={14} />
             <span>Source: {s.title}</span>
@@ -91,27 +117,35 @@ function Sources({ sources, onAction }) {
   );
 }
 
-function Feedback({ messageId }) {
-  const [state, setState] = useState("idle"); // idle | reasons | sent
+function Feedback({ messageId, sent, onSent }) {
+  const [state, setState] = useState("idle"); // idle | reasons
   const [error, setError] = useState(false);
+  const whyId = useId();
   const send = async (rating, reason) => {
+    const reasonCode = reason || (rating === "up" ? "helpful" : undefined);
     try {
-      await sendFeedback({ target_type: "answer", target_id: messageId, rating, reason_code: reason || (rating === "up" ? "helpful" : undefined) });
-      setState("sent");
+      await sendFeedback({ target_type: "answer", target_id: messageId, rating, reason_code: reasonCode });
+      track("feedback_submitted", { response_id: messageId, helpful: rating === "up", reason_code: reasonCode });
+      onSent();
     } catch {
       setError(true);
     }
   };
-  if (state === "sent") return <p className="zg-feedback" role="status">Thanks for the feedback.</p>;
+  if (sent) return <p className="zg-feedback" role="status">Thanks for the feedback.</p>;
   if (state === "reasons") {
+    // Reasons are optional (WF-17); "Skip" records the rating without one.
     return (
-      <div className="zg-feedback" role="group" aria-label="What went wrong?">
-        <span>What went wrong?</span>
+      <div className="zg-feedback" role="group" aria-labelledby={whyId}>
+        <span id={whyId}>Optional: What could be better?</span>
         {REASONS.map(([code, label]) => (
-          <button key={code} type="button" className="zg-chip" onClick={() => send("down", code)}>
+          <button key={label} type="button" className="zg-chip" onClick={() => send("down", code)}>
             {label}
           </button>
         ))}
+        <button type="button" className="zg-chip" onClick={() => send("down")}>
+          Skip
+        </button>
+        {error && <span role="alert">Feedback couldn&apos;t be sent.</span>}
       </div>
     );
   }
@@ -129,10 +163,11 @@ function Feedback({ messageId }) {
   );
 }
 
-export default function AssistantMessage({ item, onAction, onResume, onSuggest }) {
-  const { msg, streaming } = item;
+export default function AssistantMessage({ item, onAction, onResume, onSuggest, onPatch = () => {} }) {
+  const { msg, streaming, incomplete } = item;
   const boundary = BOUNDARY[msg.answer_class];
   const Icon = boundary?.icon;
+  const chosen = item.chosenSuggestion;
   return (
     <div className="zg-row">
       <GuideAvatar />
@@ -146,7 +181,20 @@ export default function AssistantMessage({ item, onAction, onResume, onSuggest }
             {boundary.label}
           </span>
         )}
-        {msg.text ? <RichText text={msg.text} /> : null}
+        {incomplete && (
+          // Interrupted stream: partial text is kept but never passed off as the answer (CF §24).
+          <span className="zg-badge">
+            <AlertTriangle aria-hidden="true" size={13} />
+            Incomplete response
+          </span>
+        )}
+        {msg.text ? (
+          streaming || incomplete ? (
+            <RichText text={msg.text} />
+          ) : (
+            <AnswerText text={msg.text} expanded={!!item.expanded} onToggle={() => onPatch(item.id, { expanded: !item.expanded })} />
+          )
+        ) : null}
         {streaming && !msg.text && (
           <span className="zg-typing" aria-label="Guide is replying">
             <span />
@@ -155,7 +203,7 @@ export default function AssistantMessage({ item, onAction, onResume, onSuggest }
           </span>
         )}
       </div>
-      {!streaming && (
+      {!streaming && !incomplete && (
         <>
           <Sources sources={msg.sources} onAction={onAction} />
           <Actions actions={msg.actions} onAction={onAction} />
@@ -168,16 +216,27 @@ export default function AssistantMessage({ item, onAction, onResume, onSuggest }
           )}
           {Array.isArray(msg.suggestions) && msg.suggestions.length > 0 && onSuggest && (
             // Follow-up topics from the server's approved intent catalog.
+            // GC-005: once one is chosen it shows selected and the set is disabled.
             <div className="zg-actions" role="group" aria-label="Suggested topics">
               {msg.suggestions.map((s) => (
-                <button key={s.intent_id} type="button" className="zg-chip" onClick={() => onSuggest(s)}>
+                <button
+                  key={s.intent_id}
+                  type="button"
+                  className={`zg-chip${chosen === s.intent_id ? " is-selected" : ""}`}
+                  aria-pressed={chosen === s.intent_id}
+                  disabled={!!chosen}
+                  onClick={() => {
+                    onPatch(item.id, { chosenSuggestion: s.intent_id });
+                    onSuggest(s);
+                  }}
+                >
                   {s.label}
                 </button>
               ))}
             </div>
           )}
           {msg.message_id && !["degraded", "conversation"].includes(msg.answer_class) && (
-            <Feedback messageId={msg.message_id} />
+            <Feedback messageId={msg.message_id} sent={!!item.feedbackSent} onSent={() => onPatch(item.id, { feedbackSent: true })} />
           )}
         </>
       )}

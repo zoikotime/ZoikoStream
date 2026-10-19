@@ -3,10 +3,10 @@
 Deletes rows whose purge_after has passed, sensitive children first, in bounded batches with
 SKIP LOCKED so concurrent runs never contend. Emits a non-content audit record per run.
 
-How it runs: `run_if_due()` is called opportunistically from session creation and executes at
-most once per PURGE_INTERVAL per process (mounted sub-apps get no lifespan of their own, and the
-Guide must not depend on the platform's ticker leadership). For a guaranteed schedule, also run
-`python -m app.guide.purge` from cron/Cloud Scheduler hourly.
+How it runs: scheduler.py runs it hourly in a background thread (one process at a time via
+an advisory lock), with stale-operation reconciliation and a backlog alert. `run_if_due()` is
+still called opportunistically from session creation as a second trigger, and
+`python -m app.guide.purge` runs it once by hand.
 """
 from __future__ import annotations
 

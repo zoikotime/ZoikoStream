@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from . import (
     conversation, crypto, event_answers, llm, policy, prompts, registry, retention, validator,
 )
+from . import status as public_status
 from .errors import GuideProblem
 from .knowledge import retrieval
 from .knowledge.retrieval import EvidencePack
@@ -51,6 +52,9 @@ GAP = "I don't have an approved ZoikoStream source that confirms that informatio
 GAP_REPLY = f"{GAP} {conversation.GAP_FOLLOW_UP}"
 CONFLICT = ("The approved public sources don't currently agree, so I can't confirm that "
             "detail.")
+STATUS_SOURCE = {"source_id": "public-status", "title": "ZoikoStream public status page",
+                 "source_type": "status", "version": None, "updated_at": None,
+                 "canonical_path": "/status"}
 STATUS_UNKNOWN = ("I can't verify the current service status right now. You can check the "
                   "public status page for any reported issue.")
 DEGRADED = ("I can't answer questions right now. Viewer help still works, and you can use the "
@@ -329,6 +333,14 @@ def _route(db: Session, session: GuideSession, text: str, intent_hint: str | Non
 
     # 5. Dynamic facts: public status (D1) and validated event context (D2).
     if intent == "STATUS":
+        # D1: the live public status feed, with freshness; never a guess (CF §17).
+        db.commit()  # no transaction held across the network call
+        live = public_status.current()
+        if live is not None:
+            return TurnResult(live.summary(), "factual", "ACTIVE", grounded=True,
+                              sources=[dict(STATUS_SOURCE, updated_at=live.checked_at.isoformat()
+                                            .replace("+00:00", "Z"))],
+                              actions=_actions(db, ["status-page"]), intent=intent)
         return TurnResult(STATUS_UNKNOWN, "routing", "ACTIVE",
                           actions=_actions(db, ["status-page"]), intent=intent,
                           uncertainty="partial")
@@ -393,6 +405,12 @@ def _grounded_answer(db: Session, session: GuideSession, text: str, intent: str,
                           reason=pack.answerability, suggestions=_suggestions(db, session))
 
     allowed = _actions(db, RAG_ACTIONS.get(intent, RAG_ACTIONS["PRODUCT_QA"]))
+    if not registry.feature_enabled(db, "generation"):
+        # G1: model generation off — deterministic flows and direct routes keep working.
+        return TurnResult(DEGRADED, "degraded", "DEGRADED", intent=intent,
+                          actions=_viewer_action(db, "viewer_other")
+                          + _actions(db, ["help-center", "contact-support"]),
+                          rag_release_id=pack.release_id, reason="generation_disabled")
     high_risk = intent in retrieval.HIGH_RISK_INTENTS
     history = _history(db, session)
     db.commit()

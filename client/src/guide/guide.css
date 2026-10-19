@@ -337,6 +337,23 @@
   font-size: 13px; font-weight: 650; box-shadow: var(--zg-shadow-lg); cursor: pointer;
 }
 
+/* Selected / disabled quick replies (GC-005). */
+.zg-quick-card.is-selected, .zg-chip.is-selected { border-color: var(--zg-brand); background: var(--zg-grad-soft); color: var(--zg-brand-text); }
+.zg-quick-card[disabled], .zg-chip[disabled] { cursor: default; transform: none; box-shadow: none; }
+.zg-quick-card[disabled]:not(.is-selected), .zg-chip[disabled]:not(.is-selected) { opacity: 0.6; }
+.zg-quick-card[disabled]:hover, .zg-chip[disabled]:hover { transform: none; }
+
+/* Progressive disclosure toggle (PR-006), failed-send retry, lead review, composer banners. */
+.zg-more { margin-top: 6px; font-size: 14px; }
+.zg-failed { margin-top: 8px; margin-left: auto; max-width: 92%; }
+.zg-failed .zg-actions { justify-content: flex-end; margin-top: 8px; }
+.zg-review { margin: 12px 0 0; display: grid; gap: 6px; font-size: 14px; }
+.zg-review > div { display: flex; gap: 12px; justify-content: space-between; }
+.zg-review dt { color: var(--zg-muted); }
+.zg-review dd { margin: 0; color: var(--zg-ink); font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+.zg-banner { margin-bottom: 10px; }
+.zg-banner .zg-actions { margin-top: 8px; }
+
 /* ── Responsive & motion ────────────────────────────────────────────────────────────── */
 @media (max-width: 767px) {
   .zg-panel {

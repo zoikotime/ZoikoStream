@@ -50,6 +50,8 @@ os.environ["GUIDE_EVENT_CONTEXT_KEY"] = "test-event-context-signing-key-01234567
 os.environ["GUIDE_ALLOWED_ORIGINS"] = "https://www.zoikostream.test"
 os.environ["GUIDE_ALLOW_MISSING_ORIGIN"] = "true"
 os.environ["GUIDE_LLM_PROVIDER"] = "mock"
+os.environ["GUIDE_MAINTENANCE_ENABLED"] = "false"  # tests drive purge/reconcile directly
+os.environ["GUIDE_STATUS_ENDPOINT"] = ""  # D1 is mocked per test
 os.environ["GUIDE_EMBEDDING_PROFILE"] = "hash:v1"  # deterministic, no model download
 os.environ["GUIDE_CONTACT_ENDPOINT"] = "http://contact.invalid/api/contact"
 
@@ -132,6 +134,8 @@ def clean_tables(migrated_db):
         conn.execute(text("TRUNCATE " + ", ".join(_LOCAL_TABLES) + " CASCADE"))
         conn.execute(text("UPDATE guide_runtime_config SET config_value = "
                           "'{\"enabled\": true}' WHERE config_key = 'guide.enabled'"))
+        conn.execute(text("DELETE FROM guide_runtime_config WHERE config_key LIKE "
+                          "'guide.feature.%'"))
     yield
     _reset_caches()
 

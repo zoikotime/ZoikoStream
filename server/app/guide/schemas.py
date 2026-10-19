@@ -140,6 +140,6 @@ class FeedbackSubmit(Strict):
     target_type: Literal["answer", "session"]
     target_id: str | None = Field(default=None, max_length=64)
     rating: Literal["up", "down"]
-    reason_code: Literal["not_helpful", "incorrect", "unclear", "too_long", "other",
-                         "helpful"] | None = None
+    reason_code: Literal["not_helpful", "incorrect", "unclear", "out_of_date", "too_long",
+                         "other", "helpful"] | None = None
     comment: str | None = Field(default=None, max_length=500)

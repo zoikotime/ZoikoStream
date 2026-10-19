@@ -8,9 +8,7 @@ Providers:
   * "anthropic" — Claude (GUIDE_LLM_MODEL, default claude-opus-5-5) via the Anthropic SDK.
     Structured output constrains the reply to the per-turn JSON schema. Effort defaults to
     "low": answers are short and grounded, and first-response latency matters (PRD §18).
-    Server-side refusal fallback ("default" routing) is enabled so a classifier decline on a
-    legitimate question is retried on Anthropic's recommended fallback model instead of
-    surfacing as an error.
+    No server-side model fallback: only the configured, evaluated model answers (SP-AT-20).
   * "groq" — Groq's OpenAI-compatible API (GUIDE_GROQ_MODEL, default openai/gpt-oss-120b),
     strict JSON-schema output, low reasoning effort.
   * "mock" — deterministic, offline; answers from the top evidence unit. Development and tests.
@@ -34,7 +32,6 @@ from .settings import get_settings
 log = logging.getLogger(__name__)
 
 MAX_OUTPUT_TOKENS = 4000  # covers adaptive thinking at low effort + a short JSON answer
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
 @dataclass
@@ -103,11 +100,11 @@ class AnthropicProvider:
         a = self._anthropic
         started = time.monotonic()
         try:
+            # No server-side model fallback: only the configured, evaluated model answers
+            # (Security §13.1, SP-AT-20). Our own provider chain is the only fallback.
             response = self._client.beta.messages.create(
                 model=self.model,
                 max_tokens=MAX_OUTPUT_TOKENS,
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
                 # Stable system prompt first so it can be cached across turns.
                 system=[{"type": "text", "text": prompt.system,
                          "cache_control": {"type": "ephemeral"}}],

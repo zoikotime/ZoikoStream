@@ -1,11 +1,18 @@
-import { useMemo, useRef, useState } from "react";
+import { useState } from "react";
 import { AlertTriangle, CalendarCheck, CheckCircle2, XCircle } from "lucide-react";
 import * as api from "../guideApi";
+import { track } from "../guideAnalytics";
 import Actions from "./Actions";
+import { leadTitle } from "./leadUtils";
 
 // Demo / sales request (WF-06, Conversation Flow §8). The server supplies the purpose notice,
 // the field set and the consent wording; this form renders them and reports exactly the
 // outcome the server confirmed: confirmed | failed | unknown (PR-014, PR-027).
+//
+// Steps: details (+ consent) -> review -> submit (WF-06 "Step 3: review + explicit Submit
+// request", CF §8 L4). Everything the visitor typed, the step and the outcome live on the
+// timeline item (via onPatch), so closing/reopening Guide or switching views never loses them
+// (Figma §10.1, PR-013). Nothing is written to browser storage; cancel/submit clear it.
 
 const COUNTRIES = (() => {
   try {
@@ -23,10 +30,33 @@ const COUNTRIES = (() => {
     return [["US", "United States"], ["GB", "United Kingdom"], ["IN", "India"], ["CA", "Canada"]];
   }
 })();
+const COUNTRY_NAME = Object.fromEntries(COUNTRIES);
 
-function Field({ field, value, error, onChange, idPrefix }) {
+// Light client checks (Figma §11); the server stays authoritative (§11.1).
+const LENGTHS = { full_name: [2, 100], organization: [2, 160], notes: [0, 1200] };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function validateField(field, raw) {
+  const value = String(raw ?? "").trim();
+  if (!value) return field.required ? "This field is required." : undefined;
+  if (field.type === "email" && !EMAIL_RE.test(value)) return "Enter a valid email address.";
+  const [min, max] = LENGTHS[field.field_id] || [0, field.max_length];
+  const limit = Math.min(max || Infinity, field.max_length || Infinity);
+  if (min && value.length < min) return `Enter at least ${min} characters.`;
+  if (Number.isFinite(limit) && value.length > limit) return `Use ${limit} characters or fewer.`;
+  return undefined;
+}
+
+function displayValue(field, value) {
+  if (field.type === "country") return COUNTRY_NAME[value] || value;
+  if (field.type === "select") return field.options?.find((o) => o.value === value)?.label || value;
+  return value;
+}
+
+function Field({ field, value, error, onChange, onBlur, idPrefix }) {
   const id = `${idPrefix}-${field.field_id}`;
   const describedBy = [error ? `${id}-err` : null, field.hint ? `${id}-hint` : null].filter(Boolean).join(" ") || undefined;
+  const limit = LENGTHS[field.field_id]?.[1] || field.max_length;
   const common = {
     id,
     name: field.field_id,
@@ -35,6 +65,7 @@ function Field({ field, value, error, onChange, idPrefix }) {
     "aria-describedby": describedBy,
     "aria-required": field.required || undefined,
     onChange: (e) => onChange(field.field_id, e.target.value),
+    onBlur: () => onBlur(field.field_id),
   };
   let control;
   if (field.type === "select") {
@@ -56,7 +87,7 @@ function Field({ field, value, error, onChange, idPrefix }) {
       </select>
     );
   } else if (field.type === "textarea") {
-    control = <textarea {...common} maxLength={field.max_length} rows={3} />;
+    control = <textarea {...common} maxLength={limit} rows={3} />;
   } else {
     control = (
       <input
@@ -64,7 +95,7 @@ function Field({ field, value, error, onChange, idPrefix }) {
         type={field.type === "email" ? "email" : "text"}
         inputMode={field.type === "email" ? "email" : undefined}
         autoComplete={field.autocomplete}
-        maxLength={field.max_length}
+        maxLength={limit}
       />
     );
   }
@@ -81,38 +112,46 @@ function Field({ field, value, error, onChange, idPrefix }) {
   );
 }
 
-export default function LeadForm({ item, onAction, onDone }) {
+export default function LeadForm({ item, onAction, onPatch = () => {} }) {
   const { flow } = item;
   const idPrefix = `zg-lead-${flow.flow_id.slice(0, 8)}`;
-  const initialValues = useMemo(
-    () => Object.fromEntries(flow.fields.filter((f) => f.value !== undefined).map((f) => [f.field_id, f.value])),
-    [flow],
-  );
-  const [values, setValues] = useState(initialValues);
+  // Values the server echoed back (a resumed flow) seed the draft; the visitor's own edits win.
+  const serverValues = Object.fromEntries(flow.fields.filter((f) => f.value !== undefined).map((f) => [f.field_id, f.value]));
+  const values = item.values || serverValues;
+  const consent = !!item.consent;
+  const phase = item.phase || "collecting"; // collecting | checking | reviewing | submitting | confirmed | failed | unknown | cancelled
+  const result = item.result || null;
   const [errors, setErrors] = useState({});
-  const [consent, setConsent] = useState(false);
-  const [phase, setPhase] = useState("collecting"); // collecting | submitting | confirmed | failed | unknown | cancelled
-  const [result, setResult] = useState(null);
   const [formError, setFormError] = useState(null);
-  const idemKey = useRef(api.uuid()); // reused across retries of the same attempt
+  const save = (patch) => onPatch(item.id, patch);
 
   const set = (fid, v) => {
-    setValues((s) => ({ ...s, [fid]: v }));
+    save({ values: { ...values, [fid]: v } });
     if (errors[fid]) setErrors((e) => ({ ...e, [fid]: undefined }));
   };
-
-  const focusFirstError = (errs) => {
-    const first = flow.fields.find((f) => errs[f.field_id]) ? `${idPrefix}-${flow.fields.find((f) => errs[f.field_id]).field_id}` : errs.consent ? `${idPrefix}-consent` : null;
-    if (first) requestAnimationFrame(() => document.getElementById(first)?.focus());
+  // Validate after interaction, never on untouched fields (Figma §11.1).
+  const blur = (fid) => {
+    const field = flow.fields.find((f) => f.field_id === fid);
+    if (!field || values[fid] === undefined) return;
+    const err = validateField(field, values[fid]);
+    setErrors((e) => ({ ...e, [fid]: err }));
   };
 
-  const submit = async (e) => {
+  const focusId = (id) => requestAnimationFrame(() => document.getElementById(id)?.focus());
+  const focusFirstError = (errs) => {
+    const f = flow.fields.find((x) => errs[x.field_id]);
+    if (f) focusId(`${idPrefix}-${f.field_id}`);
+    else if (errs.consent) focusId(`${idPrefix}-consent`);
+  };
+
+  // Step 1 -> 2: client checks, then the server validates the fields (authoritative).
+  const review = async (e) => {
     e.preventDefault();
     setFormError(null);
-    // Light client checks; the server is authoritative (Figma §11.1).
     const local = {};
     flow.fields.forEach((f) => {
-      if (f.required && !String(values[f.field_id] || "").trim()) local[f.field_id] = "This field is required.";
+      const err = validateField(f, values[f.field_id]);
+      if (err) local[f.field_id] = err;
     });
     if (flow.consent.required && !consent) local.consent = "Please confirm we may contact you about this request.";
     if (Object.keys(local).length) {
@@ -120,45 +159,64 @@ export default function LeadForm({ item, onAction, onDone }) {
       focusFirstError(local);
       return;
     }
-    setPhase("submitting");
+    save({ phase: "checking" });
     try {
-      const payload = Object.fromEntries(flow.fields.map((f) => [f.field_id, String(values[f.field_id] ?? "")]));
-      try {
-        await api.updateLeadFlow(flow.flow_id, payload);
-      } catch (err) {
-        const fe = err?.problem?.field_errors;
-        if (err.code === "GUIDE_VALIDATION_ERROR" && fe?.length) {
-          const mapped = Object.fromEntries(fe.map((x) => [x.field, x.message]));
-          setErrors(mapped);
-          setPhase("collecting");
-          focusFirstError(mapped);
-          return;
-        }
-        throw err;
+      const payload = Object.fromEntries(flow.fields.map((f) => [f.field_id, String(values[f.field_id] ?? "").trim()]));
+      await api.updateLeadFlow(flow.flow_id, payload);
+      save({ phase: "reviewing" });
+      focusId(`${idPrefix}-review`);
+    } catch (err) {
+      save({ phase: "collecting" });
+      const fe = err?.problem?.field_errors;
+      if (err?.code === "GUIDE_VALIDATION_ERROR" && fe?.length) {
+        const mapped = Object.fromEntries(fe.map((x) => [x.field, x.message]));
+        setErrors(mapped);
+        focusFirstError(mapped);
+        return;
       }
+      setFormError(err?.message || "Your details couldn't be checked. Please try again.");
+    }
+  };
+
+  // Step 3: consent receipt + idempotent submit. The key survives close/reopen (it lives on
+  // the item), so a retry of the same attempt can never create a second lead.
+  const submit = async () => {
+    setFormError(null);
+    const idemKey = item.idemKey || api.uuid();
+    save({ phase: "submitting", idemKey });
+    try {
       let receipt = null;
       if (flow.consent.required) {
         const c = await api.putConsent("sales_contact", "granted", flow.consent.notice_version);
         receipt = c.receipt_id;
       }
-      const res = await api.submitLead(flow.flow_id, receipt, idemKey.current);
-      setResult(res);
-      setPhase(res.outcome);
-      if (res.outcome === "failed") idemKey.current = api.uuid(); // a new attempt is a new key
-      onDone?.(res.outcome);
+      const res = await api.submitLead(flow.flow_id, receipt, idemKey);
+      if (res.outcome === "confirmed") {
+        track("lead_submitted", { flow_kind: flow.flow_kind, outcome: "confirmed", has_reference: !!res.submission_reference, consent_given: !!receipt });
+        // Submitted: the draft is no longer needed in memory.
+        save({ phase: "confirmed", result: res, values: undefined, consent: false });
+      } else {
+        track("error", { error_class: `lead_${res.outcome}`, flow_kind: flow.flow_kind });
+        // A failed attempt gets a new key; an unknown outcome keeps it (no blind resubmit).
+        save({ phase: res.outcome, result: res, ...(res.outcome === "failed" ? { idemKey: api.uuid() } : {}) });
+      }
     } catch (err) {
-      if (err.code === "GUIDE_OUTCOME_UNKNOWN" || err.problem?.outcome === "unknown") {
-        setResult({ message: err.problem?.detail || err.message, actions: err.problem?.actions || [] });
-        setPhase("unknown");
+      if (err?.code === "GUIDE_OUTCOME_UNKNOWN" || err?.problem?.outcome === "unknown") {
+        track("error", { error_class: "lead_unknown", flow_kind: flow.flow_kind });
+        save({ phase: "unknown", result: { message: err.problem?.detail || err.message, actions: err.problem?.actions || [] } });
         return;
       }
-      if (err.code === "GUIDE_VALIDATION_ERROR" && err.problem?.field_errors?.some((x) => x.field === "consent")) {
-        setErrors({ consent: "Please confirm we may contact you about this request." });
-        setPhase("collecting");
+      if (err?.code === "GUIDE_VALIDATION_ERROR") {
+        const fe = err.problem?.field_errors || [];
+        const mapped = Object.fromEntries(fe.map((x) => [x.field, x.message]));
+        if (fe.some((x) => x.field === "consent")) mapped.consent = "Please confirm we may contact you about this request.";
+        setErrors(mapped);
+        save({ phase: "collecting" });
+        focusFirstError(mapped);
         return;
       }
-      setPhase("collecting");
-      setFormError(err.message || "Your request couldn't be sent. Please try again.");
+      save({ phase: "reviewing" });
+      setFormError(err?.message || "Your request couldn't be sent. Please try again.");
     }
   };
 
@@ -168,11 +226,12 @@ export default function LeadForm({ item, onAction, onDone }) {
     } catch {
       /* cancelling is best-effort */
     }
-    setPhase("cancelled");
+    save({ phase: "cancelled", values: undefined, consent: false });
   };
 
   const headingId = `${idPrefix}-title`;
-  const title = flow.flow_kind === "sales" ? "Talk to sales" : "Request a demo";
+  const title = leadTitle(flow);
+  const submitLabel = flow.flow_kind === "sales" ? "Submit request" : "Submit demo request"; // WF-06 A4
 
   if (phase === "confirmed") {
     return (
@@ -181,8 +240,8 @@ export default function LeadForm({ item, onAction, onDone }) {
           <CheckCircle2 aria-hidden="true" />
           <div>
             <strong id={headingId}>Request received</strong>
-            <div>{result.message}</div>
-            {result.submission_reference && <div className="zg-meta">Reference: {result.submission_reference}</div>}
+            <div>{result?.message}</div>
+            {result?.submission_reference && <div className="zg-meta">Reference: {result.submission_reference}</div>}
           </div>
         </div>
       </section>
@@ -194,7 +253,7 @@ export default function LeadForm({ item, onAction, onDone }) {
         <div className="zg-notice zg-notice--warning" role="alert">
           <AlertTriangle aria-hidden="true" />
           <div>
-            <strong id={headingId}>We can't confirm this yet</strong>
+            <strong id={headingId}>We can&apos;t confirm this yet</strong>
             <div>{result?.message}</div>
           </div>
         </div>
@@ -204,6 +263,60 @@ export default function LeadForm({ item, onAction, onDone }) {
   }
   if (phase === "cancelled") {
     return <p className="zg-meta">Request cancelled. Nothing was sent.</p>;
+  }
+
+  const errorBanner = (
+    <>
+      {phase === "failed" && (
+        <div className="zg-notice zg-notice--error" role="alert" style={{ marginTop: 12 }}>
+          <XCircle aria-hidden="true" />
+          <span>{result?.message}</span>
+        </div>
+      )}
+      {formError && (
+        <div className="zg-notice zg-notice--error" role="alert" style={{ marginTop: 12 }}>
+          <XCircle aria-hidden="true" />
+          <span>{formError}</span>
+        </div>
+      )}
+    </>
+  );
+
+  if (phase === "reviewing" || phase === "failed" || phase === "submitting") {
+    const filled = flow.fields.filter((f) => String(values[f.field_id] ?? "").trim());
+    return (
+      <section className="zg-card" aria-labelledby={`${idPrefix}-review`}>
+        <p className="zg-eyebrow"><CalendarCheck aria-hidden="true" /> {title}</p>
+        <h3 id={`${idPrefix}-review`} tabIndex={-1}>Review your request</h3>
+        {errorBanner}
+        <dl className="zg-review">
+          {filled.map((f) => (
+            <div key={f.field_id}>
+              <dt>{f.label}</dt>
+              <dd>{displayValue(f, String(values[f.field_id]).trim())}</dd>
+            </div>
+          ))}
+          {flow.consent.required && (
+            <div>
+              <dt>Contact consent</dt>
+              <dd>Given</dd>
+            </div>
+          )}
+        </dl>
+        <div className="zg-actions">
+          <button type="button" className="zg-btn zg-btn--primary" onClick={submit} disabled={phase === "submitting"}>
+            {phase === "submitting" ? "Sending…" : phase === "failed" ? "Try again" : submitLabel}
+          </button>
+          <button type="button" className="zg-btn zg-btn--ghost" onClick={() => save({ phase: "collecting" })} disabled={phase === "submitting"}>
+            Edit
+          </button>
+          <button type="button" className="zg-btn zg-btn--ghost" onClick={cancel} disabled={phase === "submitting"}>
+            Cancel
+          </button>
+        </div>
+        {phase === "failed" && <Actions actions={result?.actions} onAction={onAction} />}
+      </section>
+    );
   }
 
   return (
@@ -220,22 +333,11 @@ export default function LeadForm({ item, onAction, onDone }) {
         </button>
       </div>
 
-      {phase === "failed" && (
-        <div className="zg-notice zg-notice--error" role="alert" style={{ marginTop: 12 }}>
-          <XCircle aria-hidden="true" />
-          <span>{result?.message}</span>
-        </div>
-      )}
-      {formError && (
-        <div className="zg-notice zg-notice--error" role="alert" style={{ marginTop: 12 }}>
-          <XCircle aria-hidden="true" />
-          <span>{formError}</span>
-        </div>
-      )}
+      {errorBanner}
 
-      <form className="zg-form" onSubmit={submit} noValidate>
+      <form className="zg-form" onSubmit={review} noValidate>
         {flow.fields.map((f) => (
-          <Field key={f.field_id} field={f} value={values[f.field_id]} error={errors[f.field_id]} onChange={set} idPrefix={idPrefix} />
+          <Field key={f.field_id} field={f} value={values[f.field_id]} error={errors[f.field_id]} onChange={set} onBlur={blur} idPrefix={idPrefix} />
         ))}
         {flow.consent.required && (
           <div>
@@ -245,7 +347,7 @@ export default function LeadForm({ item, onAction, onDone }) {
                 type="checkbox"
                 checked={consent}
                 onChange={(e) => {
-                  setConsent(e.target.checked);
+                  save({ consent: e.target.checked });
                   setErrors((x) => ({ ...x, consent: undefined }));
                 }}
                 aria-invalid={errors.consent ? true : undefined}
@@ -257,14 +359,13 @@ export default function LeadForm({ item, onAction, onDone }) {
           </div>
         )}
         <div className="zg-actions" style={{ marginTop: 0 }}>
-          <button type="submit" className="zg-btn zg-btn--primary" disabled={phase === "submitting"}>
-            {phase === "submitting" ? "Sending…" : phase === "failed" ? "Try again" : "Submit request"}
+          <button type="submit" className="zg-btn zg-btn--primary" disabled={phase === "checking"}>
+            {phase === "checking" ? "Checking…" : "Continue"}
           </button>
-          <button type="button" className="zg-btn zg-btn--ghost" onClick={cancel} disabled={phase === "submitting"}>
+          <button type="button" className="zg-btn zg-btn--ghost" onClick={cancel} disabled={phase === "checking"}>
             Cancel
           </button>
         </div>
-        {phase === "failed" && <Actions actions={result?.actions} onAction={onAction} />}
       </form>
     </section>
   );

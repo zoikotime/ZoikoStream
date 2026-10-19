@@ -7,6 +7,7 @@
 // never mistaken for "nothing was attempted".
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 import {
   FiSearch, FiFilter, FiChevronDown, FiPlay,
   FiHardDrive, FiDownload, FiShare2, FiTrash2, FiSend, FiCopy,
@@ -479,6 +480,7 @@ export default function OrganizationRecordings() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Recordings</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">Manage all recorded live events for your organization</p>
+          <AskGuideButton question="Where is the replay?" className="mt-2" />
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
