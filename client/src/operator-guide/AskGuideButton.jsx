@@ -1,16 +1,16 @@
 // "Ask Guide" button for console pages (§5 inline entry point, §23 guide-inline-entry). Opens
 // Guide with a question and, where there is one, the page's event attached. Renders nothing
-// for roles Guide does not serve. Lightweight by design: no Guide bundle, no Guide styles —
-// console Tailwind classes only.
+// unless Guide can open here (role, console route, web build — published by the mount).
+// Lightweight by design: no Guide bundle, no auth module, no Guide styles — console Tailwind
+// classes only.
+import { useSyncExternalStore } from "react";
 import { useLocation } from "react-router-dom";
-import { useAuth } from "../auth/AuthContext";
-import { GUIDE_ROLES } from "./eligibility";
-import { askGuide } from "./askGuide";
+import { askGuide, isGuideAvailable, subscribeGuideAvailable } from "./askGuide";
 
 export default function AskGuideButton({ question, eventId, label = "Ask Guide", className = "" }) {
-  const { user } = useAuth() || {};
+  const available = useSyncExternalStore(subscribeGuideAvailable, isGuideAvailable, () => false);
   const { pathname } = useLocation();
-  if (!user || !GUIDE_ROLES.includes(user.role)) return null;
+  if (!available) return null;
   return (
     <button
       type="button"

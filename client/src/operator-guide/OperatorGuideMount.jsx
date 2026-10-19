@@ -5,6 +5,7 @@ import { Component, Suspense, lazy, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { consoleRoute } from "./operatorGuideApi";
+import { setGuideAvailable } from "./askGuide";
 import { GUIDE_ROLES, eventIdFrom, isConsolePath } from "./eligibility";
 
 const OperatorGuide = lazy(() => import("./OperatorGuide"));
@@ -41,6 +42,11 @@ export default function OperatorGuideMount() {
   const { user } = useAuth() || {};
   const ready = useAfterIdle();
   const eligible = !!user && GUIDE_ROLES.includes(user.role) && isConsolePath(pathname);
+  // Tell inline "Ask Guide" buttons whether Guide can open here (they render nothing otherwise).
+  useEffect(() => {
+    setGuideAvailable(eligible);
+    return () => setGuideAvailable(false);
+  }, [eligible]);
   if (!eligible || !ready) return null;
   return (
     <Isolate>

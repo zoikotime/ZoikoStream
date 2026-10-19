@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, within, waitFor } from "@testing-library/react";
+import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
@@ -10,7 +10,7 @@ vi.mock("../auth/AuthContext", () => ({ useAuth: () => auth }));
 import api from "../api";
 import OperatorGuide from "./OperatorGuide";
 import AskGuideButton from "./AskGuideButton";
-import { askGuide } from "./askGuide";
+import { askGuide, setGuideAvailable } from "./askGuide";
 import { consoleRoute } from "./operatorGuideApi";
 import { eventIdFrom, isConsolePath } from "./eligibility";
 import { safeHref } from "./parts/links";
@@ -223,15 +223,19 @@ async function ask(user, panel, text) {
 }
 
 describe("inline Ask Guide entry points (§1.1, §5)", () => {
-  it("renders nothing for a role Guide does not serve", () => {
-    auth.user = { role: "viewer" };
+  it("renders nothing unless Guide can open on this page", () => {
+    setGuideAvailable(false);
     render(<MemoryRouter><AskGuideButton question="Is this event ready?" eventId={EVENT.id} /></MemoryRouter>);
     expect(screen.queryByRole("button", { name: /ask guide/i })).not.toBeInTheDocument();
+    act(() => setGuideAvailable(true));
+    expect(screen.getByRole("button", { name: "Ask Guide" })).toBeInTheDocument();
+    act(() => setGuideAvailable(false));
   });
 
   it("opens Guide and asks with the page's event attached", async () => {
     const user = setup();
     api.post.mockResolvedValueOnce({ data: READINESS });
+    act(() => setGuideAvailable(true));
     render(<MemoryRouter><AskGuideButton question="Is this event ready?" eventId={OTHER.id} /></MemoryRouter>);
     await screen.findByRole("button", { name: /open guide/i });
     await user.click(screen.getByRole("button", { name: "Ask Guide" }));

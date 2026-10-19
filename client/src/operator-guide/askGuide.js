@@ -21,3 +21,22 @@ export function takePendingAsk() {
   window[PENDING] = undefined;
   return request && Date.now() - request.at < PENDING_TTL_MS ? request : null;
 }
+
+// Whether Guide can open on this page right now: published by OperatorGuideMount, which alone
+// knows the user's role, the route and the build. Entry points read it instead of importing the
+// auth module, so a console page that renders an "Ask Guide" button gains no new dependency.
+let available = false;
+const listeners = new Set();
+
+export function setGuideAvailable(value) {
+  if (available === !!value) return;
+  available = !!value;
+  listeners.forEach((listener) => listener());
+}
+
+export function subscribeGuideAvailable(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+export const isGuideAvailable = () => available;
