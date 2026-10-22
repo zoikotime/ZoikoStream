@@ -93,7 +93,13 @@ class AdminUserOut(BaseModel):
     username: str
     role: str
     is_active: bool
-    org_id: uuid.UUID
+    # Optional, because every other layer already treats a user's organization as something
+    # that may not resolve: crud._user_out writes `organization_name = u.organization.name if
+    # u.organization else None`, and the console renders `organization_name || "—"`. This
+    # field was the one place that insisted on it, so a row whose organization is absent
+    # raised ValidationError inside the list serializer — a 500 for the whole page, not a
+    # dash in one cell. AdminAuditOut in this same file already models org_id this way.
+    org_id: uuid.UUID | None = None
     organization_name: str | None = None
     created_at: datetime | None = None
     # Commercial RBAC (ZST-LE-COM-001 Section 25) — meaningful only when role=='super_admin'.

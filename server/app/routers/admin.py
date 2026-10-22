@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from pydantic import BaseModel, Field
@@ -156,6 +157,28 @@ def command_center(
     try:
         return ops_svc.command_center(
             db, admin, range_=range_, region=region, scope=scope, include_test=include_test,
+            since=from_ if range_ == "custom" else None,
+            until=to if range_ == "custom" else None)
+    except ops_window.WindowError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+
+@router.get("/api-traffic")
+def api_traffic(
+    range_: str = Query("24h", alias="range", pattern="^(live|1h|24h|7d|custom)$"),
+    from_: datetime | None = Query(None, alias="from"),
+    to: datetime | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Request volume, HTTP error rate and p95 latency for one window.
+
+    The API-health tile on the Command Center links here. It reuses services/ops.api_window,
+    the same function that produces the tile, so the two always report the same figures.
+    Super-admin only, like every route on this router (see the router's dependencies)."""
+    from ..services import ops_window
+    try:
+        return ops_svc.api_traffic(
+            db, range_=range_,
             since=from_ if range_ == "custom" else None,
             until=to if range_ == "custom" else None)
     except ops_window.WindowError as exc:
@@ -673,9 +696,39 @@ def delete_organization(org_id: uuid.UUID, request: Request, background: Backgro
     if user_count:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             f"Organization has {user_count} user(s); remove them before deleting")
+    # Users are not the only thing that keeps an organization alive. 24 tables carry a
+    # foreign key to organizations and only two of them cascade, so anything else the
+    # organization still owns — an event, a ticket, an invitation, a webhook, its commercial
+    # account — makes the DELETE fail. That used to surface as an unhandled
+    # ForeignKeyViolation: a 500 and a toast that named none of it. The operator is told what
+    # is holding the record instead, in the same shape as the user message above.
+    #
+    # Deliberately NOT a cascade: these are the records the organization lifecycle and the
+    # retention rules are written about. An organization that still owns data is suspended or
+    # restricted (see services/org_governance), not erased with its evidence.
+    blockers = crud.organization_delete_blockers(db, org.id)
+    if blockers:
+        detail = ", ".join(f"{n} {label}" for label, n in blockers[:4])
+        if len(blockers) > 4:
+            detail += f" and {len(blockers) - 4} more"
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Organization still owns {detail}. Remove or reassign them first, or suspend the "
+            f"organization instead of deleting it.")
+
     name = org.name
     previous_state = org.status
-    crud.delete_organization(db, org)
+    try:
+        crud.delete_organization(db, org)
+    except IntegrityError:
+        # The pre-check above is metadata-driven and should have caught this, but a race (a
+        # row written between the count and the delete) must not become a 500 either. The
+        # rollback is what keeps the session usable and the organization intact.
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Organization still has records that reference it, so it cannot be deleted. "
+            "Suspend it instead, or remove the dependent records first.")
     # ORG-010 "deleted". The event carries org_name and no FK, so the record survives the
     # organization row it describes. Recipient resolution runs before the delete would have
     # orphaned it — this path already refuses to delete an organization that still has
