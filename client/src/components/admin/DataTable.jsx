@@ -473,16 +473,12 @@ export default function DataTable({
                 {/* py-20 gave an empty table ~250px of blank before the message even
                     began. Content-driven height reads as "nothing here yet" rather
                     than as a page that failed to load. */}
-<<<<<<< Updated upstream
-                <td colSpan={colCount} className="px-4 py-12 text-center">
-                  <PinToView on={pinEmpty}>
-=======
                 {/* `empty.compact` drops the decorative cluster for a SECONDARY table — a
                     page that stacks two empty sections otherwise shows the same large
                     placeholder twice and reads as clutter rather than as hierarchy. Opt-in:
                     omit it and the state renders exactly as before. */}
                 <td colSpan={colCount} className={cx("px-4 text-center", empty?.compact ? "py-7" : "py-12")}>
->>>>>>> Stashed changes
+                  <PinToView on={pinEmpty}>
                   {empty ? (
                     <div className="zk-fade-in mx-auto max-w-sm">
                       {empty.icon && empty.compact && (
