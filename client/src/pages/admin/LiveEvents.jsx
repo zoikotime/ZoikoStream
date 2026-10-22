@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { FiSearch, FiRadio, FiGrid, FiClock, FiSlash } from "react-icons/fi";
 import toast from "react-hot-toast";
 import api, { diagnoseLoadError } from "../../api";
@@ -59,7 +59,18 @@ export default function LiveEvents() {
   const navigate = useNavigate();
   const { data, loading, error, reload } = useLiveEventsData();
   useInterval(reload, POLL_MS);
-  const [tab, setTab] = useState("live");
+  // The view lives in ?tab= rather than component state, the same convention ConsoleTabs
+  // uses: it makes "Live Now" and "Recently ended" linkable from the Command Center, and it
+  // survives a refresh or a pasted URL. An unknown or absent value falls back to live, so an
+  // old link and a hand-typed one both land somewhere valid.
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "recent" ? "recent" : "live";
+  const setTab = (key) => {
+    const next = new URLSearchParams(params);
+    if (key === "live") next.delete("tab");
+    else next.set("tab", key);
+    setParams(next, { replace: true });
+  };
   const [q, setQ] = useState("");
   // The row whose End-session confirmation is open. Null closes it.
   const [ending, setEnding] = useState(null);

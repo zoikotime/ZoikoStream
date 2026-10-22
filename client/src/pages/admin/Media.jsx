@@ -25,7 +25,7 @@ const NONE = [];
 // watch page uses (services/livekit.py signed_url, existence-checked first).
 
 const STATUSES = ["recording", "paused", "stopped", "failed"];
-const STATUS_TONE = { recording: "danger", paused: "warning", stopped: "neutral", failed: "danger" };
+const STATUS_TONE = { recording: "danger", paused: "warning", stopped: "neutral", processing: "info", failed: "danger" };
 
 // The server's verdict (crud.event.recording_list_state), from PERSISTED evidence only — never
 // computed here. "ready" means the provider reported a finished file; "unverified" means the
@@ -33,6 +33,16 @@ const STATUS_TONE = { recording: "danger", paused: "warning", stopped: "neutral"
 // the key egress was ASKED to write, so it is never treated as evidence of a file.
 const VERDICT_TONE = { ready: "success", unverified: "warning", processing: "info", in_progress: "info", failed: "danger" };
 const VERDICT_LABEL = { ready: "Ready", unverified: "Unverified", processing: "Processing", in_progress: "In progress", failed: "Failed" };
+// What "—" in the File column means for a row that has not stopped. The verdict for these
+// rows is derived straight from the capture status next to it, so repeating it would be the
+// redundancy this replaces.
+const FILE_PENDING = {
+  recording: "Still recording — no finished file yet.",
+  paused: "Paused — no finished file yet.",
+  processing: "Still processing — no finished file yet.",
+  failed: "The capture failed, so no file was produced.",
+};
+
 const VERDICT_HINT = {
   unverified: "Stopped cleanly, but the provider never reported a file size. Playback performs the real storage check.",
 };
@@ -117,9 +127,13 @@ function ValidationPanel({ recording }) {
             const side = ev[label];
             if (!side) return null;
             return (
-              <div key={label} className="flex justify-between">
-                <dt className={cx(CONSOLE.faint, "capitalize")}>{label}</dt>
-                <dd className={type.mono}>
+              // min-w-0 + break-words on the value: a flex item defaults to min-width:auto,
+              // so one long unbroken token (which is what a provider error is) pushed this row
+              // past the drawer instead of wrapping inside it. gap-3 keeps the label and the
+              // value apart once the value takes several lines.
+              <div key={label} className="flex justify-between gap-3">
+                <dt className={cx(CONSOLE.faint, "shrink-0 capitalize")}>{label}</dt>
+                <dd className={cx(type.mono, "min-w-0 break-words text-right")}>
                   {side.error
                     ? side.error
                     : `${side.duration_seconds ?? "—"}s · ${side.has_video ? "video ✓" : "no video"} · ${side.has_audio ? "audio ✓" : "no audio"}`}
@@ -195,7 +209,9 @@ function PublishPanel({ loading, entitlement, publishing, onPublish, retrying, o
       )}
       {state === "published" && wm === "failed" && (
         <>
-          <p className="mt-2 text-[11px] text-rose-600 dark:text-rose-400">
+          {/* Same reasoning as the recording error box: watermark_error is the encoder's
+              own message and may have nothing to wrap at. */}
+          <p className="mt-2 break-words text-[11px] text-rose-600 dark:text-rose-400">
             {entitlement.watermark_error || "The watermark burn failed."} Viewers see no replay until this is retried.
           </p>
           <Button className="mt-2" size="sm" leftIcon={FiRefreshCw} loading={retrying} disabled={retrying} onClick={onRetryWatermark}>
@@ -316,8 +332,14 @@ function RecordingDrawer({ recording, open, onClose }) {
         {recording.role && <DetailField label="Recording path" value={recording.role} />}
       </dl>
 
+      {/* break-words because this is the PROVIDER's text, not ours: a LiveKit/twirp failure
+          arrives as one machine-written string and frequently carries a trace id, a URL or an
+          underscored token with nothing to wrap at. Without it the box kept its 407px and the
+          rest of the message was simply gone — the drawer is 28rem and scrolls vertically, so
+          there was nowhere for the overflow to go. The message is never shortened; the box
+          grows downward instead. */}
       {recording.error && (
-        <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-[12px] text-rose-700 dark:border-rose-500/25 dark:bg-rose-500/10 dark:text-rose-300">
+        <div className="mt-4 break-words rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-[12px] text-rose-700 dark:border-rose-500/25 dark:bg-rose-500/10 dark:text-rose-300">
           {recording.error}
         </div>
       )}
@@ -389,10 +411,20 @@ export default function Media() {
   const columns = [
     { key: "event_title", header: "Event", render: (r) => <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>{r.event_title || "Untitled event"}</p> },
     { key: "organization", header: "Organization", render: (r) => r.organization || "—" },
-    { key: "status", header: "Status", render: (r) => <Badge tone={STATUS_TONE[r.status]} dot>{r.status}</Badge> },
-    { key: "state", header: "File", render: (r) => (r.state
+    // Capture lifecycle (what the recorder was doing) and file verdict (what is actually on
+    // storage) are different facts, so both stay — "stopped + unverified" is the whole reason
+    // this console exists and one column cannot say it.
+    //
+    // They were printing the same word twice, though. crud.event.recording_list_state derives
+    // the verdict FROM the status for every status except `stopped`: recording/paused all
+    // collapse to in_progress, failed to failed, processing to processing. Only a stopped row
+    // carries independent evidence (ready | unverified | failed-because-unenforced), so only a
+    // stopped row gets a File badge; the rest show "—", which is also the truth — there is no
+    // finished file to report on yet.
+    { key: "status", header: "Capture", render: (r) => <Badge tone={STATUS_TONE[r.status]} dot>{r.status}</Badge> },
+    { key: "state", header: "File", render: (r) => (r.state && r.status === "stopped"
       ? <span title={VERDICT_HINT[r.state] || undefined}><Badge tone={VERDICT_TONE[r.state] || "neutral"}>{VERDICT_LABEL[r.state] || r.state}</Badge></span>
-      : "—") },
+      : <span className={CONSOLE.faint} title={FILE_PENDING[r.status] || "No finished file to report on yet."}>—</span>) },
     { key: "quality", header: "Quality", render: (r) => r.quality || "—" },
     { key: "started_at", header: "Started", align: "right", render: (r) => (r.started_at ? new Date(r.started_at).toLocaleString() : "—") },
     { key: "duration", header: "Duration", align: "right", render: (r) => fmtDuration(r.started_at, r.stopped_at) },

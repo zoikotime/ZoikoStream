@@ -148,7 +148,7 @@ export default function KpiRow({ kpis, range, age }) {
         note={liveNote}
         series={live.series}
         color="#8b5cf6"
-        to="/admin/live-events"
+        to="/admin/live-events?tab=live"
         linkLabel="Live Now"
         age={age}
       />
@@ -167,7 +167,13 @@ export default function KpiRow({ kpis, range, age }) {
         }
         series={null}
         color="#f43f5e"
-        to="/admin/live-events"
+        // NOT /admin/live-events, which is where this used to go — the same URL as the Live
+        // sessions tile beside it. That page lists broadcast sessions (GET /admin/live-events,
+        // state=live|recent) and carries no severity, so it cannot show "at risk" at all; the
+        // at-risk view is the attention table on THIS page, built from the same `attention`
+        // list this tile counts. Linking to it reuses the backend's own definition instead of
+        // inventing a second one.
+        to="#sessions-attention"
         linkLabel="At Risk"
         age={age}
       />
@@ -181,7 +187,7 @@ export default function KpiRow({ kpis, range, age }) {
         note={audienceNote}
         series={audience.series}
         color="#22d3ee"
-        to="/admin/live-events"
+        to="/admin/live-events?tab=live"
         linkLabel="Live Now"
         age={age}
       />
@@ -195,7 +201,10 @@ export default function KpiRow({ kpis, range, age }) {
         note={apiNote}
         series={apiHealth.series}
         color="#f59e0b"
-        to="/admin/developers"
+        // Was /admin/developers, which is the API KEYS page — it shows no traffic at all.
+        // This is the request volume / error rate / p95 view, built on the same api_window()
+        // that produces the figure on this tile.
+        to="/admin/status?tab=traffic"
         linkLabel="Traffic"
         age={age}
       />

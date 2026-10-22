@@ -7,6 +7,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from pydantic import ValidationError
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
@@ -323,6 +324,69 @@ def _delete_legacy_memberships(db, column: str, value) -> None:
     db.execute(text(f"DELETE FROM memberships WHERE {column} = :v"), {"v": value})
 
 
+# Tables this delete clears itself, so they are never reported as blockers.
+_ORG_DELETE_CLEARS = {"subscriptions", "memberships"}
+
+# Human names for the dependents an operator can act on. Anything not listed falls back to
+# its table name, which is still more use than a ForeignKeyViolation.
+_ORG_DEPENDENT_LABELS = {
+    "events": "event(s)",
+    "event_access_links": "event access link(s)",
+    "support_tickets": "support ticket(s)",
+    "support_access_requests": "support access request(s)",
+    "invitations": "invitation(s)",
+    "webhook_endpoints": "webhook endpoint(s)",
+    "commercial_accounts": "commercial account(s)",
+    "commercial_overrides": "commercial override(s)",
+    "org_entitlement_states": "entitlement record(s)",
+    "usage_reports": "usage report(s)",
+    "governance_records": "governance record(s)",
+    "access_reviews": "access review(s)",
+    "content_restrictions": "content restriction(s)",
+    "developer_data_exports": "developer export(s)",
+    "feature_availability_grants": "feature grant(s)",
+    "incidents": "incident(s)",
+    "ownership_transfers": "ownership transfer(s)",
+    "organization_security_contacts": "security contact(s)",
+    "security_incident_disclosures": "security disclosure(s)",
+    "advisory_impacts": "advisory impact(s)",
+}
+
+
+def organization_delete_blockers(db, org_id) -> list[tuple[str, int]]:
+    """Which dependent records would make `DELETE organizations` fail, and how many.
+
+    Discovered from the mapper metadata rather than from a hand-kept list: 24 tables carry a
+    foreign key to organizations and only two of them declare ON DELETE CASCADE, so every
+    other one RESTRICTs the delete. A list written out by hand goes stale the first time a
+    table is added, and the symptom of staleness is a 500 with a ForeignKeyViolation in it.
+
+    `users` is excluded because the caller reports it separately and more specifically; the
+    tables this module clears itself are excluded for the same reason. Rows are returned
+    biggest-first so the message names the thing most worth acting on.
+    """
+    from ..db import Base
+
+    org_table = Base.metadata.tables["organizations"]
+    counts: list[tuple[str, int]] = []
+    for table in Base.metadata.tables.values():
+        if table.name in _ORG_DELETE_CLEARS or table.name == "users":
+            continue
+        for fk in table.foreign_keys:
+            if fk.column.table is not org_table:
+                continue
+            # A cascading FK cleans itself up; it can never be the reason a delete fails.
+            if (fk.ondelete or "").upper() == "CASCADE":
+                continue
+            n = db.scalar(select(func.count()).select_from(table)
+                          .where(table.c[fk.parent.name] == org_id)) or 0
+            if n:
+                counts.append((_ORG_DEPENDENT_LABELS.get(table.name, table.name), n))
+            break
+    counts.sort(key=lambda row: (-row[1], row[0]))
+    return counts
+
+
 def delete_organization(db, org: Organization) -> None:
     db.query(Subscription).filter(Subscription.org_id == org.id).delete()
     # `memberships` predates the current org_id-on-User model and isn't SQLAlchemy-mapped,
@@ -406,7 +470,11 @@ def list_users(db, q=None, role=None, org_id=None, is_active=None, page=1, page_
     users = db.scalars(
         stmt.order_by(*ordering).offset((page - 1) * page_size).limit(page_size)
     ).all()
-    return [_user_out(u) for u in users], total
+    # `total` is the count the filter matched, so a skipped row leaves the page one short of
+    # it. That is the intended trade: a visibly short page beats a console that will not load,
+    # and the ERROR log above names the row to fix.
+    rows = [out for out in (_user_out(u) for u in users) if out is not None]
+    return rows, total
 
 
 def user_stats(db) -> dict:
@@ -430,8 +498,27 @@ def user_stats(db) -> dict:
     return {"total": total, "active": active, "inactive": inactive, "super_admins": super_admins}
 
 
-def _user_out(u: User) -> AdminUserOut:
-    out = AdminUserOut.model_validate(u)
+def _user_out(u: User) -> AdminUserOut | None:
+    """One row, or None if this row cannot be represented.
+
+    Returning None rather than raising is deliberate. This runs inside a list comprehension
+    over a page of users, so an exception here is not "one row is odd" — it is HTTP 500 for
+    the entire Identity & Access console, with nothing in the response naming the row that
+    caused it. One unrepresentable account should cost one line, not the page.
+
+    Which row is logged, at ERROR with its id, so the cause is findable without reproducing
+    it. The response itself carries no exception detail.
+
+    The known trigger is fixed at the schema (org_id is Optional now); this guard is for the
+    next field that diverges from the database, not for that one.
+    """
+    try:
+        out = AdminUserOut.model_validate(u)
+    except ValidationError:
+        # exc_info so the failing field is in the log; the id so the row can be found.
+        log.error("admin user listing: skipping unserialisable user %s", getattr(u, "id", "?"),
+                  exc_info=True)
+        return None
     out.organization_name = u.organization.name if u.organization else None
     return out
 

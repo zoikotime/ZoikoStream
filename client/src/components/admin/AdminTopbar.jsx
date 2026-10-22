@@ -170,7 +170,11 @@ export default function AdminTopbar({ onMenuClick, state, unknown, onRetry }) {
           className={cx(
             "w-full rounded-full border py-2 pl-9 pr-14 text-[13px] outline-none transition",
             "border-slate-200 bg-slate-100/70 text-slate-800 placeholder:text-slate-400 focus:border-violet-400 focus:bg-white",
-            "dark:border-white/10 dark:bg-white/[0.05] dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus:border-violet-500/60"
+            // focus:bg-white above is the LIGHT theme's focused field. Without a dark
+            // counterpart the dark console inherited it, so putting the caret in the search
+            // box turned it solid white — measured rgb(255,255,255) against a black topbar.
+            // 0.08 is the same lift the console's own listbox uses for an active row.
+            "dark:border-white/10 dark:bg-white/[0.05] dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus:border-violet-500/60 dark:focus:bg-white/[0.08]"
           )}
         />
         <kbd
@@ -190,7 +194,11 @@ export default function AdminTopbar({ onMenuClick, state, unknown, onRetry }) {
             )}
           >
             {results.length === 0 ? (
-              <p className={cx("px-3 py-3 text-[13px]", CONSOLE.faint)}>No matches for “{term}”.</p>
+              // break-words because the panel clips (overflow-hidden) and a query with no
+              // spaces has nothing to wrap at: a 128-character one measured 854px of text in
+              // a 446px panel, so everything past the halfway point was simply gone. Ordinary
+              // terms already wrapped at their spaces and are unaffected.
+              <p className={cx("px-3 py-3 text-[13px] break-words", CONSOLE.faint)}>No matches for “{term}”.</p>
             ) : (
               results.map((r) => (
                 <button

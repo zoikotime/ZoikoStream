@@ -225,10 +225,18 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* Each value is one non-breaking unit, so a narrow viewport wraps BETWEEN them
+          instead of splitting a timestamp down the middle ("Oct 19, 2026," / "10:05 AM"),
+          which is what it did at <= 320px. The paragraph still wraps normally at the
+          spaces between the units, and break-words is the backstop for a timezone name
+          longer than the line rather than a reason to let it overflow. */}
       {data?.range && (
-        <p className={cx("text-[11px]", type.mono, CONSOLE.faint)} data-testid="command-window">
-          Window {fmtInstant(data.range.from)} – {fmtInstant(data.range.to)}
-          {" "}({Intl.DateTimeFormat().resolvedOptions().timeZone}) · current-state tiles read now
+        <p className={cx("text-[11px] break-words", type.mono, CONSOLE.faint)} data-testid="command-window">
+          Window{" "}
+          <span className="whitespace-nowrap">{fmtInstant(data.range.from)} –</span>{" "}
+          <span className="whitespace-nowrap">{fmtInstant(data.range.to)}</span>{" "}
+          <span className="whitespace-nowrap">({Intl.DateTimeFormat().resolvedOptions().timeZone})</span>{" "}
+          <span className="whitespace-nowrap">· current-state tiles read now</span>
           {loading && !matches ? " · loading the selected window…" : ""}
         </p>
       )}

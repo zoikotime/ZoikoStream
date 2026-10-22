@@ -48,6 +48,13 @@ const payload = (mode = "live", kpis = {}) => ({
 });
 
 const calls = () => vi.mocked(api.get).mock.calls.filter(([u]) => u === "/admin/command-center");
+
+// Region and Scope are ui/Dropdown listboxes, not native selects, so they are driven the way
+// an operator drives them: open the trigger, click the option by the label on screen.
+const pick = (field, option) => {
+  fireEvent.click(screen.getByLabelText(field));
+  fireEvent.click(within(screen.getByRole("listbox", { name: field })).getByText(option));
+};
 const lastParams = () => calls().at(-1)?.[1]?.params;
 
 const show = () =>
@@ -103,19 +110,56 @@ describe("the range reaches the request", () => {
   it("sends region, scope and test mode", async () => {
     show();
     await screen.findByText("Live sessions");
-    fireEvent.change(screen.getByLabelText("Region"), { target: { value: "eu" } });
+    pick("Region", "EU");
     await waitFor(() => expect(lastParams()).toMatchObject({ region: "eu" }));
-    fireEvent.change(screen.getByLabelText("Scope"), { target: { value: "core" } });
+    pick("Scope", "Core platform");
     await waitFor(() => expect(lastParams()).toMatchObject({ region: "eu", scope: "core" }));
     fireEvent.click(screen.getByLabelText("Include test mode"));
     await waitFor(() => expect(lastParams()).toMatchObject({ include_test: true, scope: "core" }));
+  });
+
+  // The native <select> these replaced came with keyboard operation for free; the listbox
+  // has to earn it. Pinned on the real filter, not on the component in isolation, because
+  // what matters is that choosing with the keyboard still reaches the request.
+  it("drives Region from the keyboard, and announces as a listbox", async () => {
+    show();
+    await screen.findByText("Live sessions");
+
+    const trigger = screen.getByLabelText("Region");
+    expect(trigger).toHaveAttribute("aria-haspopup", "listbox");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });        // opens, as a select does
+    const list = screen.getByRole("listbox", { name: "Region" });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(list).toHaveAttribute("aria-activedescendant");
+
+    fireEvent.keyDown(list, { key: "ArrowDown" });            // All regions -> NA
+    fireEvent.keyDown(list, { key: "Enter" });
+    await waitFor(() => expect(lastParams()).toMatchObject({ region: "na" }));
+
+    // Escape closes without committing, and hands focus back to the trigger.
+    fireEvent.keyDown(screen.getByLabelText("Region"), { key: "ArrowDown" });
+    fireEvent.keyDown(screen.getByRole("listbox", { name: "Region" }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Region" })).not.toBeInTheDocument());
+    expect(lastParams()).toMatchObject({ region: "na" });
+  });
+
+  it("marks the chosen option as the selected one", async () => {
+    show();
+    await screen.findByText("Live sessions");
+    pick("Region", "EU");
+    await waitFor(() => expect(lastParams()).toMatchObject({ region: "eu" }));
+    fireEvent.click(screen.getByLabelText("Region"));
+    const chosen = within(screen.getByRole("listbox", { name: "Region" })).getByRole("option", { name: /EU/ });
+    expect(chosen).toHaveAttribute("aria-selected", "true");
   });
 
   it("refresh keeps every filter", async () => {
     show();
     await screen.findByText("Live sessions");
     fireEvent.click(screen.getByRole("button", { name: "7d" }));
-    fireEvent.change(screen.getByLabelText("Region"), { target: { value: "na" } });
+    pick("Region", "NA");
     await waitFor(() => expect(lastParams()).toMatchObject({ range: "7d", region: "na" }));
     const n = calls().length;
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -169,6 +213,38 @@ describe("tiles say what they measure", () => {
     await screen.findByText("Platform health");
     // A rising sparkline is not a comparison; the badge used to be computed from it.
     expect(screen.queryByText(/^\d+(\.\d+)?%$/)).toBeNull();
+  });
+
+  // The server decides what the health trend may claim (services/ops.health_history_note —
+  // the samples carry no region or stage dimension). What is pinned here is that whatever
+  // caveat it sends reaches the card instead of being dropped on the floor, and that the
+  // card stays silent only when the server sent nothing to say.
+  it("prints the server's health-history caveat on the card", async () => {
+    const note =
+      "Health is sampled platform-wide, so this trend and the status above cover every region, not only the selected one.";
+    vi.mocked(api.get).mockResolvedValue({ data: payload("24h", {
+      platform_health: { semantics: "current", status: "ok", ok: 7, total: 9, warn: 0, down: 0,
+                         unmonitored: 2, not_configured: 0, series: [{ value: 7 }],
+                         average_ok: 7, history_note: note, comparison: { delta_pct: null } },
+    }) });
+    const { container } = show();
+    await screen.findByText("Platform health");
+    // Substring on the rendered card, so the sentence needs no regex escaping to
+    // be matched exactly as the server sent it.
+    expect(container.textContent).toContain(note);
+  });
+
+  it("says nothing extra when the trend genuinely matches the filters", async () => {
+    vi.mocked(api.get).mockResolvedValue({ data: payload("24h", {
+      platform_health: { semantics: "current", status: "ok", ok: 7, total: 9, warn: 0, down: 0,
+                         unmonitored: 2, not_configured: 0, series: [{ value: 7 }],
+                         average_ok: 7, history_note: null, comparison: { delta_pct: null } },
+    }) });
+    show();
+    await screen.findByText("Platform health");
+    expect(screen.queryByText(/sampled platform-wide/i)).toBeNull();
+    // and the old, self-contradicting wording must never come back
+    expect(screen.queryByText(/trend is shown for Core \+ Live Events only/i)).toBeNull();
   });
 
   it("shows a badge from the server's previous-window comparison", async () => {

@@ -7,11 +7,31 @@ import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, initials } from "..
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import OrgModal from "./OrgModal";
+import ConfirmDialog from "../../ui/ConfirmDialog";
 
 // Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
 // as a dependency, and a fresh `[]` literal on every render would defeat every one of them
 // (permanently, for a response that simply omits the field). It is never mutated.
 const NONE = [];
+
+// What the dialog says about THIS organization. users_count and events_count are already on
+// every row (the list endpoint computes both), and they are two of the things the server
+// refuses a delete over — so the dialog can warn before the operator commits instead of
+// confirming a destructive action the backend was always going to reject.
+function deleteBody(o) {
+  const holds = [
+    o.users_count ? `${o.users_count} user(s)` : null,
+    o.events_count ? `${o.events_count} event(s)` : null,
+  ].filter(Boolean);
+  if (holds.length) {
+    return `${o.name} still has ${holds.join(" and ")}. The platform refuses to delete an `
+      + `organization that still owns records — remove or reassign them first, or suspend the `
+      + `organization instead. Deleting is permanent and cannot be undone.`;
+  }
+  return `${o.name} will be permanently deleted. This cannot be undone. If it still owns `
+    + `events, tickets, invitations or commercial records, the delete will be refused and `
+    + `nothing will change.`;
+}
 
 const PLAN_TONE = { Enterprise: "brand", Pro: "info", Starter: "neutral" };
 const STATUS_TONE = { active: "success", trial: "warning", suspended: "danger" };
@@ -94,14 +114,35 @@ export default function Organizations() {
     }
   };
 
-  const remove = async (o) => {
-    if (!window.confirm(`Delete ${o.name}? This cannot be undone.`)) return;
+  // The row whose delete is being confirmed, and the one whose request is in flight.
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  // window.confirm was the wrong control in two ways: it is not this console's dialog, and
+  // it cannot say anything useful. Deletion is refused by the server whenever the
+  // organization still owns users, events, tickets, invitations or commercial records — so
+  // the dialog now states the preconditions from the row's OWN counts before the operator
+  // commits to a destructive action, instead of confirming and then failing.
+  const remove = async () => {
+    const o = confirmDelete;
+    // Guard rather than rely on the disabled button: a second Enter on the confirm button
+    // must not open a second DELETE for the same row.
+    if (!o || deleting) return;
+    setDeleting(true);
     try {
       await api.delete(`/admin/organizations/${o.id}`);
+      // Only after the server confirmed it. 204 is the success path; anything else threw.
       toast.success(`${o.name} deleted`);
+      setConfirmDelete(null);
+      // Both the table and the counters above it come from the same request.
       reload();
     } catch (e) {
+      // The server's own explanation — which now names the records holding the
+      // organization — rather than a generic failure.
       toast.error(errMsg(e));
+      setConfirmDelete(null);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -149,7 +190,7 @@ export default function Organizations() {
         leftIcon={o.status === "suspended" ? FiCheckCircle : FiSlash}
         onClick={() => toggleSuspend(o)}
       />
-      <Button variant="ghost" size="sm" iconOnly title={`Delete ${o.name}`} leftIcon={FiTrash2} className="hover:text-rose-600 dark:hover:text-rose-400" onClick={() => remove(o)} />
+      <Button variant="ghost" size="sm" iconOnly title={`Delete ${o.name}`} leftIcon={FiTrash2} className="hover:text-rose-600 dark:hover:text-rose-400" onClick={() => setConfirmDelete(o)} />
     </>
   );
 
@@ -241,6 +282,16 @@ export default function Organizations() {
           onSaved={reload}
         />
       )}
+
+      <ConfirmDialog
+        open={Boolean(confirmDelete)}
+        busy={deleting}
+        onClose={() => (deleting ? null : setConfirmDelete(null))}
+        onConfirm={remove}
+        title={confirmDelete ? `Delete ${confirmDelete.name}?` : "Delete organization?"}
+        body={confirmDelete ? deleteBody(confirmDelete) : null}
+        confirmLabel="Delete organization"
+      />
     </div>
   );
 }
