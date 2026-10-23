@@ -12,7 +12,7 @@ import { ROLE_PATH } from "./roleConfig";
 export default function AssignPeopleModal({ open, onClose, eventId, role, assigned, onSaved }) {
   // Seeded once, at mount, from the props that are the source of truth.
   //
-  // EventDetails mounts this conditionally and keys it by role, so "the modal opened" and
+  // The event workspace (Preparation) mounts this conditionally and keys it by role, so "the modal opened" and
   // "this component mounted" are the same event — which is why the initial selection belongs
   // in useState. The effect this replaces re-seeded on `open`, and since the only call site
   // mounts with open={true}, that bought one guaranteed cascading re-render per open and

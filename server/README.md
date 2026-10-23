@@ -57,13 +57,17 @@ venv\Scripts\activate
 
 pip install -r requirements.txt
 
-uvicorn app.main:app --reload
+.\run-dev.ps1          # = uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
 ```
+
+The local API runs on **port 8001** (8000 belongs to another local API on the development machine).
+Override it for one session with `$env:ZOIKOSTREAM_API_PORT = "8010"` before `.\run-dev.ps1`, and set
+`VITE_API_URL` in the repo-root `.env` to the same port.
 
 Swagger
 
 ```
-http://localhost:8000/docs
+http://localhost:8001/docs
 ```
 
 ---
@@ -245,11 +249,11 @@ Upcoming
 
 Swagger
 
-http://localhost:8000/docs
+http://localhost:8001/docs
 
 ReDoc
 
-http://localhost:8000/redoc
+http://localhost:8001/redoc
 
 ---
 

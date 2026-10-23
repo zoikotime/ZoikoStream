@@ -82,6 +82,7 @@ def audit(db: Session, *, actor: User | None, action: str, target_type: str, tar
     entry = AuditLog(
         actor_id=actor.id if actor else None,
         actor_email=actor.email if actor else None,
+        actor_role=getattr(actor, "role", None) if actor else None,
         action=action,
         target_type=target_type,
         target_id=str(target_id) if target_id is not None else None,

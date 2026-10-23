@@ -23,7 +23,7 @@ function MetricsRow({ summary }) {
     <dl className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
       {METRICS.map((m) => {
         const raw = summary?.[m.key];
-        const has = raw != null;
+        const has = typeof raw === "number" && Number.isFinite(raw);
         return (
           <div key={m.key} className="min-w-0">
             <dt className={cx("truncate text-[13px]", CONSOLE.faint)}>{m.label}</dt>

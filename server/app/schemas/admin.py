@@ -419,6 +419,15 @@ class ApiKeyOut(BaseModel):
     # retroactively given a deadline.
     expires_at: datetime | None = None
     revoked: bool = False
+    # Lifecycle, computed by the server at response time (crud.admin.key_lifecycle) so every
+    # surface reads one rule: active | expiring_soon | expired | revoked. `usable` is the
+    # strict now < expires_at test; `seconds_until_expiry` is signed (negative once expired,
+    # None for a non-expiring key); `expiry_warning` is notice / urgent / imminent for a key
+    # inside its last 30 days / 7 days / 24 hours.
+    status: str = "active"
+    usable: bool = True
+    seconds_until_expiry: int | None = None
+    expiry_warning: str | None = None
 
 
 class ApiKeyCreated(ApiKeyOut):

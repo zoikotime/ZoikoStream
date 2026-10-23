@@ -238,7 +238,9 @@ def test_001_developer_surface_creates_no_application():
         r = client.get("/api/organization/developer", headers=headers)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert set(body) == {"api_keys", "webhooks"}, \
+        # key_summary / generated_at are the key inventory's own counts and timestamp
+        # (crud.admin.key_summary), not a new collection.
+        assert set(body) == {"api_keys", "webhooks", "key_summary", "generated_at"}, \
             f"no application collection exists on the developer surface; got {set(body)}"
     finally:
         o.cleanup()
@@ -349,7 +351,7 @@ def test_002_3_to_21_successful_creation_sends_a_safe_class_a_notice():
 
         # 20/21 — CTA is a customer Developer console, never Super Admin or localhost.
         for surface in (text, payload["html"]):
-            assert "/organization/developer" in surface, "CTA is the Developer console"
+            assert "/organization/settings?tab=developer" in surface, "CTA is Developer settings"
             assert "/admin" not in surface, "no customer email may link into Super Admin"
         with patch.object(settings, "ENVIRONMENT", "production"), \
              patch.object(settings, "APP_URL", "http://localhost:5173"):

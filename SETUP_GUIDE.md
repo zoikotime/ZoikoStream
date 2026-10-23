@@ -16,7 +16,7 @@
 
 **Solution:**
 - Verified Supabase PostgreSQL connection is working ✓
-- Backend (uvicorn) running on http://localhost:8000 ✓
+- Backend (uvicorn) running on http://localhost:8001 ✓ (`server/run-dev.ps1`)
 - All CORS headers properly configured
 - Created database seed script for super admin initialization
 
@@ -136,7 +136,7 @@ GET    /dashboard/platform/stats  → Platform-wide stats (super_admin only)
 ## Troubleshooting
 
 ### "Network Error" on Login
-1. Verify backend is running: `Invoke-WebRequest -Uri "http://localhost:8000/health"`
+1. Verify backend is running: `Invoke-WebRequest -Uri "http://localhost:8001/health"`
 2. Check Supabase connection: Database URL in `.env` file
 3. Ensure CORS origins match your development URL (5173, 5174, etc.)
 
@@ -177,7 +177,7 @@ GET    /dashboard/platform/stats  → Platform-wide stats (super_admin only)
 
 **Status:** ✅ All core features implemented and tested
 **Database:** ✅ Supabase PostgreSQL connected
-**Backend:** ✅ Running on localhost:8000
+**Backend:** ✅ Running on localhost:8001
 **Frontend:** Ready for testing on localhost:5173+
 
 
@@ -234,7 +234,7 @@ stripe login
 
 # 2. Forward events to the local endpoint. This prints a whsec_... value —
 #    paste it into STRIPE_WEBHOOK_SECRET in .env, then restart the backend.
-stripe listen --forward-to localhost:8000/api/commercial/webhooks/stripe
+stripe listen --forward-to localhost:8001/api/commercial/webhooks/stripe
 
 # 3. In another terminal, fire test events:
 stripe trigger payment_intent.succeeded

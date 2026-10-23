@@ -1,5 +1,5 @@
 import { FiArrowUpRight, FiArrowDownRight } from "react-icons/fi";
-import { cx, ACCENT } from "./tokens";
+import { CONSOLE, cx, ACCENT } from "./tokens";
 import Card from "./Card";
 import Counter from "./Counter";
 
@@ -39,7 +39,7 @@ export default function StatsCard({
             {isNumber ? <Counter value={value} prefix={prefix} suffix={suffix} decimals={decimals} /> : value}
           </p>
           {hint && (
-            <p className="mt-0.5 text-[11px] leading-4 text-slate-400 dark:text-slate-500">{hint}</p>
+            <p className={cx("mt-0.5 text-[11px] leading-4", CONSOLE.faint)}>{hint}</p>
           )}
         </div>
       </div>

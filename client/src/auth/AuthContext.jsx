@@ -285,8 +285,18 @@ export function AuthProvider({ children }) {
         sessionStorage.removeItem(key);
       } catch { /* storage unavailable */ }
     }
+    const before = generation.current;
     const confirmed = await validate();
-    return confirmed || user || null;
+    if (confirmed) return confirmed;
+    // /auth/me did not confirm the new session. If THIS validation reached a verdict (nothing
+    // newer started — validate() bumps the generation by exactly one), that verdict was a
+    // refusal or a failure and the app is now signed out: return null, so the sign-in page
+    // says the session could not be confirmed instead of greeting the user and navigating to a
+    // dashboard the route guard immediately bounces back to /login. Only a validation that was
+    // superseded by a newer one leaves the outcome to that newer one, and then the login
+    // payload's account stands in, as it always did.
+    if (generation.current === before + 1) return null;
+    return user || null;
   }, [validate]);
 
   /**

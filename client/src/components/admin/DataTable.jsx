@@ -124,6 +124,8 @@ export default function DataTable({
   initialSort = null,
   pageSize,
   minWidth = 640,
+  // What the rows are, for the pagination summary ("Showing 1–10 of 24 events"). Optional.
+  itemLabel,
   // A table wider than its scroller (minWidth on a phone) centres its empty state across the
   // FULL table width, so on a 360px screen most of it sits off to the right and the visible
   // column is blank space between the header row and a clipped message. pinEmpty sizes the
@@ -358,7 +360,9 @@ export default function DataTable({
                       aria-disabled={sortDisabled}
                       title={sortDisabled ? undefined : `Sort by ${typeof c.header === "string" ? c.header : c.key}`}
                       className={cx(
-                        "-mx-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5",
+                        // `uppercase`: preflight resets text-transform on <button>, which left
+                        // sortable headings in mixed case beside the uppercase plain ones.
+                        "-mx-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 uppercase",
                         sortDisabled
                           ? "cursor-default"
                           : cx(
@@ -538,6 +542,7 @@ export default function DataTable({
               ? Math.min(current * pageSize, serverTotal ?? sorted.length)
               : Math.min(current * pageSize, sorted.length)}{" "}
             of {serverPaged ? (serverTotal ?? sorted.length) : sorted.length}
+            {itemLabel ? ` ${itemLabel}` : ""}
           </p>
           <nav aria-label="Pagination" className="flex min-w-0 flex-wrap items-center gap-1">
             <PageBtn disabled={current === 1} onClick={() => goToPage(current - 1)} aria-label="Previous page">

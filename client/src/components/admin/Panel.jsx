@@ -30,6 +30,7 @@ export default function Panel({
       id={id}
       className={cx(
         CONSOLE.panel,
+        id && "scroll-mt-24",
         !isStatic && cx(CONSOLE.panelHover, "transition-colors duration-150 motion-reduce:transition-none"),
         className
       )}
@@ -38,7 +39,7 @@ export default function Panel({
         <header className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
             {eyebrow && (
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              <p className={cx("text-[11px] font-semibold uppercase tracking-wider", CONSOLE.faint)}>
                 {eyebrow}
               </p>
             )}

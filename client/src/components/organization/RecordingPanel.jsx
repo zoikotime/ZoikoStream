@@ -111,7 +111,7 @@ function Row({ rec, eventEnded }) {
 }
 
 export default function RecordingPanel({ event, recordings }) {
-  // null means the request FAILED (EventDetails catches and passes null). That is not the
+  // null means the request FAILED (the Event Workspace's Replay & Assets section catches and passes null). That is not the
   // same as an empty list, and saying "no recording available" for it would be the original
   // bug in a new costume.
   if (recordings === null || recordings === undefined) {

@@ -135,6 +135,28 @@ export const brand = {
 };
 export const brandButton = `${brand.fill} ${brand.fillHover} ${brand.glow} text-white`;
 
+// The console's action ramp (ZST-ENG-DASH-001 frames): violet into magenta — the same fill as
+// the rail's active row — for the console's primary buttons. The marketing site keeps the
+// blue-led `brand` ramp above; only the console wears this one.
+//
+// White text sits on it, so every point of the ramp must hold 4.5:1 (it is interpolated in
+// oklab; the lightest point decides). The frames' fuchsia-600 → pink-500 end measured 3.8:1
+// under button labels, and the lighter hover stops 2.8:1. These stops hold ≥5.8:1 end to end,
+// and hover darkens rather than lightens (≥7.2:1), in both themes. Pinned by ui/contrast.test.js.
+export const actionStops = "from-violet-600 via-fuchsia-700 to-pink-700";
+export const actionStopsHover = "hover:from-violet-700 hover:via-fuchsia-800 hover:to-pink-800";
+export const consoleAction = cx(
+  "bg-gradient-to-r text-white",
+  actionStops,
+  actionStopsHover,
+  "shadow-[0_8px_20px_-10px_rgba(217,70,239,0.7)] hover:shadow-[0_10px_24px_-10px_rgba(217,70,239,0.85)]"
+);
+// Identity chips in the console shell — the signed-in member's avatar (top bar, its menu, the
+// rail) and the workspace badge: the same AA stops on the diagonal, the same in both themes.
+// White initials sit on it; violet-500 → fuchsia-500 measured 3.5:1 under them, and `brand.chip`
+// drops to 3.5:1 in dark mode. Pinned by ui/contrast.test.js.
+export const consoleChip = `bg-gradient-to-br ${actionStops} text-white`;
+
 // Interaction primitives — every interactive element composes these.
 export const focusRing =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-900";
@@ -205,7 +227,11 @@ export const CONSOLE = {
   heading: "text-slate-900 dark:text-white",
   body: "text-slate-600 dark:text-neutral-200",
   muted: "text-slate-500 dark:text-neutral-300",
-  faint: "text-slate-400 dark:text-neutral-400",
+  // Light: slate-500, not slate-400 — 400 measured 2.5–2.6:1 on white and the slate-50 page,
+  // and there is no lighter slate that reaches 4.5:1 on slate-50, so faint and muted now share
+  // a colour in light mode. On a tinted surface (violet-50, rose-50) even 500 is 4.3–4.4:1;
+  // those few places step up to slate-600 themselves. Dark keeps neutral-400 (≥7:1 on black).
+  faint: "text-slate-500 dark:text-neutral-400",
   // Controls
   control:
     "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-white/[0.16] dark:bg-white/[0.07] dark:text-neutral-100 dark:hover:bg-white/[0.12]",

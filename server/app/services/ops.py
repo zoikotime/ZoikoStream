@@ -683,6 +683,63 @@ def _upcoming_stmt(include_test: bool, high_impact_only: bool, horizon: timedelt
     return stmt
 
 
+def _event_gates(db: Session, ev: Event, hosts: dict, single_path: set) -> list[dict]:
+    gates = _gate_results(ev, hosts, single_path)
+    commercial_gate = _commercial_gate(db, ev)
+    return gates + [commercial_gate] if commercial_gate is not None else gates
+
+
+def readiness_for(db: Session, ev: Event) -> dict:
+    """ONE event's readiness, from the same gates event_readiness evaluates for the upcoming
+    list — so the Event Workspace's Preparation section and every list that shows a verdict
+    can never disagree. Evaluated for the event in front of the caller whatever its status or
+    start time; the caller decides what a verdict means for an event already on air."""
+    hosts = _event_hosts(db, [ev.id])
+    single_path = set(db.scalars(
+        select(GovernanceRecord.event_id).where(
+            GovernanceRecord.kind == "single_path_override",
+            GovernanceRecord.resolved_at.is_(None),
+            GovernanceRecord.event_id == ev.id,
+        )
+    ).all())
+    gates = _event_gates(db, ev, hosts, single_path)
+    return {
+        "id": str(ev.id),
+        "impact": ev.impact or "standard",
+        "verdict": _verdict(gates),
+        "gates": gates,
+        "failing": [g["label"] for g in gates if not g["passed"]],
+    }
+
+
+def readiness_many(db: Session, events) -> dict:
+    """{event_id: {verdict, blockers, failing}} for a page of events, from the same gates —
+    three queries for the page plus the commercial gate where an event carries one. What the
+    Events list's Readiness column reads, so it can never disagree with the event's own
+    Preparation section."""
+    events = list(events)
+    if not events:
+        return {}
+    ids = [e.id for e in events]
+    hosts = _event_hosts(db, ids)
+    single_path = set(db.scalars(
+        select(GovernanceRecord.event_id).where(
+            GovernanceRecord.kind == "single_path_override",
+            GovernanceRecord.resolved_at.is_(None),
+            GovernanceRecord.event_id.in_(ids),
+        )
+    ).all())
+    out = {}
+    for ev in events:
+        gates = _event_gates(db, ev, hosts, single_path)
+        out[ev.id] = {
+            "verdict": _verdict(gates),
+            "blockers": sum(1 for g in gates if g["required"] and not g["passed"]),
+            "failing": sum(1 for g in gates if not g["passed"]),
+        }
+    return out
+
+
 def event_readiness(db: Session, include_test: bool, limit: int = 8,
                     high_impact_only: bool = True, *, horizon: timedelta | None = None,
                     org_filter: "OrgFilter | None" = None) -> list[dict]:
@@ -707,10 +764,7 @@ def event_readiness(db: Session, include_test: bool, limit: int = 8,
 
     out = []
     for ev in events:
-        gates = _gate_results(ev, hosts, single_path)
-        commercial_gate = _commercial_gate(db, ev)
-        if commercial_gate is not None:
-            gates = gates + [commercial_gate]
+        gates = _event_gates(db, ev, hosts, single_path)
         out.append({
             "id": str(ev.id),
             "title": ev.title or "Untitled event",

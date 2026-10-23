@@ -115,7 +115,7 @@ describe("exporting in the browser", () => {
     expect(notify.error).not.toHaveBeenCalled();
 
     // The data the page already fetched for this org — no second request, no other source.
-    expect(api.get).toHaveBeenCalledTimes(1);
+    expect(api.get.mock.calls.filter(([url]) => url === "/organization/analytics")).toHaveLength(1);
     expect(api.get).toHaveBeenCalledWith("/organization/analytics", { params: { range: "30d" } });
 
     expect(blobs).toHaveLength(1);

@@ -15,7 +15,8 @@ vi.mock("../../api", () => ({
 
 vi.mock("../../auth/AuthContext", () => ({
   useAuth: () => ({
-    user: { full_name: "Vihari Owner", email: "owner@example.com" },
+    // The create action is offered only with the privilege to create (ZST-UX-NAV-001 §3.1).
+    user: { full_name: "Vihari Owner", email: "owner@example.com", role: "org_admin" },
     logout: vi.fn(),
   }),
 }));

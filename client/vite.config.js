@@ -1,6 +1,12 @@
-import { defineConfig } from 'vite'
+import { fileURLToPath } from 'node:url'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { ALLOW_LOOPBACK_API_ENV, isLoopbackUrl, loopbackApiGuard } from './src/loopbackApiGuard.js'
+
+// The repo root, where the shared .env lives. Absolute, so the guard below and Vite itself
+// provably read the same files whatever directory the build is started from.
+const ENV_DIR = fileURLToPath(new URL('..', import.meta.url))
 
 
 // ── DROP CHUNKS NOTHING CAN REACH (mobile build only) ────────────────────────────────────
@@ -75,9 +81,29 @@ const pruneUnreachableChunks = () => ({
   },
 })
 
-export default defineConfig(({ mode }) => ({
+// ── NO DEVELOPMENT API ADDRESS IN A DEPLOYABLE BUNDLE (src/loopbackApiGuard.js) ────────────
+// The shared .env's VITE_API_URL is the local API (http://127.0.0.1:<port>). The dev server uses
+// it; a build must not embed it, or every visitor's browser calls its own machine. Vite loads the
+// env files after the config function returns and lets a VITE_* value already in process.env win
+// over them, so blanking it here is what the bundle sees: it then calls its own origin, where
+// production serves the API. Returns the guard plugin, which also checks the finished output.
+const noLoopbackApiInBuild = (command, mode) => {
+  if (command !== 'build') return []
+  const allow = process.env[ALLOW_LOOPBACK_API_ENV] === '1'
+  let droppedApiUrl = null
+  if (!allow) {
+    const { VITE_API_URL } = loadEnv(mode, ENV_DIR, 'VITE_')
+    if (isLoopbackUrl(VITE_API_URL)) {
+      droppedApiUrl = VITE_API_URL
+      process.env.VITE_API_URL = ''
+    }
+  }
+  return [loopbackApiGuard({ allow, droppedApiUrl })]
+}
+
+export default defineConfig(({ command, mode }) => ({
   // Load env from the repo root so backend + frontend share one .env file.
-  envDir: '..',
+  envDir: ENV_DIR,
   plugins: [
     react(),
     tailwindcss(),
@@ -85,6 +111,8 @@ export default defineConfig(({ mode }) => ({
     // nothing to do — but running a bundle-mutating step against the artefact that serves
     // production, to achieve nothing, is not a trade worth making.
     ...(mode === 'mobile' ? [pruneUnreachableChunks()] : []),
+    // Every build, mobile included.
+    ...noLoopbackApiInBuild(command, mode),
   ],
   // The app's .jsx uses the automatic JSX runtime (no `import React`). Vitest transforms
   // through esbuild rather than the react plugin's babel step, so it needs telling — without

@@ -92,7 +92,9 @@ export default function MetricCard({
 
   const shell = cx("rounded-2xl border p-5 transition-colors duration-150 motion-reduce:transition-none", t.surface);
 
-  if (!to) return <div className={shell}>{body}</div>;
+  // Not a link (nothing to open, or the reader may not open it): still a named group, so a
+  // screen reader announces which figure this is.
+  if (!to) return <div role="group" aria-label={label} className={shell}>{body}</div>;
 
   return (
     <Link

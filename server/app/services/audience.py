@@ -305,18 +305,27 @@ def _breakdown(rows, key, labels=None):
     return sorted(out, key=lambda r: (-r["viewers"], r[key]))
 
 
-def insights(db: Session, org, range_key: str = "30d", event_id: uuid.UUID | None = None) -> dict:
+def insights(db: Session, org, range_key: str = "30d", event_id: uuid.UUID | None = None,
+             *, whole_event: bool = False) -> dict:
     """Geography, device mix, registration -> attendance and blocked joins for one
     organization over the Audience page's window (and optionally one event).
+
+    `whole_event` (only with an event_id) drops the window: the Event Workspace's Insights
+    section reports the event's whole audience, and an event held more than a window ago
+    must not read as having had none.
 
     Every figure counts one identified viewer per event (a viewer of two events counts in
     both), never socket reconnects. Staff are never recorded, so never counted.
     """
     from .org import ANALYTICS_RANGES   # local import: org imports far more than this module
 
-    since = _now() - ANALYTICS_RANGES.get(range_key, ANALYTICS_RANGES["30d"])
-    sessions_where = [AudienceSession.org_id == org.id, AudienceSession.last_seen_at >= since]
-    denials_where = [JoinDenial.org_id == org.id, JoinDenial.created_at >= since]
+    whole_event = whole_event and event_id is not None
+    since = None if whole_event else _now() - ANALYTICS_RANGES.get(range_key, ANALYTICS_RANGES["30d"])
+    sessions_where = [AudienceSession.org_id == org.id]
+    denials_where = [JoinDenial.org_id == org.id]
+    if since is not None:
+        sessions_where.append(AudienceSession.last_seen_at >= since)
+        denials_where.append(JoinDenial.created_at >= since)
     if event_id is not None:
         sessions_where.append(AudienceSession.event_id == event_id)
         denials_where.append(JoinDenial.event_id == event_id)
@@ -345,12 +354,12 @@ def insights(db: Session, org, range_key: str = "30d", event_id: uuid.UUID | Non
     # the live stream. Every link-shareable event asks viewers to register and a private one
     # registers its invitees (routers/events.registration_gate_required), so the measure is
     # "not applicable" exactly when nobody registered — never a 0% over nothing.
-    event_scope = [
-        Event.org_id == org.id, Event.deleted_at.is_(None),
-        or_(Event.start_time >= since, Event.end_time >= since, Event.status.in_(("live", "degraded")),
+    event_scope = [Event.org_id == org.id, Event.deleted_at.is_(None)]
+    if since is not None:
+        event_scope.append(or_(
+            Event.start_time >= since, Event.end_time >= since, Event.status.in_(("live", "degraded")),
             and_(Event.start_time.is_(None), Event.created_at >= since),
-            Event.id.in_(select(BroadcastSession.event_id).where(BroadcastSession.started_at >= since))),
-    ]
+            Event.id.in_(select(BroadcastSession.event_id).where(BroadcastSession.started_at >= since))))
     if event_id is not None:
         event_scope.append(Event.id == event_id)
     staff_emails = select(func.lower(User.email)).where(User.org_id == org.id)
@@ -368,7 +377,7 @@ def insights(db: Session, org, range_key: str = "30d", event_id: uuid.UUID | Non
     ).all()
 
     return {
-        "range": range_key,
+        "range": "event" if whole_event else range_key,
         "since": since,
         "event_id": event_id,
         "viewers": viewers,

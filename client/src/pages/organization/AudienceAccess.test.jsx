@@ -30,11 +30,11 @@ import { ThemeProvider } from "../../theme/ThemeContext";
 import AudienceAccess from "./AudienceAccess";
 
 const EVENTS = [
-  { id: "e1", title: "Full House", visibility: "public", registration_required: true,
+  { id: "e1", title: "Full House", status: "published", visibility: "public", registration_required: true,
     registration_limit: 10, registered_count: 10, start_time: "2026-09-16T12:11:00Z" },
-  { id: "e2", title: "Nearly There", visibility: "private", registration_required: true,
+  { id: "e2", title: "Nearly There", status: "published", visibility: "private", registration_required: true,
     registration_limit: 10, registered_count: 9, start_time: "2026-09-15T12:11:00Z" },
-  { id: "e3", title: "Open Door", visibility: "public", registration_required: false,
+  { id: "e3", title: "Open Door", status: "published", visibility: "public", registration_required: false,
     registration_limit: null, registered_count: 0, start_time: "2026-09-14T12:11:00Z" },
 ];
 
@@ -124,8 +124,11 @@ const summaryParams = () => {
   const calls = vi.mocked(api.get).mock.calls.filter(([u]) => u === "/organization/audience-summary");
   return calls[calls.length - 1]?.[1]?.params;
 };
-const rowFor = (title) => screen.getByText(title).closest("tr");
-const card = (label) => screen.getByText(label).closest("div");
+// Rows live in the "Access by event" table; event titles also appear in Needs attention.
+const accessTable = () => within(screen.getByRole("heading", { name: "Access by event" }).closest("section"));
+const rowFor = (title) => accessTable().getByText(title).closest("tr");
+// A KPI tile, by its label (KpiTile is a named group).
+const card = (label) => screen.getByRole("group", { name: label });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -148,7 +151,7 @@ const block = (title) => screen.getByRole("region", { name: title });
 describe("KPI row", () => {
   it("reads the dataset-wide summary rather than summing the page", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     // The page holds 3 rows; the cards must come from the summary endpoint regardless.
     expect(summaryParams()).toBeTruthy();
     // Asserted as "a figure, not an em dash" rather than as the literal 19: StatCard renders
@@ -160,9 +163,15 @@ describe("KPI row", () => {
     expect(vi.mocked(api.get).mock.calls.some(([u]) => u === "/organization/audience-summary")).toBe(true);
   });
 
+  it("keeps the governance card's small print legible on its dark fill (white/50 measured 4.22:1)", async () => {
+    renderPage();
+    await accessTable().findByText("Full House");
+    expect(screen.getByText("View-only summary · policy-gated controls")).toHaveClass("text-white/60");
+  });
+
   it("shows a real registration total, not an em dash", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     expect(within(card("Registrations")).queryByText("—")).not.toBeInTheDocument();
   });
 
@@ -184,7 +193,7 @@ describe("KPI row", () => {
   it("shows an em dash — never a zero — when the summary call fails", async () => {
     failSummary = true;
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
 
     expect(await screen.findByText(/couldn't load the audience totals/i)).toBeInTheDocument();
     expect(within(card("Registrations")).getByText("—")).toBeInTheDocument();
@@ -194,7 +203,7 @@ describe("KPI row", () => {
   it("keeps the table working when only the summary failed", async () => {
     failSummary = true;
     renderPage();
-    expect(await screen.findByText("Full House")).toBeInTheDocument();
+    expect(await accessTable().findByText("Full House")).toBeInTheDocument();
   });
 
   it("explains an at-capacity zero when nothing has a capacity", async () => {
@@ -215,7 +224,7 @@ describe("KPI row", () => {
 describe("per-event figures", () => {
   it("shows the real registered count for each event", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
 
     // The Registered cell is split across elements ("10" + " / 10"), so getByText cannot see
     // it as one string — assert on the row's text instead.
@@ -226,7 +235,7 @@ describe("per-event figures", () => {
 
   it("renders a counted zero as 0, not an em dash", async () => {
     renderPage();
-    await screen.findByText("Open Door");
+    await accessTable().findByText("Open Door");
     const row = rowFor("Open Door");
     expect(within(row).getByText("0")).toBeInTheDocument();
   });
@@ -240,13 +249,16 @@ describe("per-event figures", () => {
           ? Promise.resolve({ data: SUMMARY })
           : Promise.resolve({ data: ATTENDANCE }));
     renderPage();
-    await screen.findByText("Full House");
-    expect(within(rowFor("Full House")).getByText("—")).toBeInTheDocument();
+    await accessTable().findByText("Full House");
+    const headers = accessTable().getAllByRole("columnheader").map((th) => th.textContent.trim());
+    const cell = within(rowFor("Full House")).getAllByRole("cell")[headers.indexOf("Registrations")];
+    expect(within(cell).getByText("—")).toBeInTheDocument();
+    expect(within(cell).queryByText("0")).not.toBeInTheDocument();
   });
 
   it("names the real capacity, and says Uncapped only when none is configured", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
 
     expect(within(rowFor("Full House")).getByText(/of 10/)).toBeInTheDocument();
     // registration_limit is null on this one — genuinely uncapped.
@@ -256,7 +268,7 @@ describe("per-event figures", () => {
 
   it("takes the audience type from the event's own visibility", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     expect(within(rowFor("Full House")).getByText(/public/i)).toBeInTheDocument();
     // Not hardcoded to Public — this one really is private.
     expect(within(rowFor("Nearly There")).getByText(/private/i)).toBeInTheDocument();
@@ -264,7 +276,7 @@ describe("per-event figures", () => {
 
   it("shows the real registration state per event", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     expect(within(rowFor("Full House")).getByText(/required/i)).toBeInTheDocument();
     // Exact match: the event is literally called "Open Door", so a loose /open/i matches the
     // title cell too.
@@ -277,7 +289,7 @@ describe("per-event figures", () => {
 describe("the date range is real", () => {
   it("sends the range to the summary and a matching window to the events list", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     expect(summaryParams().range).toBe("30d");
     expect(listParams().date_from).toBeTruthy();
   });
@@ -285,7 +297,7 @@ describe("the date range is real", () => {
   it.each(["7 days", "90 days"])("refetches everything when %s is chosen", async (label) => {
     const u = userEvent.setup();
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
 
     await u.click(screen.getByRole("button", { name: label }));
 
@@ -298,7 +310,7 @@ describe("the date range is real", () => {
   it("moves the window: a longer range asks for an earlier date_from", async () => {
     const u = userEvent.setup();
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     const thirty = new Date(listParams().date_from).getTime();
 
     await u.click(screen.getByRole("button", { name: "90 days" }));
@@ -311,7 +323,7 @@ describe("search is server-side", () => {
   it("sends q to the API rather than filtering the fetched page", async () => {
     const u = userEvent.setup();
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
 
     await u.type(screen.getByLabelText(/search events/i), "Nearly");
     await waitFor(() => expect(listParams().q).toBe("Nearly"));
@@ -321,7 +333,7 @@ describe("search is server-side", () => {
     const u = userEvent.setup();
     eventsTotal = 120;
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
 
     await u.click(screen.getByRole("button", { name: "2" }));
     await waitFor(() => expect(listParams().page).toBe(2));
@@ -335,7 +347,7 @@ describe("search is server-side", () => {
 describe("pagination is server-side", () => {
   it("asks for a page and a page size inside the API cap", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     expect(listParams().page).toBe(1);
     expect(listParams().page_size).toBeLessThanOrEqual(100);
   });
@@ -344,7 +356,7 @@ describe("pagination is server-side", () => {
     const u = userEvent.setup();
     eventsTotal = 120;
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
 
     expect(await screen.findByText(/of 120/)).toBeInTheDocument();
     await u.click(screen.getByRole("button", { name: "2" }));
@@ -358,7 +370,7 @@ describe("export", () => {
   it("exports the counted values, not placeholders", async () => {
     const u = userEvent.setup();
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
 
     await u.click(screen.getByRole("button", { name: /export/i }));
     expect(downloadCsv).toHaveBeenCalled();
@@ -379,7 +391,7 @@ describe("export", () => {
 describe("organization scoping", () => {
   it("never sends an org_id — the server derives it from the session", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     for (const [, cfg] of vi.mocked(api.get).mock.calls) {
       expect(cfg?.params ?? {}).not.toHaveProperty("org_id");
     }
@@ -389,13 +401,13 @@ describe("organization scoping", () => {
 describe("the Playback & Access entry points are gone", () => {
   it("no longer offers a Playback gates action", async () => {
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     expect(screen.queryByText(/playback gates/i)).not.toBeInTheDocument();
   });
 
   it("links nowhere into /organization/playback", async () => {
     const { container } = renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     const hrefs = [...container.querySelectorAll("a")].map((a) => a.getAttribute("href"));
     expect(hrefs.some((h) => h && h.includes("/organization/playback"))).toBe(false);
   });
@@ -489,7 +501,7 @@ describe("audience insights", () => {
   it("follows the page's date range", async () => {
     const u = userEvent.setup();
     renderPage();
-    await screen.findByText("Full House");
+    await accessTable().findByText("Full House");
     await waitFor(() => expect(insightsParams().range).toBe("30d"));
     await u.click(screen.getByRole("button", { name: "7 days" }));
     await waitFor(() => expect(insightsParams().range).toBe("7d"));
@@ -512,5 +524,90 @@ describe("error handling", () => {
         : Promise.resolve({ data: url.includes("summary") ? SUMMARY : ATTENDANCE }));
     renderPage();
     expect(await screen.findByText(/couldn't load events/i)).toBeInTheDocument();
+  });
+});
+
+// ── player sessions (ORG-03 "Playback activity" and the table's Sessions column) ─────────────
+
+describe("player sessions", () => {
+  const QOE = {
+    live: { sessions: 5 }, replay: { sessions: 2 },
+    total: { sessions: 7, playback_starts: 6, failed_sessions: 0, failures: [] },
+    series: { bucket: "day", timezone: "UTC", points: [
+      { start: "2026-10-20T00:00:00+00:00", sessions: 3, playback_starts: 3 },
+      { start: "2026-10-21T00:00:00+00:00", sessions: 4, playback_starts: 3 },
+    ] },
+    by_event: { e1: 4, e2: 3 },
+  };
+  const withQoe = (qoe) => {
+    serve();
+    const base = vi.mocked(api.get).getMockImplementation();
+    vi.mocked(api.get).mockImplementation((url, cfg) =>
+      url === "/organization/playback/qoe" ? Promise.resolve({ data: qoe }) : base(url, cfg));
+  };
+  const sessionsOf = (title) => {
+    const headers = accessTable().getAllByRole("columnheader").map((th) => th.textContent.trim());
+    return within(rowFor(title)).getAllByRole("cell")[headers.indexOf("Sessions")];
+  };
+
+  it("counts each event's sessions from the server, and a listed event with none as 0", async () => {
+    withQoe(QOE);
+    renderPage();
+    await accessTable().findByText("Full House");
+    await waitFor(() => expect(sessionsOf("Full House")).toHaveTextContent("4"));
+    expect(sessionsOf("Nearly There")).toHaveTextContent("3");
+    expect(sessionsOf("Open Door")).toHaveTextContent("0");
+    expect(screen.getByText("7 total sessions")).toBeInTheDocument();
+    expect(screen.getByText(/Live 5 · Replay 2/)).toBeInTheDocument();
+  });
+
+  it("asks for the page's own window — 90 days is 90 days, not all time", async () => {
+    withQoe(QOE);
+    renderPage();
+    await accessTable().findByText("Full House");
+    await userEvent.click(screen.getByRole("button", { name: "90 days" }));
+    await waitFor(() => {
+      const windows = vi.mocked(api.get).mock.calls
+        .filter(([u]) => u === "/organization/playback/qoe").map(([, c]) => c.params.window);
+      expect(windows).toContain("90d");
+      expect(windows).not.toContain("all");
+    });
+  });
+
+  it("says nothing was reported instead of drawing an empty chart", async () => {
+    withQoe({ ...QOE, total: { sessions: 0 }, live: { sessions: 0 }, replay: { sessions: 0 },
+              series: { bucket: "day", timezone: "UTC", points: [] }, by_event: {} });
+    renderPage();
+    expect(await screen.findByText("No playback sessions were reported in this window.")).toBeInTheDocument();
+  });
+
+  it("shows — for every event's sessions when the player figures cannot be read", async () => {
+    serve();
+    const base = vi.mocked(api.get).getMockImplementation();
+    vi.mocked(api.get).mockImplementation((url, cfg) =>
+      url === "/organization/playback/qoe" ? Promise.reject(new Error("down")) : base(url, cfg));
+    renderPage();
+    await accessTable().findByText("Full House");
+    await waitFor(() => expect(sessionsOf("Full House")).toHaveTextContent("—"));
+    expect(sessionsOf("Full House")).not.toHaveTextContent("0");
+  });
+});
+
+// ── sorting ──────────────────────────────────────────────────────────────────────────────
+
+describe("sorting", () => {
+  it("keeps every server-side order, including visibility and capacity", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await accessTable().findByText("Full House");
+    const sortBy = screen.getByRole("combobox", { name: "Sort events" });
+    await user.selectOptions(sortBy, "visibility:asc");
+    await waitFor(() => expect(listParams()).toMatchObject({ sort_by: "visibility", order: "asc" }));
+    await user.selectOptions(sortBy, "pct:desc");
+    await waitFor(() => expect(listParams()).toMatchObject({ sort_by: "registration_limit", order: "desc" }));
+    await user.selectOptions(sortBy, "registered:desc");
+    await waitFor(() => expect(listParams()).toMatchObject({ sort_by: "registered", order: "desc" }));
+    await user.selectOptions(sortBy, "start_time:desc");
+    await waitFor(() => expect(listParams()).toMatchObject({ sort_by: "start_time", order: "desc" }));
   });
 });

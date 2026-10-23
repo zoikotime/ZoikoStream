@@ -1,32 +1,29 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useMatch, useNavigate } from "react-router-dom";
 import {
-  FiMenu, FiLogOut, FiUser, FiChevronDown, FiPlus, FiRefreshCw,
+  FiArrowLeft, FiChevronDown, FiHelpCircle, FiLogOut, FiMenu, FiPlus, FiRefreshCw, FiSearch, FiUser,
 } from "react-icons/fi";
 import { useAuth } from "../../auth/AuthContext";
-import { CONSOLE, brand, brandButton, cx, focusRing, z } from "../../ui/tokens";
+import { CONSOLE, brandButton, consoleChip, cx, focusRing, z } from "../../ui/tokens";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import ThemeToggle from "../../ui/ThemeToggle";
 import HealthDot from "../admin/HealthDot";
 import QuickActionsMenu from "../organization/QuickActionsMenu";
 import UserAvatar from "../../ui/UserAvatar";
+import { isAdminRole } from "./orgNav";
 
-// Organization console topbar. One presentation for every /organization/* route: the
-// primary "request live event" action, theme, and the account menu.
+// Organization console topbar (ZST-ENG-DASH-001 ORG-01..08, EVT-01..07): search on the left,
+// help and who you are on the right; inside an event, the way back to the console first.
 //
-// What it deliberately no longer carries:
-//   * the workspace and time-range selectors — no page read them any more, so they were
-//     dead controls occupying the bar on every screen
-//   * a permanent health verdict — a "Healthy" pill the reader cannot act on, duplicated on
-//     every page; the real verdict and its history live on Support & Status
-// The FAILURE case is kept: if /organization/console-state cannot be reached the shell has
-// no identity, no badges and no verdict, and that is worth saying with a retry attached.
+// The search is real, not a decoration: in the console it searches events by name (the
+// Events list, filtered on the server); inside an event it searches that event's Activity &
+// Audit ledger (actions, actors, request references). Both are ordinary navigations.
 //
-// `quickActions` swaps in the Quick Actions menu for the Profile page, which asks for it
-// through useOrgScope — the control lives here, the decision belongs to the page.
-//
-// The notification bell that used to live here was hardcoded to "3" with no data source; it
-// is gone rather than lying about unread items.
+// What it deliberately does not carry:
+//   * a notification bell — there is no notification feed to back it, and a bell with nothing
+//     behind it is a control that lies (one with a hardcoded "3" was removed earlier)
+//   * a permanent health verdict — the rail's footer carries service status; the FAILURE case
+//     (console state unreachable) still shows here, with a retry attached.
 const UNKNOWN = { status: "neutral", label: "Status unavailable" };
 
 function useClickOutside(onClose) {
@@ -37,6 +34,43 @@ function useClickOutside(onClose) {
     return () => document.removeEventListener("mousedown", onDown);
   }, [onClose]);
   return ref;
+}
+
+function SearchBox({ eventId }) {
+  const navigate = useNavigate();
+  const [term, setTerm] = useState("");
+  const submit = (e) => {
+    e.preventDefault();
+    const q = term.trim();
+    if (!q) return;
+    navigate(
+      eventId
+        ? `/organization/events/${eventId}/activity?q=${encodeURIComponent(q)}`
+        : `/organization/events?q=${encodeURIComponent(q)}`
+    );
+    setTerm("");
+  };
+  const label = eventId ? "Search this event's activity, actors and request IDs" : "Search events by name";
+  return (
+    <form role="search" onSubmit={submit} className="relative hidden min-w-0 max-w-xl flex-1 md:block">
+      <FiSearch aria-hidden="true" className={cx("pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2", CONSOLE.faint)} />
+      <input
+        type="search"
+        value={term}
+        onChange={(e) => setTerm(e.target.value)}
+        aria-label={label}
+        // Says what it searches. The frames read "events, recordings, people and settings";
+        // only events are searchable by the API today, so the field claims nothing more.
+        placeholder={eventId ? "Search this event's activity, actors and request IDs…" : "Search events by name or description…"}
+        className={cx(
+          "h-11 w-full rounded-xl border pl-10 pr-3 text-[13.5px]",
+          "border-slate-200 bg-slate-50/70 text-slate-800 placeholder:text-slate-400",
+          "hover:border-slate-300 focus-visible:border-violet-500 focus-visible:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/30",
+          "dark:border-white/[0.14] dark:bg-white/[0.05] dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus-visible:bg-white/[0.08]"
+        )}
+      />
+    </form>
+  );
 }
 
 export default function Topbar({
@@ -54,9 +88,11 @@ export default function Topbar({
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useClickOutside(() => setMenuOpen(false));
+  const inEvent = useMatch("/organization/events/:id/*");
+  const eventId = inEvent?.params?.id;
 
-  // The overview payload's user when it has loaded, falling back field by field to the signed-in
-  // account, so the menu header never shows an empty name while the account has one.
+  // The console-state user when it has loaded, falling back field by field to the signed-in
+  // account, so the header never shows an empty name while the account has one.
   const person = {
     ...(state?.user || {}),
     name: state?.user?.name || user?.full_name,
@@ -65,6 +101,7 @@ export default function Topbar({
     // (ProfilePhotoEditor), a beat before /console-state catches up.
     avatar_url: user ? user.avatar_url ?? null : state?.user?.avatar_url ?? null,
   };
+  const canCreate = isAdminRole(state?.user?.role ?? user?.role ?? "org_admin");
 
   const iconBtnBase = cx(
     "grid place-items-center rounded-lg transition-colors duration-150 motion-reduce:transition-none",
@@ -107,16 +144,13 @@ export default function Topbar({
       >
         <FiMenu className="text-xl" aria-hidden="true" />
       </button>
-
       <button
         type="button"
         onClick={onToggleCollapse}
-        // Icon-only, so the accessible name has to carry the whole meaning — and it names
-        // the ACTION, not the state, because that is what a click will do.
         aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         aria-expanded={!collapsed}
         title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        className={cx(iconBtn, "hidden lg:grid")}
+        className={cx(iconBtn, "hidden border-transparent bg-transparent lg:grid dark:border-transparent dark:bg-transparent")}
       >
         {collapsed ? (
           <PanelLeftOpen className="h-[18px] w-[18px]" aria-hidden="true" />
@@ -125,17 +159,20 @@ export default function Topbar({
         )}
       </button>
 
+      {eventId && (
+        <nav aria-label="Console" className="hidden shrink-0 items-center gap-2 text-[13.5px] font-semibold xl:flex">
+          <Link to="/organization/events" className={cx("inline-flex items-center gap-2 rounded", CONSOLE.heading, focusRing)}>
+            <FiArrowLeft aria-hidden="true" /> Organization Console
+          </Link>
+          <span aria-hidden="true" className={CONSOLE.faint}>/</span>
+          <span className={CONSOLE.heading}>Event Workspace</span>
+        </nav>
+      )}
+
+      <SearchBox key={eventId || "org"} eventId={eventId} />
+
       <div className="ml-auto flex items-center gap-2 sm:gap-2.5">
-        {/* Silent when things are fine, actionable when they are not.
-            A permanent "Healthy" pill on every page is a readout nobody can act on, and it
-            is what made the console feel like a monitoring tool; the real verdict, with its
-            history, lives on Support & Status. What is NOT dropped is the failure case: when
-            /organization/console-state cannot be reached the shell has no identity, no
-            badges and no verdict, and the reader needs to know that and be able to retry.
-            So: healthy renders nothing, unreachable renders a retry. */}
         {quickActions ? (
-          // `md:inline-flex` on the pill it replaces hid the verdict on phones; the menu is
-          // an ACTION, not a readout, so it stays available at every width.
           <QuickActionsMenu />
         ) : unknown ? (
           <button
@@ -143,8 +180,7 @@ export default function Topbar({
             className={cx(
               "hidden items-center gap-1.5 rounded-full border px-2.5 py-1.5 md:inline-flex",
               "border-slate-200 bg-slate-50 dark:border-white/10 dark:bg-white/[0.04]",
-              "transition-colors duration-150 hover:bg-slate-100 dark:hover:bg-white/[0.08]",
-              "motion-reduce:transition-none",
+              "transition-colors duration-150 hover:bg-slate-100 dark:hover:bg-white/[0.08] motion-reduce:transition-none",
               focusRing
             )}
             title="Couldn’t reach the API — click to retry"
@@ -154,26 +190,27 @@ export default function Topbar({
           </button>
         ) : null}
 
-        {/* Primary action: schedule a live event for this organization. Reuses the existing
-            Events page create flow rather than adding a second creation path. */}
-        <button
-          onClick={() => navigate("/organization/events?create=true")}
-          className={cx(
-            "group inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-semibold",
-            // Same brand ramp as the console's primary Button and the rail's active row.
-            brandButton,
-            "active:scale-[0.98]",
-            "transition-[background-image,box-shadow,transform] duration-150 ease-out",
-            "motion-reduce:transition-none motion-reduce:active:scale-100",
-            focusRing
-          )}
-        >
-          <FiPlus
-            className="text-[14px] transition-transform duration-150 group-hover:rotate-90 motion-reduce:transition-none motion-reduce:group-hover:rotate-0"
-            aria-hidden="true"
-          />
-          <span className="hidden sm:inline">Request live event</span>
-        </button>
+        {/* Primary action below lg (the rail carries it on desktop), only with the privilege
+            to create — no disabled CTA otherwise (ZST-UX-NAV-001 §3.1). */}
+        {canCreate && (
+          <button
+            onClick={() => navigate("/organization/events?create=true")}
+            className={cx(
+              "group inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-semibold lg:hidden",
+              brandButton,
+              "active:scale-[0.98] transition-[background-image,box-shadow,transform] duration-150 ease-out",
+              "motion-reduce:transition-none motion-reduce:active:scale-100",
+              focusRing
+            )}
+          >
+            <FiPlus className="text-[14px]" aria-hidden="true" />
+            <span className="hidden sm:inline">Request live event</span>
+          </button>
+        )}
+
+        <Link to="/organization/support" aria-label="Help and support" title="Help and support" className={iconBtn}>
+          <FiHelpCircle className="text-[18px]" aria-hidden="true" />
+        </Link>
 
         <ThemeToggle />
 
@@ -182,27 +219,27 @@ export default function Topbar({
             onClick={() => setMenuOpen((v) => !v)}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
+            aria-label="Account menu"
             className={cx(
-              "flex items-center gap-2 rounded-full border py-1 pl-1 pr-2",
+              "flex items-center gap-2.5 rounded-xl py-1 pl-1 pr-2",
               "transition-colors duration-150 motion-reduce:transition-none",
-              "border-slate-200 hover:bg-slate-50 dark:border-white/10 dark:hover:bg-white/[0.05]",
-              menuOpen && "bg-slate-50 dark:bg-white/[0.05]",
+              "hover:bg-slate-100 dark:hover:bg-white/[0.06]",
+              menuOpen && "bg-slate-100 dark:bg-white/[0.06]",
               focusRing
             )}
-            aria-label="Account menu"
           >
             <UserAvatar
               name={person.name}
               src={person.avatar_url}
               alt=""
-              className={cx("h-7 w-7 text-[10px] font-semibold text-white shadow-sm shadow-violet-900/25", brand.chip)}
+              className={cx("h-9 w-9 rounded-full text-[12px] font-semibold", consoleChip)}
             />
+            <span className="hidden min-w-0 text-left lg:block">
+              <span className={cx("block max-w-[10rem] truncate text-[13px] font-semibold", CONSOLE.heading)}>{person.name || "Member"}</span>
+              <span className={cx("block max-w-[10rem] truncate text-[11px]", CONSOLE.faint)}>{person.role_label || person.email}</span>
+            </span>
             <FiChevronDown
-              className={cx(
-                "hidden text-[13px] transition-transform duration-150 sm:block motion-reduce:transition-none",
-                CONSOLE.faint,
-                menuOpen && "rotate-180"
-              )}
+              className={cx("hidden text-[14px] transition-transform duration-150 sm:block motion-reduce:transition-none", CONSOLE.faint, menuOpen && "rotate-180")}
               aria-hidden="true"
             />
           </button>
@@ -210,7 +247,7 @@ export default function Topbar({
             <div
               role="menu"
               className={cx(
-                "zk-pop-in absolute right-0 top-12 z-30 w-60 overflow-hidden rounded-xl border p-1 shadow-xl",
+                "zk-pop-in absolute right-0 top-14 z-30 w-60 overflow-hidden rounded-xl border p-1 shadow-xl",
                 "border-slate-200 bg-white shadow-slate-900/10",
                 "dark:border-white/10 dark:bg-neutral-950 dark:shadow-black/60"
               )}
@@ -219,15 +256,11 @@ export default function Topbar({
                 <UserAvatar
                   name={person.name}
                   src={person.avatar_url}
-                  className={cx("h-9 w-9 text-[11px] font-semibold text-white", brand.chip)}
+                  className={cx("h-9 w-9 text-[11px] font-semibold", consoleChip)}
                 />
                 <div className="min-w-0">
-                  <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>
-                    {person.name || "Member"}
-                  </p>
-                  <p className={cx("truncate text-[11px]", CONSOLE.faint)}>
-                    {person.role_label || person.email}
-                  </p>
+                  <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>{person.name || "Member"}</p>
+                  <p className={cx("truncate text-[11px]", CONSOLE.faint)}>{person.role_label || person.email}</p>
                 </div>
               </div>
               <div className={cx("my-1 border-t", CONSOLE.divider)} />
@@ -243,7 +276,8 @@ export default function Topbar({
                 )}
               >
                 <FiUser className="shrink-0 text-[15px]" aria-hidden="true" />
-                {/* Same destination, same name as the sidebar's Profile item. */}
+                {/* Your own profile lives here, in the account menu, not in the rail
+                    (ZST-UX-NAV-001 §2: profile is an account utility, not a destination). */}
                 Profile
               </button>
               <button

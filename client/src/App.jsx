@@ -20,7 +20,16 @@ import OrganizationRecordings from "./pages/organization/Recordings";
 import OrganizationAnalytics from "./pages/organization/Analytics";
 import OrganizationBilling from "./pages/organization/Billing";
 import OrganizationSettings from "./pages/organization/Settings";
-import EventDetails from "./pages/organization/EventDetails";
+import EventWorkspaceLayout from "./pages/organization/event/EventWorkspaceLayout";
+import EventOverview from "./pages/organization/event/EventOverview";
+import EventPreparation from "./pages/organization/event/EventPreparation";
+import EventAudienceAccess from "./pages/organization/event/EventAudienceAccess";
+import EventLiveControl from "./pages/organization/event/EventLiveControl";
+import EventReplay from "./pages/organization/event/EventReplay";
+import EventInsights from "./pages/organization/event/EventInsights";
+import EventActivity from "./pages/organization/event/EventActivity";
+import OrganizationHub from "./pages/organization/OrganizationHub";
+import SecurityAudit from "./pages/organization/SecurityAudit";
 import InviteMembers from "./pages/organization/InviteMembers";
 import AuthLayout from "./layouts/AuthLayout";
 import Login from "./pages/auth/Login";
@@ -428,7 +437,6 @@ export default function App() {
                   <Route path="/organization/analytics" element={<OrganizationAnalytics />} />
                   <Route path="/organization/billing" element={<OrganizationBilling />} />
                   <Route path="/organization/settings" element={<OrganizationSettings />} />
-                  <Route path="/organization/events/:id" element={<EventDetails />} />
                   <Route path="/organization/users" element={<InviteMembers />} />
                   <Route path="/organization/profile" element={<OrganizationProfile />} />
                   {/* Build */}
@@ -444,6 +452,25 @@ export default function App() {
                   {/* Trust & evidence details, opened from the Support & Status cards. */}
                   <Route path="/organization/support/security" element={<SecurityOverview />} />
                   <Route path="/organization/support/data-residency" element={<DataResidency />} />
+                  {/* Organization (ZST-UX-NAV-001 §4): the hub, and its Security & audit ledger. */}
+                  <Route path="/organization/manage" element={<OrganizationHub />} />
+                  <Route path="/organization/security" element={<SecurityAudit />} />
+                </Route>
+
+                {/* THE EVENT WORKSPACE (ZST-UX-NAV-001 §6). Same shell, event rail; the event
+                    is resolved once by the layout and every section renders inside it. The
+                    Overview is the event's own URL, so every existing link to an event lands
+                    here, and an old ?tab= link is forwarded to the section that holds it.
+                    live/* covers the spec's live/sessions and live/incidents suffixes — both
+                    are sections of the one Live Control page. */}
+                <Route path="/organization/events/:id" element={<EventWorkspaceLayout />}>
+                  <Route index element={<EventOverview />} />
+                  <Route path="preparation" element={<EventPreparation />} />
+                  <Route path="access" element={<EventAudienceAccess />} />
+                  <Route path="live/*" element={<EventLiveControl />} />
+                  <Route path="replay" element={<EventReplay />} />
+                  <Route path="insights" element={<EventInsights />} />
+                  <Route path="activity" element={<EventActivity />} />
                 </Route>
               </Route>
               </>

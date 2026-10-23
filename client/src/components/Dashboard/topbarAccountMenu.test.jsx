@@ -4,7 +4,7 @@
 // rendered blank. The page's own `sticky top-0 z-20` bar painted OVER the menu, because the
 // topbar was also z-20 and an equal z-index is won by whichever comes later in the DOM. The
 // topbar now sits on the shared z.header layer, above page content and below overlays.
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,7 +20,7 @@ vi.mock("../../auth/AuthContext", () => ({
 }));
 
 import { ThemeProvider } from "../../theme/ThemeContext";
-import { z } from "../../ui/tokens";
+import { consoleChip, z } from "../../ui/tokens";
 import Topbar from "./Topbar";
 
 function renderTopbar(state) {
@@ -49,6 +49,20 @@ describe("the account menu", () => {
     expect(menu).toHaveTextContent("Vihari Rao");
     expect(menu).toHaveTextContent("Organization Owner");
     expect(menu).toHaveTextContent("VR");                      // the initials avatar
+  });
+
+  // Both avatars carry white initials: the console chip ramp holds AA in both themes
+  // (ui/contrast.test.js); violet-500 → fuchsia-500, and brand.chip in dark mode, measured ~3.5:1.
+  it("draws both avatars' initials on the AA chip ramp", async () => {
+    const u = userEvent.setup();
+    renderTopbar({ user: { name: "Vihari Rao", role_label: "Organization Owner" } });
+    const onButton = within(screen.getByRole("button", { name: "Account menu" })).getByText("VR").parentElement;
+    await open(u);
+    const inMenu = within(screen.getByRole("menu")).getByText("VR").parentElement;
+    for (const avatar of [onButton, inMenu]) {
+      expect(avatar).toHaveClass(...consoleChip.split(" "));
+      expect(avatar.className).not.toMatch(/from-violet-500|to-fuchsia-500|from-blue-/);
+    }
   });
 
   it("falls back to the signed-in account's name when the overview has none", async () => {

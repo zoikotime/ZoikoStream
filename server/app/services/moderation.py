@@ -123,8 +123,9 @@ class Ctx:
 
     @property
     def actor(self):
-        """Minimal stand-in for the User row that create_audit_log needs (id + email)."""
-        return SimpleNamespace(id=self.user_id, email=self.name)
+        """Minimal stand-in for the User row that create_audit_log needs (id + email, and the
+        role the audit row records the actor as holding when they acted)."""
+        return SimpleNamespace(id=self.user_id, email=self.name, role=self.role)
 
 
 def resolve_ctx(event_id: uuid.UUID, user: User) -> Ctx | None:

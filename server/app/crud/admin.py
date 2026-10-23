@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select, text
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from ..config import BILLING_INTERVALS, MONTHLY, TRIAL_DAYS, settings
@@ -706,13 +707,19 @@ def update_subscription(db, sub: Subscription, data) -> SubscriptionOut:
 # ── Audit logs ───────────────────────────────────────────────────────────────
 
 def create_audit_log(db, *, actor, action, target_type=None, target_id=None,
-                     org_id=None, meta=None, ip=None) -> None:
+                     org_id=None, meta=None, ip=None, event_id=None, outcome=None) -> None:
+    # event_id / outcome are optional: models/audit_log derives both on insert when a caller
+    # does not state them (event from meta["event_id"] or an event target; outcome from the
+    # action name). The actor's role is captured as it stands NOW, at the moment of acting.
+    from ..request_context import get_client_ip
+    resolved_ip = ip if ip is not None else get_client_ip()
     db.add(AuditLog(
         actor_id=actor.id if actor else None,
         actor_email=actor.email if actor else None,
+        actor_role=getattr(actor, "role", None) if actor else None,
         action=action, target_type=target_type,
         target_id=str(target_id) if target_id is not None else None,
-        org_id=org_id, meta=meta, ip=ip,
+        org_id=org_id, meta=meta, ip=resolved_ip, event_id=event_id, outcome=outcome,
     ))
     db.commit()
 
@@ -1012,13 +1019,20 @@ def key_fingerprint(record: dict) -> str:
     return f"{short[:4]}-{short[4:]}" if len(short) == 8 else short
 
 
-def list_api_keys(db, org: Organization) -> list[ApiKeyOut]:
-    records = org.api_keys or []
-    return [ApiKeyOut(id=r["id"], label=r["label"], prefix=r["prefix"],
-                      fingerprint=key_fingerprint(r),
-                      created_at=r["created_at"], expires_at=r.get("expires_at"),
-                      revoked=r.get("revoked", False))
-            for r in records]
+def api_key_out(record: dict, now: datetime | None = None) -> ApiKeyOut:
+    """One credential record as the console sees it: identity, never the verifier, plus its
+    lifecycle from key_lifecycle — so the badge, the filter and the counts all read the same
+    server-side rule instead of each re-deriving it from the browser's clock."""
+    return ApiKeyOut(id=record["id"], label=record["label"], prefix=record["prefix"],
+                     fingerprint=key_fingerprint(record),
+                     created_at=record["created_at"], expires_at=record.get("expires_at"),
+                     revoked=bool(record.get("revoked", False)),
+                     **key_lifecycle(record, now))
+
+
+def list_api_keys(db, org: Organization, now: datetime | None = None) -> list[ApiKeyOut]:
+    now = now or datetime.now(timezone.utc)
+    return [api_key_out(r, now) for r in (org.api_keys or [])]
 
 
 def get_api_key_record(org: Organization, key_id: str) -> dict | None:
@@ -1035,25 +1049,86 @@ KEY_EXPIRED = "expired"
 KEY_REVOKED = "revoked"
 KEY_STATUSES = (KEY_ACTIVE, KEY_EXPIRED, KEY_REVOKED)
 
-# How far ahead of expiry the warning fires.
-KEY_EXPIRY_WARNING_DAYS = 7
+# ── Expiry: one canonical rule (ZST-EC-001 DEV-003) ─────────────────────────────────────
+#
+# A credential is usable while `now < expires_at` and from that instant on it is EXPIRED —
+# no grace period, and nothing ever extends one. All comparisons are between timezone-aware
+# UTC instants (stored ISO strings without an offset are read as UTC). The console's badge,
+# status filter and summary counts, and the reminder sweep, all read key_lifecycle /
+# key_summary below, so none of them can disagree about a boundary.
+#
+# "Expiring soon" is a DISPLAY state of a usable key, never stored: a key 29 days from its
+# expiry is still active, it is just one that needs a rotation planned.
+KEY_EXPIRING_SOON = "expiring_soon"
+KEY_EXPIRING_SOON_DAYS = 30          # "Expiring soon" from here on
+KEY_URGENT_DAYS = 7                  # the stronger warning
+KEY_IMMINENT_SECONDS = 24 * 3600     # "Expires in N hours"
+# Reminder emails, in days before expiry (services/credential_lifecycle.sweep).
+KEY_REMINDER_DAYS = (30, 14, 7, 3, 1)
+# Kept for callers that read the old single-warning horizon; it is the widest reminder now.
+KEY_EXPIRY_WARNING_DAYS = KEY_EXPIRING_SOON_DAYS
 
 
-def key_status(record: dict) -> str:
-    """Effective state of one credential record.
+def key_status(record: dict, now: datetime | None = None) -> str:
+    """Effective lifecycle state of one credential record: active, expired or revoked.
 
-    Derived so that records written before `status` existed still report correctly: a
-    revoked flag or a lapsed expiry is authoritative even without the field.
+    The EXPIRY is checked before any stored status: a record still stored as "active" whose
+    expiry has passed (the sweep marks it within the hour) is expired from the instant it
+    lapsed, never "active" in the meantime. A stored "expired" is never resurrected, and
+    revocation outranks everything. Records written before `status` existed derive the same
+    answer from `revoked` and `expires_at`.
     """
-    if record.get("revoked"):
+    if record.get("revoked") or record.get("status") == KEY_REVOKED:
         return KEY_REVOKED
-    stored = record.get("status")
-    if stored in KEY_STATUSES:
-        return stored
+    now = now or datetime.now(timezone.utc)
     expires = _parse_ts(record.get("expires_at"))
-    if expires is not None and expires <= datetime.now(timezone.utc):
+    if expires is not None and now >= expires:
+        return KEY_EXPIRED
+    if record.get("status") == KEY_EXPIRED:
         return KEY_EXPIRED
     return KEY_ACTIVE
+
+
+def key_lifecycle(record: dict, now: datetime | None = None) -> dict:
+    """What the console shows for one credential, from key_status plus the time left.
+
+      status                active | expiring_soon | expired | revoked
+      usable                True only for active and expiring_soon
+      seconds_until_expiry  signed: negative once expired, None for a non-expiring key
+      expiry_warning        None, or for an expiring key how close it is:
+                            "notice" (<= 30 days), "urgent" (<= 7 days), "imminent" (<= 24 h)
+    """
+    now = now or datetime.now(timezone.utc)
+    state = key_status(record, now)
+    expires = _parse_ts(record.get("expires_at"))
+    seconds = int((expires - now).total_seconds()) if expires is not None else None
+    shown, warning = state, None
+    if state == KEY_ACTIVE and seconds is not None and seconds <= KEY_EXPIRING_SOON_DAYS * 86400:
+        shown = KEY_EXPIRING_SOON
+        warning = ("imminent" if seconds <= KEY_IMMINENT_SECONDS
+                   else "urgent" if seconds <= KEY_URGENT_DAYS * 86400 else "notice")
+    return {"status": shown, "usable": state == KEY_ACTIVE,
+            "seconds_until_expiry": seconds, "expiry_warning": warning}
+
+
+def key_summary(records: list[dict], now: datetime | None = None) -> dict:
+    """The inventory counts, from the same rule as each row.
+
+    `active` counts every currently USABLE key (expiring ones included: they still work);
+    `expiring_30d` / `expiring_7d` are usable keys expiring within that many days; expired and
+    revoked keys never count as active."""
+    now = now or datetime.now(timezone.utc)
+    rows = [key_lifecycle(r, now) for r in records or []]
+    usable = [r for r in rows if r["usable"]]
+    return {
+        "total": len(rows),
+        "active": len(usable),
+        "expiring_30d": sum(1 for r in usable if r["expiry_warning"] is not None),
+        "expiring_7d": sum(1 for r in usable if r["expiry_warning"] in ("urgent", "imminent")),
+        "expired": sum(1 for r in rows if r["status"] == KEY_EXPIRED),
+        "revoked": sum(1 for r in rows if r["status"] == KEY_REVOKED),
+        "non_expiring": sum(1 for r in usable if r["seconds_until_expiry"] is None),
+    }
 
 
 def _parse_ts(value):
@@ -1068,40 +1143,80 @@ def _parse_ts(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _lock_keys(db, org: Organization) -> Organization:
+    """Re-read the organization row FOR UPDATE and return it with its CURRENT api_keys.
+
+    Every credential write is a read-modify-write of one JSON list, so without this two
+    writers — a reminder sweep and an admin creating a key, or two processes during a ticker
+    leadership hand-over — could each write back a list missing the other's change, or both
+    claim the same notification. The row lock serializes them until the caller commits.
+    (SQLite, used by some tests, has no row locks and ignores FOR UPDATE.) Only a PERSISTENT
+    row can be locked: an organization not yet flushed, or any non-ORM stand-in, is returned
+    as it is."""
+    state = sa_inspect(org, raiseerr=False)
+    if state is None or not getattr(state, "persistent", False):
+        return org
+    return db.execute(
+        select(Organization).where(Organization.id == org.id).with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+
+
 def _mutate_key(db, org: Organization, key_id: str, changes: dict) -> dict | None:
-    """Apply changes to one credential record in the JSON column, atomically enough for a
-    single-writer path. Returns the updated record."""
-    records, updated, found = org.api_keys or [], [], None
-    for r in records:
+    """Apply changes to one credential record in the JSON column, under the row lock.
+    Returns the updated record."""
+    org = _lock_keys(db, org)
+    updated, found = [], None
+    for r in org.api_keys or []:
         if r.get("id") == key_id:
             r = {**r, **changes}
             found = r
         updated.append(r)
     if found is not None:
         org.api_keys = updated
-        db.commit()
+    db.commit()
     return found
 
 
 def claim_key_notification(db, org: Organization, key_id: str,
-                           column: str = "dev_002_notified_at") -> bool:
+                           column: str = "dev_002_notified_at",
+                           also: tuple[str, ...] = ()) -> bool:
     """Claim the right to send ONE notification for one credential. True for exactly one
-    caller, per (credential, marker).
+    caller, per (credential, marker), across processes (the row lock in _lock_keys).
 
-    The marker lives on the credential record itself, so a retried request that somehow
-    reached this point twice cannot produce two security emails for one credential.
+    The marker lives on the credential record itself, so a retried request or a second sweep
+    cannot produce two emails for one credential. `also` names further markers set in the same
+    write when the claim succeeds (an earlier reminder threshold being superseded).
     """
-    records = org.api_keys or []
+    org = _lock_keys(db, org)
     updated, claimed = [], False
-    for r in records:
+    stamp = datetime.now(timezone.utc).isoformat()
+    for r in org.api_keys or []:
         if r.get("id") == key_id and not r.get(column):
-            r = {**r, column: datetime.now(timezone.utc).isoformat()}
+            r = {**r, column: stamp, **{m: r.get(m) or stamp for m in also}}
             claimed = True
         updated.append(r)
     if claimed:
         org.api_keys = updated
-        db.commit()
+    db.commit()
     return claimed
+
+
+def release_key_notification(db, org: Organization, key_id: str, column: str) -> int:
+    """Give a claimed notification back after its delivery failed, so the next sweep retries
+    it. Returns how many times it has now failed (`<column>_failures`)."""
+    org = _lock_keys(db, org)
+    failures = 0
+    updated = []
+    for r in org.api_keys or []:
+        if r.get("id") == key_id:
+            failures = int(r.get(f"{column}_failures") or 0) + 1
+            r = {k: v for k, v in r.items() if k != column}
+            r[f"{column}_failures"] = failures
+        updated.append(r)
+    org.api_keys = updated
+    db.commit()
+    return failures
 
 
 def mark_key_expired(db, org: Organization, key_id: str) -> dict | None:
@@ -1112,7 +1227,9 @@ def mark_key_expired(db, org: Organization, key_id: str) -> dict | None:
     is worded accordingly.
     """
     record = get_api_key_record(org, key_id)
-    if record is None or key_status(record) != KEY_ACTIVE:
+    # The STORED state, not key_status: key_status already reads a lapsed key as expired, and
+    # this is what records that. Revoked and already-recorded expiries are left alone.
+    if record is None or record.get("revoked") or record.get("status") in (KEY_EXPIRED, KEY_REVOKED):
         return None
     return _mutate_key(db, org, key_id,
                        {"status": KEY_EXPIRED,
@@ -1150,7 +1267,8 @@ def rotate_api_key(db, org: Organization, key_id: str, actor_id=None,
     return retired, replacement
 
 
-def create_api_key(db, org: Organization, label: str, expires_in_days: int | None = None) -> ApiKeyCreated:
+def create_api_key(db, org: Organization, label: str, expires_in_days: int | None = None,
+                   created_by=None) -> ApiKeyCreated:
     now = datetime.now(timezone.utc)
     raw = f"zk_live_{secrets.token_urlsafe(32)}"
     record = {
@@ -1165,13 +1283,17 @@ def create_api_key(db, org: Organization, label: str, expires_in_days: int | Non
         "expires_at": (now + timedelta(days=expires_in_days)).isoformat() if expires_in_days else None,
         "revoked": False,
         "status": KEY_ACTIVE,
+        # Who minted it, so its expiry reminders can reach the person who wired it in (as
+        # well as the Organization's administrators). Never shown to the browser.
+        "created_by": str(created_by) if created_by else None,
     }
-    org.api_keys = [*(org.api_keys or []), record]
+    locked = _lock_keys(db, org)
+    locked.api_keys = [*(locked.api_keys or []), record]
     db.commit()
     return ApiKeyCreated(id=record["id"], label=label, prefix=record["prefix"],
                          fingerprint=key_fingerprint(record),
                          created_at=record["created_at"], revoked=False, key=raw,
-                         expires_at=record["expires_at"])
+                         expires_at=record["expires_at"], **key_lifecycle(record, now))
 
 
 def revoke_api_key(db, org: Organization, key_id: str, actor_id=None,
@@ -1182,10 +1304,10 @@ def revoke_api_key(db, org: Organization, key_id: str, actor_id=None,
     attributed. The record is retained rather than deleted, which is what keeps the audit
     history intact (ZST-EC-001 DEV-004).
     """
-    records = org.api_keys or []
+    org = _lock_keys(db, org)
     found = False
     updated = []
-    for r in records:
+    for r in org.api_keys or []:
         if r["id"] == key_id:
             found = True
             r = {**r, "revoked": True, "status": KEY_REVOKED,
@@ -1194,6 +1316,7 @@ def revoke_api_key(db, org: Organization, key_id: str, actor_id=None,
                  "revoke_reason": reason}
         updated.append(r)
     if not found:
+        db.commit()                       # release the row lock
         return False
     org.api_keys = updated
     db.commit()
