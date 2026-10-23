@@ -112,7 +112,12 @@ export default function OrganizationDashboard() {
   // `peak_viewers_summed`, not `viewers`: services/org.py::analytics renamed the key (it is
   // the sum of each event's PEAK concurrency), and reading the old name left this card on
   // "—" for every organization. It is not `summary.peak`, which is the single highest peak.
-  const viewers = analytics.data?.summary?.peak_viewers_summed ?? null;
+  // analytics() always sends it as a number, 0 when nothing was watched, so anything else is
+  // a contract problem and not an empty organization: it reads "—" / "Viewer count
+  // unavailable", never "No audience recorded yet". That false empty state is exactly how
+  // the old key name hid a real audience.
+  const rawViewers = analytics.data?.summary?.peak_viewers_summed;
+  const viewers = Number.isFinite(rawViewers) ? rawViewers : null;
   const rangeLabel = RANGES.find((r) => r.key === range)?.label.toLowerCase() ?? "";
 
   return (
@@ -168,7 +173,9 @@ export default function OrganizationDashboard() {
               ? "Loading…"
               : analytics.error
               ? "Analytics unavailable"
-              : viewers
+              : viewers == null
+              ? "Viewer count unavailable"
+              : viewers > 0
               ? `Across events · ${rangeLabel}`
               : "No audience recorded yet"
           }
@@ -197,14 +204,18 @@ export default function OrganizationDashboard() {
       {attention.length > 0 && <AttentionRequired items={attention} />}
 
       {/* Where the operational detail went. A one-line signpost, so simplifying the page
-          doesn't leave anyone hunting for a panel that used to be here. */}
-      <p className={cx("text-[12px]", CONSOLE.faint)}>
-        Looking for sessions, usage, credentials or platform status? They live on{" "}
-        <Link to="/organization/sessions" className={CONSOLE.link}>Streaming Sessions</Link>,{" "}
-        <Link to="/organization/billing" className={CONSOLE.link}>Usage &amp; Entitlements</Link>,{" "}
-        <Link to="/organization/settings?tab=developer" className={CONSOLE.link}>Settings &rsaquo; Developer</Link> and{" "}
-        <Link to="/organization/support" className={CONSOLE.link}>Support &amp; Status</Link>.
-      </p>
+          doesn't leave anyone hunting for a panel that used to be here. Org admins only: all
+          four pages sit behind RoleRoute allow={["org_admin"]} (App.jsx), so for any other
+          member each link bounced straight back to this dashboard, which read as a refresh. */}
+      {user?.role === "org_admin" && (
+        <p className={cx("text-[12px]", CONSOLE.faint)}>
+          Looking for sessions, usage, credentials or platform status? They live on{" "}
+          <Link to="/organization/sessions" className={CONSOLE.link}>Streaming Sessions</Link>,{" "}
+          <Link to="/organization/billing" className={CONSOLE.link}>Usage &amp; Entitlements</Link>,{" "}
+          <Link to="/organization/settings?tab=developer" className={CONSOLE.link}>Settings &rsaquo; Developer</Link> and{" "}
+          <Link to="/organization/support" className={CONSOLE.link}>Support &amp; Status</Link>.
+        </p>
+      )}
     </div>
   );
 }

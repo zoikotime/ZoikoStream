@@ -300,12 +300,14 @@ describe("Account Security is unchanged", () => {
 });
 
 describe("Support & Status around the cards", () => {
-  it("keeps the other two trust cards inert and marked On request", async () => {
+  // These two were inert "On request" cards until the Support & Status Bug 13 change: both now
+  // open the Trust Center's existing forms (SupportStatusTrustRequests.test.jsx).
+  it("sends the other two trust cards to the Trust Center's forms, leaving none inert", async () => {
     renderAt(SUPPORT);
     await supportLoaded();
-    expect(screen.queryByRole("link", { name: /compliance documents/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /report a vulnerability/i })).not.toBeInTheDocument();
-    expect(screen.getAllByText(/on request/i)).toHaveLength(2);
+    expect(screen.getByRole("link", { name: /compliance documents/i })).toHaveAttribute("href", "/trust#evidence");
+    expect(screen.getByRole("link", { name: /report a vulnerability/i })).toHaveAttribute("href", "/trust#report");
+    expect(screen.queryByText(/on request/i)).toBeNull();
   });
 
   it("no longer sends anything on the page to Settings → Security", async () => {

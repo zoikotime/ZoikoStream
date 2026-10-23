@@ -16,7 +16,7 @@ vi.mock("../../api", () => ({
 }));
 
 vi.mock("../../auth/AuthContext", () => ({
-  useAuth: vi.fn(() => ({ user: { full_name: "Ajay Kumar", email: "ajay@example.com" } })),
+  useAuth: vi.fn(() => ({ user: { full_name: "Ajay Kumar", email: "ajay@example.com", role: "org_admin" } })),
 }));
 
 import api from "../../api";
@@ -96,8 +96,9 @@ beforeEach(() => {
     completed: () => Promise.resolve({ data: COMPLETED }),
   };
   vi.mocked(api.get).mockImplementation(route);
+  // The organization console's admin, as every page this dashboard links to requires.
   vi.mocked(useAuth).mockReturnValue({
-    user: { full_name: "Ajay Kumar", email: "ajay@example.com" },
+    user: { full_name: "Ajay Kumar", email: "ajay@example.com", role: "org_admin" },
   });
 });
 
@@ -271,6 +272,57 @@ describe("Total viewers reads the analytics service's real key", () => {
       expect(within(viewers).getByText(/analytics unavailable/i)).toBeInTheDocument()
     );
     expect(within(viewers).getByText("—")).toBeInTheDocument();
+  });
+
+  // The mobile app showed "—" / "No audience recorded yet" beside a web dashboard showing 1.
+  // A build from before the key change reads `summary.viewers`, which the API no longer sends;
+  // the card then claimed an empty organization. analytics() always sends a number, so a
+  // missing or malformed one now says the count is unavailable rather than inventing an empty.
+  it("says the count is unavailable, not that there was no audience, when the key is missing", async () => {
+    world.analytics = () =>
+      Promise.resolve({ data: { summary: { viewers: 1, peak: 1 }, trends: { viewership: [] } } });
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    await waitFor(() => expect(within(viewers).getByText(/viewer count unavailable/i)).toBeInTheDocument());
+    expect(within(viewers).getByText("—")).toBeInTheDocument();
+    expect(within(viewers).queryByText(/no audience recorded yet/i)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["a string", "1"],
+    ["NaN", Number.NaN],
+    ["null", null],
+  ])("treats %s as unavailable, never printing it", async (_name, value) => {
+    world.analytics = () =>
+      Promise.resolve({ data: { summary: { peak_viewers_summed: value, peak: 1 }, trends: { viewership: [] } } });
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    await waitFor(() => expect(within(viewers).getByText(/viewer count unavailable/i)).toBeInTheDocument());
+    expect(within(viewers).getByText("—")).toBeInTheDocument();
+    expect(within(viewers).queryByText(/nan/i)).not.toBeInTheDocument();
+  });
+
+  it("is not mistaken for zero while analytics is still loading", async () => {
+    world.analytics = () => new Promise(() => {});
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    expect(within(viewers).getByText(/loading/i)).toBeInTheDocument();
+    expect(within(viewers).getByText("—")).toBeInTheDocument();
+    expect(within(viewers).queryByText("0")).not.toBeInTheDocument();
+    expect(within(viewers).queryByText(/no audience recorded yet/i)).not.toBeInTheDocument();
+  });
+
+  it("formats a larger count and reads it from the same 30-day window the note names", async () => {
+    world.analytics = () =>
+      Promise.resolve({ data: { ...ONE_VIEWER, summary: { ...ONE_VIEWER.summary, peak_viewers_summed: 1234567 } } });
+    renderDashboard();
+    const viewers = await card("Total viewers");
+    // Formatted the way the card formats it: grouping is locale-dependent (en-IN 12,34,567).
+    await waitFor(() => expect(within(viewers).getByText((1234567).toLocaleString())).toBeInTheDocument());
+    expect(within(viewers).getByText(/across events · last 30 days/i)).toBeInTheDocument();
+    // One definition for web and app: this page and its hook have no platform branch, and
+    // the default window requested is the one the note states.
+    expect(world.analyticsRanges[0]).toBe("30d");
   });
 });
 

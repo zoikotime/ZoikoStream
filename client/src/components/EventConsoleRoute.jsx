@@ -4,6 +4,7 @@ import { useAuth } from "../auth/AuthContext";
 import { accountHome, fetchConsoleAccess } from "../auth/destination";
 import { PageSpinner } from "../ui/Spinner";
 import { notify } from "../ui/Toast";
+import SessionUnreachable from "./SessionUnreachable";
 
 // Gate an event console on a REAL, server-confirmed assignment.
 //
@@ -31,7 +32,7 @@ import { notify } from "../ui/Toast";
 // own snapshot, so admitting a moderator grants them nothing a host has.
 export default function EventConsoleRoute({ capability }) {
   const required = Array.isArray(capability) ? capability : [capability];
-  const { user, loading } = useAuth();
+  const { user, loading, unreachable } = useAuth();
   const location = useLocation();
   const [params] = useSearchParams();
   const eventId = params.get("event");
@@ -66,6 +67,7 @@ export default function EventConsoleRoute({ capability }) {
   }, [access]);
 
   if (loading) return <PageSpinner />;
+  if (unreachable) return <SessionUnreachable />;
   if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
 
   // No event context at all. Not an error the user caused — send them to pick one.

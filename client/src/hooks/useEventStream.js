@@ -141,10 +141,14 @@ export default function useEventStream(eventId, onEnvelope, regToken, linkToken,
           // in AuthContext — which signs this tab out, tells the other tabs, and lets the route
           // guards send a protected page to /login. Never retried: the session is over.
           const reason = SESSION_END_MESSAGES[e.reason] ? e.reason : "reauth";
-          markSessionEnded(reason);
           setCloseReason(SESSION_END_MESSAGES[reason]);
           setStatus("unauthorized");
-          window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { reason } }));
+          // Only if this socket's sign-in is still the tab's sign-in (same rule as api.js):
+          // the end of a session the user has since replaced must not end the new one.
+          if (token && readToken() === token) {
+            markSessionEnded(reason);
+            window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { reason } }));
+          }
           return;
         }
         if (FATAL_CODES.has(e.code)) {

@@ -420,13 +420,15 @@ describe("Trust & evidence", () => {
     expect(screen.getByRole("link", { name: /data residency/i })).toHaveAttribute("href", "/organization/support/data-residency");
   });
 
-  it("marks the two that do not, instead of leaving them looking clickable", async () => {
+  // These two rendered inert ("On request") until they were pointed at the Trust Center's
+  // existing request and report forms (SupportStatusTrustRequests.test.jsx).
+  it("links the other two to the Trust Center's forms, leaving no card inert", async () => {
     show();
     await heading();
 
-    expect(screen.queryByRole("link", { name: /compliance documents/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /report a vulnerability/i })).not.toBeInTheDocument();
-    expect(screen.getAllByText(/on request/i)).toHaveLength(2);
+    expect(screen.getByRole("link", { name: /compliance documents/i })).toHaveAttribute("href", "/trust#evidence");
+    expect(screen.getByRole("link", { name: /report a vulnerability/i })).toHaveAttribute("href", "/trust#report");
+    expect(screen.queryByText(/on request/i)).toBeNull();
   });
 });
 

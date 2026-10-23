@@ -99,6 +99,10 @@ export const clearStoredAuth = () => {
 export { AUTH_EXPIRED_EVENT } from "../api";
 export const SESSION_EXPIRED_EVENT = AUTH_EXPIRED_EVENT;
 
+// How often an UNREACHABLE session is re-checked while nothing else (the connection coming
+// back, the app returning to the foreground, the Try again button) has prompted a check.
+export const UNREACHABLE_RETRY_MS = 15_000;
+
 export function AuthProvider({ children }) {
   // Starts LOADING whenever there is a credential to check — the difference between
   // "unauthenticated" and "not yet known" is the whole fix, because a route guard must never
@@ -130,11 +134,15 @@ export function AuthProvider({ children }) {
   /**
    * Ask the server who we are. The ONLY way `user` is ever populated.
    *
-   * A 401/403 means the token is missing, expired, malformed, forged, or belongs to a
+   * A 401 means the token is missing, expired, malformed, forged, or belongs to a
    * deactivated user — all of which are "not signed in", so stale state is cleared. A
-   * network/5xx failure is different: the session may well be valid and the API is simply
-   * unreachable, so the token is KEPT and we resolve to unauthenticated for this page load
-   * rather than silently signing the user out of a working session.
+   * network/5xx failure (or a 403, which this endpoint never sends) is different: the session may well be valid and the API is simply
+   * unreachable, so the token is KEPT and the state is UNREACHABLE — not signed in (no
+   * `user`, nothing protected renders) but not signed out either. It used to resolve to
+   * unauthenticated "for this page load", which on the web cost a reload; in the Android
+   * app, which has no reload, it put a sign-in form in front of a still-valid session every
+   * time a cold start after being backgrounded met a network that was not up yet. The guards
+   * now show a reconnecting screen, and the check is re-asked (see the retry effect below).
    */
   const validate = useCallback(async () => {
     const mine = ++generation.current;
@@ -162,14 +170,18 @@ export function AuthProvider({ children }) {
     } catch (error) {
       if (mine !== generation.current) return null;
       const status = error?.response?.status;
-      if (status === 401 || status === 403) {
+      // 401 only. Every refusal /auth/me itself can give — no token, a bad or expired one, an
+      // ended session, a deactivated account — is a 401 (security.get_current_user). A 403
+      // here was never ours: it is something in front of the server (an edge or proxy block)
+      // and says nothing about the session, so it keeps the token like any other non-answer.
+      if (status === 401) {
         // A reopened browser whose session expired while it was closed lands on /login with
         // the reason, not a bare sign-in form.
         const reason = sessionEndReasonOf(error);
         if (reason) markSessionEnded(reason);
         applyUnauthenticated();
       } else {
-        setState({ status: "unauthenticated", user: null });
+        setState({ status: "unreachable", user: null });
       }
       return null;
     }
@@ -180,6 +192,36 @@ export function AuthProvider({ children }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     validate();
   }, [validate]);
+
+  // UNREACHABLE: a credential is held but the server could not be asked about it. Ask again
+  // when the connection comes back, when the app or tab returns to the foreground, and every
+  // UNREACHABLE_RETRY_MS while it lasts. One check at a time. The server's answer decides as
+  // always: a live session signs straight back in, a 401 goes to sign-in with its reason.
+  const checking = useRef(false);
+  const retry = useCallback(async () => {
+    if (checking.current) return;
+    checking.current = true;
+    try {
+      await validate();
+    } finally {
+      checking.current = false;
+    }
+  }, [validate]);
+  useEffect(() => {
+    if (state.status !== "unreachable") return undefined;
+    const onOnline = () => retry();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") retry();
+    };
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = setInterval(retry, UNREACHABLE_RETRY_MS);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(timer);
+    };
+  }, [state.status, retry]);
 
   // A 401 anywhere in the app ends the session here too, so one expired request cannot
   // leave the rest of the console believing it is still signed in — and the other tabs are
@@ -299,11 +341,15 @@ export function AuthProvider({ children }) {
     user: state.user,
     loading: state.status === "loading",
     authenticated: state.status === "authenticated",
+    // A credential is held but the server could not be reached to confirm it. Guards show
+    // the reconnecting screen instead of sending the user to sign in.
+    unreachable: state.status === "unreachable",
     status: state.status,
     setSession,
     logout,
     refresh: validate,
-  }), [state, setSession, logout, validate]);
+    retry,
+  }), [state, setSession, logout, validate, retry]);
 
   return (
     <AuthContext.Provider value={value}>

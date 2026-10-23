@@ -55,13 +55,19 @@ api.interceptors.response.use(
     //   • 401 specifically. A 403 means "authenticated but not allowed" — a real answer about
     //     permissions, and logging someone out for hitting a page above their role would be a
     //     bug, not security.
-    //   • The request actually CARRIED a token. Without this, a 401 from a public,
-    //     token-less call (a bad delivery/registration link) would clear a perfectly good
-    //     session belonging to whoever happened to be signed in.
+    //   • The request carried THE token this tab holds now. Without a token at all, a 401
+    //     from a public, token-less call (a bad delivery/registration link) would clear a
+    //     perfectly good session belonging to whoever happened to be signed in. With an
+    //     OLDER one — a request still in flight from a session that has since ended, answered
+    //     after the user signed in again — the 401 is about that old session; acting on it
+    //     cleared the new sign-in and told every tab it had ended. And once this tab has
+    //     already signed out, the remaining 401s of a burst have nothing left to announce.
     //   • Not one of the sign-in endpoints above.
-    const sentToken = !!config?.headers?.Authorization;
+    const sent = config?.headers?.Authorization;
+    const current = readToken();
+    const aboutCurrentSession = !!sent && !!current && sent === `Bearer ${current}`;
     const path = config?.url || "";
-    if (status === 401 && sentToken && !AUTH_ENDPOINT.test(path)) {
+    if (status === 401 && aboutCurrentSession && !AUTH_ENDPOINT.test(path)) {
       clearToken();
       try {
         // Legacy key from the build that treated a stored profile as proof of identity.

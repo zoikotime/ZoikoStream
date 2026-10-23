@@ -3614,8 +3614,11 @@ def send_reset_otp_email(to: str, name: str, otp: str) -> None:
 
 
 def send_assignment_email(to: str, name: str, event_title: str, role: str, org_name: str, event_url: str) -> None:
+    # Approved display name, as the organization invitations use: without it the From line is
+    # MAIL_FROM verbatim, so the brand recipients see depended on deployment configuration.
     _send(to, f"You've been added as {role} for {event_title}",
-          _assignment_html(name, event_title, role, org_name, event_url))
+          _assignment_html(name, event_title, role, org_name, event_url),
+          sender=_sender_identity(SENDER_DEFAULT))
 
 
 def send_self_host_confirmation_email(to: str, name: str, event_title: str, org_name: str,
@@ -3630,8 +3633,10 @@ def send_registration_confirmation_email(to: str, name: str, event_title: str, e
 
 
 def send_viewer_invite_email(to: str, name: str, event_title: str, watch_url: str, inviter_name: str) -> None:
+    # Same as send_assignment_email: the approved "Zoiko Stream" name around MAIL_FROM's address.
     _send(to, f"You're invited to watch {event_title}",
-          _viewer_invite_html(name, event_title, watch_url, inviter_name))
+          _viewer_invite_html(name, event_title, watch_url, inviter_name),
+          sender=_sender_identity(SENDER_DEFAULT))
 
 
 if __name__ == "__main__":
