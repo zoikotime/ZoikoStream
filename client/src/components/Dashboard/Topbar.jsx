@@ -47,6 +47,8 @@ export default function Topbar({
   quickActions = false,
   collapsed = false,
   onToggleCollapse,
+  // Whether the mobile navigation drawer is open, so the hamburger can say what a tap will do.
+  drawerOpen = false,
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -64,12 +66,13 @@ export default function Topbar({
     avatar_url: user ? user.avatar_url ?? null : state?.user?.avatar_url ?? null,
   };
 
-  const iconBtn = cx(
-    "grid h-9 w-9 place-items-center rounded-lg transition-colors duration-150 motion-reduce:transition-none",
+  const iconBtnBase = cx(
+    "grid place-items-center rounded-lg transition-colors duration-150 motion-reduce:transition-none",
     CONSOLE.muted,
     "hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-white/[0.06] dark:hover:text-white",
     focusRing
   );
+  const iconBtn = cx("h-9 w-9", iconBtnBase);
 
   return (
     <header
@@ -79,7 +82,11 @@ export default function Topbar({
         // every OrganizationPageHeader), and at an equal z-index the later one in the DOM wins,
         // so the account menu dropped under them and its upper half went blank. The shared
         // scale keeps the topbar above page content and below every portalled overlay.
-        "sticky top-0 flex h-16 shrink-0 items-center gap-2 border-b px-3 backdrop-blur-xl sm:gap-3 sm:px-5",
+        // Safe area: on Android devices that draw the app under the status bar (edge-to-edge,
+        // despite bridge.js's overlay:false) the bar's controls sat in the status-bar strip,
+        // where the system takes the taps. The inset pads the bar clear of it; the controls
+        // keep their 64px row. It is 0 on the web build (no viewport-fit=cover there).
+        "sticky top-0 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center gap-2 border-b px-3 pt-[env(safe-area-inset-top)] backdrop-blur-xl sm:gap-3 sm:px-5",
         z.header,
         CONSOLE.bar
       )}
@@ -89,8 +96,16 @@ export default function Topbar({
           At lg and up the rail is always present and this collapses it to an icon strip.
           The desktop control sits at the very start of the bar, against the boundary it
           acts on — it reads as a handle on the sidebar rather than a page action. */}
-      <button onClick={onMenuClick} className={cx(iconBtn, "lg:hidden")} aria-label="Toggle menu">
-        <FiMenu className="text-xl" />
+      {/* 44×44 touch target (the 36px icon buttons are fine for a cursor, not a thumb); -ml-1
+          keeps the icon exactly where it was. The label names what a tap will do. */}
+      <button
+        type="button"
+        onClick={onMenuClick}
+        aria-expanded={drawerOpen}
+        aria-label={drawerOpen ? "Close navigation menu" : "Open navigation menu"}
+        className={cx("-ml-1 h-11 w-11", iconBtnBase, "lg:hidden")}
+      >
+        <FiMenu className="text-xl" aria-hidden="true" />
       </button>
 
       <button

@@ -16,7 +16,8 @@ vi.mock("../api", () => ({
 }));
 
 vi.mock("../auth/AuthContext", () => ({
-  useAuth: () => ({ user: { full_name: "Vihari Owner", email: "owner@example.com" }, logout: vi.fn() }),
+  // An org admin: the rail lists the admin pages only for that role (Sidebar.navFor).
+  useAuth: () => ({ user: { full_name: "Vihari Owner", email: "owner@example.com", role: "org_admin" }, logout: vi.fn() }),
 }));
 
 import api from "../api";
@@ -234,7 +235,7 @@ describe("the profile item", () => {
   it("is the same item in the mobile drawer", async () => {
     renderShell("/organization/profile");
     await screen.findByRole("heading", { level: 1 });
-    await userEvent.click(screen.getByRole("button", { name: /toggle menu/i }));
+    await userEvent.click(screen.getByRole("button", { name: /navigation menu/i }));
     expect(rail().closest("aside").className).toContain("translate-x-0");
     expect(profileLink()).toHaveAttribute("aria-current", "page");
     expect(railLinks()).toContain("Profile");
@@ -339,8 +340,8 @@ describe("the sidebar collapse control", () => {
     renderShell();
     await screen.findByRole("heading", { level: 1 });
     // Two controls, one per breakpoint — neither doubles as the other.
-    expect(screen.getByRole("button", { name: /toggle menu/i })).toBeInTheDocument();
-    expect(toggle()).not.toBe(screen.getByRole("button", { name: /toggle menu/i }));
+    expect(screen.getByRole("button", { name: /navigation menu/i })).toBeInTheDocument();
+    expect(toggle()).not.toBe(screen.getByRole("button", { name: /navigation menu/i }));
   });
 
   it.each(ROUTES)("%s carries the same control", async (path) => {

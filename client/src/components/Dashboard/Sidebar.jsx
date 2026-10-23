@@ -4,8 +4,9 @@ import {
   FiActivity, FiFilm, FiRadio, FiUserCheck, FiBarChart2,
   FiCreditCard, FiLifeBuoy, FiSettings,
 } from "react-icons/fi";
-import { CONSOLE, brand, cx, focusRing, type } from "../../ui/tokens";
+import { CONSOLE, brand, cx, focusRing, type, z } from "../../ui/tokens";
 import UserAvatar from "../../ui/UserAvatar";
+import { useAuth } from "../../auth/AuthContext";
 import Logo from "../../ui/Logo";
 
 // Organization console navigation.
@@ -28,7 +29,9 @@ import Logo from "../../ui/Logo";
 const NAV = [
   {
     items: [
-      { to: "/organization/dashboard", label: "Dashboard", icon: FiGrid, end: true },
+      // `member`: open to every signed-in member. Every other item here is behind
+      // RoleRoute allow={["org_admin"]} in App.jsx and is shown to org admins only.
+      { to: "/organization/dashboard", label: "Dashboard", icon: FiGrid, end: true, member: true },
       { to: "/organization/events", label: "Events", icon: FiRadio, badge: "live_events" },
       { to: "/organization/audience", label: "Audience", icon: FiUserCheck },
       { to: "/organization/users", label: "Members", icon: FiUsers },
@@ -101,9 +104,19 @@ function Tip({ children, show }) {
   );
 }
 
+// The rail a member can actually use. Below org admin only the `member` items remain (and a
+// group left empty is dropped with its divider): offering the admin pages sent every tap
+// straight back to the dashboard, which read as the page refreshing.
+const navFor = (role) =>
+  role === "org_admin"
+    ? NAV
+    : NAV.map((group) => ({ ...group, items: group.items.filter((item) => item.member) }))
+        .filter((group) => group.items.length > 0);
+
 export default function Sidebar({ open, onClose, state, collapsed = false }) {
   const badges = state?.badges || {};
   const person = state?.user;
+  const nav = navFor(useAuth()?.user?.role);
 
   // ~44px rows: this rail is navigated, not scanned like a table, and the extra height is
   // what makes it read as a product menu rather than a tool palette.
@@ -111,9 +124,12 @@ export default function Sidebar({ open, onClose, state, collapsed = false }) {
 
   return (
     <>
+      {/* The mobile drawer and its backdrop are an overlay, so they sit on z.overlay, above
+          the topbar's z.header. At z-20/z-30 they were BELOW it: the bar covered the drawer's
+          top, and its Close button could not be tapped. The desktop rail keeps lg:z-30. */}
       {open && (
         <div
-          className="fixed inset-0 z-20 bg-slate-900/60 backdrop-blur-sm lg:hidden"
+          className={cx("fixed inset-0 bg-slate-900/60 backdrop-blur-sm lg:hidden", z.overlay)}
           onClick={onClose}
         />
       )}
@@ -127,7 +143,10 @@ export default function Sidebar({ open, onClose, state, collapsed = false }) {
           collapse rule is written `lg:` and the drawer is unaffected. */}
       <aside
         className={cx(
-          "fixed inset-y-0 left-0 z-30 flex w-64 shrink-0 flex-col border-r",
+          "fixed inset-y-0 left-0 flex w-64 shrink-0 flex-col border-r lg:z-30",
+          z.overlay,
+          // Same status-bar clearance as the topbar (0 on the web build).
+          "pt-[env(safe-area-inset-top)]",
           "transition-[transform,width] duration-200 ease-out motion-reduce:transition-none",
           "lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:translate-x-0",
           CONSOLE.rail,
@@ -172,7 +191,7 @@ export default function Sidebar({ open, onClose, state, collapsed = false }) {
             collapsed ? "px-3 lg:px-2.5" : "px-3"
           )}
         >
-          {NAV.map((group, gi) => (
+          {nav.map((group, gi) => (
             <div
               key={`section-${gi}`}
               className={cx("space-y-1", group.footer && "mt-auto pt-2")}
