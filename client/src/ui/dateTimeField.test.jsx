@@ -7,7 +7,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import DateTimeField, { formatLocalInput } from "./DateTimeField";
+import DateTimeField from "./DateTimeField";
+import { formatLocalInput } from "./formatLocalInput";
 import CommandFilters from "../components/admin/sections/CommandFilters";
 import { commandCenterParams } from "../components/admin/sections/commandWindow";
 
