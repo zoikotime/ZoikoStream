@@ -1403,6 +1403,54 @@ def health_window(db: Session, win: "ops_window.Window") -> dict:
     }
 
 
+def api_traffic(db: Session, range_: str = "24h", since=None, until=None) -> dict:
+    """The API-health figures on their own, for the traffic view behind the tile.
+
+    Nothing new is measured and nothing new is stored: this resolves a window the same way
+    the Command Center does and hands it to the same api_window(), so the dashboard tile and
+    the traffic page can never disagree about the same minute. The rows underneath are the
+    per-minute api_requests / api_errors / api_lat_le_* that run_request_stats_flusher
+    already writes from every process.
+
+    Separate from /admin/command-center on purpose: that endpoint answers for the whole
+    dashboard (sessions, audience, incidents, governance, upcoming), and a page that wants
+    request counts should not pay for all of it.
+    """
+    generated_at = _now()
+    win = ops_window.resolve(range_, since, until, now=generated_at)
+    return {"generated_at": generated_at, "range": win.as_dict(), **api_window(db, win)}
+
+
+def health_history_note(has_trend: bool, region: str | None) -> str | None:
+    """What the health card actually covers, for the selection that produced it.
+
+    record_samples writes ONE scalar per tick — platform_health_ok, the number of healthy
+    services across the whole platform. It carries no stage, region or test-mode dimension,
+    and health_window filters those rows by time and nothing else. So the time range is the
+    only filter the trend can honour; every other control on the page leaves it untouched.
+
+    The card has to say that, because a page with a region selected otherwise implies a
+    regional trend. The note used to be emitted only for the narrower scopes, and read
+    "...so the trend is shown for Core + Live Events only" — which described a trend that in
+    that branch was not being shown at all, and said nothing at all when a region was picked.
+
+    Current status and the trend are reported separately here on purpose: status IS scoped by
+    the stage selection (see _scoped_health), so the two do not share a caveat.
+    """
+    if has_trend:
+        # Core + Live Events is the whole platform, so the trend matches the scope asked for.
+        # Region is the only thing that can still be silently ignored.
+        if region:
+            return ("Health is sampled platform-wide, so this trend and the status above "
+                    "cover every region, not only the selected one.")
+        return None
+    if region:
+        return ("Health is sampled platform-wide, not per stage or region, so this scope "
+                "has no trend and the status above covers every region.")
+    return ("Health is sampled platform-wide, not per stage, so this scope has no trend. "
+            "The status above is current and does reflect it.")
+
+
 UPCOMING_HORIZON = timedelta(days=7)
 
 
@@ -1493,9 +1541,7 @@ def command_center(db: Session, user: User, range_: str = "live", region: str | 
                 "series": hist["series"] if hist else [],
                 "average_ok": hist["average_ok"] if hist else None,
                 "comparison": hist["comparison"] if hist else None,
-                "history_note": None if hist else (
-                    "Health history is sampled platform-wide, so the trend is shown for "
-                    "Core + Live Events only."),
+                "history_note": health_history_note(hist is not None, region),
                 "applies": {"range": "trend", "region": False, "scope": True,
                             "include_test": False},
             },

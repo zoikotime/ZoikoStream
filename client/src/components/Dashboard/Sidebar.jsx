@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { FiArrowRight, FiChevronDown, FiLogOut, FiPlus, FiUser, FiX } from "react-icons/fi";
 import { Building2 } from "lucide-react";
 import { useAuth } from "../../auth/AuthContext";
-import { actionStops, consoleChip, cx, focusRing } from "../../ui/tokens";
+import { actionStops, consoleChip, cx, focusRing, z } from "../../ui/tokens";
 import UserAvatar from "../../ui/UserAvatar";
 import Logo from "../../ui/Logo";
 import { activeChildId, groupIsActive, isAdminRole, resolveOrgNav } from "./orgNav";
@@ -326,8 +326,14 @@ export default function Sidebar({ open, onClose, state, collapsed = false, nav =
 
   return (
     <>
+      {/* The mobile drawer and its backdrop are an overlay, so they sit on z.overlay, above
+          the topbar's z.header. At z-20/z-30 they were BELOW it: the bar covered the drawer's
+          top, and its Close button could not be tapped. The desktop rail keeps lg:z-30. */}
       {open && (
-        <div className="fixed inset-0 z-20 bg-slate-900/60 backdrop-blur-sm lg:hidden" onClick={onClose} />
+        <div
+          className={cx("fixed inset-0 bg-slate-900/60 backdrop-blur-sm lg:hidden", z.overlay)}
+          onClick={onClose}
+        />
       )}
 
       {/* Sticky and exactly viewport-tall on desktop so the nav scrolls inside it and the
@@ -335,9 +341,12 @@ export default function Sidebar({ open, onClose, state, collapsed = false, nav =
           always full width. */}
       <aside
         className={cx(
-          "fixed inset-y-0 left-0 z-30 flex w-64 shrink-0 flex-col",
+          "fixed inset-y-0 left-0 flex w-64 shrink-0 flex-col border-r border-white/[0.06]",
+          z.overlay,
+          "lg:z-30",
+          // Same status-bar clearance as the topbar (0 on the web build).
+          "pt-[env(safe-area-inset-top)]",
           "bg-gradient-to-b from-[#121b44] via-[#0f1838] to-[#0b1230] text-white",
-          "border-r border-white/[0.06]",
           "transition-[transform,width,visibility] duration-200 ease-out motion-reduce:transition-none",
           "lg:sticky lg:top-0 lg:bottom-auto lg:h-screen lg:self-start lg:translate-x-0",
           collapsed ? "lg:w-[4.5rem]" : "lg:w-[16.25rem]",

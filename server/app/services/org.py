@@ -1703,7 +1703,11 @@ def overview(db: Session, org: Organization, user: User, range_: str = "24h",
         "media_assets": media,
         "entitlements": ent,
         "api": api_posture(),
-        "attention": attention(db, org, ent, readiness),
+        # attention() is "things an org admin has to act on", every item linking to an
+        # admin-only page. Any member can read this overview, so below org_admin it is empty:
+        # a member who had just accepted their invitation was shown the organization's
+        # "N invitations awaiting acceptance · Manage", which was neither theirs nor theirs to act on.
+        "attention": attention(db, org, ent, readiness) if user.role in ("org_admin", "super_admin") else [],
         "upcoming_events": readiness,
         "developer_ops": developer_ops(db, org),
         "security_support": security_support(db, org),

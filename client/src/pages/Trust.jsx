@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import api, { errMsg } from "../api";
 import {
   AlertTriangle, BadgeCheck, Bug, ChevronDown, FileText, History, Loader2, Lock,
@@ -33,6 +33,9 @@ const SEVERITY_TONE = {
   high: { chip: "border-orange-200 bg-orange-50 text-orange-800", dot: "bg-orange-500" },
   critical: { chip: "border-rose-200 bg-rose-50 text-rose-800", dot: "bg-rose-600" },
 };
+
+// The header's two shortcut pills; the live link adds its hover on top.
+const SHORTCUT = "inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.04] px-3.5 py-2 text-[13px] font-medium text-white/85";
 
 const STATUS_LABEL = {
   published: "Published",
@@ -606,7 +609,29 @@ export default function Trust() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
+  // The error state's "Try again": the same GET /trust, showing Loading… while it runs.
+  const retry = () => {
+    setFailed(false);
+    setLoading(true);
+    load();
+  };
 
+  // Arriving at /trust#evidence or /trust#report (the Support & Status cards link straight to
+  // a form): both sections render only once GET /trust has answered, after the browser's own
+  // fragment scroll has looked for them and found nothing. So go to the section, and move
+  // focus to it, once it exists. The header's in-page links need none of this.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (!data || !hash) return;
+    const target = document.getElementById(hash.slice(1));
+    if (!target) return;
+    target.scrollIntoView?.({ block: "start" });
+    if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    target.focus({ preventScroll: true });
+  }, [data, hash]);
+
+  // Whether the two forms (and so the header's shortcuts to them) are on the page.
+  const formsShown = !loading && !!data;
   const open = (data?.advisories || []).filter((a) => a.status !== "closed");
   const closed = (data?.advisories || []).filter((a) => a.status === "closed");
 
@@ -616,14 +641,24 @@ export default function Trust() {
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4 px-6 py-6 lg:px-8">
           <Link to="/" aria-label="ZoikoStream home"><Logo height="h-7" /></Link>
           <div className="flex gap-2">
-            <a href="#evidence" className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.04] px-3.5 py-2 text-[13px] font-medium text-white/85 transition hover:border-white/30 hover:bg-white/[0.08]">
-              <FileText className="h-4 w-4" aria-hidden="true" />
-              Request documents
-            </a>
-            <a href="#report" className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.04] px-3.5 py-2 text-[13px] font-medium text-white/85 transition hover:border-white/30 hover:bg-white/[0.08]">
-              <Bug className="h-4 w-4" aria-hidden="true" />
-              Report an issue
-            </a>
+            {/* Shortcuts to the two forms, which exist only once GET /trust has answered (the
+                same condition as the forms' own render below). While loading, or after it
+                failed, each stays in place, dimmed and announced as an unavailable link with no
+                href, rather than jumping to a section that is not on the page. Try again
+                restores them. Kept in place so the header does not shift when they appear. */}
+            {[["#evidence", FileText, "Request documents"], ["#report", Bug, "Report an issue"]].map(([href, Icon, label]) =>
+              formsShown ? (
+                <a key={href} href={href} className={`${SHORTCUT} transition hover:border-white/30 hover:bg-white/[0.08]`}>
+                  <Icon className="h-4 w-4" aria-hidden="true" />
+                  {label}
+                </a>
+              ) : (
+                <span key={href} role="link" aria-disabled="true" className={`${SHORTCUT} cursor-not-allowed opacity-50`}>
+                  <Icon className="h-4 w-4" aria-hidden="true" />
+                  {label}
+                </span>
+              )
+            )}
           </div>
         </div>
         <div className="mx-auto max-w-5xl px-6 pb-12 pt-4 lg:px-8">
@@ -650,14 +685,32 @@ export default function Trust() {
           </p>
         )}
         {failed && (
-          <p className="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 text-[14px] leading-relaxed text-rose-900">
-            We could not load the Trust Center just now. Please try again shortly — and if you
-            are trying to report a security issue urgently, that form is below and will still
-            submit.
-          </p>
+          // Both forms are built from GET /trust (the document catalogue, the report categories
+          // and the disclosure policy), so when it fails neither is on the page. This used to
+          // say the report form "is below and will still submit". Retrying is the one next step
+          // that exists; the report form is the security team's channel, so the reader is not
+          // pointed at general support instead.
+          <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 text-[14px] leading-relaxed text-rose-900">
+            <p>
+              We could not load the Trust Center just now, so the documentation request and
+              security report forms are unavailable. Please try again in a moment.
+            </p>
+            <p className="mt-2">
+              The security report form sends your report to our security team rather than to
+              general support, so please try again here rather than sending vulnerability
+              details another way.
+            </p>
+            <button
+              type="button"
+              onClick={retry}
+              className="mt-3 inline-flex items-center rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-[13px] font-semibold text-rose-900 transition hover:bg-rose-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/40"
+            >
+              Try again
+            </button>
+          </div>
         )}
 
-        {!loading && data && (
+        {formsShown && (
           <>
             <section>
               <h2 className="flex items-center gap-2 text-[13px] font-semibold uppercase tracking-wide text-slate-500">

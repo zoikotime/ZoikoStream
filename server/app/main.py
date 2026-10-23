@@ -32,8 +32,8 @@ from .routers.privacy import router as privacy_router
 from .guide.mount import mount_guide
 from .operator_guide.mount import mount_operator_guide
 from . import log_redaction
-from .request_context import bind_request_id, new_request_id, reset_request_id
-from .security import ALGORITHM
+from .request_context import bind_request_id, new_request_id, reset_request_id, set_client_ip, reset_client_ip
+from .security import ALGORITHM, client_ip
 from .services import bus
 from .services import platform_settings
 from .services import livekit
@@ -378,6 +378,16 @@ class RequestReference:
 
 
 app.add_middleware(RequestReference)
+
+
+@app.middleware("http")
+async def bind_client_ip(request: Request, call_next):
+    token = set_client_ip(client_ip(request))
+    try:
+        return await call_next(request)
+    finally:
+        reset_client_ip(token)
+
 
 @app.middleware("http")
 async def measure_requests(request: Request, call_next):

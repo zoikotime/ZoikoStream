@@ -3,6 +3,7 @@ import ConsoleTabs from "./ConsoleTabs";
 import Users from "./Users";
 import Organizations from "./Organizations";
 import SystemStatus from "./SystemStatus";
+import ApiTraffic from "./ApiTraffic";
 
 // The three merges of the console consolidation, in one file so the whole of "what moved
 // where" is readable in one screen rather than spread across three page files.
@@ -62,6 +63,8 @@ export function SystemStatusConsole() {
       tabs={[
         { key: "status", label: "System Status", render: () => <SystemStatus /> },
         { key: "infrastructure", label: "Media Infrastructure", render: () => <Infrastructure /> },
+        // The Command Center's API-health tile links straight to this tab (?tab=traffic).
+        { key: "traffic", label: "API Traffic", render: () => <ApiTraffic /> },
       ]}
     />
   );

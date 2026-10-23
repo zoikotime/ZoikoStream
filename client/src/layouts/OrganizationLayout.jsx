@@ -99,9 +99,10 @@ export default function OrganizationLayout({ renderNav, outletContext, content }
             nav={renderNav ? renderNav({ state, collapsed, onNavigate: () => setOpen(false) }) : null}
           />
         )}
-        renderTopbar={({ setOpen }) => (
+        renderTopbar={({ open, setOpen }) => (
           <Topbar
             onMenuClick={() => setOpen((v) => !v)}
+            drawerOpen={open}
             state={state}
             unknown={unknown}
             onRetry={reload}

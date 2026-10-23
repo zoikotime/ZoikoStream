@@ -117,14 +117,6 @@ export default function Support() {
     <Button variant="ghost" size="sm" iconOnly title="Delete ticket" leftIcon={FiTrash2} className="hover:text-rose-600 dark:hover:text-rose-400" onClick={() => remove(t)} />
   );
 
-  if (error) {
-    return (
-      <div className="mx-auto max-w-[1200px] rounded-xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
-        Couldn't load support tickets. Try refreshing the page.
-      </div>
-    );
-  }
-
   return (
     <div className="mx-auto max-w-[1200px] space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -159,20 +151,36 @@ export default function Support() {
           </Select>
         </div>
         <div className="border-t border-slate-100 dark:border-slate-800/70" />
-        <DataTable
-          columns={columns}
-          rows={filtered}
-          rowKey={(t) => t.id}
-          loading={loading}
-          rowActions={rowActions}
-          pageSize={10}
-          minWidth={700}
-          empty={{
-            icon: FiLifeBuoy,
-            title: "No support tickets",
-            description: status === "all" ? "Nothing logged yet." : `No ${label(status).toLowerCase()} tickets.`,
-          }}
-        />
+        {/* A failed queue is reported HERE, not by returning an error card in place of the
+            page. useSupportData fetches tickets and organizations together, so one bad
+            response used to take the heading, the counters, the filter and — the part that
+            matters — the whole Authorized support access panel off the screen with it,
+            including the control that ENDS a live support session. The panel below loads
+            independently and is unaffected by this request, so it stays.
+
+            Rendered instead of the table rather than above it: "No support tickets" next to
+            "couldn't load them" claims the queue is empty when nobody knows that. */}
+        {error ? (
+          <div className="flex items-center justify-between gap-3 px-5 py-6 text-sm text-rose-700 dark:text-rose-300" role="alert">
+            <span>Couldn&apos;t load the ticket queue.</span>
+            <Button variant="secondary" size="sm" onClick={reload}>Retry</Button>
+          </div>
+        ) : (
+          <DataTable
+            columns={columns}
+            rows={filtered}
+            rowKey={(t) => t.id}
+            loading={loading}
+            rowActions={rowActions}
+            pageSize={10}
+            minWidth={700}
+            empty={{
+              icon: FiLifeBuoy,
+              title: "No support tickets",
+              description: status === "all" ? "Nothing logged yet." : `No ${label(status).toLowerCase()} tickets.`,
+            }}
+          />
+        )}
       </Panel>
 
       <SupportAccessPanel />

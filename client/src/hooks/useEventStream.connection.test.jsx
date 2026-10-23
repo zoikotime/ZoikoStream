@@ -242,4 +242,21 @@ describe("a session-ended close (4401)", () => {
     window.removeEventListener("zoiko:auth-expired", onExpired);
     sessionStorage.clear();
   });
+
+  it("the end of a sign-in the tab has since replaced does not end the new one", () => {
+    const heard = [];
+    const onExpired = (e) => heard.push(e.detail);
+    window.addEventListener("zoiko:auth-expired", onExpired);
+    const { result } = mount();                   // opened with "host-jwt"
+    latest().open();
+    localStorage.setItem("token", "newer-jwt");   // signed in again since
+
+    act(() => latest().onclose?.({ code: 4401, reason: "idle" }));
+
+    expect(result.current.status).toBe("unauthorized");   // this socket is still done
+    expect(heard).toEqual([]);                             // but the new sign-in is untouched
+    expect(sessionStorage.getItem("zs.session-ended")).toBeNull();
+    expect(localStorage.getItem("token")).toBe("newer-jwt");
+    window.removeEventListener("zoiko:auth-expired", onExpired);
+  });
 });

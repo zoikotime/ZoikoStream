@@ -26,6 +26,9 @@ const cap = (s = "") => s.charAt(0).toUpperCase() + s.slice(1);
 export default function SessionsAttention({ items = [] }) {
   return (
     <Panel
+      // The At-risk tile's quick link lands here. scroll-mt clears the sticky topbar, which
+      // would otherwise cover the heading the anchor just scrolled to.
+      id="sessions-attention"
       title="Live sessions requiring attention"
       count={items.length}
       action={
@@ -34,7 +37,7 @@ export default function SessionsAttention({ items = [] }) {
         </Link>
       }
       flush
-      className="flex flex-col"
+      className="flex flex-col scroll-mt-24"
     >
       {items.length === 0 ? (
         // Compact by design: the healthy state is the common one, and a full-height empty

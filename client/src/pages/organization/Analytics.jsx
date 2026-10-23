@@ -5,11 +5,11 @@
 // Event + BroadcastSession + AnalyticsSnapshot. Device/location/traffic-source breakdowns
 // aren't shown here: nothing in this stack persists them historically (see the endpoint's
 // own `breakdowns_note`), so a bar chart for them would be invented, not measured.
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   FiCalendar, FiCheck, FiChevronDown, FiDownload, FiUsers, FiClock, FiTrendingUp, FiActivity, FiGlobe,
-  FiLock, FiPlay,
+  FiInfo, FiLock, FiPlay,
 } from "react-icons/fi";
 import { CONSOLE, cx, focusRing } from "../../ui/tokens";
 import api from "../../api";
@@ -42,8 +42,20 @@ import {
   Banner, FactList, Footnote, KpiRow, KpiTile, Panel, PanelLink, Tag,
 } from "../../components/organization/console/ConsoleUI";
 import { useHashScroll } from "./event/workspace";
+import { exportTextFile } from "../../utils/export";
 
-const CHART = { violet: "#7c3aed", blue: "#3b82f6", emerald: "#10b981", amber: "#f59e0b", rose: "#f43f5e" };
+// One toast slot for the export, so a retry replaces the last outcome instead of stacking.
+const EXPORT_TOAST = "analytics-export";
+// What went wrong SAVING, by exportTextFile's reason. Generating the CSV fails separately.
+const EXPORT_FAILED = {
+  unsupported: "Exporting isn't available in the app yet. Export this report from ZoikoStream on the web.",
+  write: "Couldn't save the report file on this device.",
+  share: "Couldn't open the share sheet to save the report.",
+  download: "Couldn't download the report file.",
+  empty: "The report file came out empty, so nothing was saved.",
+};
+
+const CHART ={ violet: "#7c3aed", blue: "#3b82f6", emerald: "#10b981", amber: "#f59e0b", rose: "#f43f5e" };
 
 const RANGES = [
   { key: "7d", label: "Last 7 days" },
@@ -138,8 +150,12 @@ function RankedBars({ title, subtitle, items, color, format, action, emptyText }
   const max = Math.max(...items.map((i) => i.value)) || 1;
   return (
     <Card padding="md">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div className="min-w-0">
+      {/* Wraps rather than squeezes. One unwrapping row let the title column shrink below its
+          longest word on a phone — "Performing" painted over the metric switch — while the
+          switch was squeezed until "Watch time" broke in two. The title now starts from
+          10rem, so the switch drops below it when both cannot fit side by side. */}
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1 basis-40">
           <h2 className="font-semibold text-slate-900 dark:text-white">{title}</h2>
           {subtitle && <p className="text-sm text-slate-500 dark:text-slate-400">{subtitle}</p>}
         </div>
@@ -154,7 +170,8 @@ function RankedBars({ title, subtitle, items, color, format, action, emptyText }
           {items.map((i) => (
             <li key={i.label} className="group -mx-2 rounded-lg px-2 py-1 transition-colors hover:bg-slate-50 motion-reduce:transition-none dark:hover:bg-white/[0.03]">
               <div className="mb-1 flex items-center justify-between gap-2 text-sm">
-                <span className="truncate pr-2 text-slate-700 dark:text-slate-200">{i.label}</span>
+                {/* Truncated to one line; the full name is the tooltip (and is what a screen reader reads). */}
+                <span className="truncate pr-2 text-slate-700 dark:text-slate-200" title={i.label}>{i.label}</span>
                 <span className="shrink-0 font-medium tabular-nums text-slate-500 dark:text-slate-400">{format(i.value)}</span>
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
@@ -490,28 +507,52 @@ export default function OrganizationAnalytics() {
     [reports]
   );
 
-  const exportReport = () => {
-    // Headers say what the numbers ARE. "Peak Viewers" was already accurate here even when
-    // the card above said "Total Viewers"; the engagement column now names itself a score.
-    // A figure that was never measured exports as text, not as a numeric 0 that a
-    // spreadsheet would happily average.
-    const head = ["Event", "Date", "Peak Viewers", "Watch Time (hrs)", "Engagement Score (%)"];
-    const notMeasured = (v) => (v == null ? "Not measured" : v);
-    const body = reports.map((r) => [
-      r.event, r.date, r.viewers,
-      notMeasured(r.watch_hours == null ? null : r.watch_hours.toFixed(2)),
-      notMeasured(r.engagement),
-    ]);
-    const csv = [head, ...body]
-      .map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `zoikostream-analytics-${range}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    notify.success("Report exported");
+  // One export at a time: the ref stops a second tap in the same frame, the state drives the
+  // buttons' loading/disabled look.
+  const [exporting, setExporting] = useState(false);
+  const exportingRef = useRef(false);
+
+  const exportReport = async () => {
+    if (exportingRef.current) return;
+    if (!reports.length) {
+      notify.info("There are no events in this window to export.", { id: EXPORT_TOAST });
+      return;
+    }
+    let csv;
+    try {
+      // Headers say what the numbers ARE. "Peak Viewers" was already accurate here even when
+      // the card above said "Total Viewers"; the engagement column now names itself a score.
+      // A figure that was never measured exports as text, not as a numeric 0 that a
+      // spreadsheet would happily average.
+      const head = ["Event", "Date", "Peak Viewers", "Watch Time (hrs)", "Engagement Score (%)"];
+      const notMeasured = (v) => (v == null ? "Not measured" : v);
+      const body = reports.map((r) => [
+        r.event, r.date, r.viewers,
+        notMeasured(r.watch_hours == null ? null : r.watch_hours.toFixed(2)),
+        notMeasured(r.engagement),
+      ]);
+      csv = [head, ...body]
+        .map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(","))
+        .join("\n");
+    } catch {
+      notify.error("Couldn't generate the report from this data. Please refresh and try again.", { id: EXPORT_TOAST });
+      return;
+    }
+    exportingRef.current = true;
+    setExporting(true);
+    try {
+      // Named for the window the rows were fetched for (the payload says), not the <select>,
+      // which can already show the next range while that request is in flight.
+      const result = await exportTextFile(`zoikostream-analytics-${data?.range || range}.csv`, csv, "text/csv;charset=utf-8");
+      // Success is said only once the file was actually downloaded or handed to the share
+      // sheet — it used to be said unconditionally, after a click the Android app ignored.
+      if (result.ok) notify.success("Report exported", { id: EXPORT_TOAST });
+      else if (result.reason === "cancelled") notify.info("Export cancelled.", { id: EXPORT_TOAST });
+      else notify.error(EXPORT_FAILED[result.reason] || EXPORT_FAILED.download, { id: EXPORT_TOAST });
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
   };
 
   return (
@@ -547,7 +588,7 @@ export default function OrganizationAnalytics() {
                 <FiClock aria-hidden="true" /> {data.timezone}
               </span>
             )}
-            <ConsoleButton onClick={exportReport} disabled={!reports.length} leftIcon={FiDownload}>
+            <ConsoleButton onClick={exportReport} disabled={!reports.length || exporting} loading={exporting} leftIcon={FiDownload}>
               Export Report
             </ConsoleButton>
           </>
@@ -628,7 +669,8 @@ export default function OrganizationAnalytics() {
                     <button
                       type="button"
                       onClick={exportReport}
-                      disabled={!reports.length}
+                      disabled={!reports.length || exporting}
+                      aria-busy={exporting || undefined}
                       className={cx("hidden items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-semibold disabled:opacity-40 sm:inline-flex", CONSOLE.control, focusRing)}
                     >
                       <FiDownload aria-hidden="true" /> Export CSV

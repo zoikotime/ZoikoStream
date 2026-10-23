@@ -3,6 +3,18 @@
 /* Class-based dark mode: `dark:` applies when <html class="dark"> is set. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Tell the BROWSER which scheme it is painting for.
+   A native control's popup — a <select>'s option list, a date/datetime picker's calendar,
+   scrollbars, autofill — is drawn by the browser, not by this stylesheet. No class or
+   utility reaches it; `color-scheme` is the only control there is. Unset, it defaults to
+   light, so the console could put itself in dark mode while every native popup stayed white:
+   opening a filter painted a large white option list over a black page. The theme toggle
+   writes `.dark` on <html>, so the scheme follows it here and the two can never disagree.
+   This is not cosmetic to one dropdown — the admin console alone has 24 native selects and
+   46 date/time inputs, and this is every one of them. */
+:root { color-scheme: light; }
+:root.dark { color-scheme: dark; }
+
 /* ---- Brand palette ----
    The app was built on emerald/teal. Rather than touch 300+ utility usages
    across 56 files, remap those two scales to the ZoikoStream logo colors:

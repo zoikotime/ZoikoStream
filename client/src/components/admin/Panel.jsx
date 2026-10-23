@@ -8,6 +8,7 @@ import { CONSOLE, cx } from "../../ui/tokens";
 //   <Panel title="Services" flush> <table/> </Panel>   // flush = table draws edge-to-edge
 // `static` opts out of the hover response — use it for a panel that is purely decorative.
 export default function Panel({
+  // Opt-in anchor target, so a quick link elsewhere on the page can address this section.
   id,
   eyebrow,
   title,

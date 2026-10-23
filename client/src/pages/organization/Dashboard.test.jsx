@@ -101,6 +101,7 @@ beforeEach(() => {
     upcoming: () => Promise.resolve({ data: UPCOMING }),
   };
   vi.mocked(api.get).mockImplementation(route);
+  // The organization console's admin, as every page this dashboard links to requires.
   vi.mocked(useAuth).mockReturnValue({
     user: { full_name: "Ajay Kumar", email: "ajay@example.com", role: "org_admin" },
   });
@@ -329,6 +330,46 @@ describe("Total viewers reads the analytics service's real key", () => {
     renderDashboard();
     await waitFor(() => expect(metric("Total Viewers")).toBeTruthy());
     expect(metric("Total Viewers")).not.toHaveTextContent("99");
+  });
+
+  // The mobile app showed "—" / "No audience recorded yet" beside a web dashboard showing 1.
+  // A build from before the key change reads `summary.viewers`, which the API no longer sends;
+  // the card then claimed an empty organization. analytics() always sends a number, so a
+  // missing or malformed one now says the count is unavailable rather than inventing an empty.
+  it("says the count is unavailable, not that there was no audience, when the key is missing", async () => {
+    world.analytics = () =>
+      Promise.resolve({ data: { summary: { viewers: 1, peak: 1 }, trends: { viewership: [] } } });
+    renderDashboard();
+    await waitFor(() => expect(metric("Total Viewers")).toBeTruthy());
+    expect(metric("Total Viewers")).toHaveTextContent("—");
+  });
+
+  it.each([
+    ["a string", "1"],
+    ["NaN", Number.NaN],
+    ["null", null],
+  ])("treats %s as unavailable, never printing it", async (_name, value) => {
+    world.analytics = () =>
+      Promise.resolve({ data: { summary: { peak_viewers_summed: value, peak: 1 }, trends: { viewership: [] } } });
+    renderDashboard();
+    await waitFor(() => expect(metric("Total Viewers")).toBeTruthy());
+    expect(metric("Total Viewers")).toHaveTextContent("—");
+    expect(metric("Total Viewers")).not.toHaveTextContent("NaN");
+  });
+
+  it("is not mistaken for zero while analytics is still loading", async () => {
+    world.analytics = () => new Promise(() => {});
+    renderDashboard();
+    await pageHeading();
+    expect(screen.queryByText("Total Viewers")).not.toBeInTheDocument();
+  });
+
+  it("formats a larger count and reads it from the same 30-day window the note names", async () => {
+    world.analytics = () =>
+      Promise.resolve({ data: { ...ONE_VIEWER, summary: { ...ONE_VIEWER.summary, peak_viewers_summed: 1234567 } } });
+    renderDashboard();
+    await waitFor(() => expect(metric("Total Viewers")).toHaveTextContent((1234567).toLocaleString()));
+    expect(world.analyticsRanges[0]).toBe("30d");
   });
 });
 

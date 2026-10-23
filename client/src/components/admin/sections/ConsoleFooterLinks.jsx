@@ -62,12 +62,23 @@ export default function ConsoleFooterLinks({ queues = [], governance, privileged
     (g.single_path_overrides_quarter || 0);
 
   return (
-    <div className={cx("flex flex-wrap items-center gap-2 border-t pt-4", CONSOLE.divider)}>
-      <Stat to="/admin/support" label="queued actions" value={queueTotal} urgent />
-      <Stat to="/admin/governance" label="governance actions" value={governanceOpen} urgent />
-      <Stat to="/admin/audit" label="recent privileged actions" value={privilegedCount} />
+    <div className={cx("flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t pt-4", CONSOLE.divider)}>
+      {/* Two groups, so justify-between has exactly two things to push apart. The counts have
+          to be wrapped for that: left as loose children they would be spread across the row
+          individually. What this replaces was an ml-auto on the links, which is right-align
+          for a row that never wraps — once it did, the links were pushed hard right on their
+          OWN line, leaving a left-aligned badge row above a right-aligned link row. Each
+          group now starts at the same edge when stacked.
 
-      <span className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1">
+          gap-x-4 keeps the two groups apart at a width where they still share a line;
+          gap-y-2 is the space between them once they do not. */}
+      <span className="flex flex-wrap items-center gap-2">
+        <Stat to="/admin/support" label="queued actions" value={queueTotal} urgent />
+        <Stat to="/admin/governance" label="governance actions" value={governanceOpen} urgent />
+        <Stat to="/admin/audit" label="recent privileged actions" value={privilegedCount} />
+      </span>
+
+      <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {SHORTCUTS.map(([to, label]) => (
           <Link key={to} to={to} className={cx("text-[12px] font-medium", CONSOLE.link)}>
             {label}

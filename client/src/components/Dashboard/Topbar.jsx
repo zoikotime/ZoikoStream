@@ -81,6 +81,8 @@ export default function Topbar({
   quickActions = false,
   collapsed = false,
   onToggleCollapse,
+  // Whether the mobile navigation drawer is open, so the hamburger can say what a tap will do.
+  drawerOpen = false,
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -99,29 +101,48 @@ export default function Topbar({
     // (ProfilePhotoEditor), a beat before /console-state catches up.
     avatar_url: user ? user.avatar_url ?? null : state?.user?.avatar_url ?? null,
   };
-  const canCreate = isAdminRole(state?.user?.role || user?.role);
+  const canCreate = isAdminRole(state?.user?.role ?? user?.role ?? "org_admin");
 
-  const iconBtn = cx(
-    "grid h-10 w-10 shrink-0 place-items-center rounded-xl border transition-colors duration-150 motion-reduce:transition-none",
-    "border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-900",
-    "dark:border-white/[0.14] dark:bg-white/[0.04] dark:text-neutral-300 dark:hover:bg-white/[0.08] dark:hover:text-white",
+  const iconBtnBase = cx(
+    "grid place-items-center rounded-lg transition-colors duration-150 motion-reduce:transition-none",
+    CONSOLE.muted,
+    "hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-white/[0.06] dark:hover:text-white",
     focusRing
   );
+  const iconBtn = cx("h-9 w-9", iconBtnBase);
 
   return (
     <header
       ref={menuRef}
       className={cx(
-        // z.header: pages have their own sticky bars; the account menu must stay above them.
-        "sticky top-0 flex h-[4.25rem] shrink-0 items-center gap-2 border-b px-3 backdrop-blur-xl sm:gap-3 sm:px-6",
+        // z.header, not z-20: pages have their own `sticky top-0 z-20` bars (Settings, and
+        // every OrganizationPageHeader), and at an equal z-index the later one in the DOM wins,
+        // so the account menu dropped under them and its upper half went blank. The shared
+        // scale keeps the topbar above page content and below every portalled overlay.
+        // Safe area: on Android devices that draw the app under the status bar (edge-to-edge,
+        // despite bridge.js's overlay:false) the bar's controls sat in the status-bar strip,
+        // where the system takes the taps. The inset pads the bar clear of it; the controls
+        // keep their 64px row. It is 0 on the web build (no viewport-fit=cover there).
+        "sticky top-0 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center gap-2 border-b px-3 pt-[env(safe-area-inset-top)] backdrop-blur-xl sm:gap-3 sm:px-5",
         z.header,
         CONSOLE.bar
       )}
     >
-      {/* Two controls, one job each, and never both at once: under lg the rail is a drawer the
-          hamburger opens; at lg and up this collapses it to an icon strip. */}
-      <button onClick={onMenuClick} className={cx(iconBtn, "lg:hidden")} aria-label="Toggle menu">
-        <FiMenu className="text-xl" />
+      {/* Two controls, one job each, and never both at once.
+          Under lg the rail is an overlay drawer, so the hamburger opens and closes it.
+          At lg and up the rail is always present and this collapses it to an icon strip.
+          The desktop control sits at the very start of the bar, against the boundary it
+          acts on — it reads as a handle on the sidebar rather than a page action. */}
+      {/* 44×44 touch target (the 36px icon buttons are fine for a cursor, not a thumb); -ml-1
+          keeps the icon exactly where it was. The label names what a tap will do. */}
+      <button
+        type="button"
+        onClick={onMenuClick}
+        aria-expanded={drawerOpen}
+        aria-label={drawerOpen ? "Close navigation menu" : "Open navigation menu"}
+        className={cx("-ml-1 h-11 w-11", iconBtnBase, "lg:hidden")}
+      >
+        <FiMenu className="text-xl" aria-hidden="true" />
       </button>
       <button
         type="button"

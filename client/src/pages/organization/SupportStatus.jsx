@@ -31,8 +31,12 @@ const TRUST = [
   // Settings → Security, which is the change-password form and answers neither question.
   { icon: FiShield, title: "Security overview", desc: "Practices, certifications, and reporting.", to: "/organization/support/security" },
   { icon: FiGlobe, title: "Data residency", desc: "Where data is processed and stored.", to: "/organization/support/data-residency" },
-  { icon: FiFileText, title: "Compliance documents", desc: "Request access under NDA." },
-  { icon: FiAlertOctagon, title: "Report a vulnerability", desc: "Coordinated disclosure and security.txt." },
+  // These two open the Trust Center's own forms (pages/Trust.jsx: POST /trust/evidence/requests
+  // and POST /trust/security/reports). They used to render inert, marked "On request", which
+  // read as broken buttons although both flows exist. The second promised a security.txt that
+  // this deployment does not serve.
+  { icon: FiFileText, title: "Compliance documents", desc: "Request access under NDA.", to: "/trust#evidence" },
+  { icon: FiAlertOctagon, title: "Report a vulnerability", desc: "Coordinated disclosure through a protected channel.", to: "/trust#report" },
 ];
 
 const th = "px-5 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.1em]";
@@ -372,10 +376,9 @@ export default function SupportStatus() {
                 {body}
               </Link>
             ) : (
-              // No destination exists for these two. They already rendered as inert divs,
-              // but looked exactly like the two beside them that DO navigate — so they read
-              // as dead buttons. Dimmed and labelled, so the difference is visible rather
-              // than discovered by clicking.
+              // A card with no destination (none today) renders inert, dimmed and labelled, so
+              // the difference from the cards that DO navigate is visible rather than
+              // discovered by clicking.
               <div key={title} className={cx(cls, "opacity-60")}>
                 {body}
                 <span className={cx("ml-auto shrink-0 self-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider", CONSOLE.inset, CONSOLE.faint)}>

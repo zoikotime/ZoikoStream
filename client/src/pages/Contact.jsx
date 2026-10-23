@@ -226,7 +226,9 @@ export default function Contact() {
           <Logo height="h-7" />
         </div>
 
-        <div className="relative z-10 mx-auto max-w-7xl px-6 pb-12 pt-28 lg:px-10 lg:pb-14 lg:pt-32">
+        {/* Phones get pb-8 here and pt-6 on the form section below: the tablet values (pb-12 +
+            py-10) stacked to an 88px band between the last hero line and the form card. */}
+        <div className="relative z-10 mx-auto max-w-7xl px-6 pb-8 pt-28 sm:pb-12 lg:px-10 lg:pb-14 lg:pt-32">
           <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:gap-7">
             <span
               aria-hidden="true"
@@ -242,7 +244,9 @@ export default function Contact() {
                 Talk to the right expert, faster.
               </h1>
               <p className="mt-3 max-w-xl text-[15px] leading-relaxed text-white/70">
-                Tell us what you&rsquo;re trying to accomplish.
+                {/* The explicit space is what separates the sentences on a phone, where the
+                    <br> is hidden; JSX drops the line break around it. */}
+                Tell us what you&rsquo;re trying to accomplish.{" "}
                 <br className="hidden sm:block" />
                 We&rsquo;ll route your inquiry to the ZoikoStream team best equipped to help.
               </p>
@@ -268,7 +272,7 @@ export default function Contact() {
       </section>
 
       {/* ── form + sidebar ───────────────────────────────────────────────────── */}
-      <section className="mx-auto grid max-w-7xl gap-6 px-6 py-10 lg:grid-cols-[minmax(0,1fr)_360px] lg:px-10 lg:py-14">
+      <section className="mx-auto grid max-w-7xl gap-6 px-6 pb-10 pt-6 sm:pt-10 lg:grid-cols-[minmax(0,1fr)_360px] lg:px-10 lg:py-14">
         <form
           onSubmit={submit}
           noValidate

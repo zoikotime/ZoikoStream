@@ -62,7 +62,7 @@ const pruneUnreachableChunks = () => ({
         if (code.includes(base(name))) {
           reachable.add(name)
           queue.push(name)
-        }
+        }                   
       }
     }
 
@@ -74,10 +74,10 @@ const pruneUnreachableChunks = () => ({
       removed += 1
       delete bundle[name]
     }
-    if (removed) {
+    if(removed) {
       this.warn(`pruned ${removed} unreachable chunk(s), ${(bytes / 1024).toFixed(0)} kB — ` +
                 'console pages the mobile route table cannot reach')
-    }
+          }
   },
 })
 

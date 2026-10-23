@@ -365,8 +365,10 @@ describe("the sidebar collapse control", () => {
   it("stays separate from the mobile drawer control, which opens the drawer", async () => {
     renderShell();
     await screen.findByRole("heading", { level: 1 });
-    expect(toggle()).not.toBe(screen.getByRole("button", { name: /toggle menu/i }));
-    await userEvent.click(screen.getByRole("button", { name: /toggle menu/i }));
+    // Two controls, one per breakpoint — neither doubles as the other.
+    expect(screen.getByRole("button", { name: /navigation menu/i })).toBeInTheDocument();
+    expect(toggle()).not.toBe(screen.getByRole("button", { name: /navigation menu/i }));
+    await userEvent.click(screen.getByRole("button", { name: /navigation menu/i }));
     expect(rail().closest("aside").className).toContain("translate-x-0");
   });
 
@@ -377,7 +379,7 @@ describe("the sidebar collapse control", () => {
     await screen.findByRole("heading", { level: 1 });
     const aside = rail().closest("aside");
     expect(aside).toHaveClass("-translate-x-full", "max-lg:invisible");
-    await userEvent.click(screen.getByRole("button", { name: /toggle menu/i }));
+    await userEvent.click(screen.getByRole("button", { name: /navigation menu/i }));
     expect(aside).not.toHaveClass("-translate-x-full", "max-lg:invisible");
     expect(aside).toHaveClass("translate-x-0");
     // Desktop is untouched: nothing unprefixed hides the rail.

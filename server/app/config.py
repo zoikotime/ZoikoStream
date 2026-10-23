@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     # 5173 is Vite's default; 5174 is its fallback when 5173 is taken. 4173 = vite preview.
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:5174,http://localhost:4173"
     APP_URL: str = "http://localhost:5173"
+    TRUSTED_PROXY_HOPS: int = 1
 
     # ── THE ANDROID APP ──────────────────────────────────────────────────────────────────
     # Kept OUT of CORS_ORIGINS on purpose. The production guard below rejects any
