@@ -2,16 +2,22 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   FiSearch, FiPlay, FiMonitor, FiShield, FiAlignLeft,
-  FiTrendingUp, FiCheckSquare, FiChevronRight,
+  FiTrendingUp, FiCheckSquare, FiChevronRight, FiKey, FiLink, FiLayers, FiActivity, FiCode,
+  FiCalendar, FiLock, FiCheck, FiArrowRight,
 } from "react-icons/fi";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
+import { keyInventory } from "../../data/keyInventory";
 import { ACCENT, CONSOLE, STAGE_COLOR, cx, focusRing, type } from "../../ui/tokens";
 import { ConsoleButton } from "../../ui/Button";
 import { Input } from "../../ui/forms";
 import HealthDot from "../../components/admin/HealthDot";
 import StatRow from "../../components/admin/StatRow";
+import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
+import {
+  Banner, IconChip, KpiRow, KpiTile, Panel, PanelLink, Tag,
+} from "../../components/organization/console/ConsoleUI";
 
 // Developer Platform — the org console's build surface: what ZoikoStream is, the docs
 // entry points, and whether the platform is currently in a state worth building against.
@@ -88,6 +94,56 @@ const FOOTER_LINKS = [
   ["Terms", null],
 ];
 
+// What the platform actually enforces today — each line is a behaviour of this codebase
+// (crud.admin key minting, services/webhooks signing, the audit ledger), not a roadmap item.
+const SAFEGUARDS = [
+  ["One-time secret reveal", "Only a hash of each API key is stored; the key is shown once"],
+  ["Expiry and revocation", "Keys can expire and be revoked; expiring keys are flagged"],
+  ["Auditable changes", "Creating or revoking a key is recorded in Security & audit"],
+  ["Signed webhooks", "Deliveries carry a timestamped HMAC-SHA256 X-Zoiko-Signature"],
+];
+
+const STEP_TONE = { done: "green", todo: "amber", unavailable: "slate", error: "rose" };
+
+function ReadinessStep({ n, icon, title, detail, state, label, to }) {
+  return (
+    <li className="flex items-center gap-3 py-3">
+      <span className={cx("w-6 shrink-0 text-[12px] font-semibold tabular-nums", CONSOLE.faint)}>{String(n).padStart(2, "0")}</span>
+      <IconChip icon={icon} tone={state === "done" ? "green" : state === "todo" ? "violet" : "slate"} size="sm" />
+      <div className="min-w-0 flex-1">
+        <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>{title}</p>
+        <p className={cx("text-[12px]", CONSOLE.faint)}>{detail}</p>
+      </div>
+      {to && state === "todo" ? (
+        <Link to={to} className={cx("shrink-0 rounded", focusRing)} aria-label={`${title}: ${label}`}>
+          <Tag plain tone="amber">{label}</Tag>
+        </Link>
+      ) : (
+        <Tag plain tone={STEP_TONE[state]}>{label}</Tag>
+      )}
+    </li>
+  );
+}
+
+function FlowBox({ icon: Icon, title, detail }) {
+  return (
+    <div className={cx("flex min-w-0 flex-1 flex-col items-center rounded-xl border px-3 py-3 text-center", CONSOLE.divider)}>
+      <Icon aria-hidden="true" className="text-[18px] text-violet-600 dark:text-violet-300" />
+      <p className={cx("mt-1.5 text-[12.5px] font-semibold", CONSOLE.heading)}>{title}</p>
+      <p className={cx("text-[11px]", CONSOLE.faint)}>{detail}</p>
+    </div>
+  );
+}
+
+function FlowArrow({ label }) {
+  return (
+    <div className={cx("flex shrink-0 flex-col items-center px-1 text-[10px] uppercase tracking-wider", CONSOLE.faint)}>
+      <span>{label}</span>
+      <FiArrowRight aria-hidden="true" className="text-[14px]" />
+    </div>
+  );
+}
+
 function FootPanel({ eyebrow, children }) {
   return (
     <section className={cx(CONSOLE.panel, "px-5 py-4")}>
@@ -96,6 +152,107 @@ function FootPanel({ eyebrow, children }) {
       </p>
       {children}
     </section>
+  );
+}
+
+// Request and delivery visibility (ORG-08 "API requests & webhook deliveries"). Webhook
+// deliveries are recorded per endpoint, so that tab is real; per-key request telemetry is not
+// collected anywhere, and that tab says so rather than drawing a chart of nothing.
+const ACTIVITY_TABS = [
+  ["requests", "Request activity"],
+  ["deliveries", "Webhook deliveries"],
+  ["errors", "Errors"],
+];
+const failedDelivery = (d) => d.status === "failed" || Boolean(d.last_error) || (d.last_response_code ?? 0) >= 400;
+
+function useDeliveries(hooks) {
+  // Up to five endpoints' recent deliveries, newest first; only metadata, never payloads.
+  const deliveries = useApi(() =>
+    Promise.all(
+      hooks.slice(0, 5).map((h) =>
+        api.get(`/organization/developer/webhooks/${h.id}/deliveries`).then((r) => (r.data || []).map((d) => ({ ...d, endpoint: h.label || h.url })))
+      )
+    ).then((lists) => lists.flat().sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 20))
+  );
+  return deliveries;
+}
+
+function IntegrationActivity({ hooks, failed }) {
+  const [tab, setTab] = useState("requests");
+  return (
+    <Panel eyebrow="Operational visibility" title="API requests & webhook deliveries" subtitle="Organization-scoped technical activity, where it is recorded">
+      <div role="tablist" aria-label="Activity" className={cx("-mt-1 mb-3 flex gap-4 border-b", CONSOLE.divider)}>
+        {ACTIVITY_TABS.map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            onClick={() => setTab(key)}
+            className={cx(
+              "-mb-px border-b-2 pb-2 text-[13px] font-semibold",
+              tab === key ? "border-violet-600 text-violet-700 dark:border-violet-400 dark:text-violet-300" : cx("border-transparent", CONSOLE.muted),
+              focusRing
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {tab === "requests" ? (
+        <div className={cx("flex items-start gap-3 rounded-xl border border-dashed p-4", CONSOLE.divider)}>
+          <IconChip icon={FiActivity} tone="violet" size="sm" />
+          <div>
+            <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>Request telemetry is not connected</p>
+            <p className={cx("text-[12px]", CONSOLE.faint)}>
+              Per-key request volume, failures and latency are not collected, so nothing is shown here.
+            </p>
+          </div>
+        </div>
+      ) : failed ? (
+        <p className={cx("py-4 text-center text-[12.5px]", CONSOLE.faint)}>Developer settings couldn&apos;t be read.</p>
+      ) : !hooks ? (
+        <p className={cx("py-4 text-center text-[12.5px]", CONSOLE.faint)}>Loading…</p>
+      ) : hooks.length === 0 ? (
+        <p className={cx("rounded-xl border border-dashed px-4 py-6 text-center text-[12.5px]", CONSOLE.divider, CONSOLE.faint)}>
+          No webhook endpoints are registered, so there are no deliveries.
+        </p>
+      ) : (
+        <Deliveries hooks={hooks} errorsOnly={tab === "errors"} />
+      )}
+      <p className={cx("mt-3 text-[11.5px]", CONSOLE.faint)}>Delivery records are scoped to this organization and never include payloads.</p>
+    </Panel>
+  );
+}
+
+function Deliveries({ hooks, errorsOnly }) {
+  const { data, error, loading } = useDeliveries(hooks);
+  const rows = (data || []).filter((d) => !errorsOnly || failedDelivery(d));
+  if (error) return <p className={cx("py-4 text-center text-[12.5px]", CONSOLE.faint)}>Deliveries couldn&apos;t be read.</p>;
+  if (loading && !data) return <p className={cx("py-4 text-center text-[12.5px]", CONSOLE.faint)}>Loading…</p>;
+  if (rows.length === 0) {
+    return (
+      <p className={cx("rounded-xl border border-dashed px-4 py-6 text-center text-[12.5px]", CONSOLE.divider, CONSOLE.faint)}>
+        {errorsOnly ? "No failed deliveries." : "No deliveries yet."}
+      </p>
+    );
+  }
+  return (
+    <ul className={cx("divide-y", CONSOLE.divideY)}>
+      {rows.map((d) => (
+        <li key={d.id} className="flex items-center gap-3 py-2.5">
+          <div className="min-w-0 flex-1">
+            <p className={cx("truncate font-mono text-[12.5px]", CONSOLE.heading)}>{d.event_type}</p>
+            <p className={cx("truncate text-[11.5px]", CONSOLE.faint)}>
+              {d.endpoint} · {new Date(d.created_at).toLocaleString()} · {d.attempt_count} attempt{d.attempt_count === 1 ? "" : "s"}
+            </p>
+          </div>
+          <Tag tone={failedDelivery(d) ? "rose" : d.status === "delivered" ? "green" : "slate"}>
+            {d.last_response_code ? `${d.status} · ${d.last_response_code}` : d.status}
+          </Tag>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -109,6 +266,15 @@ export default function DeveloperPlatform() {
     api.get("/organization/overview", { params: { range: "24h" } }).then((r) => r.data)
   );
   useInterval(reload, REFRESH_MS);
+
+  // The organization's own integration state: keys (with the server's lifecycle counts) and
+  // webhook endpoints. Admin-only on the server; a refusal reads as "Unavailable", never as zero.
+  const dev = useApi(() => api.get("/organization/developer").then((r) => r.data));
+  const keys = Array.isArray(dev.data?.api_keys) ? dev.data.api_keys : null;
+  const hooks = Array.isArray(dev.data?.webhooks) ? dev.data.webhooks : null;
+  const inventory = keyInventory(dev.data);
+  const activeKeys = inventory?.active ?? null;
+  const enabledHooks = hooks ? hooks.filter((h) => h.enabled !== false).length : null;
 
   const health = data?.service_health || {};
   const openIncidents = useMemo(
@@ -126,69 +292,161 @@ export default function DeveloperPlatform() {
   }, [query, stage]);
 
   return (
-    <div className="mx-auto max-w-[1500px] space-y-8">
-      {/* ── Hero ───────────────────────────────────────────────────────────── */}
-      <section
-        className={cx(
-          "relative isolate overflow-hidden rounded-2xl border px-4 py-12 text-center sm:px-8 sm:py-16",
-          "border-slate-200 bg-white dark:border-white/10 dark:bg-black"
-        )}
+    <div className="space-y-6">
+      <OrganizationPageHeader
+        breadcrumbs={[["Organization", "/organization/manage"], ["Developers", "/organization/developers"], ["Overview"]]}
+        eyebrow="Integration workspace / Conditional experience"
+        title="Developers"
+        subtitle="Build secure integrations with governed API access and event-driven workflows."
+        actions={
+          <>
+            <ConsoleButton href="/organization/credentials" variant="secondary" size="sm" leftIcon={FiKey}>
+              API credentials
+            </ConsoleButton>
+            <ConsoleButton href="/organization/live-inputs" size="sm" leftIcon={FiPlay}>
+              Start the quickstart
+            </ConsoleButton>
+          </>
+        }
+      />
+
+      <Banner
+        icon={FiLock}
+        title="Conditional module — shown once developer access is in use"
+        aside={<Tag tone="slate"><FiShield aria-hidden="true" /> Organization admins only</Tag>}
       >
-        {/* Ambient glow. Literal violet/green (not `emerald`, which index.css remaps). */}
-        <div aria-hidden="true" className="pointer-events-none absolute inset-0 -z-10">
-          <div className="absolute -left-32 -top-24 h-72 w-72 rounded-full bg-violet-500/10 blur-3xl dark:bg-violet-500/20" />
-          <div className="absolute -bottom-32 -right-24 h-72 w-72 rounded-full bg-green-500/[0.07] blur-3xl dark:bg-green-500/15" />
-        </div>
+        This workspace appears in the rail when your organization has an API key or a webhook endpoint. Every request is
+        still checked by the server for organization and role.
+      </Banner>
 
-        <p className={cx("text-[11px] uppercase tracking-[0.22em]", type.mono, CONSOLE.faint)}>
-          Build on ZoikoStream
-        </p>
+      <KpiRow>
+        <KpiTile
+          icon={FiKey}
+          label="API credentials"
+          value={dev.error ? null : activeKeys}
+          emphasis={activeKeys == null ? "text" : "number"}
+          caption={
+            dev.error
+              ? "Unavailable right now"
+              : dev.loading && !dev.data
+              ? "Loading…"
+              : !inventory
+              ? "Key inventory not reported"
+              : inventory.total === 0
+              ? "No credentials issued yet"
+              : `Active of ${inventory.total} issued${inventory.expiring_30d ? ` · ${inventory.expiring_30d} expiring in 30 days` : ""}`
+          }
+          to="/organization/credentials"
+        />
+        <KpiTile
+          icon={FiLayers}
+          tone="sky"
+          label="Sandbox access"
+          value="Not available"
+          emphasis="text"
+          caption="No sandbox environment is provisioned"
+        />
+        <KpiTile
+          icon={FiLink}
+          tone="green"
+          label="Webhooks"
+          value={dev.error ? null : enabledHooks}
+          caption={
+            dev.error
+              ? "Unavailable right now"
+              : hooks == null
+              ? "Loading…"
+              : hooks.length === 0
+              ? "No endpoints registered"
+              : "Enabled endpoints · signed deliveries"
+          }
+        />
+        <KpiTile
+          icon={FiActivity}
+          tone="pink"
+          label="Request telemetry"
+          value="Not connected"
+          emphasis="text"
+          caption="Per-key request metrics are not collected"
+        />
+      </KpiRow>
 
-        <h1
-          className={cx(
-            "mx-auto mt-4 max-w-[760px] text-[28px] font-bold leading-[1.15] tracking-tight sm:text-[36px] lg:text-[44px]",
-            CONSOLE.heading
-          )}
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+        <div className="min-w-0 space-y-6">
+        <Panel
+          eyebrow="Getting started"
+          title="Integration readiness"
+          subtitle="The prerequisites before an integration goes to production"
+          action={<PanelLink to="/organization/credentials">Manage credentials</PanelLink>}
         >
-          Ship secure live and on-demand{" "}
-          <span className="bg-gradient-to-r from-violet-500 to-indigo-400 bg-clip-text text-transparent">
-            video, end to end.
-          </span>
-        </h1>
+          <ol className={cx("divide-y", CONSOLE.divideY)}>
+            <ReadinessStep
+              n={1}
+              icon={FiShield}
+              title="Confirm organization access"
+              detail="Developer settings are readable only by an organization admin"
+              state={dev.error ? "error" : dev.data ? "done" : "unavailable"}
+              label={dev.error ? "Unavailable" : dev.data ? "Confirmed" : "Checking"}
+            />
+            <ReadinessStep
+              n={2}
+              icon={FiKey}
+              title="Create a credential"
+              detail="Shown once on creation; set an expiry and revoke when unused"
+              state={activeKeys > 0 ? "done" : keys ? "todo" : "unavailable"}
+              label={activeKeys > 0 ? "Done" : keys ? "To do" : "—"}
+              to="/organization/credentials"
+            />
+            <ReadinessStep
+              n={3}
+              icon={FiLink}
+              title="Register a signed webhook"
+              detail="Through the API (POST /organization/developer/webhooks) — then verify X-Zoiko-Signature at your receiver"
+              state={enabledHooks > 0 ? "done" : hooks ? "todo" : "unavailable"}
+              label={enabledHooks > 0 ? "Done" : hooks ? "To do" : "—"}
+            />
+            <ReadinessStep
+              n={4}
+              icon={FiCheck}
+              title="Validate in a sandbox"
+              detail="No sandbox environment exists yet — test against a draft event"
+              state="unavailable"
+              label="Not available"
+            />
+          </ol>
+        </Panel>
 
-        <p className={cx("mx-auto mt-5 max-w-[626px] text-[14px] leading-[25px]", CONSOLE.muted)}>
-          ZoikoStream is the API platform for contribution, ingest, production, secure delivery,
-          and playback — with managed Live Events for the moments that can’t be repeated.
-        </p>
-
-        <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
-          <ConsoleButton href="/organization/live-inputs" leftIcon={FiPlay}>
-            Start the quickstart
-          </ConsoleButton>
-          <ConsoleButton href="/organization/events" variant="secondary">
-            Request a Live Event
-          </ConsoleButton>
+        <IntegrationActivity hooks={hooks} failed={Boolean(dev.error)} />
         </div>
 
-        {/* Filters the catalogue below — a live control, not decoration. */}
-        <div className="relative mx-auto mt-7 max-w-[440px]">
-          <FiSearch
-            className={cx("pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[15px]", CONSOLE.faint)}
-            aria-hidden="true"
-          />
-          <Input
-            variant="console"
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search the developer guides"
-            placeholder='Search "create live input", "verify webhook signature", "playback token"…'
-            /* Side-only padding override, the same way PasswordField clears room for its
-               eye icon — safe against Tailwind's shorthand ordering (no tailwind-merge here). */
-            className="pl-10 text-center text-[13px]"
-          />
+        <div className="min-w-0 space-y-6">
+          <Panel eyebrow="Reference architecture" title="How requests are authorized" subtitle="Every call is checked at the API boundary">
+            <div className="flex items-stretch gap-1">
+              <FlowBox icon={FiCode} title="Your application" detail="API key" />
+              <FlowArrow label="HTTPS" />
+              <FlowBox icon={FiShield} title="API boundary" detail="Key check · org scope" />
+              <FlowArrow label="Scoped" />
+              <FlowBox icon={FiCalendar} title="Your organization" detail="Events · media · analytics" />
+            </div>
+          </Panel>
+
+          <Panel eyebrow="Built-in safeguards" title="Credential & webhook governance" subtitle="What the platform enforces today">
+            <ul className={cx("divide-y", CONSOLE.divideY)}>
+              {SAFEGUARDS.map(([title, detail]) => (
+                <li key={title} className="flex items-start gap-3 py-2.5">
+                  <span aria-hidden="true" className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300">
+                    <FiCheck />
+                  </span>
+                  <div className="min-w-0">
+                    <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>{title}</p>
+                    <p className={cx("text-[12px]", CONSOLE.faint)}>{detail}</p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </Panel>
         </div>
-      </section>
+      </div>
 
       {/* ── Docs by lifecycle stage ────────────────────────────────────────── */}
       <section className={cx(CONSOLE.panel, "overflow-hidden")}>
@@ -254,8 +512,26 @@ export default function DeveloperPlatform() {
 
       {/* ── Quickstarts ────────────────────────────────────────────────────── */}
       <section>
-        <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <h2 className={cx("text-[20px] font-semibold tracking-tight", CONSOLE.heading)}>Quickstarts</h2>
+          {/* Filters the catalogue below — a live control, not decoration. */}
+          <div className="relative order-last w-full sm:order-none sm:ml-auto sm:w-[360px]">
+            <FiSearch
+              className={cx("pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[15px]", CONSOLE.faint)}
+              aria-hidden="true"
+            />
+            <Input
+              variant="console"
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search the developer guides"
+              placeholder='Search "live input", "webhook signature", "playback token"…'
+              /* Side-only padding override, the same way PasswordField clears room for its
+                 eye icon — safe against Tailwind's shorthand ordering (no tailwind-merge here). */
+              className="pl-10 text-[13px]"
+            />
+          </div>
           <button
             type="button"
             onClick={() => {

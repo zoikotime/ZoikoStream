@@ -3,6 +3,7 @@
 // developer (API keys + integrations), and danger zone. Route: /organization/settings.
 // Rendered inside OrganizationLayout. Each editable panel saves ONLY its own section, and only
 // the fields that changed (see SECTIONS); immediate actions (keys, integrations) act on their own.
+import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import { useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -462,11 +463,14 @@ export default function OrganizationSettings() {
       {/* Header + Save */}
       {/* Sticky so Save is reachable from the bottom of a long panel — the reason a change
           could be made, scrolled past, and lost. */}
-      <div className="sticky top-0 z-20 -mx-4 flex flex-col gap-4 border-b border-transparent bg-slate-50/95 px-4 py-3 backdrop-blur sm:flex-row sm:items-start sm:justify-between dark:bg-slate-950/95">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Settings</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">Manage your organization's profile, security, and integrations</p>
-        </div>
+      <div className="sticky top-0 z-20 -mx-4 flex flex-col gap-4 border-b border-transparent bg-slate-50/95 px-4 py-3 backdrop-blur sm:flex-row sm:items-end sm:justify-between dark:bg-black/95">
+        <OrganizationPageHeader
+          className="min-w-0"
+          breadcrumbs={[["Organization", "/organization/manage"], ["Organization settings", "/organization/settings"], [TABS.find((t) => t.key === tab)?.label || "General"]]}
+          eyebrow="Organization console / Settings"
+          title="Settings"
+          subtitle="Manage your organization's profile, security, and integrations"
+        />
         <div className="flex items-center gap-3">
           {/* Each panel has its own Save. This line only says where unsaved edits are, so a
               change made on one tab is not forgotten on another. */}

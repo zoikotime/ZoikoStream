@@ -1,5 +1,7 @@
 // Audience, Streaming Sessions and Playback & Access, after the page-level right rail was
-// removed.
+// removed — and Audience since, rebuilt to the approved ORG-03 frame (ZST-ENG-DASH-001), which
+// sets the access governance cards beside the main column. Audience is therefore pinned to
+// that composition below; the other two pages stay one column.
 //
 // The thing worth pinning is not "it looks nicer" — it is that the split is gone while every
 // control, table and honest blank came through the move intact. A layout change that
@@ -128,7 +130,6 @@ function railTracks(container) {
 
 describe("no page-level right rail", () => {
   it.each([
-    ["Audience", AudienceAccess],
     ["Streaming Sessions", StreamingSessions],
     ["Playback & Access", PlaybackAccess],
   ])("%s renders one column", async (_name, Page) => {
@@ -136,12 +137,29 @@ describe("no page-level right rail", () => {
     await screen.findByRole("heading", { level: 1 });
     expect(railTracks(container)).toEqual([]);
   });
+
+  it("Audience follows the ORG-03 frame: the work in the main column, governance beside it", async () => {
+    const { container } = renderPage(AudienceAccess);
+    await screen.findByRole("heading", { level: 1 });
+    // One split only, and it is the frame's: activity and the access table in the main track.
+    expect(railTracks(container)).toHaveLength(1);
+    const [main, side] = container.querySelector("[class*='grid-cols-[']").children;
+    expect(within(main).getByRole("heading", { name: "Playback activity" })).toBeInTheDocument();
+    expect(within(main).getByRole("heading", { name: "Access by event" })).toBeInTheDocument();
+    expect(within(main).getByRole("table")).toBeInTheDocument();
+    expect(within(side).getByText("Access rules belong to each event.")).toBeInTheDocument();
+    // Everything below the split stays full width.
+    for (const title of ["Attendance", "Audience insights", "Controls that shape the audience"]) {
+      expect(main.contains(screen.getByRole("heading", { name: title }))).toBe(false);
+      expect(side.contains(screen.getByRole("heading", { name: title }))).toBe(false);
+    }
+  });
 });
 
 describe("Audience keeps its content, in order, full width", () => {
   it("still has the table, its search, refresh and export", async () => {
     renderPage(AudienceAccess);
-    await screen.findByRole("heading", { level: 1, name: /audience access/i });
+    await screen.findByRole("heading", { level: 1, name: /audience & access/i });
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/search events/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /refresh/i })).toBeInTheDocument();

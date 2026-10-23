@@ -1,20 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
-  FiUserCheck, FiRefreshCw, FiUsers, FiCalendar, FiTrendingUp, FiDownload,
+  FiUserCheck, FiRefreshCw, FiUsers, FiCalendar, FiTrendingUp, FiDownload, FiShield, FiEye, FiRadio,
+  FiLock, FiAlertTriangle, FiChevronRight,
 } from "react-icons/fi";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
-import { CONSOLE, cx, type } from "../../ui/tokens";
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, XAxis, YAxis } from "recharts";
+import { CONSOLE, cx, focusRing, type } from "../../ui/tokens";
+import { ChartTooltip } from "../../ui/charts";
 import { ConsoleButton } from "../../ui/Button";
 import Badge from "../../ui/Badge";
 import DataTable from "../../components/admin/DataTable";
 import Panel from "../../components/admin/Panel";
-import StatCard from "../../components/admin/StatCard";
+import { DarkCard, IconChip, KpiRow, KpiTile, Panel as ConsolePanel, PanelLink } from "../../components/organization/console/ConsoleUI";
+import { useOrgScope } from "../../components/organization/orgScope";
 import FactGrid from "../../components/organization/FactGrid";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
-import { fmtDateTime, visLabel } from "../../data/events";
+import { displayStatusOf, fmtDateTime, statusMeta, visLabel } from "../../data/events";
 import { downloadCsv } from "../../utils/export";
 
 // Audience Access — who has registered, who may watch, and how full each event is.
@@ -62,6 +66,16 @@ const fillTone = (pct) => {
 // the attendance panel use. The range buttons used to reload only the attendance panel, which
 // left the table and the four cards showing every event regardless of the selection.
 const RANGE_DAYS = { "7d": 7, "30d": 30, "90d": 90 };
+// The table's orders, as `${key}:${dir}` over SORT_FIELD's keys (start_time is the default).
+const SORT_OPTIONS = [
+  ["start_time:desc", "Newest start"],
+  ["start_time:asc", "Oldest start"],
+  ["title:asc", "Event name (A–Z)"],
+  ["visibility:asc", "Audience (visibility)"],
+  ["registered:desc", "Most registered"],
+  ["pct:desc", "Largest capacity"],
+];
+
 const PAGE_SIZE = 20;               // inside the API's le=100 cap
 
 // DataTable names a column by the row field it renders; the API names sortable fields in its
@@ -207,6 +221,64 @@ function AudienceInsights({ data }) {
   );
 }
 
+// Bucket labels for the activity series (UTC, as the server buckets it).
+const BUCKET_LABEL = {
+  hour: (d) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+  day: (d) => d.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }),
+  week: (d) => d.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }),
+};
+
+// ORG-03 "Playback activity": sessions that began in each UTC day (hour / week for the
+// shortest and longest windows), straight from the server's series — every bucket a real
+// count, empty ones zero. Nothing drawn when nothing was reported.
+function PlaybackActivity({ qoe }) {
+  const total = qoe.total?.sessions ?? 0;
+  const series = qoe.series;
+  const label = BUCKET_LABEL[series?.bucket] || BUCKET_LABEL.day;
+  const data = (series?.points || []).map((p) => ({ label: label(new Date(p.start)), sessions: p.sessions }));
+  const peak = data.reduce((best, p) => (p.sessions > (best?.sessions ?? -1) ? p : best), null);
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[12px]">
+        <span className={cx("inline-flex items-center gap-1.5", CONSOLE.body)}>
+          <span aria-hidden="true" className="h-2 w-2 rounded-full bg-violet-500" /> Playback sessions
+        </span>
+        <span className={cx("font-semibold tabular-nums", CONSOLE.heading)}>{total.toLocaleString()} total sessions</span>
+      </div>
+      {!series || total === 0 ? (
+        <p className={cx("rounded-xl border border-dashed px-4 py-10 text-center text-[12.5px]", CONSOLE.divider, CONSOLE.faint)}>
+          No playback sessions were reported in this window.
+        </p>
+      ) : (
+        <div
+          role="img"
+          aria-label={`Playback sessions per ${series.bucket} (UTC): ${total} in total${peak ? `, highest ${peak.sessions} on ${peak.label}` : ""}.`}
+          style={{ height: 200 }}
+        >
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={data} margin={{ left: 0, right: 8, top: 8 }}>
+              <defs>
+                <linearGradient id="zk-aud-sessions" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#8b5cf6" stopOpacity={0.3} />
+                  <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-slate-100 dark:text-white/10" vertical={false} />
+              <XAxis dataKey="label" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-neutral-500" minTickGap={24} />
+              <YAxis allowDecimals={false} fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-neutral-500" width="auto" />
+              <ChartTooltip formatter={(v) => [v.toLocaleString(), "Sessions"]} />
+              <Area type="monotone" dataKey="sessions" name="Sessions" stroke="#8b5cf6" strokeWidth={2} fill="url(#zk-aud-sessions)" dot={false} activeDot={{ r: 4 }} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      <p className={cx("mt-2 text-[12px] tabular-nums", CONSOLE.muted)}>
+        Live {(qoe.live?.sessions ?? 0).toLocaleString()} · Replay {(qoe.replay?.sessions ?? 0).toLocaleString()} · UTC {series?.bucket === "hour" ? "hours" : series?.bucket === "week" ? "weeks" : "days"}
+      </p>
+    </>
+  );
+}
+
 export default function AudienceAccess() {
   const [range, setRange] = useState("30d");
   const [qInput, setQInput] = useState("");
@@ -257,6 +329,14 @@ export default function AudienceAccess() {
   const insights = useApi(() =>
     api.get("/organization/audience-insights", { params: { range } }).then((r) => r.data)
   );
+  // Playback sessions (ORG-03 "Playback sessions — not unique people"): what viewers' players
+  // reported, live and replay, over the same window as the rest of the page — the summary also
+  // carries the per-day series and each event's session count.
+  const qoeWindow = range;
+  const qoe = useApi(() =>
+    api.get("/organization/playback/qoe", { params: { window: qoeWindow } }).then((r) => r.data)
+  );
+  const { state: shell } = useOrgScope();
 
   // useApi fetches on mount and on reload() only, so every server-decided input refetches
   // explicitly. Guarded-render refetch is this repo's idiom in place of an effect.
@@ -265,7 +345,7 @@ export default function AudienceAccess() {
   if (inputs !== lastInputs) {
     setLastInputs(inputs);
     events.reload();
-    if (!lastInputs.startsWith(range)) { summary.reload(); attendance.reload(); insights.reload(); }
+    if (!lastInputs.startsWith(range)) { summary.reload(); attendance.reload(); insights.reload(); qoe.reload(); }
   }
 
   // Narrowing the result must return to its first page.
@@ -306,6 +386,7 @@ export default function AudienceAccess() {
       key: "title",
       header: "Event",
       sortable: true,
+      className: "min-w-[13rem]",
       render: (ev) => (
         <div className="min-w-0">
           <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>
@@ -314,81 +395,103 @@ export default function AudienceAccess() {
           <p className={cx("truncate text-[11px]", CONSOLE.faint)}>
             {ev.start_time ? fmtDateTime(ev.start_time) : "Unscheduled"}
           </p>
+          {/* Who may watch, and on what condition (no sort key: the API has no ordering for
+              the registration flag). */}
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+            <Badge tone="brand" size="sm">{visLabel(ev.visibility)}</Badge>
+            {ev.registration_required ? (
+              <Badge tone="info" size="sm">Required</Badge>
+            ) : (
+              <span className={CONSOLE.faint}>Open</span>
+            )}
+          </p>
         </div>
       ),
     },
     {
-      key: "visibility",
-      header: "Audience",
-      sortable: true,
-      render: (ev) => <Badge tone="brand">{visLabel(ev.visibility)}</Badge>,
+      key: "lifecycle",
+      header: "Lifecycle",
+      render: (ev) => {
+        const m = statusMeta(displayStatusOf(ev));
+        return <Badge tone={m.tone} dot={m.pulse} size="sm">{m.label}</Badge>;
+      },
     },
     {
-      // Not sortable: the API has no ordering for this flag, and a header that reordered
-      // nothing (or reordered by creation date) would be worse than no header control.
-      key: "registration_required",
-      header: "Registration",
-      render: (ev) =>
-        ev.registration_required ? (
-          <Badge tone="info">Required</Badge>
-        ) : (
-          <span className={cx("text-[12px]", CONSOLE.faint)}>Open</span>
-        ),
-    },
-    {
-      key: "registered",
-      header: "Registered",
+      // Player sessions for this event over the page's window (the QoE summary's by_event):
+      // sessions, not people. "—" only when the player figures could not be read.
+      key: "sessions",
+      header: "Sessions",
       align: "right",
-      sortable: true,
-      sortValue: (ev) => ev.registered ?? -1,
       render: (ev) => (
-        <span className={cx("text-[13px]", type.mono, ev.registered ? CONSOLE.heading : CONSOLE.faint)}>
-          {ev.registered ?? "—"}
-          {ev.limit ? <span className={CONSOLE.faint}> / {ev.limit}</span> : null}
+        <span className={cx("text-[13px] tabular-nums", type.mono, qoe.data ? CONSOLE.heading : CONSOLE.faint)}>
+          {qoe.data?.by_event ? (qoe.data.by_event[ev.id] ?? 0).toLocaleString() : "—"}
         </span>
       ),
     },
     {
-      key: "pct",
-      header: "Capacity",
+      // How many registered, against what capacity: the count on top, the fill beneath.
+      key: "registered",
+      header: "Registrations",
       align: "right",
       sortable: true,
-      sortValue: (ev) => ev.pct ?? -1,
-      render: (ev) =>
-        ev.limit == null ? (
-          // Genuinely uncapped: registration_limit is NULL on the event. Not a stand-in for
-          // a figure we failed to fetch — an event with a limit always shows the number.
-          <span className={cx("text-[12px]", CONSOLE.faint)} title="No capacity limit set">
-            Uncapped
+      sortValue: (ev) => ev.registered ?? -1,
+      render: (ev) => (
+        <div className="flex flex-col items-end gap-1">
+          <span className={cx("text-[13px]", type.mono, ev.registered ? CONSOLE.heading : CONSOLE.faint)}>
+            {ev.registered ?? "—"}
+            {ev.limit ? <span className={CONSOLE.faint}> / {ev.limit}</span> : null}
           </span>
-        ) : ev.pct == null ? (
-          // Capped, but this response did not carry a registered count, so the fill is
-          // unknown. The configured capacity is still a fact and is still shown.
-          <span className={cx("text-[13px]", type.mono, CONSOLE.heading)}>{ev.limit}</span>
-        ) : (
-          <span className="inline-flex items-center gap-2">
-            {/* Bar carries the same verdict as the number, for anyone scanning rather than
-                reading. aria-hidden because the adjacent text already states it. */}
-            <span
-              className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-200 dark:bg-white/10"
-              aria-hidden="true"
-            >
-              <span
-                className={cx(
-                  "block h-full rounded-full",
-                  ev.pct >= 95 ? "bg-rose-500" : ev.pct >= 80 ? "bg-amber-500" : "bg-green-500"
-                )}
-                style={{ width: `${Math.min(ev.pct, 100)}%` }}
-              />
+          {ev.limit == null ? (
+            // Genuinely uncapped: registration_limit is NULL on the event. Not a stand-in for
+            // a figure we failed to fetch — an event with a limit always shows the number.
+            <span className={cx("text-[11.5px]", CONSOLE.faint)} title="No capacity limit set">
+              Uncapped
             </span>
-            <Badge tone={fillTone(ev.pct)} size="sm">
-              {ev.pct}%
-            </Badge>
-            {/* The configured capacity itself, so the column answers "how many?" and not
-                only "how full?". */}
-            <span className={cx("text-[12px]", type.mono, CONSOLE.faint)}>of {ev.limit}</span>
-          </span>
-        ),
+          ) : ev.pct == null ? (
+            // Capped, but this response did not carry a registered count, so the fill is
+            // unknown. The configured capacity is still a fact and is still shown.
+            <span className={cx("text-[11.5px]", type.mono, CONSOLE.faint)}>capacity {ev.limit}</span>
+          ) : (
+            <span className="inline-flex items-center gap-2">
+              {/* Bar carries the same verdict as the number, for anyone scanning rather than
+                  reading. aria-hidden because the adjacent text already states it. */}
+              <span
+                className="h-1.5 w-12 overflow-hidden rounded-full bg-slate-200 dark:bg-white/10"
+                aria-hidden="true"
+              >
+                <span
+                  className={cx(
+                    "block h-full rounded-full",
+                    ev.pct >= 95 ? "bg-rose-500" : ev.pct >= 80 ? "bg-amber-500" : "bg-green-500"
+                  )}
+                  style={{ width: `${Math.min(ev.pct, 100)}%` }}
+                />
+              </span>
+              <Badge tone={fillTone(ev.pct)} size="sm">
+                {ev.pct}%
+              </Badge>
+              {/* The configured capacity itself, so the column answers "how many?" and not
+                  only "how full?". */}
+              <span className={cx("text-[11.5px]", type.mono, CONSOLE.faint)}>of {ev.limit}</span>
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      // Where this event's access is reviewed and changed: its own workspace.
+      key: "destination",
+      header: "Destination",
+      render: (ev) => (
+        <Link
+          to={`/organization/events/${ev.id}/access`}
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Open the access workspace for ${ev.title || "this event"}`}
+          className={cx("inline-flex items-center gap-0.5 whitespace-nowrap rounded text-[12.5px] font-semibold", CONSOLE.link, focusRing)}
+        >
+          Open workspace <FiChevronRight aria-hidden="true" />
+        </Link>
+      ),
     },
   ];
 
@@ -405,8 +508,10 @@ export default function AudienceAccess() {
   return (
     <div className="space-y-6">
       <OrganizationPageHeader
-        title="Audience Access"
-        subtitle="Who may attend each event, how many have registered, and how close each one is to capacity."
+        breadcrumbs={[["Organization", "/organization/manage"], ["Audience & Access", "/organization/audience"], ["Audience overview"]]}
+        eyebrow="Organization console / Audience governance"
+        title="Audience & access"
+        subtitle="Understand viewing activity and manage event access safely — without assuming every viewer has an account."
         actions={
           <>
             <div
@@ -429,20 +534,16 @@ export default function AudienceAccess() {
                 </button>
               ))}
             </div>
-            <ConsoleButton
-              variant="secondary"
-              leftIcon={FiDownload}
-              onClick={exportRows}
-              disabled={rows.length === 0}
-            >
+            <ConsoleButton variant="secondary" leftIcon={FiDownload} onClick={exportRows} disabled={rows.length === 0}>
               Export
             </ConsoleButton>
-            <ConsoleButton
-              variant="secondary"
-              leftIcon={FiRefreshCw}
-              onClick={events.reload}
-            >
+            <ConsoleButton variant="secondary" leftIcon={FiRefreshCw} onClick={events.reload}>
               Refresh
+            </ConsoleButton>
+            {/* Each event's access is reviewed in its own workspace; this takes you to the
+                table whose rows open it. (Event access has its own rail entry.) */}
+            <ConsoleButton leftIcon={FiShield} href="#access-by-event">
+              Review event access
             </ConsoleButton>
           </>
         }
@@ -460,47 +561,101 @@ export default function AudienceAccess() {
         </div>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {/* All four are counted in SQL across the selected window — not summed from the page
-            of rows below, which would describe the page instead of the organization. */}
-        <StatCard label="Events" value={kpi(totals.events)} loading={summary.loading} />
-        <StatCard label="Registration required" value={kpi(totals.gated)} loading={summary.loading} />
-        <StatCard label="Registrations" value={kpi(totals.registrations)} loading={summary.loading} />
-        <StatCard
-          label="At capacity"
-          value={kpi(totals.atCapacity)}
-          loading={summary.loading}
-          // 0 of 0 capped events is a different fact from 0 of 12, and the card alone cannot
-          // tell them apart. Only shown once the count is actually known.
-          hint={totals.capped === 0 ? "No event has a capacity set" : undefined}
-        />
+      <KpiRow>
+        {/* Counted in SQL across the selected window — not summed from the page of rows
+            below, which would describe the page instead of the organization. */}
+        <KpiTile icon={FiCalendar} tone="violet" label="Events in scope" value={summary.loading ? "…" : kpi(totals.events)}
+          caption="Events in the selected window" />
+        <KpiTile icon={FiEye} tone="sky" label="Playback sessions"
+          value={qoe.loading && !qoe.data ? "…" : qoe.data ? (qoe.data.total?.sessions ?? 0).toLocaleString() : UNKNOWN}
+          caption={qoe.error ? "Playback telemetry unavailable" : `Not unique people · last ${qoeWindow}`} />
+        <KpiTile icon={FiUsers} tone="amber" label="Registrations" value={summary.loading ? "…" : kpi(totals.registrations)}
+          caption="Across events in the window" />
+        <KpiTile icon={FiRadio} tone="pink" label="Live events" value={shell?.badges ? shell.badges.live_events ?? 0 : UNKNOWN}
+          caption="Viewer conditions monitored" />
+      </KpiRow>
+
+      <div className="flex gap-3 rounded-2xl border border-violet-200/80 bg-violet-50/70 px-4 py-3.5 text-[12.5px] dark:border-violet-400/25 dark:bg-violet-500/[0.08]">
+        <span aria-hidden="true" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-white text-violet-600 dark:bg-white/10 dark:text-violet-300"><FiShield /></span>
+        <div>
+          <p className="text-[14px] font-semibold text-violet-900 dark:text-violet-100">Viewer-access policy decisions remain open</p>
+          <p className={CONSOLE.body}>
+            Authentication, authorization and registration are separate. Access is set per event from its visibility and
+            registration rules, and changing that policy is approval-gated.
+          </p>
+        </div>
       </div>
 
-      {/* The "Playback gates →" action that sat here pointed at /organization/playback, which
-          was deliberately removed from the Organization rail. Leaving a link into a surface
-          the console no longer presents as its own would reintroduce it through a side door.
-          The ROUTE and the page are untouched — this is only the entry point. */}
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem] 2xl:grid-cols-[minmax(0,1fr)_26rem]">
+        <div className="min-w-0 space-y-6">
+          <ConsolePanel
+            title="Playback activity"
+            subtitle="Playback sessions in the window — not a count of identified viewers"
+            tag="Player-reported"
+            tagTone="violet"
+          >
+            {qoe.error ? (
+              <p className={cx("text-sm", CONSOLE.muted)}>Playback telemetry couldn&apos;t be read.</p>
+            ) : !qoe.data ? (
+              <p className={cx("text-sm", CONSOLE.faint)}>Loading…</p>
+            ) : (
+              <PlaybackActivity qoe={qoe.data} />
+            )}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <p className={cx("text-[11.5px]", CONSOLE.faint)}>
+                A session can be anonymous or signed in; repeat views can create several sessions.
+              </p>
+              <PanelLink to="/organization/analytics">Open analytics</PanelLink>
+            </div>
+          </ConsolePanel>
+
       <Panel
+          id="access-by-event"
           title="Access by event"
           // No `count`: Panel renders it inline with the title, and the table's own
           // "Showing 1–20 of N" footer already states the total — from the same number.
           flush
         >
-          <div className="px-4 pt-3">
+          <div className="flex flex-wrap items-center gap-3 px-4 pt-3">
             <input
               value={qInput}
               onChange={(e) => resetPage(() => setQInput(e.target.value))}
               placeholder="Search events…"
               aria-label="Search events"
-              className={CONSOLE.search}
+              className={cx(CONSOLE.search, "min-w-[12rem] flex-1")}
             />
+            {/* Every server-side order the table offers, including the two whose columns now
+                share a cell (Audience, Capacity) and so have no header of their own. Shares
+                its state with the sortable headers. */}
+            <select
+              value={SORT_OPTIONS.some(([v]) => v === `${sort?.key}:${sort?.dir}`) ? `${sort.key}:${sort.dir}` : "column"}
+              onChange={(e) => {
+                const [key, dir] = e.target.value.split(":");
+                resetPage(() => setSort({ key, dir }));
+              }}
+              aria-label="Sort events"
+              className={cx(CONSOLE.select, "h-9 text-[13px]")}
+            >
+              {SORT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              {!SORT_OPTIONS.some(([v]) => v === `${sort?.key}:${sort?.dir}`) && <option value="column" disabled>Sort: by column</option>}
+            </select>
+            {/* Two more window-wide counts, kept beside the table they describe. */}
+            <div className={cx(CONSOLE.inset, "px-3 py-1.5")}>
+              <p className={cx("text-[11px]", CONSOLE.faint)}>Registration required</p>
+              <p className={cx("text-[15px] font-semibold tabular-nums", CONSOLE.heading)}>{summary.loading ? "…" : kpi(totals.gated)}</p>
+            </div>
+            <div className={cx(CONSOLE.inset, "px-3 py-1.5")}>
+              <p className={cx("text-[11px]", CONSOLE.faint)}>At capacity</p>
+              <p className={cx("text-[15px] font-semibold tabular-nums", CONSOLE.heading)}>{summary.loading ? "…" : kpi(totals.atCapacity)}</p>
+              {totals.capped === 0 && <p className={cx("text-[10.5px]", CONSOLE.faint)}>No event has a capacity set</p>}
+            </div>
           </div>
           <DataTable
             columns={columns}
             rows={rows}
             rowKey={(ev) => ev.id}
             loading={events.loading}
-            minWidth={760}
+            minWidth={600}
             // Server-driven: DataTable's own search/sort/paging would only ever act on the
             // page the API already returned, which is how "oldest" comes to mean "oldest of
             // the twenty on screen".
@@ -511,7 +666,7 @@ export default function AudienceAccess() {
             serverPageCount={pageCount}
             serverTotal={total}
             onPageChange={setPage}
-            onRowClick={(ev) => navigate(`/organization/events/${ev.id}`)}
+            onRowClick={(ev) => navigate(`/organization/events/${ev.id}/access`)}
             empty={{
               icon: FiUserCheck,
               title: "No events yet",
@@ -525,6 +680,78 @@ export default function AudienceAccess() {
             }}
           />
       </Panel>
+        </div>
+
+        <div className="space-y-6">
+          <DarkCard>
+            <p className="inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.16em] text-white/70">
+              <FiShield aria-hidden="true" /> Access governance
+            </p>
+            <p className="mt-2 text-[20px] font-bold leading-snug">Access rules belong to each event.</p>
+            <p className="mt-2 text-[13px] text-white/70">
+              Validate the viewer experience, link behaviour and permissions in the event&apos;s Audience Access before
+              publishing changes.
+            </p>
+            <ul className="mt-4 space-y-2 border-t border-white/10 pt-3 text-[12.5px] text-white/85">
+              <li className="flex items-center gap-2"><FiLock aria-hidden="true" /> Registration is not a default gate</li>
+              <li className="flex items-center gap-2"><FiShield aria-hidden="true" /> Link and invitation changes are audited</li>
+            </ul>
+            <p className="mt-3 text-[10.5px] font-bold uppercase tracking-[0.14em] text-white/60">View-only summary · policy-gated controls</p>
+          </DarkCard>
+
+          <ConsolePanel title="Needs attention" subtitle="Event-level access signals from this window"
+            action={<span className="rounded-md bg-amber-50 px-2 py-0.5 text-[12px] font-bold text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+              {rows.filter((r) => r.pct != null && r.pct >= 80).length + (insights.data?.blocked_join_attempts?.total ? 1 : 0)}
+            </span>}>
+            <ul>
+              {rows.filter((r) => r.pct != null && r.pct >= 80).slice(0, 3).map((r) => (
+                <li key={r.id} className={cx("flex items-start gap-3 border-t py-3 first:border-t-0", CONSOLE.divider)}>
+                  <IconChip icon={FiAlertTriangle} tone="amber" size="sm" />
+                  <div className="min-w-0">
+                    <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>{r.title || "Untitled event"}</p>
+                    <p className={cx("text-[12px]", CONSOLE.faint)}>Registration at {r.pct}% of capacity.</p>
+                    <PanelLink to={`/organization/events/${r.id}/access`}>Review in Event Workspace</PanelLink>
+                  </div>
+                </li>
+              ))}
+              {insights.data?.blocked_join_attempts?.total > 0 && (
+                <li className={cx("flex items-start gap-3 border-t py-3 first:border-t-0", CONSOLE.divider)}>
+                  <IconChip icon={FiEye} tone="violet" size="sm" />
+                  <div className="min-w-0">
+                    <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>
+                      {insights.data.blocked_join_attempts.total} refused join attempt{insights.data.blocked_join_attempts.total === 1 ? "" : "s"}
+                    </p>
+                    <p className={cx("text-[12px]", CONSOLE.faint)}>
+                      {insights.data.blocked_join_attempts.reasons.slice(0, 2).map((x) => x.label).join(" · ")}
+                    </p>
+                  </div>
+                </li>
+              )}
+              {!rows.some((r) => r.pct != null && r.pct >= 80) && !(insights.data?.blocked_join_attempts?.total > 0) && (
+                <li className={cx("py-3 text-[13px]", CONSOLE.muted)}>No event is near capacity and no join was refused.</li>
+              )}
+            </ul>
+          </ConsolePanel>
+
+          <ConsolePanel title="Keep audiences distinct" subtitle="Apply the correct privacy boundary">
+            <ul>
+              {[
+                [FiEye, "Playback sessions", "Engagement signals, not people records"],
+                [FiUserCheck, "Registered & invited viewers", "Per event, under its access settings"],
+                [FiUsers, "Your team", "Managed in Organization › Team & roles"],
+              ].map(([Icon, title, detail]) => (
+                <li key={title} className={cx("flex items-center gap-3 border-t py-3 first:border-t-0", CONSOLE.divider)}>
+                  <IconChip icon={Icon} tone="violet" size="sm" />
+                  <div>
+                    <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>{title}</p>
+                    <p className={cx("text-[12px]", CONSOLE.faint)}>{detail}</p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </ConsolePanel>
+        </div>
+      </div>
 
       <Panel title="Attendance" eyebrow={`Last ${range}`}>
         <FactGrid

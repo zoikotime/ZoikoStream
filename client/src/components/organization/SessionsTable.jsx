@@ -74,7 +74,7 @@ export default function SessionsTable({ sessions }) {
                 <tr key={s.id} className="transition-colors hover:bg-slate-50 dark:hover:bg-white/[0.03]">
                   <td className="max-w-[16rem] px-4 py-3">
                     <Link
-                      to={`/organization/events/${s.event_id}`}
+                      to={`/organization/events/${s.event_id}/live`}
                       className={cx("block truncate text-[13px] font-semibold hover:underline", CONSOLE.heading)}
                     >
                       {s.title}

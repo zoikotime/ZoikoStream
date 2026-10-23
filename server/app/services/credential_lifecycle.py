@@ -19,6 +19,7 @@ authentication path will accept, and there is no authentication path to honour i
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -138,42 +139,144 @@ def notify_rotated(db: Session, background, *, org: Organization, old_record: di
 
 
 # ── DEV-003 expiry ──────────────────────────────────────────────────────────────────────
+#
+# Reminders go out 30, 14, 7, 3 and 1 day(s) before a key expires (admin_crud.
+# KEY_REMINDER_DAYS), then one "expired" notice. Each threshold is sent at most once per key:
+#
+#   * the claim is a marker on the key record, written under the organization row lock
+#     (admin_crud.claim_key_notification), so a second sweep, or a second process during a
+#     ticker leadership hand-over, finds it set and sends nothing;
+#   * a key first seen inside a later window (created with a 10-day lifetime, or a sweep that
+#     was down for a week) gets that window's reminder once, and the earlier, larger windows
+#     are recorded as superseded in the same write — never sent late, one after another;
+#   * if NO recipient's message was accepted (a provider outage), the claim is released so the
+#     next hourly sweep tries again, up to MAX_SEND_ATTEMPTS; a partial delivery keeps the
+#     claim, because resending would duplicate the mail that did arrive.
+#
+# Nothing here ever changes a key's expiry or makes an expired key usable, and the reminder's
+# outcome never affects the key: expiry is decided by admin_crud.key_status from the clock.
 
-def notify_expiring(db: Session, background, *, org: Organization, record: dict) -> bool:
-    key_id = record["id"]
-    if not admin_crud.claim_key_notification(db, org, key_id,
-                                             "dev_003_warning_notified_at"):
+MAX_SEND_ATTEMPTS = 6
+EXPIRED_NOTICE_WINDOW = timedelta(days=30)
+_LEGACY_WARNING_MARKER = "dev_003_warning_notified_at"   # the old single 7-day warning
+_EXPIRED_MARKER = "dev_003_expired_notified_at"
+
+
+def reminder_marker(days: int) -> str:
+    return f"dev_003_warning_{days}d_notified_at"
+
+
+def due_reminder(record: dict, now: datetime) -> int | None:
+    """The reminder threshold (in days) this key is due for now, or None.
+
+    The most urgent window the key is inside, unless that window's reminder (or, for keys
+    warned before the schedule existed, the old 7-day warning) has already been claimed."""
+    if admin_crud.key_status(record, now) != admin_crud.KEY_ACTIVE:
+        return None
+    expires = admin_crud._parse_ts(record.get("expires_at"))
+    if expires is None:
+        return None
+    seconds = (expires - now).total_seconds()
+    inside = [d for d in admin_crud.KEY_REMINDER_DAYS if seconds <= d * 86400]
+    if not inside:
+        return None
+    days = min(inside)
+    if record.get(reminder_marker(days)):
+        return None
+    if record.get(_LEGACY_WARNING_MARKER) and days >= 7:
+        return None
+    return days
+
+
+def _creator(db: Session, org: Organization, record: dict):
+    """The member who minted the key, while they are still an active member of THIS
+    organization — a platform operator who minted it under a support session is not."""
+    from ..models import User
+
+    raw = record.get("created_by")
+    if not raw:
+        return None
+    try:
+        user = db.get(User, uuid.UUID(str(raw)))
+    except (ValueError, TypeError):
+        return None
+    return user if user is not None and user.org_id == org.id else None
+
+
+def _deliver(send, addresses, **kwargs) -> int:
+    """Send one message per address now; how many the provider accepted. Never raises."""
+    accepted = 0
+    for address in addresses:
+        try:
+            accepted += 1 if send(address, **kwargs) else 0
+        except UnsafeLinkError:
+            log.exception("Credential notice not sent: APP_URL unsafe for this environment")
+        except Exception:  # noqa: BLE001 — one bad send must not stop the sweep
+            log.exception("Credential notice failed")
+    return accepted
+
+
+def _after_send(db: Session, org: Organization, key_id: str, marker: str, accepted: int,
+                recipients: int) -> bool:
+    if accepted:
+        if accepted < recipients:
+            log.warning("Credential notice %s for key %s: %s of %s recipients accepted",
+                        marker, key_id, accepted, recipients)
+        return True
+    failures = admin_crud.release_key_notification(db, org, key_id, marker)
+    if failures >= MAX_SEND_ATTEMPTS:
+        # Re-claim for good: an address the provider keeps refusing must not be retried hourly
+        # for ever. The key itself is untouched either way.
+        admin_crud.claim_key_notification(db, org, key_id, marker)
+        log.error("Credential notice %s for key %s abandoned after %s failed attempts",
+                  marker, key_id, failures)
+    else:
+        log.warning("Credential notice %s for key %s not delivered; will retry (attempt %s of %s)",
+                    marker, key_id, failures, MAX_SEND_ATTEMPTS)
+    return False
+
+
+def notify_expiring(db: Session, background=None, *, org: Organization, record: dict,
+                    days: int | None = None, now: datetime | None = None) -> bool:
+    """Send this key's due reminder (threshold `days`, or whichever is due). True when sent."""
+    now = now or _now()
+    days = days or due_reminder(record, now)
+    if days is None:
         return False
-    addresses = developer_comms.recipients(db, org, None)
+    key_id = record["id"]
+    marker = reminder_marker(days)
+    superseded = tuple(reminder_marker(d) for d in admin_crud.KEY_REMINDER_DAYS if d > days)
+    if not admin_crud.claim_key_notification(db, org, key_id, marker, also=superseded):
+        return False
+    addresses = developer_comms.recipients(db, org, _creator(db, org, record))
     if not addresses:
         return False
-    expires = developer_comms._as_datetime(record.get("expires_at"))
-    days_left = max(0, (expires - _now()).days) if expires else 0
+    expires = admin_crud._parse_ts(record.get("expires_at"))
     facts = _facts(org, record)
-    _queue(background, email_mod.send_credential_expiring_email, addresses,
-           org_name=facts["org_name"], credential_name=facts["credential_name"],
-           fingerprint=facts["fingerprint"],
-           expires_at=org_comms.org_timestamp(org, expires), days_left=days_left,
-           access_note=ACCESS_NOTE_WARNING)
-    return True
+    accepted = _deliver(email_mod.send_credential_expiring_email, addresses,
+                        org_name=facts["org_name"], credential_name=facts["credential_name"],
+                        fingerprint=facts["fingerprint"],
+                        expires_at=org_comms.org_timestamp(org, expires),
+                        seconds_left=int((expires - now).total_seconds()),
+                        access_note=ACCESS_NOTE_WARNING)
+    return _after_send(db, org, key_id, marker, accepted, len(addresses))
 
 
-def notify_expired(db: Session, background, *, org: Organization, record: dict) -> bool:
+def notify_expired(db: Session, background=None, *, org: Organization, record: dict) -> bool:
     key_id = record["id"]
-    if not admin_crud.claim_key_notification(db, org, key_id,
-                                             "dev_003_expired_notified_at"):
+    if not admin_crud.claim_key_notification(db, org, key_id, _EXPIRED_MARKER):
         return False
-    addresses = developer_comms.recipients(db, org, None)
+    addresses = developer_comms.recipients(db, org, _creator(db, org, record))
     if not addresses:
         return False
     facts = _facts(org, record)
-    _queue(background, email_mod.send_credential_expired_email, addresses,
-           org_name=facts["org_name"], credential_name=facts["credential_name"],
-           fingerprint=facts["fingerprint"],
-           expired_at=org_comms.org_timestamp(
-               org, developer_comms._as_datetime(record.get("expires_at"))),
-           access_note=ACCESS_NOTE)
-    return True
+    accepted = _deliver(email_mod.send_credential_expired_email, addresses,
+                        org_name=facts["org_name"], credential_name=facts["credential_name"],
+                        fingerprint=facts["fingerprint"],
+                        expired_at=org_comms.org_timestamp(
+                            org, admin_crud._parse_ts(record.get("expires_at"))),
+                        access_note=ACCESS_NOTE)
+    return _after_send(db, org, key_id, _EXPIRED_MARKER, accepted, len(addresses))
 
 
 class _Bg:
@@ -184,30 +287,33 @@ class _Bg:
             log.exception("Credential notice failed")
 
 
-def sweep(db: Session, background=None) -> dict:
-    """One pass: warn credentials nearing expiry, mark and announce lapsed ones."""
-    background = background or _Bg()
-    now = _now()
-    horizon = now + timedelta(days=admin_crud.KEY_EXPIRY_WARNING_DAYS)
-    warned = expired = 0
+def sweep(db: Session, background=None, now: datetime | None = None) -> dict:
+    """One pass: send due reminders, record lapsed keys as expired and announce them once.
 
-    for org in db.scalars(select(Organization)).all():
+    Reads organizations that hold any key at all; the keys live in a JSON column on the
+    organization, so there is no per-key index to narrow by — the scan is one pass over the
+    organizations table per hour, and everything per key is in memory. `background` is kept
+    for callers' signatures: reminders are sent synchronously here (this already runs off the
+    request path), because whether one was ACCEPTED decides whether it is retried."""
+    now = now or _now()
+    warned = expired = 0
+    for org in db.scalars(select(Organization).where(Organization.api_keys.isnot(None))).all():
         for record in list(org.api_keys or []):
-            expires = developer_comms._as_datetime(record.get("expires_at"))
-            if expires is None:
+            if admin_crud._parse_ts(record.get("expires_at")) is None:
                 continue
-            state = admin_crud.key_status(record)
+            state = admin_crud.key_status(record, now)
             if state == admin_crud.KEY_REVOKED:
                 continue
-            if expires <= now:
-                if state != admin_crud.KEY_EXPIRED:
-                    admin_crud.mark_key_expired(db, org, record["id"])
+            if state == admin_crud.KEY_EXPIRED:
+                admin_crud.mark_key_expired(db, org, record["id"])
                 fresh = admin_crud.get_api_key_record(org, record["id"]) or record
-                if notify_expired(db, background, org=org, record=fresh):
+                # One informational notice, for a lapse that is news. A key that expired long
+                # before anything could announce it is recorded, not mailed months late.
+                lapsed = admin_crud._parse_ts(record.get("expires_at"))
+                if now - lapsed <= EXPIRED_NOTICE_WINDOW and notify_expired(db, org=org, record=fresh):
                     expired += 1
-            elif expires <= horizon:
-                if notify_expiring(db, background, org=org, record=record):
-                    warned += 1
+            elif notify_expiring(db, org=org, record=record, now=now):
+                warned += 1
     return {"warned": warned, "expired": expired}
 
 

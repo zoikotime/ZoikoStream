@@ -3,12 +3,11 @@
 // ── THE BUG ─────────────────────────────────────────────────────────────────────────────
 // The page showed "Couldn't load billing information. Try refreshing the page." for every
 // cause, and that advice cannot work for any of the real ones. The case actually hit: the dev
-// client's fallback API base was port 8001 while this project runs its API on 8000 (.env.example
-// ships VITE_API_URL=http://127.0.0.1:8000, server/README.md documents :8000, SETUP_GUIDE.md
-// forwards Stripe webhooks to :8000). With VITE_API_URL not loaded — a dev server started
-// before that line reached .env, since Vite reads env files once at startup — every request
-// went to a port with nothing behind it. The backend was healthy the whole time and the page
-// said nothing that would lead anyone to the port.
+// client's fallback API base named a different port from the one the API ran on. With
+// VITE_API_URL not loaded — a dev server started before that line reached .env, since Vite reads
+// env files once at startup — every request went to a port with nothing behind it. The backend
+// was healthy the whole time and the page said nothing that would lead anyone to the port.
+// (The local API now runs on 8001, because 8000 belongs to another local API on the dev machine.)
 //
 // An expired session and a restricted organization land in the same branch and need completely
 // different fixes, so the message has to tell them apart.
@@ -58,9 +57,10 @@ beforeEach(() => {
 
 describe("the dev API base", () => {
   it("points at the port this project actually serves the API on", () => {
-    // Guards the regression directly: 8001 had nothing behind it, so every call failed at the
-    // transport layer and looked exactly like the API being down.
-    expect(API_BASE).not.toMatch(/:8001(\/|$)/);
+    // Guards the regression directly: a base on any other port reaches no server (or another
+    // project's), so every call fails and looks exactly like the API being down. The local API
+    // runs on 8001 (server/run-dev.ps1); VITE_API_URL in the repo-root .env must name it too.
+    expect(API_BASE).toMatch(/:8001(\/|$)/);
   });
 });
 

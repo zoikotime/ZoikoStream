@@ -20,6 +20,7 @@
 // the change is SCHEDULED, never immediate: no proration, effective at current_period_end, and
 // the customer keeps their current plan's entitlements until then. This page therefore shows a
 // change as PENDING with its effective date and never implies it has already happened.
+import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -397,11 +398,12 @@ export default function OrganizationBilling() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Billing</h1>
-        <p className="text-sm text-slate-500 dark:text-slate-400">Your subscription and usage</p>
-      </div>
+      <OrganizationPageHeader
+        breadcrumbs={[["Organization", "/organization/manage"], ["Plan, usage & billing"]]}
+        eyebrow="Organization console / Plan, usage & billing"
+        title="Billing"
+        subtitle="Your subscription and usage"
+      />
 
       {/* Return from Stripe. Deliberately never says "payment successful" on the strength of
           the redirect: ZST-COM-PLAN-001 Section 18 requires the verified webhook to be the

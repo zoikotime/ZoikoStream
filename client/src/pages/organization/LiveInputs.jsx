@@ -163,6 +163,8 @@ export default function LiveInputs() {
   return (
     <div className="space-y-6">
       <OrganizationPageHeader
+        breadcrumbs={[["Organization", "/organization/manage"], ["Events", "/organization/events"], ["Live inputs"]]}
+        eyebrow="Event operations / Contribution"
         title="Live Inputs"
         subtitle="RTMP/WHIP ingest endpoints your encoder publishes into. Publish credentials are shown one input at a time, never in the list."
         actions={

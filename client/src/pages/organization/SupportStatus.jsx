@@ -1,3 +1,4 @@
+import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
 import { Link } from "react-router-dom";
 import { FiShield, FiGlobe, FiFileText, FiAlertOctagon, FiHeadphones, FiRefreshCw } from "react-icons/fi";
 import api from "../../api";
@@ -122,6 +123,8 @@ export default function SupportStatus() {
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-6">
+      {/* Breadcrumb and eyebrow only: the service verdict below is this page's heading. */}
+      <OrganizationPageHeader breadcrumbs={[["Organization", "/organization/manage"], ["Support & status"]]} eyebrow="Organization console / Support & status" />
       {/* ── Verdict + posture tiles ────────────────────────────────────────── */}
       <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr] lg:items-start">
         <div className="min-w-0">

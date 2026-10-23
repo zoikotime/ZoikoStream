@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import text, update
 from starlette.testclient import TestClient
 
 import app.main as m
@@ -391,11 +391,109 @@ def test_every_figure_uses_the_same_window(org):
         db.close()
     day = summary(org, event_id=eid, window="24h")["live"]
     assert (day["playback_starts"], day["rebuffer_ratio"], day["failures"]) == (1, 0.0, [])
-    for window in ("7d", "30d", "all"):
+    for window in ("7d", "30d", "90d", "all"):
         wide = summary(org, event_id=eid, window=window)["live"]
         assert wide["playback_starts"] == 2 and wide["rebuffer_ratio"] == 0.25
         assert wide["failures"] == [{"reason": "decoder_error", "count": 1}]
-    assert org.client().get("/api/organization/playback/qoe", params={"window": "90d"}).status_code == 422
+    # The window vocabulary is closed: anything else is refused, not guessed at.
+    assert org.client().get("/api/organization/playback/qoe", params={"window": "365d"}).status_code == 422
+
+
+def _age(token, days):
+    db = SessionLocal()
+    try:
+        db.execute(update(PlaybackSession).where(PlaybackSession.id == uuid.UUID(sid_of(token)))
+                   .values(created_at=datetime.now(UTC) - timedelta(days=days)))
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_the_activity_series_counts_the_same_sessions_by_utc_day(org):
+    eid = org.event()
+    old = session(eid)
+    played(old)
+    played(session(eid))
+    ok(session(eid), 1, failures=["media_connection_failed"])  # a session that never started
+    _age(old, 3)
+
+    out = summary(org, window="7d")
+    series = out["series"]
+    assert series["bucket"] == "day" and series["timezone"] == "UTC"
+    points = series["points"]
+    # Every day of the window, the empty ones as real zeros, oldest first.
+    assert len(points) == 8
+    assert [p["start"] for p in points] == sorted(p["start"] for p in points)
+    assert sum(p["sessions"] for p in points) == out["total"]["sessions"] == 3
+    assert sum(p["playback_starts"] for p in points) == out["total"]["playback_starts"] == 2
+    today, three_days_ago = points[-1], points[-4]
+    assert (today["sessions"], today["playback_starts"]) == (2, 1)
+    assert (three_days_ago["sessions"], three_days_ago["playback_starts"]) == (1, 1)
+    assert all(p["sessions"] == 0 for p in points if p not in (today, three_days_ago))
+
+    hourly = summary(org, window="24h")["series"]
+    assert hourly["bucket"] == "hour" and len(hourly["points"]) == 25
+    assert sum(p["sessions"] for p in hourly["points"]) == 2      # the 3-day-old session is outside
+
+
+def test_sessions_are_counted_per_event_and_only_for_this_organization(org, other):
+    first, second = org.event(), org.event()
+    played(session(first))
+    played(session(second))
+    played(session(second))
+    elsewhere = other.event()
+    played(session(elsewhere))
+
+    by_event = summary(org, window="30d")["by_event"]
+    assert by_event == {str(first): 1, str(second): 2}
+    assert summary(other, window="30d")["by_event"] == {str(elsewhere): 1}
+    # Filtered to one event, the map holds only that event.
+    assert summary(org, event_id=second, window="30d")["by_event"] == {str(second): 2}
+
+
+def test_the_90_day_window_keeps_its_first_day_and_nothing_older(org):
+    eid = org.event()
+    inside, outside = session(eid), session(eid)
+    played(inside)
+    played(outside)
+    _age(inside, 89.9)
+    _age(outside, 90.1)
+    out = summary(org, window="90d")
+    assert out["total"]["sessions"] == 1
+    assert out["by_event"] == {str(eid): 1}
+    assert sum(p["sessions"] for p in out["series"]["points"]) == 1
+    assert len(out["series"]["points"]) == 91                     # every UTC day, both ends
+    assert summary(org, window="all")["total"]["sessions"] == 2   # still stored, just older
+
+
+def test_an_empty_90_day_window_is_zeros_on_utc_days(org):
+    out = summary(org, window="90d")
+    points = out["series"]["points"]
+    assert len(points) == 91 and all(p["sessions"] == 0 for p in points)
+    assert all(p["start"].endswith("T00:00:00+00:00") for p in points)
+    assert out["total"]["sessions"] == 0 and out["by_event"] == {}
+
+
+def test_day_buckets_are_utc_whatever_the_database_session_time_zone(org):
+    eid = org.event()
+    played(session(eid))
+    db = SessionLocal()
+    try:
+        # date_trunc on a timestamptz follows the session's TimeZone; the summary must not.
+        db.execute(text("SET TIME ZONE 'Pacific/Kiritimati'"))       # UTC+14
+        out = qoe.summarize(db, org.id, window="7d")
+    finally:
+        db.close()
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    assert out["series"]["points"][-1] == {"start": today.isoformat(), "sessions": 1, "playback_starts": 1}
+    assert all(p["start"].endswith("T00:00:00+00:00") for p in out["series"]["points"])
+
+
+def test_no_playback_is_a_series_of_zeros_not_a_missing_one(org):
+    out = summary(org, window="7d")
+    assert len(out["series"]["points"]) == 8
+    assert all(p["sessions"] == 0 for p in out["series"]["points"])
+    assert out["by_event"] == {}
 
 
 # ── what is refused ─────────────────────────────────────────────────────────────────────

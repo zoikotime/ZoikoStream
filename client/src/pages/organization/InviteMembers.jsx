@@ -354,6 +354,8 @@ export default function OrganizationMembers() {
   return (
     <div className="space-y-6">
       <OrganizationPageHeader
+        breadcrumbs={[["Organization", "/organization/manage"], ["Team & roles"]]}
+        eyebrow="Organization console / Team & roles"
         title="Members"
         subtitle={
           canManageMembers

@@ -1679,7 +1679,8 @@ def create_api_key(org_id: uuid.UUID, data: ApiKeyCreate, request: Request,
     org = db.get(Organization, org_id)
     if not org:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
-    created = crud.create_api_key(db, org, data.label, expires_in_days=data.expires_in_days)
+    created = crud.create_api_key(db, org, data.label, expires_in_days=data.expires_in_days,
+                                  created_by=admin.id)
     # ZST-EC-001 DEV-002. The customer is told whenever a credential is minted against
     # their Organization — including when platform staff do it under an approved support
     # session, which is precisely the case they most need to see.

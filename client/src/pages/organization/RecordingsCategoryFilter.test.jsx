@@ -48,7 +48,9 @@ const show = () =>
 
 const filter = () => screen.queryByRole("combobox", { name: "Filter by category" });
 const optionLabels = () => within(filter()).getAllByRole("option").map((o) => o.textContent);
-const titlesShown = (titles) => titles.filter((t) => screen.queryByText(t));
+// The library table — the newest recordings also appear under Recently captured.
+const lib = () => within(screen.getByRole("region", { name: "Recording library" }));
+const titlesShown = (titles) => titles.filter((t) => lib().queryByText(t));
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -74,7 +76,7 @@ describe("when there is nothing to filter by", () => {
   it("shows no category filter when no recording has a category", async () => {
     serve([rec("r1", "Untitled one", null), rec("r2", "Untitled two", "   ")]);
     show();
-    await screen.findByText("Untitled one");
+    await lib().findByText("Untitled one");
     expect(filter()).toBeNull();
   });
 });
@@ -83,7 +85,7 @@ describe("the categories offered", () => {
   it("are the real ones, each once, after All categories", async () => {
     serve(LIBRARY);
     show();
-    await screen.findByText("Town hall");
+    await lib().findByText("Town hall");
     expect(optionLabels()).toEqual(["All categories", "Company", "Webinar"]);
     expect(filter()).toHaveValue(ALL_CATEGORIES);
   });
@@ -91,7 +93,7 @@ describe("the categories offered", () => {
   it("include Uncategorized only when some recordings have no category", async () => {
     serve([...LIBRARY, rec("r5", "Loose recording", null)]);
     show();
-    await screen.findByText("Loose recording");
+    await lib().findByText("Loose recording");
     expect(optionLabels()).toEqual(["All categories", "Company", "Webinar", "Uncategorized"]);
   });
 });
@@ -101,7 +103,7 @@ describe("filtering", () => {
     const user = userEvent.setup();
     serve(LIBRARY);
     show();
-    await screen.findByText("Town hall");
+    await lib().findByText("Town hall");
     await user.selectOptions(filter(), "webinar");
     await waitFor(() => expect(titlesShown(TITLES)).toEqual(["Quarterly webinar", "Product webinar"]));
     await user.selectOptions(filter(), ALL_CATEGORIES);
@@ -112,7 +114,7 @@ describe("filtering", () => {
     const user = userEvent.setup();
     serve([...LIBRARY, rec("r5", "Loose recording", null)]);
     show();
-    await screen.findByText("Loose recording");
+    await lib().findByText("Loose recording");
     await user.selectOptions(filter(), UNCATEGORIZED);
     await waitFor(() => expect(titlesShown([...TITLES, "Loose recording"])).toEqual(["Loose recording"]));
   });
@@ -121,7 +123,7 @@ describe("filtering", () => {
     const user = userEvent.setup();
     serve(LIBRARY);
     show();
-    await screen.findByText("Town hall");
+    await lib().findByText("Town hall");
     await user.selectOptions(filter(), "company");
     await user.type(screen.getByPlaceholderText("Search recordings..."), "all-hands");
     await waitFor(() => expect(titlesShown(TITLES)).toEqual(["All-hands"]));

@@ -79,8 +79,13 @@ class GuideSettings(BaseSettings):
 
     GUIDE_MAX_MESSAGE_CHARS: int = 4000
 
-    # Lead delivery: the platform's existing public contact flow (see adapters.py).
-    GUIDE_CONTACT_ENDPOINT: str = "http://127.0.0.1:8000/api/contact"
+    # Lead delivery: the platform's existing public contact flow (see adapters.py), served by this
+    # same process. Empty (the default): each lead goes over loopback to the port its request
+    # arrived on (adapters.own_contact_endpoint), which is right on Cloud Run ($PORT), behind a
+    # VM's reverse proxy and on any local port, with no port written down here. Set it only when
+    # the contact route is served elsewhere, or the API listens on a Unix socket or terminates
+    # TLS itself.
+    GUIDE_CONTACT_ENDPOINT: str = ""
     GUIDE_CONTACT_TIMEOUT_SECONDS: float = 10.0
     GUIDE_RL_LEAD_SUBMIT_PER_HOUR: int = 5
 

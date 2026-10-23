@@ -372,7 +372,8 @@ def submit(db: Session, request: Request, session: GuideSession, flow_id: uuid.U
     payload = _contact_payload(flow, values)
     db.commit()  # durable BEFORE the network call; no transaction held across it
 
-    result = lead_adapter().submit(payload, visitor_ip=_visitor_ip(request))
+    result = lead_adapter().submit(payload, visitor_ip=_visitor_ip(request),
+                                   server=request.scope.get("server"))
 
     op = db.get(GuideExternalOperation, op.operation_id, with_for_update=True)
     flow = db.get(GuideLeadFlow, flow.flow_id, with_for_update=True)

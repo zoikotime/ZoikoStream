@@ -474,7 +474,7 @@ export default function EventCommercial({ event }) {
           {order.lines.length > 0 && (
             <div className="mt-4 overflow-x-auto rounded-lg border border-slate-100 dark:border-slate-800">
               <table className="w-full text-sm">
-                <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-400 dark:bg-slate-800/50">
+                <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
                   <tr>
                     <th className="px-3 py-2 font-medium">Line</th>
                     <th className="px-3 py-2 font-medium">Qty</th>

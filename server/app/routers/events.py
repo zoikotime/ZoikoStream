@@ -79,6 +79,8 @@ from ..services import event_comms
 from ..services import contributor_access
 from ..services import event_closeout
 from ..services import event_ops
+from ..services import event_audit
+from ..services import ops as ops_svc
 from ..services import event_planning
 from ..services import moderation as mod
 from ..services import webhooks
@@ -155,6 +157,26 @@ def _can_edit(db, ev: Event, user: User) -> bool:
     return False
 
 
+def _require_edit(db, ev: Event, user: User, action: str, message: str) -> None:
+    """_can_edit, with the refusal RECORDED before it is raised.
+
+    A member who is not an assigned host attempting to change an event is exactly the
+    "denied sensitive action" the Activity & Audit view must show (ZST-ENG-DASH-001 NAV-17):
+    the attempt, who made it and why it was refused - with nothing changed. Cross-org callers
+    never reach here (_get_event_or_404 answers them with a non-disclosing 404 first), so a
+    receipt is only ever written into the event's own organization."""
+    if not _can_edit(db, ev, user):
+        event_audit.deny(db, actor=user, event=ev, action=action, reason=event_audit.REASON_NOT_EVENT_HOST)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, message)
+
+
+def _changed_fields(ev: Event, fields: dict) -> list[str]:
+    """Names (never values) of the fields an update actually changes, for the audit receipt.
+    `status` is reported separately as a transition; `risk_tier` is derived, not chosen."""
+    return sorted(k for k, v in fields.items()
+                  if k not in ("status", "risk_tier", "previous_status") and getattr(ev, k, None) != v)
+
+
 def _with_display(db: Session, events) -> list[EventOut]:
     """EventOut rows carrying the display status the console shows (crud.display_states:
     "missed" for a Scheduled event past start + grace that never went live). One query for
@@ -203,10 +225,18 @@ def list_events(
     # One grouped query for the whole page, not a subquery per row. Scoped implicitly: the
     # ids come from list_events, which already filtered on the caller's own org.
     counts = crud.registration_counts(db, [e.id for e in items])
+    # Readiness only where it still means something: before go-live, and not for a draft
+    # nobody has started preparing or an event already cancelled.
+    readiness = ops_svc.readiness_many(db, [e for e in items if e.status in crud.UPCOMING_STATUSES])
     out = _with_display(db, items)
     for row in out:
         # 0 for an event nobody registered for — a counted zero, not an absent figure.
         row.registered_count = counts.get(row.id, 0)
+        r = readiness.get(row.id)
+        if r:
+            row.readiness_verdict = r["verdict"]
+            row.readiness_blockers = r["blockers"]
+            row.readiness_failing = r["failing"]
     return Page(items=out, total=total, page=page, page_size=page_size)
 
 
@@ -219,7 +249,30 @@ def event_status_counts(user: User = Depends(get_current_user), db: Session = De
     `counts` is the canonical lifecycle. `display_counts` is what the Events page shows:
     Missed counted on its own, and Scheduled meaning upcoming only."""
     return {"counts": crud.status_counts(db, user.org_id),
-            "display_counts": crud.display_status_counts(db, user.org_id)}
+            "display_counts": crud.display_status_counts(db, user.org_id),
+            "attention": _attention_counts(db, user.org_id)}
+
+
+def _attention_counts(db: Session, org_id) -> dict:
+    """Upcoming events whose readiness is not yet passed — the Events page's "Needs
+    attention" card and banner. Blocked (a REQUIRED check fails) and conditional (only
+    recommended checks fail) are counted apart, with the blocked events named so the banner
+    can link straight to them."""
+    upcoming = list(db.scalars(
+        select(Event).where(Event.org_id == org_id, Event.deleted_at.is_(None),
+                            Event.status.in_(crud.UPCOMING_STATUSES), ~crud.missed_clause())
+        .order_by(Event.start_time.asc().nulls_last()).limit(200)
+    ).all())
+    verdicts = ops_svc.readiness_many(db, upcoming)
+    blocked = [e for e in upcoming if verdicts[e.id]["verdict"] == "blocked"]
+    conditional = [e for e in upcoming if verdicts[e.id]["verdict"] == "conditional"]
+    return {
+        "blocked": len(blocked),
+        "conditional": len(conditional),
+        "events": [{"id": str(e.id), "title": e.title or "Untitled event", "verdict": verdicts[e.id]["verdict"],
+                    "blockers": verdicts[e.id]["blockers"], "failing": verdicts[e.id]["failing"]}
+                   for e in (blocked + conditional)[:5]],
+    }
 
 
 # ── console access (ZST post-login routing) ─────────────────────────────────────────────
@@ -297,6 +350,8 @@ def create_event(data: EventCreate, background: BackgroundTasks, admin: User = D
     else:
         slug = None
     event = crud.create_event(db, admin.org_id, admin.id, data, slug, actor=admin)
+    event_audit.record(db, actor=admin, event=event, action="event.create",
+                       meta={"status": event.status})
 
     # After the response, same as signup's welcome mail — a Resend outage never delays or
     # breaks event creation (send_event_created_email is best-effort and logs its own errors).
@@ -881,8 +936,7 @@ def set_registration_country(
 def update_event(event_id: uuid.UUID, data: EventUpdate, background: BackgroundTasks,
                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only edit events you host")
+    _require_edit(db, ev, user, "event.update", "You may only edit events you host")
 
     fields = data.model_dump(exclude_unset=True)
 
@@ -915,6 +969,9 @@ def update_event(event_id: uuid.UUID, data: EventUpdate, background: BackgroundT
             start_time=fields.get("start_time", ev.start_time),
         )
         if err:
+            event_audit.deny(db, actor=user, event=ev, action="event.status.change",
+                             reason=event_audit.REASON_TRANSITION, outcome="rejected",
+                             from_status=ev.status, to_status=target)
             raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
     elif ev.status == "scheduled" and "start_time" in fields:
         # Rescheduling a Scheduled event: it stays Scheduled only with a real, future start.
@@ -934,10 +991,18 @@ def update_event(event_id: uuid.UUID, data: EventUpdate, background: BackgroundT
     # happens to include the same start_time still sends nothing.
     previous_start, previous_end = ev.start_time, ev.end_time
     previous_zone = ev.timezone
+    previous_status = ev.status
+    changed = _changed_fields(ev, fields)
 
     # `actor=user` (from the other side of this merge) attributes the edit in the audit
     # trail; the result is bound because every notice below reports COMMITTED state.
     updated = crud.update_event(db, ev, fields, actor=user)
+    if updated.status != previous_status:
+        event_audit.record(db, actor=user, event=updated, action="event.status.change",
+                           meta={"from_status": previous_status, "to_status": updated.status})
+    if changed:
+        event_audit.record(db, actor=user, event=updated, action="event.update",
+                           meta={"fields": changed})
 
     change = event_ops.record_change(
         db, updated, previous_start=previous_start, previous_end=previous_end,
@@ -982,9 +1047,10 @@ async def end_event(event_id: uuid.UUID, user: User = Depends(get_current_user),
     exists — e.g. debug/manual writes), the fallback below still forces status to ended rather
     than leaving the event stuck live with no recovery path."""
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only end events you host")
+    _require_edit(db, ev, user, "event.end", "You may only end events you host")
     if ev.status not in ON_AIR_STATUSES:
+        event_audit.deny(db, actor=user, event=ev, action="event.end",
+                         reason=event_audit.REASON_NOT_ON_AIR, outcome="rejected", from_status=ev.status)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event is not live")
 
     ctx = mod.Ctx(
@@ -998,7 +1064,13 @@ async def end_event(event_id: uuid.UUID, user: User = Depends(get_current_user),
 
     if ev.status in ON_AIR_STATUSES and not crud.status_transition_error(ev.status, "ended", ev.title,
                                                                        actor="platform"):
+        # No broadcast session answered the teardown above (which records its own
+        # live.broadcast.emergency_stop receipt when one does), so the status is forced here and
+        # the receipt says so.
+        previous = ev.status
         ev = crud.update_event(db, ev, {"status": "ended"})
+        event_audit.record(db, actor=user, event=ev, action="event.end",
+                           meta={"from_status": previous, "to_status": "ended", "forced": True})
     return ev
 
 
@@ -1010,28 +1082,33 @@ async def end_event(event_id: uuid.UUID, user: User = Depends(get_current_user),
 @router.post("/{event_id}/archive", response_model=EventOut)
 def archive_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only archive events you host")
+    _require_edit(db, ev, user, "event.archive", "You may only archive events you host")
     if ev.status == "archived":
         return ev                                  # a second click changes nothing
     err = crud.status_transition_error(ev.status, "archived", ev.title, actor="archive")
     if err:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
-    return crud.update_event(db, ev, {"status": "archived", "previous_status": ev.status}, actor=user)
+    previous = ev.status
+    ev = crud.update_event(db, ev, {"status": "archived", "previous_status": ev.status}, actor=user)
+    event_audit.record(db, actor=user, event=ev, action="event.archive",
+                       meta={"from_status": previous, "to_status": "archived"})
+    return ev
 
 
 @router.post("/{event_id}/unarchive", response_model=EventOut)
 def unarchive_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only unarchive events you host")
+    _require_edit(db, ev, user, "event.unarchive", "You may only unarchive events you host")
     if ev.status != "archived":
         return ev                                  # already restored
     restore = crud.viewer_status_of(ev)            # what it was archived from
     err = crud.status_transition_error("archived", restore, ev.title, actor="archive")
     if err:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
-    return crud.update_event(db, ev, {"status": restore, "previous_status": None}, actor=user)
+    ev = crud.update_event(db, ev, {"status": restore, "previous_status": None}, actor=user)
+    event_audit.record(db, actor=user, event=ev, action="event.unarchive",
+                       meta={"from_status": "archived", "to_status": restore})
+    return ev
 
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1048,7 +1125,9 @@ async def delete_event(event_id: uuid.UUID, admin: User = Depends(require_org_ad
         )
         await broadcast_svc._end(ctx, {}, emergency=True)
         db.refresh(ev)
+    previous = ev.status
     crud.soft_delete_event(db, ev)  # soft delete: retained, excluded from listings
+    event_audit.record(db, actor=admin, event=ev, action="event.delete", meta={"from_status": previous})
 
 
 # ── Assignments (host / speaker) ───────────────────────────────────────────────
@@ -1079,6 +1158,13 @@ def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
     previous_ids = {u.id for u in crud.list_assignees(db, event_id, role)}
     crud.set_assignees(db, ev, role, user_ids)
     assignees = crud.list_assignees(db, event_id, role)
+    current_ids = {u.id for u in assignees}
+    if current_ids != previous_ids:
+        # Counts, not identities: who is on the team is already on the team page; the receipt
+        # records that the team changed, by whom, and by how much.
+        event_audit.record(db, actor=admin, event=ev, action="event.team.assign", meta={
+            "role": role, "added": len(current_ids - previous_ids),
+            "removed": len(previous_ids - current_ids), "total": len(current_ids)})
 
     org_name = admin.organization.name if admin.organization else None
     event_url = _console_url(role, ev.id)
@@ -1169,6 +1255,8 @@ def invite_contributor(
         expires_at=data.expires_at, contribution_method=data.contribution_method,
         consent_notice=data.consent_notice, support_contact=data.support_contact,
     )
+    event_audit.record(db, actor=admin, event=ev, action="event.contributor.invite",
+                       meta={"kind": "speaker"})
     org_name = admin.organization.name if admin.organization else None
     background.add_task(
         send_contributor_invite_email,
@@ -1199,11 +1287,14 @@ def revoke_contributor_invite(
     """Revoke a speaker's backstage access. "Rotate" is deliberately not offered here —
     unlike EventAccessLink, a contributor invite has no bearer token to rotate under
     login-based auth, only an invitation window to close."""
-    _get_event_or_404(db, admin, event_id)
+    ev = _get_event_or_404(db, admin, event_id)
     session = crud.get_contributor_session(db, event_id, user_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No invitation on record for this speaker")
-    return crud.revoke_contributor_session(db, session)
+    out = crud.revoke_contributor_session(db, session)
+    event_audit.record(db, actor=admin, event=ev, action="event.contributor.revoke",
+                       meta={"kind": "speaker"})
+    return out
 
 
 @router.get("/{event_id}/registrations", response_model=list[RegistrantOut])
@@ -1243,8 +1334,7 @@ def invite_viewers(
     for a public/unlisted event just a courtesy email of the watch link. Same permission as
     editing the event: org admin, or the host who owns/is assigned it."""
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only invite viewers to events you host")
+    _require_edit(db, ev, user, "event.viewers.invite", "You may only invite viewers to events you host")
 
     seen = set()
     out = []
@@ -1266,6 +1356,8 @@ def invite_viewers(
             _registration_console_url(ev.id, reg, ev.organization), user.full_name,
         )
         out.append(RegistrationOut(id=reg.id, name=reg.name, email=reg.email, token=token))
+    if out:
+        event_audit.record(db, actor=user, event=ev, action="event.viewers.invite", meta={"count": len(out)})
     return out
 
 
@@ -1298,9 +1390,10 @@ def create_access_link(
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
+    _require_edit(db, ev, user, "event.access_link.create", "You may only manage access links for events you host")
     link, raw = crud.create_access_link(db, event_id, ev.org_id, user.id, data.label, data.expires_in_days)
+    event_audit.record(db, actor=user, event=ev, action="event.access_link.create",
+                       meta={"access_link_id": str(link.id), "expires_in_days": data.expires_in_days})
     return AccessLinkIssued(**AccessLinkOut.model_validate(link).model_dump(), url=_access_link_url(event_id, raw, ev.organization))
 
 
@@ -1310,12 +1403,13 @@ def rotate_access_link(
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
+    _require_edit(db, ev, user, "event.access_link.rotate", "You may only manage access links for events you host")
     link = crud.get_access_link(db, event_id, link_id)
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
     link, raw = crud.rotate_access_link(db, link, data.expires_in_days)
+    event_audit.record(db, actor=user, event=ev, action="event.access_link.rotate",
+                       meta={"access_link_id": str(link.id), "expires_in_days": data.expires_in_days})
     return AccessLinkIssued(**AccessLinkOut.model_validate(link).model_dump(), url=_access_link_url(event_id, raw, ev.organization))
 
 
@@ -1325,12 +1419,13 @@ def revoke_access_link(
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
+    _require_edit(db, ev, user, "event.access_link.revoke", "You may only manage access links for events you host")
     link = crud.get_access_link(db, event_id, link_id)
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
     out = crud.revoke_access_link(db, link)
+    event_audit.record(db, actor=user, event=ev, action="event.access_link.revoke",
+                       meta={"access_link_id": str(link.id)})
     webhooks.enqueue(db, ev.org_id, "access_link.revoked", {
         "event_id": str(ev.id), "access_link_id": str(link.id), "label": link.label,
     })
@@ -1343,12 +1438,14 @@ def delete_access_link(
     user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     ev = _get_event_or_404(db, user, event_id)
-    if not _can_edit(db, ev, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You may only manage access links for events you host")
+    _require_edit(db, ev, user, "event.access_link.delete", "You may only manage access links for events you host")
     link = crud.get_access_link(db, event_id, link_id)
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Access link not found")
+    link_id_str = str(link.id)
     crud.delete_access_link(db, link)
+    event_audit.record(db, actor=user, event=ev, action="event.access_link.delete",
+                       meta={"access_link_id": link_id_str})
 
 # ── Event intake / planning / rehearsal (ZST-EC-001 LVE-002 / LVE-004 / LVE-005) ────────
 # Every route commits authoritative state FIRST and only then queues a notice, so a Resend
@@ -1398,6 +1495,7 @@ def complete_event_intake(event_id: uuid.UUID, background: BackgroundTasks,
                      "outstanding_sections": intake.outstanding_sections or []},
             background=background)
     event_planning.notify_completed(db, background, intake)
+    event_audit.record(db, actor=admin, event=ev, action="event.intake.complete")
     return {"status": intake.status, "completed_at": intake.completed_at}
 
 
@@ -1470,6 +1568,8 @@ def update_event_planning(event_id: uuid.UUID, category: str, data: PlanningUpda
         if not event_planning.attest(db, row, status=data.status,
                                      outstanding=data.outstanding):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Unknown status")
+    event_audit.record(db, actor=admin, event=ev, action="event.planning.update",
+                       meta={"category": row.category, "status": row.status})
     return {"category": row.category, "status": row.status, "blocking": row.blocking,
             "due_at": row.due_at, "outstanding": row.outstanding or []}
 
@@ -1521,6 +1621,8 @@ def record_rehearsal_outcome(event_id: uuid.UUID, rehearsal_id: uuid.UUID,
         db, rehearsal, validated=data.validated, outstanding=data.outstanding,
         repeat_required=data.repeat_required, repeat_reason=data.repeat_reason,
         next_at=data.next_rehearsal_at, outcome=data.outcome)
+    event_audit.record(db, actor=admin, event=ev, action="event.rehearsal.outcome",
+                       meta={"status": result})
     if result == "needs_repeat":
         event_planning.notify_needs_repeat(db, background, rehearsal)
     else:
@@ -1566,6 +1668,8 @@ def approve_event_brief(event_id: uuid.UUID, brief_id: uuid.UUID,
     if not event_closeout.approve_brief(db, ev, brief, actor_id=admin.id):
         raise HTTPException(status.HTTP_409_CONFLICT,
                             f"A brief in status '{brief.status}' cannot be approved")
+    event_audit.record(db, actor=admin, event=ev, action="event.brief.approve",
+                       meta={"version": brief.version})
     event_closeout.notify_brief_approved(db, background, brief)
     return {"id": str(brief.id), "version": brief.version, "status": brief.status,
             "approved_at": brief.approved_at}
@@ -1590,6 +1694,8 @@ def open_event_incident(event_id: uuid.UUID, data: IncidentStateIn,
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "state must be 'delayed' or 'temporary_hold' and reason_category must be one of "
             f"{list(INCIDENT_REASON_CATEGORIES)}")
+    event_audit.record(db, actor=admin, event=ev, action="event.incident.open", meta={
+        "state": incident.operational_state, "reason_category": incident.reason_category})
     event_ops.notify_incident(db, background, ev, incident)
     return {"id": str(incident.id), "operational_state": incident.operational_state,
             "next_update_at": incident.next_update_at}
@@ -1607,6 +1713,8 @@ def resume_event_incident(event_id: uuid.UUID, incident_id: uuid.UUID,
     if not event_ops.resume_incident(db, incident):
         raise HTTPException(status.HTTP_409_CONFLICT,
                             f"An incident in state '{incident.operational_state}' cannot resume")
+    event_audit.record(db, actor=admin, event=ev, action="event.incident.resume",
+                       meta={"state": incident.operational_state})
     event_ops.notify_incident(db, background, ev, incident)
     return {"operational_state": incident.operational_state, "resumed_at": incident.resumed_at}
 
@@ -1633,6 +1741,8 @@ def cancel_event_incident(event_id: uuid.UUID, incident_id: uuid.UUID, data: Inc
             status.HTTP_409_CONFLICT,
             "Cancellation requires the event itself to be cancelled first, and a valid "
             f"reason category from {list(INCIDENT_REASON_CATEGORIES)}")
+    event_audit.record(db, actor=admin, event=ev, action="event.incident.cancel",
+                       meta={"state": incident.operational_state})
     event_ops.notify_incident(db, background, ev, incident)
     return {"operational_state": incident.operational_state,
             "canceled_at": incident.canceled_at}
@@ -1696,6 +1806,8 @@ def invite_contributor(event_id: uuid.UUID, data: ContributorInvite,
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"A valid email and a role from {list(CONTRIBUTOR_ROLES)} are required")
+    event_audit.record(db, actor=admin, event=ev, action="event.contributor.invite",
+                       meta={"kind": "guest", "role": grant.role})
     contributor_access.notify_invited(db, background, grant, raw)
     return {"id": str(grant.id), "email": grant.email, "role": grant.role,
             "status": grant.status, "expires_at": grant.expires_at,
@@ -1734,6 +1846,8 @@ def revoke_contributor(event_id: uuid.UUID, grant_id: uuid.UUID, data: Contribut
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Contributor grant not found")
     if not contributor_access.revoke(db, grant, actor_id=admin.id, reason=data.reason):
         raise HTTPException(status.HTTP_409_CONFLICT, "This grant is already revoked")
+    event_audit.record(db, actor=admin, event=ev, action="event.contributor.revoke",
+                       meta={"kind": "guest", "role": grant.role})
     contributor_access.notify_revoked(db, background, grant)
     return {"status": grant.status, "revoked_at": grant.revoked_at}
 

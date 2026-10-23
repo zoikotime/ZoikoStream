@@ -2,7 +2,7 @@
 //
 // CRITICAL: the VALUE of every entry is an IANA identifier and must stay one. It is what the
 // API stores (`POST /events` → `timezone`) and what ManagedEvents, UpcomingEvents and
-// EventDetails hand to `Intl.DateTimeFormat({ timeZone })`, which throws a RangeError on
+// the Event Workspace hand to `Intl.DateTimeFormat({ timeZone })`, which throws a RangeError on
 // anything else. Only the LABEL is the abbreviation an operator reads — storing "IST" would
 // break every schedule readout in the console.
 //

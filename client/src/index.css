@@ -49,9 +49,22 @@ body {
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
-/* Tighter optical tracking + balanced wrapping for display headings. */
-h1, h2, h3 { text-wrap: balance; }
-p { text-wrap: pretty; }
+/* Tighter optical tracking + balanced wrapping for display headings.
+   In the base layer, so a utility on the element still wins. Unlayered CSS beats every
+   Tailwind layer, and `text-wrap` sets the same wrap mode `white-space` does — so as plain
+   rules these silently cancelled every `truncate` / `whitespace-nowrap` on a <p> or heading
+   (names wrapped onto two lines instead of ending in an ellipsis). */
+@layer base {
+  h1, h2, h3 { text-wrap: balance; }
+  p { text-wrap: pretty; }
+  /* The consoles' type (AppShell adds the class): Inter with its default glyphs — the frames
+     use the double-storey a, so the body's cv11 is switched off here. Tabular numerals stay
+     opt-in per element (tabular-nums). */
+  html.zk-console {
+    font-family: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  html.zk-console body { font-feature-settings: normal; }
+}
 /* Counters and metrics shouldn't jitter as digits change width. */
 .zk-tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
 

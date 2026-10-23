@@ -1,11 +1,16 @@
-// ONE shell for every /organization/* route.
+// ONE shell for every /organization/* route, with the rail ZST-UX-NAV-001 §4 specifies.
 //
-// The regression this exists to prevent is the one that was reported: the rail and topbar
-// changed structure when you navigated out of the dashboard, because the simplified shell
-// was something a single page opted into. These assert that the shell is now a property of
-// the layout, identical on every route, and that only the active item and the page content
-// move.
-import { render, screen, within } from "@testing-library/react";
+// What these pin:
+//   * the seven primary destinations, in the spec's order, on every route — and Developers as
+//     a conditional eighth, shown only where the organization has developer access in use
+//   * Profile is an account utility (avatar menu), not a destination; Streaming Sessions is a
+//     child of its event, not a top-level item
+//   * only the group you are in opens; a child is current by path AND query
+//   * what a member sees follows their role: no admin destinations, no Create event CTA
+//   * entering an event swaps the rail for the event workspace's seven sections, inside the
+//     same shell (§3.2, §6)
+//   * the collapse / drawer controls and the Guide's safe area, unchanged
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,45 +20,79 @@ vi.mock("../api", () => ({
   errMsg: (e) => e?.message ?? "Something went wrong.",
 }));
 
+let authRole = "org_admin";
 vi.mock("../auth/AuthContext", () => ({
-  useAuth: () => ({ user: { full_name: "Vihari Owner", email: "owner@example.com" }, logout: vi.fn() }),
+  useAuth: () => ({ user: { full_name: "Vihari Owner", email: "owner@example.com", role: authRole }, logout: vi.fn() }),
 }));
 
 import api from "../api";
 import { ThemeProvider } from "../theme/ThemeContext";
+import { consoleChip } from "../ui/tokens";
 import OrganizationLayout from "./OrganizationLayout";
+import EventWorkspaceLayout from "../pages/organization/event/EventWorkspaceLayout";
 
-const CONSOLE_STATE = {
-  organization: { name: "Northwind", plan: "Growth" },
-  workspace: { label: "production", slug: "production" },
-  workspaces: [{ label: "production", slug: "production" }],
-  badges: {},
-  user: { name: "Vihari Owner", email: "owner@example.com", role: "Organization Owner" },
-  health: { status: "ok" },
-};
-
-// Every organization route this shell serves. Page bodies are stand-ins on purpose: this is
-// a test of the SHELL contract, and a real page would drag its own fetches in with it.
-const ROUTES = [
-  ["/organization/dashboard", "Dashboard"],
-  ["/organization/events", "Events"],
-  ["/organization/audience", "Audience"],
-  ["/organization/users", "Members"],
-  ["/organization/recordings", "Recordings"],
-  ["/organization/sessions", "Streaming Sessions"],
-  ["/organization/profile", "Profile"],
-  ["/organization/analytics", "Analytics"],
-  ["/organization/billing", "Billing"],
-  ["/organization/settings", "Settings"],
-  ["/organization/support", "Support & Status"],
+const SPEC_RAIL = [
+  "Overview", "Events", "Audience & Access", "Media & Recordings", "Analytics", "Organization", "Support",
 ];
 
+let consoleState;
+const baseState = (over = {}) => ({
+  organization: { name: "Northwind", plan: "Growth", status: "active" },
+  badges: {},
+  user: { name: "Vihari Owner", email: "owner@example.com", role: "org_admin", role_label: "Organization Owner" },
+  health: { status: "ok", label: "Healthy" },
+  features: { developers: false },
+  ...over,
+});
+
+const EVENT = {
+  id: "abc-123", title: "Quarterly town hall", status: "scheduled", display_status: "scheduled",
+  start_time: "2026-11-02T17:00:00Z", timezone: "Europe/London", visibility: "public",
+};
+const READINESS = {
+  verdict: "blocked",
+  gates: [
+    { key: "title", label: "Title set", passed: true, required: true },
+    { key: "host", label: "Host assigned", passed: false, required: true },
+    { key: "recording", label: "Recording enabled", passed: false, required: true },
+    { key: "redundancy", label: "No single-path override", passed: false, required: false },
+  ],
+};
+
+let eventResponse;
 beforeEach(() => {
-  vi.mocked(api.get).mockResolvedValue({ data: CONSOLE_STATE });
-  // The rail's collapsed state is a persisted preference; start every test expanded so the
-  // toggle assertions below do not depend on the order tests happen to run in.
+  authRole = "org_admin";
+  consoleState = baseState();
+  eventResponse = () => Promise.resolve({ data: EVENT });
+  vi.mocked(api.get).mockImplementation((url) => {
+    if (url === "/organization/console-state") return Promise.resolve({ data: consoleState });
+    if (url === `/events/${EVENT.id}`) return eventResponse();
+    if (url === `/organization/events/${EVENT.id}/readiness`) return Promise.resolve({ data: READINESS });
+    return Promise.reject(Object.assign(new Error("not found"), { response: { status: 404 } }));
+  });
   localStorage.clear();
 });
+
+// Every organization route this shell serves. Page bodies are stand-ins on purpose: this is a
+// test of the SHELL contract, and a real page would drag its own fetches in with it.
+const PAGES = [
+  ["/organization/dashboard", "Dashboard"],
+  ["/organization/events", "Events"],
+  ["/organization/sessions", "Streaming Sessions"],
+  ["/organization/audience", "Audience"],
+  ["/organization/playback", "Playback & Access"],
+  ["/organization/recordings", "Recordings"],
+  ["/organization/analytics", "Analytics"],
+  ["/organization/manage", "Organization"],
+  ["/organization/users", "Members"],
+  ["/organization/security", "Security"],
+  ["/organization/billing", "Billing"],
+  ["/organization/settings", "Settings"],
+  ["/organization/profile", "Profile"],
+  ["/organization/support", "Support"],
+  ["/organization/developers", "Developers"],
+  ["/organization/credentials", "Credentials"],
+];
 
 function renderShell(at = "/organization/dashboard") {
   return render(
@@ -61,13 +100,14 @@ function renderShell(at = "/organization/dashboard") {
       <MemoryRouter initialEntries={[at]}>
         <Routes>
           <Route element={<OrganizationLayout />}>
-            {ROUTES.map(([path, label]) => (
+            {PAGES.map(([path, label]) => (
               <Route key={path} path={path} element={<h1>{label} page</h1>} />
             ))}
-            <Route path="/organization/events/:id" element={<h1>event detail page</h1>} />
-            {/* Reachable but not in the rail — stubbed explicitly for the same reason the
-                event-detail route is: ROUTES is the NAV list, and these two are not on it. */}
-            <Route path="/organization/playback" element={<h1>Playback &amp; Access page</h1>} />
+          </Route>
+          <Route path="/organization/events/:id" element={<EventWorkspaceLayout />}>
+            <Route index element={<h1>overview section</h1>} />
+            <Route path="preparation" element={<h1>preparation section</h1>} />
+            <Route path="activity" element={<h1>activity section</h1>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -75,201 +115,220 @@ function renderShell(at = "/organization/dashboard") {
   );
 }
 
-const rail = () => screen.getAllByRole("navigation")[0];
-const railLinks = () =>
-  within(rail())
-    .getAllByRole("link")
-    .map((a) => a.textContent.trim());
-const activeLink = () =>
-  within(rail())
-    .getAllByRole("link")
-    .find((a) => a.getAttribute("aria-current") === "page");
+const rail = () => screen.getByRole("navigation", { name: "Organization" });
+// The top-level destinations, by their visible label.
+const primary = () =>
+  [...rail().querySelector("ul").children].map((li) => li.querySelector("a").textContent.trim());
+const current = () =>
+  within(rail()).getAllByRole("link").filter((a) => a.getAttribute("aria-current") === "page");
 
-describe("the shell is the same on every organization route", () => {
-  it.each(ROUTES)("%s renders the one rail, in one order", async (path) => {
-    renderShell(path);
-    await screen.findByRole("heading", { level: 1 });
-    expect(railLinks()).toEqual(ROUTES.map(([, label]) => label));
-  });
-
-  it.each(ROUTES)("%s never renders the old grouped headings", async (path) => {
-    renderShell(path);
-    await screen.findByRole("heading", { level: 1 });
-    for (const heading of [/^home$/i, /^build$/i, /^operate$/i, /^manage$/i]) {
-      expect(within(rail()).queryByText(heading)).not.toBeInTheDocument();
-    }
-  });
-
-  it.each(ROUTES)("%s never renders a permanent health verdict", async (path) => {
-    renderShell(path);
-    await screen.findByRole("heading", { level: 1 });
-    expect(screen.queryByText(/^healthy$/i)).not.toBeInTheDocument();
-  });
-
-  it.each(ROUTES)("%s never renders the dead workspace / range controls", async (path) => {
-    renderShell(path);
-    await screen.findByRole("heading", { level: 1 });
-    expect(screen.queryByText(/all workspaces/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/last 24 hours/i)).not.toBeInTheDocument();
-  });
-
-  it("keeps the primary action on every route", async () => {
-    for (const [path] of ROUTES.slice(0, 4)) {
-      const view = renderShell(path);
+describe("the organization rail follows ZST-UX-NAV-001 §4", () => {
+  it.each(PAGES.filter(([p]) => !p.includes("developers") && !p.includes("credentials")))(
+    "%s renders the seven destinations, in order",
+    async (path) => {
+      renderShell(path);
       await screen.findByRole("heading", { level: 1 });
-      expect(screen.getByRole("button", { name: /request live event/i })).toBeInTheDocument();
-      view.unmount();
+      await waitFor(() => expect(primary()).toEqual(SPEC_RAIL));
+    }
+  );
+
+  it("adds Developers as the eighth item only where developer access is in use", async () => {
+    consoleState = baseState({ features: { developers: true } });
+    renderShell();
+    await waitFor(() => expect(primary()).toEqual([...SPEC_RAIL, "Developers"]));
+  });
+
+  it("still shows Developers while you are on a developer page, so a deep link is never orphaned", async () => {
+    renderShell("/organization/credentials");
+    await screen.findByText("Credentials page");
+    await waitFor(() => expect(primary().at(-1)).toBe("Developers"));
+    expect(current()[0]).toHaveAccessibleName("API credentials");
+  });
+
+  it("keeps Profile out of the rail — it lives in the account menu", async () => {
+    renderShell("/organization/profile");
+    await screen.findByText("Profile page");
+    expect(within(rail()).queryByRole("link", { name: /profile/i })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    expect(screen.getByRole("menuitem", { name: /profile/i })).toBeInTheDocument();
+  });
+
+  it("keeps Streaming Sessions out of the rail and files the page under Events", async () => {
+    renderShell("/organization/sessions");
+    await screen.findByText("Streaming Sessions page");
+    expect(within(rail()).queryByText(/streaming sessions/i)).not.toBeInTheDocument();
+    // The active-group pill (the navy rail's gradient), with no child claiming the page.
+    expect(within(rail()).getByRole("link", { name: "Events" }).className).toContain("from-violet-600");
+  });
+
+  it("never renders the old grouped headings or a Members / Billing / Settings top level", async () => {
+    renderShell();
+    await screen.findByRole("heading", { level: 1 });
+    for (const old of ["Members", "Billing", "Settings", "Recordings", "Support & Status", "Dashboard"]) {
+      expect(primary()).not.toContain(old);
     }
   });
 });
 
-describe("management utilities sit at the bottom", () => {
-  it("orders Analytics, Billing, Settings, Support & Status last", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-    const labels = railLinks();
-    expect(labels.slice(-4)).toEqual(["Analytics", "Billing", "Settings", "Support & Status"]);
-    // …and specifically below the everyday event work, not mixed into it.
-    for (const workflow of ["Events", "Audience", "Recordings", "Streaming Sessions"]) {
-      expect(labels.indexOf(workflow)).toBeLessThan(labels.indexOf("Analytics"));
-    }
+describe("groups and their children", () => {
+  it("opens only the group you are in", async () => {
+    renderShell("/organization/events");
+    await screen.findByText("Events page");
+    expect(within(rail()).getByRole("link", { name: "Calendar" })).toBeInTheDocument();
+    expect(within(rail()).queryByRole("link", { name: "Team & roles" })).not.toBeInTheDocument();
+    expect(within(rail()).getByRole("button", { name: "Collapse Events" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(rail()).getByRole("button", { name: "Expand Organization" })).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("puts Support & Status below Settings, not up with the integration items", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-    const labels = railLinks();
-    expect(labels.indexOf("Support & Status")).toBeGreaterThan(labels.indexOf("Settings"));
-    expect(labels.indexOf("Support & Status")).toBeGreaterThan(labels.indexOf("Live Inputs"));
+  it("opens another group on request without navigating", async () => {
+    renderShell("/organization/events");
+    await screen.findByText("Events page");
+    await userEvent.click(within(rail()).getByRole("button", { name: "Expand Organization" }));
+    expect(within(rail()).getByRole("link", { name: "Security & audit" })).toHaveAttribute("href", "/organization/security");
+    expect(screen.getByText("Events page")).toBeInTheDocument();
   });
 
-  it("makes Support & Status the last navigation item before Collapse", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-    expect(railLinks().at(-1)).toBe("Support & Status");
-    expect(screen.getByRole("button", { name: /collapse sidebar/i })).toBeInTheDocument();
-  });
-});
-
-describe("Playback & Access is not in the rail", () => {
-  // Removed from the sidebar deliberately; the ROUTE is untouched. Five pages still link to
-  // it (Audience, Streaming Sessions, Settings, Developer Platform), which is where the
-  // question it answers actually comes up.
-  it("renders no Playback & Access nav item", async () => {
-    renderShell("/organization/dashboard");
-    await screen.findByRole("heading", { level: 1 });
-    expect(screen.queryByRole("link", { name: /playback & access/i })).not.toBeInTheDocument();
-  });
-
-  it("still renders the shell for /organization/playback, so the route keeps working", async () => {
-    renderShell("/organization/playback");
-    expect(await screen.findByRole("heading", { level: 1 })).toBeInTheDocument();
-  });
-});
-
-describe("active navigation", () => {
   it.each([
-    ["/organization/dashboard", "Dashboard"],
-    ["/organization/events", "Events"],
-    ["/organization/analytics", "Analytics"],
-    ["/organization/billing", "Billing"],
-    ["/organization/settings", "Settings"],
-    ["/organization/support", "Support & Status"],
-  ])("%s marks %s as current", async (path, label) => {
+    ["/organization/events", "All events"],
+    ["/organization/events?view=calendar", "Calendar"],
+    ["/organization/events?status=on_air", "Live now"],
+    ["/organization/users", "Team & roles"],
+    ["/organization/settings?tab=branding", "Branding"],
+    ["/organization/settings", "Organization settings"],
+    ["/organization/security", "Security & audit"],
+    ["/organization/billing", "Plan, usage & billing"],
+    ["/organization/playback", "Event access"],
+    ["/organization/recordings", "All recordings"],
+    ["/organization/recordings?state=ready", "Replay-ready"],
+    ["/organization/analytics", "Analytics overview"],
+    ["/organization/analytics#quality", "Stream quality"],
+    ["/organization/manage", "Organization overview"],
+  ])("%s marks %s — and only it — current", async (path, label) => {
     renderShell(path);
     await screen.findByRole("heading", { level: 1 });
-    expect(activeLink()).toHaveTextContent(label);
+    expect(current()).toHaveLength(1);
+    expect(current()[0]).toHaveAccessibleName(label);
   });
 
-  it("marks Profile — and only Profile — current on /organization/profile", async () => {
-    renderShell("/organization/profile");
+  it.each([
+    ["/organization/dashboard", "Overview"],
+    ["/organization/support", "Support"],
+  ])("%s marks the %s item itself current", async (path, label) => {
+    renderShell(path);
     await screen.findByRole("heading", { level: 1 });
-    const current = within(rail()).getAllByRole("link").filter((a) => a.getAttribute("aria-current") === "page");
-    expect(current).toHaveLength(1);
-    expect(current[0]).toHaveAccessibleName("Profile");
-    expect(current[0]).toHaveAttribute("href", "/organization/profile");
+    expect(current().map((a) => a.textContent.trim())).toEqual([label]);
   });
 
-  it("resolves a nested event route to its parent item", async () => {
-    renderShell("/organization/events/abc-123");
-    await screen.findByText("event detail page");
-    expect(activeLink()).toHaveTextContent("Events");
-  });
-
-  it("does not leave Dashboard active on every route", async () => {
-    renderShell("/organization/billing");
-    await screen.findByRole("heading", { level: 1 });
-    expect(activeLink()).not.toHaveTextContent("Dashboard");
+  it("shows a live count on Events and on its Live now child", async () => {
+    consoleState = baseState({ badges: { live_events: 2 } });
+    renderShell("/organization/events");
+    await screen.findByText("Events page");
+    await waitFor(() => expect(within(rail()).getByRole("link", { name: /^Events/ })).toHaveTextContent("2"));
+    expect(within(rail()).getByRole("link", { name: /^Live now/ })).toHaveTextContent("2");
   });
 });
 
-// /organization/profile is the signed-in member's own profile, so its rail item is
-// "Profile". It used to read "Organization", which named organization management — and that
-// lives in Members, Billing and Settings, whose items must not change with it.
-describe("the profile item", () => {
-  const profileLink = () => within(rail()).getByRole("link", { name: "Profile" });
-
-  it("is called Profile everywhere in the rail, with no stale Organization item", async () => {
-    renderShell("/organization/profile");
-    await screen.findByRole("heading", { level: 1 });
-    expect(profileLink()).toHaveAttribute("href", "/organization/profile");
-    expect(within(rail()).queryByRole("link", { name: /organization/i })).not.toBeInTheDocument();
-    expect(within(rail()).queryByText("Organization")).not.toBeInTheDocument();
-    // The icon is decoration: the name comes from the label alone.
-    expect(profileLink().querySelector("svg")).toHaveAttribute("aria-hidden", "true");
-  });
-
-  it("keeps its name, tooltip and current state in the collapsed rail", async () => {
-    renderShell("/organization/profile");
-    await screen.findByRole("heading", { level: 1 });
-    await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
-    const link = profileLink();                       // aria-label, now that the text is hidden
-    expect(link).toHaveAttribute("aria-label", "Profile");
-    expect(link).toHaveAttribute("aria-current", "page");
-    const tip = [...link.querySelectorAll("[aria-hidden='true']")].find((el) => el.textContent === "Profile");
-    expect(tip).toBeTruthy();                         // the hover tooltip says Profile too
-    expect(within(rail()).queryByText("Organization")).not.toBeInTheDocument();
-  });
-
-  it("is the same item in the mobile drawer", async () => {
-    renderShell("/organization/profile");
-    await screen.findByRole("heading", { level: 1 });
-    await userEvent.click(screen.getByRole("button", { name: /toggle menu/i }));
-    expect(rail().closest("aside").className).toContain("translate-x-0");
-    expect(profileLink()).toHaveAttribute("aria-current", "page");
-    expect(railLinks()).toContain("Profile");
-    expect(railLinks()).not.toContain("Organization");
-  });
-
-  it("leaves the organization-management items exactly as they were", async () => {
-    renderShell("/organization/profile");
-    await screen.findByRole("heading", { level: 1 });
-    for (const [name, href] of [["Members", "/organization/users"], ["Billing", "/organization/billing"],
-                                ["Settings", "/organization/settings"]]) {
-      const link = within(rail()).getByRole("link", { name });
-      expect(link).toHaveAttribute("href", href);
-      expect(link).not.toHaveAttribute("aria-current");
-    }
-  });
-});
-
-describe("navigating between routes", () => {
-  it("changes only the active item and the content, never the rail itself", async () => {
+describe("role-aware rail", () => {
+  it("offers an organization admin the Create event action, once, in the rail", async () => {
     renderShell();
-    await screen.findByText("Dashboard page");
-    const before = railLinks();
+    await screen.findByRole("heading", { level: 1 });
+    expect(screen.getByRole("link", { name: "Create event" })).toHaveAttribute("href", "/organization/events?create=true");
+  });
 
-    for (const label of ["Events", "Recordings", "Analytics", "Billing", "Settings"]) {
-      // Sequential on purpose: this asserts what happens ACROSS a real navigation path,
-      // so each click has to land before the next one is made.
-      await userEvent.click(within(rail()).getByRole("link", { name: label }));
-      await screen.findByText(`${label} page`);
+  it("shows a member without admin rights only what they may open, and no create action", async () => {
+    authRole = "host";
+    consoleState = baseState({ user: { name: "Hana", email: "h@example.com", role: "host", role_label: "Host" } });
+    renderShell();
+    await screen.findByRole("heading", { level: 1 });
+    await waitFor(() => expect(primary()).toEqual(["Overview"]));
+    expect(screen.queryByRole("link", { name: "Create event" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /request live event/i })).not.toBeInTheDocument();
+  });
 
-      expect(railLinks()).toEqual(before);
-      expect(activeLink()).toHaveTextContent(label);
-      expect(screen.queryByText(/^healthy$/i)).not.toBeInTheDocument();
-      expect(within(rail()).queryByText(/^operate$/i)).not.toBeInTheDocument();
-    }
+  it("names the organization and your role, so the active tenancy is always explicit", async () => {
+    renderShell();
+    await screen.findByText("Northwind");
+    expect(screen.getByText(/organization owner · growth/i)).toBeInTheDocument();
+  });
+});
+
+describe("utility footer", () => {
+  it("shows the service status, linked to Support", async () => {
+    renderShell();
+    const status = await screen.findByRole("link", { name: "Service status: Healthy" });
+    expect(status).toHaveAttribute("href", "/organization/support");
+  });
+
+  it("says the status is unavailable rather than healthy when it cannot be read", async () => {
+    vi.mocked(api.get).mockImplementation(() => Promise.reject(new Error("down")));
+    renderShell();
+    expect(await screen.findByRole("link", { name: "Service status: Status unavailable" })).toBeInTheDocument();
+  });
+});
+
+describe("the event workspace rail", () => {
+  const eventRail = () => screen.getByRole("navigation", { name: "Event workspace" });
+  const sections = () =>
+    [...eventRail().querySelector("ul").children].map((li) => li.querySelector("a").textContent.trim());
+
+  it("replaces the organization rail with the event's seven sections, in order", async () => {
+    renderShell(`/organization/events/${EVENT.id}`);
+    await screen.findByText("overview section");
+    expect(screen.queryByRole("navigation", { name: "Organization" })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(sections()).toEqual([
+        "Event Overview", "Preparation2", "Audience AccessPublic", "Live Control", "Replay & Assets", "Insights", "Activity & Audit",
+      ])
+    );
+    expect(within(eventRail()).getByRole("link", { name: "All events" })).toHaveAttribute("href", "/organization/events");
+    expect(within(eventRail()).getByText("Quarterly town hall")).toBeInTheDocument();
+  });
+
+  it("counts only the REQUIRED checks that fail as Preparation's blockers", async () => {
+    renderShell(`/organization/events/${EVENT.id}`);
+    await screen.findByText("overview section");
+    const prep = await within(eventRail()).findByRole("link", { name: /^Preparation/ });
+    await waitFor(() => expect(prep).toHaveTextContent("2"));
+  });
+
+  it("moves the current section with the route, and reads nothing but the event to do it", async () => {
+    renderShell(`/organization/events/${EVENT.id}`);
+    await screen.findByText("overview section");
+    await userEvent.click(within(eventRail()).getByRole("link", { name: "Activity & Audit" }));
+    await screen.findByText("activity section");
+    expect(within(eventRail()).getByRole("link", { name: "Activity & Audit" })).toHaveAttribute("aria-current", "page");
+    expect(vi.mocked(api.post)).not.toHaveBeenCalled();
+  });
+
+  it("answers an event it cannot read with a non-disclosing not-found, inside the shell", async () => {
+    eventResponse = () => Promise.reject(Object.assign(new Error("Event not found"), { response: { status: 404 } }));
+    renderShell(`/organization/events/${EVENT.id}`);
+    expect(await screen.findByRole("heading", { name: "Event not found" })).toBeInTheDocument();
+    expect(screen.queryByText("overview section")).not.toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Event workspace" })).toBeInTheDocument();
+  });
+
+  it("keeps the shell's identity and service status around the event rail", async () => {
+    renderShell(`/organization/events/${EVENT.id}`);
+    await screen.findByText("overview section");
+    expect(await screen.findByRole("link", { name: "Service status: Healthy" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Account menu" })).toBeInTheDocument();
+  });
+});
+
+// White initials and the workspace icon sit on these chips. The console chip ramp holds AA in
+// both themes (ui/contrast.test.js); the violet-500 → fuchsia-500 it replaced measured ~3.5:1.
+describe("identity chips in the rail", () => {
+  it("draw the member's initials and the workspace badge on the AA chip ramp", async () => {
+    renderShell();
+    await screen.findByRole("heading", { level: 1 });
+    const aside = rail().closest("aside");
+    const account = within(aside).getByRole("button", { name: "Vihari Owner, Organization Owner — account" });
+    const avatar = within(account).getByText("VO").parentElement;
+    expect(avatar).toHaveClass(...consoleChip.split(" "));
+    const badge = within(aside).getByText("Northwind").closest("div.flex").querySelector("span[aria-hidden='true']");
+    expect(badge).toHaveClass(...consoleChip.split(" "));
+    expect(aside.innerHTML).not.toMatch(/from-violet-500|to-fuchsia-500/);
   });
 });
 
@@ -280,130 +339,63 @@ describe("the sidebar collapse control", () => {
     renderShell();
     await screen.findByRole("heading", { level: 1 });
     expect(toggle().closest("header")).not.toBeNull();
-    expect(within(rail()).queryByRole("button", { name: /(collapse|expand) sidebar/i }))
-      .not.toBeInTheDocument();
   });
 
-  it("is icon-only — no Collapse or Expand text anywhere on screen", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-    expect(toggle()).toHaveTextContent("");
-    expect(screen.queryByText(/^collapse$/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/^expand$/i)).not.toBeInTheDocument();
-  });
-
-  it("names the action it will perform, and flips when the state does", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-
-    const collapse = screen.getByRole("button", { name: "Collapse sidebar" });
-    expect(collapse).toHaveAttribute("aria-expanded", "true");
-    expect(collapse).toHaveAttribute("title", "Collapse sidebar");
-
-    await userEvent.click(collapse);
-
-    const expand = screen.getByRole("button", { name: "Expand sidebar" });
-    expect(expand).toHaveAttribute("aria-expanded", "false");
-    expect(expand).toHaveAttribute("title", "Expand sidebar");
-
-    // …and back, so the control is a real toggle rather than a one-way door.
-    await userEvent.click(expand);
-    expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeInTheDocument();
-  });
-
-  it("swaps the icon with the state", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-    const iconOf = (btn) => btn.querySelector("svg")?.getAttribute("class") || "";
-
-    const expanded = iconOf(toggle());
-    await userEvent.click(toggle());
-    // lucide stamps the icon name into the class list, so this reads the actual glyph
-    // rather than trusting that a conditional branch was taken.
-    expect(iconOf(toggle())).not.toBe(expanded);
-    expect(expanded).toMatch(/panel-left-close/);
-    expect(iconOf(toggle())).toMatch(/panel-left-open/);
-  });
-
-  it("actually narrows the rail", async () => {
+  it("names the action it will perform, flips with the state, and narrows the rail", async () => {
     renderShell();
     await screen.findByRole("heading", { level: 1 });
     const aside = rail().closest("aside");
-    expect(aside.className).toContain("lg:w-64");
-
-    await userEvent.click(toggle());
-    expect(aside.className).toContain("lg:w-[4.75rem]");
+    expect(aside.className).toContain("lg:w-[16.25rem]");
+    const collapse = screen.getByRole("button", { name: "Collapse sidebar" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(collapse);
+    expect(screen.getByRole("button", { name: "Expand sidebar" })).toHaveAttribute("aria-expanded", "false");
+    expect(aside.className).toContain("lg:w-[4.5rem]");
   });
 
-  it("stays separate from the mobile drawer control", async () => {
+  it("keeps every destination's name when collapsed", async () => {
+    renderShell("/organization/analytics");
+    await screen.findByRole("heading", { level: 1 });
+    await userEvent.click(toggle());
+    const analytics = within(rail()).getByRole("link", { name: "Analytics" });
+    expect(analytics).toHaveAttribute("aria-label", "Analytics");
+    expect(analytics).toHaveAttribute("aria-current", "page");
+  });
+
+  it("stays separate from the mobile drawer control, which opens the drawer", async () => {
     renderShell();
     await screen.findByRole("heading", { level: 1 });
-    // Two controls, one per breakpoint — neither doubles as the other.
-    expect(screen.getByRole("button", { name: /toggle menu/i })).toBeInTheDocument();
     expect(toggle()).not.toBe(screen.getByRole("button", { name: /toggle menu/i }));
+    await userEvent.click(screen.getByRole("button", { name: /toggle menu/i }));
+    expect(rail().closest("aside").className).toContain("translate-x-0");
   });
 
-  it.each(ROUTES)("%s carries the same control", async (path) => {
-    renderShell(path);
+  // Measured at 390px in Chrome: with the drawer closed, Tab walked through ~30 rail controls
+  // that were translated off-screen. Below lg the closed drawer is now invisible as well.
+  it("takes the closed mobile drawer out of the Tab order, and restores it when opened", async () => {
+    renderShell();
     await screen.findByRole("heading", { level: 1 });
-    expect(toggle()).toBeInTheDocument();
+    const aside = rail().closest("aside");
+    expect(aside).toHaveClass("-translate-x-full", "max-lg:invisible");
+    await userEvent.click(screen.getByRole("button", { name: /toggle menu/i }));
+    expect(aside).not.toHaveClass("-translate-x-full", "max-lg:invisible");
+    expect(aside).toHaveClass("translate-x-0");
+    // Desktop is untouched: nothing unprefixed hides the rail.
+    expect(aside.className).not.toMatch(/(^|\s)invisible(\s|$)/);
   });
 });
 
-describe("technical surfaces are not primary navigation", () => {
-  it("keeps Developer Platform, Credentials, Live Inputs and Webhooks out of the rail", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-    const labels = railLinks();
-    for (const gone of ["Developer Platform", "Credentials", "Live Inputs", "Webhooks"]) {
-      expect(labels).not.toContain(gone);
-    }
-  });
-
-  it("still shows the eleven destinations an organizer actually works in", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-    // Playback & Access was removed from the rail deliberately; its route is unchanged and
-    // Audience, Streaming Sessions, Settings and Developer Platform all still link to it.
-    expect(railLinks()).toEqual([
-      "Dashboard", "Events", "Audience", "Members", "Recordings",
-      "Streaming Sessions",
-      "Profile",
-      "Analytics", "Billing", "Settings", "Support & Status",
-    ]);
-  });
-
-  it("keeps Settings, which is where the technical surfaces now live", async () => {
-    renderShell();
-    await screen.findByRole("heading", { level: 1 });
-    expect(within(rail()).getByRole("link", { name: "Settings" })).toBeInTheDocument();
-  });
-
-  it("leaves no link to /organization/webhooks anywhere in the shell", async () => {
+describe("what the shell must never do", () => {
+  it("leaves no link to /organization/webhooks anywhere", async () => {
     renderShell();
     await screen.findByRole("heading", { level: 1 });
     const hrefs = [...document.querySelectorAll("a[href]")].map((a) => a.getAttribute("href"));
     expect(hrefs.filter((h) => h && h.includes("/organization/webhooks"))).toEqual([]);
   });
 
-  it("matches no route at all, so nothing of the page renders", () => {
-    // Stronger than "the page is blank": with the route gone, the path matches nothing —
-    // not even the layout — so the shell never mounts here. In the real App.jsx that same
-    // miss is caught by `<Route path="*" element={<RootRedirect />} />`, which sends a
-    // signed-in member to their role home. No custom redirect was added for this.
-    const { container } = renderShell("/organization/webhooks");
-    expect(container).toBeEmptyDOMElement();
-  });
-});
-
-describe("room for the floating Guide", () => {
-  it("the console's scroll area reserves the launcher's footprint after the last row", async () => {
+  it("reserves the floating Guide's footprint after the last row", async () => {
     renderShell("/organization/dashboard");
     await screen.findByRole("heading", { name: /dashboard page/i });
-    // index.css: .zk-guide-safe::after is var(--guide-safe-bottom) tall, which the mounted
-    // launcher publishes (guide/safeArea.js) — so a page's last control is never under it.
-    const main = document.querySelector("main");
-    expect(main).not.toBeNull();
-    expect(main.classList.contains("zk-guide-safe")).toBe(true);
+    expect(document.querySelector("main").classList.contains("zk-guide-safe")).toBe(true);
   });
 });

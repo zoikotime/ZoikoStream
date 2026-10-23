@@ -120,6 +120,17 @@ export const edgeErrorMessage = (e) => {
 // account — Billing's "Current subscription detected. Network Error" told people their
 // subscription was in trouble when the only fact in evidence was that one request got no
 // answer. These say what is actually known: we could not get an answer, and nothing changed.
+//
+// In a DEVELOPMENT build the unreachable message also names the API address the request went
+// to. A dev client pointed at the wrong server — another local project already listening on
+// the same port, or a stale VITE_API_URL — fails exactly like a dropped connection, because the
+// browser hides the CORS refusal from the page, and that address is the one fact that tells the
+// two apart. A production build keeps the plain sentence.
+const devApiHint = () =>
+  import.meta.env.DEV
+    ? ` (Development: the request went to ${API_BASE}. Make sure the ZoikoStream API is the server running there.)`
+    : "";
+
 export const transportMessage = (e) => {
   if (e?.response) return null;                 // the server DID answer; not a transport fault
   if (e?.code === "ECONNABORTED" || e?.code === "ETIMEDOUT") {
@@ -127,7 +138,7 @@ export const transportMessage = (e) => {
   }
   if (e?.code === "ERR_CANCELED") return null;  // we aborted it; the caller decides what to say
   if (e?.request) {
-    return "Couldn't reach the ZoikoStream server, so nothing was submitted. Check your connection and try again.";
+    return `Couldn't reach the ZoikoStream server, so nothing was submitted. Check your connection and try again.${devApiHint()}`;
   }
   return null;
 };

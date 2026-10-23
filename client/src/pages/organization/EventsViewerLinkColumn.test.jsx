@@ -1,9 +1,8 @@
-// The Events table's viewer link has a column of its own.
+// The Events table (ORG-02): Event · Date & time · Status · Readiness · Actions.
 //
-// The chain icon copies the event's viewer URL, but it sat under the generic "Actions" heading
-// beside View and Delete, so nothing said what it did. It is now its own "Viewer link" column
-// right after Duration, with View/Delete under "Actions" — and the URL itself still comes from
-// the unchanged utils/viewerLink (mocked here so the test can see what it was handed).
+// Copy viewer link sits in the row's "⋯" menu under "Actions", beside Open Workspace, and says
+// what it does in words (it once sat there as an unlabelled chain icon). The URL itself still comes from the unchanged utils/viewerLink (mocked here so
+// the test can see what it was handed).
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -36,7 +35,7 @@ const EVENTS = [
     public_watch_url: "https://watch.example.org/events/e2/watch" },
 ];
 
-const HEADERS = ["Event", "Status", "Starts", "Visibility", "Registration", "Duration", "Viewer link", "Actions"];
+const HEADERS = ["Event", "Date & time", "Status", "Readiness", "Actions"];
 
 const listCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => url === "/events");
 
@@ -59,72 +58,80 @@ const renderPage = () =>
   );
 
 const headerTexts = () => screen.getAllByRole("columnheader").map((th) => th.textContent.trim());
-const rowFor = (title) => screen.getByRole("button", { name: new RegExp(`^${title}`) }).closest("tr");
+// The events table. Titles also appear in the side panels (Next on the schedule), so rows are
+// always looked up inside the table.
+const table = () => within(screen.getByRole("table"));
+const rowFor = (title) => table().getByRole("button", { name: new RegExp(`^${title}`) }).closest("tr");
 const cellsOf = (row) => within(row).getAllByRole("cell");
+// The menu is portalled to <body>, so its items are found on the screen once it is open.
+async function chooseCopy(user, title) {
+  await user.click(table().getByRole("button", { name: `More actions for ${title}` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Copy viewer link" }));
+}
 
 describe("the Events table columns", () => {
-  it("reads Event, Status, Starts, Visibility, Registration, Duration, Viewer link, Actions", async () => {
+  it("reads Event, Date & time, Status, Readiness, Actions", async () => {
     renderPage();
-    await screen.findByText("Testt");
+    await table().findByText("Testt");
     expect(headerTexts()).toEqual(HEADERS);
   });
 
   it("keeps every row aligned with the header: one cell per column", async () => {
     renderPage();
-    await screen.findByText("Testt");
+    await table().findByText("Testt");
     for (const title of ["Testt", "Family memorial"]) {
       expect(cellsOf(rowFor(title))).toHaveLength(HEADERS.length);
     }
-    // The icon columns line up with their headings: same alignment above and below.
+    // The actions line up with their heading: same alignment above and below.
     const headers = screen.getAllByRole("columnheader");
     const cells = cellsOf(rowFor("Testt"));
-    for (const name of ["Duration", "Viewer link", "Actions"]) {
-      const i = HEADERS.indexOf(name);
-      expect(headers[i]).toHaveClass("text-right");
-      expect(cells[i]).toHaveClass("text-right");
-    }
+    const i = HEADERS.indexOf("Actions");
+    expect(headers[i]).toHaveClass("text-right");
+    expect(cells[i]).toHaveClass("text-right");
   });
 
-  it("puts only the link icon under Viewer link, and View/Delete under Actions", async () => {
+  it("puts Open Workspace and the row's overflow menu under Actions, and the time under Date & time", async () => {
+    const user = userEvent.setup();
     renderPage();
-    await screen.findByText("Testt");
+    await table().findByText("Testt");
     const cells = cellsOf(rowFor("Testt"));
-    const linkCell = cells[HEADERS.indexOf("Viewer link")];
     const actionsCell = cells[HEADERS.indexOf("Actions")];
 
-    expect(within(linkCell).getAllByRole("button")).toHaveLength(1);
-    expect(within(linkCell).getByRole("button", { name: "Copy viewer link for Testt" })).toBeInTheDocument();
+    expect(within(actionsCell).getByRole("link", { name: "Open workspace for Testt" })).toHaveAttribute("href", "/organization/events/e1");
+    expect(within(actionsCell).getAllByRole("button")).toHaveLength(1);
+    await user.click(within(actionsCell).getByRole("button", { name: "More actions for Testt" }));
+    const menu = await screen.findByRole("menu", { name: "More actions for Testt" });
+    expect(within(menu).getAllByRole("menuitem").map((m) => m.textContent)).toEqual(["Copy viewer link", "Delete event"]);
 
-    expect(within(actionsCell).getByRole("button", { name: "View Testt" })).toBeInTheDocument();
-    expect(within(actionsCell).getByRole("button", { name: "Delete Testt" })).toBeInTheDocument();
-    expect(within(actionsCell).queryByRole("button", { name: /viewer link/i })).not.toBeInTheDocument();
-
-    // Duration is unaffected and still sits right before the link.
-    expect(cells[HEADERS.indexOf("Duration")]).toHaveTextContent("12m");
+    expect(cells[HEADERS.indexOf("Date & time")]).toHaveTextContent(/2026/);
   });
 
-  it("says what the icon does in a tooltip and an accessible name", async () => {
+  it("says what the controls do in a tooltip and an accessible name", async () => {
+    const user = userEvent.setup();
     renderPage();
-    await screen.findByText("Testt");
-    const button = screen.getByRole("button", { name: "Copy viewer link for Testt" });
-    expect(button).toHaveAttribute("title", "Copy viewer link");
-    expect(button).toHaveAttribute("type", "button");
+    await table().findByText("Testt");
+    const trigger = table().getByRole("button", { name: "More actions for Testt" });
+    expect(trigger).toHaveAttribute("title", "More actions");
+    expect(trigger).toHaveAttribute("type", "button");
+    await user.click(trigger);
+    expect(await screen.findByRole("menuitem", { name: "Copy viewer link" })).toHaveAttribute("type", "button");
   });
 
   it("is a viewer link for private events too, not only public ones", async () => {
     renderPage();
-    await screen.findByText("Family memorial");
+    await table().findByText("Family memorial");
+    const user = userEvent.setup();
     const cells = cellsOf(rowFor("Family memorial"));
-    expect(cells[HEADERS.indexOf("Visibility")]).toHaveTextContent(/private/i);
-    expect(within(cells[HEADERS.indexOf("Viewer link")])
-      .getByRole("button", { name: "Copy viewer link for Family memorial" })).toBeInTheDocument();
+    expect(cells[HEADERS.indexOf("Event")]).toHaveTextContent(/private event/i);
+    await user.click(within(cells[HEADERS.indexOf("Actions")]).getByRole("button", { name: "More actions for Family memorial" }));
+    expect(await screen.findByRole("menuitem", { name: "Copy viewer link" })).toBeInTheDocument();
   });
 
   it("copies through the unchanged viewer-link logic, with the event it belongs to", async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText("Family memorial");
-    await user.click(screen.getByRole("button", { name: "Copy viewer link for Family memorial" }));
+    await table().findByText("Family memorial");
+    await chooseCopy(user, "Family memorial");
     await waitFor(() => expect(copyViewerLink).toHaveBeenCalledTimes(1));
     expect(copyViewerLink).toHaveBeenCalledWith(EVENTS[1]);
     expect(notify.success).toHaveBeenCalledWith("Viewer link copied");
@@ -134,23 +141,23 @@ describe("the Events table columns", () => {
     vi.mocked(copyViewerLink).mockResolvedValueOnce(false);
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText("Testt");
-    await user.click(screen.getByRole("button", { name: "Copy viewer link for Testt" }));
+    await table().findByText("Testt");
+    await chooseCopy(user, "Testt");
     await waitFor(() => expect(notify.error).toHaveBeenCalledWith("Unable to copy viewer link."));
   });
 
-  it("keeps sorting: Event, Status and Starts sort on the server; the new columns do not sort", async () => {
+  it("keeps sorting: Event, Date & time and Status sort on the server; Readiness and Actions do not", async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText("Testt");
-    for (const name of ["Event", "Status", "Starts"]) {
+    await table().findByText("Testt");
+    for (const name of ["Event", "Date & time", "Status"]) {
       expect(within(screen.getByRole("columnheader", { name: new RegExp(`^${name}`) }))
         .getByRole("button")).toBeInTheDocument();
     }
-    for (const name of ["Viewer link", "Actions"]) {
+    for (const name of ["Readiness", "Actions"]) {
       expect(within(screen.getByRole("columnheader", { name })).queryByRole("button")).not.toBeInTheDocument();
     }
-    await user.click(screen.getByRole("button", { name: /^Event/ }));
+    await user.click(within(screen.getByRole("columnheader", { name: /^Event/ })).getByRole("button"));
     await waitFor(() => expect(listCalls().at(-1)[1].params).toMatchObject({ sort_by: "title" }));
   });
 });

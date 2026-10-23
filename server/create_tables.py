@@ -1,6 +1,7 @@
+import sys
 import time
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 
 from app.db import engine, Base
@@ -466,6 +467,36 @@ _COMMERCIAL_EXCEPTION_COLUMNS = [
 ]
 _AUDIT_LOG_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(64)",
+    # Event Workspace -> Activity & Audit (ZST-ENG-DASH-001 EVT-07). The event an action
+    # concerns, the decision it came to, and the actor's role when they acted. All nullable:
+    # rows written before these existed are backfilled below where the data allows, and are
+    # otherwise shown without them rather than with a guess.
+    "ADD COLUMN IF NOT EXISTS event_id UUID",
+    "ADD COLUMN IF NOT EXISTS outcome VARCHAR(20)",
+    "ADD COLUMN IF NOT EXISTS actor_role VARCHAR(40)",
+]
+# Run after _AUDIT_LOG_COLUMNS. The two indexes serve the two readers: one event's activity
+# newest-first, and one organization's activity newest-first (audit_logs had no org index).
+#
+# The backfills are one-off for rows that predate the columns and no-ops on every later run
+# (each touches only rows where the column is still NULL; new rows are completed on insert by
+# models/audit_log._complete_audit_row). They take row locks, not a table lock, so the app keeps
+# writing audit rows while they run. The outcome CASE must agree with
+# models/audit_log.outcome_for_action.
+_UUID_RE = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+_AUDIT_LOG_STATEMENTS = [
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_event_created ON audit_logs (event_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_org_created ON audit_logs (org_id, created_at DESC)",
+    "UPDATE audit_logs SET event_id = (meta->>'event_id')::uuid "
+    f"WHERE event_id IS NULL AND meta IS NOT NULL AND (meta->>'event_id') ~ '{_UUID_RE}'",
+    "UPDATE audit_logs SET event_id = target_id::uuid "
+    f"WHERE event_id IS NULL AND target_type = 'event' AND target_id ~ '{_UUID_RE}'",
+    "UPDATE audit_logs SET outcome = CASE "
+    "WHEN lower(action) ~ '(denied|blocked|refused)' THEN 'denied' "
+    "WHEN lower(action) ~ '(rejected|illegal_transition)' THEN 'rejected' "
+    "WHEN lower(action) ~ 'failed' THEN 'failed' "
+    "WHEN lower(action) ~ '(\\.requested|_request|\\.request)$' THEN 'pending' "
+    "ELSE 'applied' END WHERE outcome IS NULL",
 ]
 _PHASE3_STATEMENTS = [
     # Provider event identity is enforced by the DATABASE, not an application check — two
@@ -1227,6 +1258,8 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE commercial_exceptions {clause}"))
         for clause in _AUDIT_LOG_COLUMNS:
             conn.execute(text(f"ALTER TABLE audit_logs {clause}"))
+        for stmt in _AUDIT_LOG_STATEMENTS:
+            conn.execute(text(stmt))
         for stmt in _PHASE3_STATEMENTS:
             conn.execute(text(stmt))
         for stmt in _PHASE4F_STATEMENTS:
@@ -1273,6 +1306,60 @@ def ensure_schema():
     print("Schema ready!")
 
 
+def missing_schema(bind=None, metadata=None) -> list[str]:
+    """Every table and column the models declare that the database does not have. Read-only.
+
+    The app never alters its own schema on boot (app/main.py), and it selects every mapped
+    column of a model, so code that runs against a database missing one of them fails on every
+    query of that table — the audit_logs columns, for instance, are written on every audited
+    action. This is the check that "the schema is ready for this code", as names: `table` for a
+    missing table, `table.column` for a missing column."""
+    bind = engine if bind is None else bind
+    metadata = Base.metadata if metadata is None else metadata
+    insp = inspect(bind)
+    missing = []
+    for table in sorted(metadata.tables.values(), key=lambda t: t.fullname):
+        if not insp.has_table(table.name, schema=table.schema):
+            missing.append(table.fullname)
+            continue
+        present = {c["name"] for c in insp.get_columns(table.name, schema=table.schema)}
+        missing.extend(f"{table.fullname}.{c.name}" for c in table.columns if c.name not in present)
+    return missing
+
+
+def verify_schema(bind=None, metadata=None) -> None:
+    """Raise unless missing_schema() is empty, so a deploy step that ran this file stops there.
+
+    ensure_schema() already fails loudly when a statement fails; this also catches the case where
+    every statement succeeded but a model column has no statement adding it to an existing table."""
+    missing = missing_schema(bind, metadata)
+    if missing:
+        for name in missing:
+            print(f"  MISSING: {name}")
+        raise RuntimeError(
+            f"{len(missing)} table(s)/column(s) the models declare are missing — the schema is NOT "
+            "ready for this code. Do not start it against this database."
+        )
+    print("Schema verified: every table and column the models declare is present.")
+
+
+def main(argv=None) -> int:
+    """`python create_tables.py` applies the schema, verifies it, then prepares the Guide
+    databases; any platform-schema failure exits non-zero, which is what stops a deploy step
+    (cloudbuild.yaml `migrate`; .github/workflows/deployVM.yml `migrate`).
+
+    `python create_tables.py --check` only verifies, changing nothing — for confirming a
+    database is ready for a release (on the VM, before a restart) without migrating it."""
+    args = sys.argv[1:] if argv is None else argv
+    if "--check" in args:
+        verify_schema()
+        return 0
+    ensure_schema()
+    verify_schema()
+    ensure_chatbot_schemas()
+    return 0
+
+
 def ensure_chatbot_schemas():
     """The two Guide assistants' own schemas, applied by the same deploy step as the platform.
 
@@ -1301,5 +1388,4 @@ def ensure_chatbot_schemas():
 
 
 if __name__ == "__main__":
-    ensure_schema()
-    ensure_chatbot_schemas()
+    sys.exit(main())

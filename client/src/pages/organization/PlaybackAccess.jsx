@@ -292,6 +292,8 @@ export default function PlaybackAccess() {
   return (
     <div className="space-y-6">
       <OrganizationPageHeader
+        breadcrumbs={[["Organization", "/organization/manage"], ["Audience & Access", "/organization/audience"], ["Event access"]]}
+        eyebrow="Audience governance / Playback & access"
         title="Playback & Access"
         subtitle="The gates a viewer passes before media plays, per event, and the links that carry them in."
         actions={

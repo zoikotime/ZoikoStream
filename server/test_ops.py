@@ -318,6 +318,33 @@ def test_console_state_shape():
         db.close()
 
 
+def test_org_rail_counts_a_degraded_broadcast_as_on_air():
+    """The organization shell's live badge is everything on air — live AND degraded — the same
+    set as the Events list's "Live now" filter, so the rail and the pages never disagree."""
+    from app.services import org as org_svc
+
+    db = SessionLocal()
+    try:
+        admin = _admin(db)
+        org = _org(db)
+        for status, deleted in (("live", None), ("degraded", None), ("scheduled", None), ("ended", None),
+                                ("live", NOW)):                         # the deleted one is not counted
+            db.add(Event(org_id=org.id, created_by=admin.id, title="On air?", status=status,
+                         start_time=NOW - timedelta(hours=1), deleted_at=deleted))
+        db.flush()
+        badge = org_svc.console_state(db, org, admin)["badges"]["live_events"]
+        assert badge == 2
+        # The same number the Events page shows: its status counts and its "Live now" filter.
+        from app.crud import event as event_crud
+        shown = event_crud.display_status_counts(db, org.id)
+        assert shown.get("live", 0) + shown.get("degraded", 0) == badge
+        _, on_air_total = event_crud.list_events(db, org.id, display_status="on_air")
+        assert on_air_total == badge
+    finally:
+        db.rollback()
+        db.close()
+
+
 def test_search_finds_real_entities_only():
     db = SessionLocal()
     try:

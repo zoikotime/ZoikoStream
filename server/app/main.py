@@ -32,6 +32,7 @@ from .routers.privacy import router as privacy_router
 from .guide.mount import mount_guide
 from .operator_guide.mount import mount_operator_guide
 from . import log_redaction
+from .request_context import bind_request_id, new_request_id, reset_request_id
 from .security import ALGORITHM
 from .services import bus
 from .services import platform_settings
@@ -290,6 +291,9 @@ _CORS_KWARGS = {
     "allow_credentials": True,
     "allow_methods": ["*"],
     "allow_headers": ["*"],
+    # The request reference (RequestReference below) is what an operator quotes to support and
+    # what an audit receipt shows; a cross-origin console must be allowed to read it.
+    "expose_headers": ["X-Request-Id"],
 }
 if not settings.is_production():
     _CORS_KWARGS["allow_origin_regex"] = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
@@ -337,6 +341,43 @@ class ReadableServerErrors:
 
 app.add_middleware(ReadableServerErrors)
 app.add_middleware(CORSMiddleware, **_CORS_KWARGS)
+
+
+class RequestReference:
+    """Stamp every HTTP request with a server-generated reference.
+
+    Bound for the request's duration (request_context), so an AuditLog row written while
+    handling it records that reference as its correlation_id, and echoed as `X-Request-Id`, so
+    the operator holding the response and the audit receipt in Activity & Audit name the same
+    request. Generated here, never taken from the caller: see request_context.
+
+    Pure ASGI rather than @app.middleware("http"): the context variable is set in the same task
+    that runs the inner layers, and the BaseHTTPMiddleware layers inside copy it when they
+    spawn theirs. HTTP only; websocket and lifespan scopes pass straight through."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        reference = new_request_id()
+        token = bind_request_id(reference)
+
+        async def send_with_reference(message):
+            if message["type"] == "http.response.start":
+                headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"x-request-id"]
+                headers.append((b"x-request-id", reference.encode()))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_reference)
+        finally:
+            reset_request_id(token)
+
+
+app.add_middleware(RequestReference)
 
 @app.middleware("http")
 async def measure_requests(request: Request, call_next):

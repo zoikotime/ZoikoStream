@@ -100,7 +100,12 @@ function TrustPage({ title, subtitle, children }) {
   return (
     <div className="mx-auto max-w-[1500px] space-y-6">
       <BackToSupport />
-      <OrganizationPageHeader title={title} subtitle={subtitle} />
+      <OrganizationPageHeader
+        breadcrumbs={[["Organization", "/organization/manage"], ["Support", "/organization/support"], [title]]}
+        eyebrow="Support / Trust & evidence"
+        title={title}
+        subtitle={subtitle}
+      />
       {children}
     </div>
   );
