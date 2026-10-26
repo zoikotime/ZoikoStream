@@ -31,6 +31,7 @@ class TurnObservation:
     model_calls: int
     retrieval: dict | None          # {answerability, evidence, candidates} or None
     http_status: int
+    error_code: str | None = None   # stable problem code on a non-200 response
 
 
 @dataclass
@@ -46,8 +47,14 @@ def _lower(s: str) -> str:
 def check(expect: dict, obs: TurnObservation, known_sources: set[str]) -> list[str]:
     f: list[str] = []
     e = expect
-    if obs.http_status != 200:
-        return [f"http status {obs.http_status}"]
+    if "http_status" in e or obs.http_status != 200:
+        # Typed failure expectations (G8: rate limit / degraded transport, CF §23).
+        if obs.http_status != e.get("http_status", 200):
+            return [f"http status {obs.http_status} != {e.get('http_status', 200)}"]
+        if "error_code" in e and obs.error_code != e["error_code"]:
+            return [f"error code {obs.error_code!r} != {e['error_code']!r}"]
+        if obs.http_status != 200:
+            return []
     if "answer_class_in" in e and obs.answer_class not in e["answer_class_in"]:
         f.append(f"answer_class {obs.answer_class!r} not in {e['answer_class_in']}")
     if "state" in e and obs.session_state != e["state"]:

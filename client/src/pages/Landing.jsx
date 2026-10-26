@@ -4,6 +4,8 @@ import {
   ShieldCheck, Lock, Globe, Flame, Church, Gem, GraduationCap, Landmark, Briefcase,
 } from "lucide-react";
 import { Logo } from "../ui";
+import { IS_NATIVE } from "../platform";
+import GuideTopicsBand from "../guide/GuideTopicsBand";
 
 // Public landing page — the entire signed-out surface. The marketing site (homepage
 // sections plus the Platform/Solutions/Pricing/Company pages behind the old nav bar) was
@@ -69,6 +71,17 @@ export default function Landing() {
         <div className="absolute left-6 top-6 z-20 lg:left-10 lg:top-8">
           <Logo height="h-7" />
         </div>
+
+        {/* ZoikoStream Guide entry (web only; Guide is not shipped in the native app). */}
+        {!IS_NATIVE && (
+          <Link
+            to="/guide"
+            className="absolute right-6 top-5 z-20 inline-flex min-h-[44px] items-center gap-2.5 rounded-xl border border-violet-400/60 bg-white/[0.04] px-4 text-sm font-semibold text-white shadow-[0_0_18px_rgba(168,85,247,0.25)] transition-colors hover:bg-white/10 lg:right-10 lg:top-7"
+          >
+            <img src="/zoiko-mark.png" alt="" aria-hidden="true" className="h-5 w-5" />
+            Ask Guide
+          </Link>
+        )}
 
         <div className="relative z-10 mx-auto grid max-w-7xl gap-12 px-6 pb-16 pt-28 lg:grid-cols-2 lg:items-center lg:gap-10 lg:px-10 lg:pb-20 lg:pt-32">
           <div className="zk-fade-in max-w-xl">
@@ -211,6 +224,13 @@ export default function Landing() {
           </ul>
         </div>
       </section>
+
+      {/* ── ZoikoStream Guide ────────────────────────────────────────────────── */}
+      {!IS_NATIVE && (
+        <div className="relative z-10 mx-auto max-w-7xl px-6 pt-10 lg:px-10 lg:pt-14">
+          <GuideTopicsBand />
+        </div>
+      )}
 
       {/* ── assurances ───────────────────────────────────────────────────────── */}
       <section className="relative z-10 mx-auto max-w-7xl px-6 py-8 lg:px-10 lg:py-10">

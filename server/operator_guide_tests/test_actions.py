@@ -256,3 +256,104 @@ def test_reconciled_event_change_carries_no_case_reference(client, db, ask, setu
     body = _confirm(client, h, p["id"]).json()
     assert body["status"] == "succeeded" and body["receipt"]["reconciled"] is True
     assert body["receipt"]["reference"] is None
+
+
+# ── §6.7 permission basis · §14 receipt · §16 audit ─────────────────────────────────
+
+def test_proposal_names_its_permission_basis(world, ask, setup):
+    org, admin, ev, h = setup
+    assert _proposal(ask(h, "turn off chat", event_id=str(ev.id)))["permission"] == \
+        "Allowed: organization admin"
+    host = world.user(org, "host")
+    world.assign(ev, host)
+    p = _proposal(ask(world.headers(host), "turn off chat", event_id=str(ev.id)))
+    assert p["permission"] == "Allowed: you host this event"
+    own = world.event(org, host, title="Host's Own")
+    p = _proposal(ask(world.headers(host), "turn off chat", event_id=str(own.id)))
+    assert p["permission"] == "Allowed: you created this event"
+
+
+def test_receipt_names_actor_and_resulting_value(client, ask, setup):
+    _, admin, ev, h = setup
+    body = _confirm(client, h, _proposal(ask(h, "turn off chat", event_id=str(ev.id)))["id"]).json()
+    receipt = body["receipt"]
+    assert receipt["actor"] == {"id": str(admin.id), "name": admin.full_name}
+    assert receipt["result"] == "Off"
+
+
+def test_failed_receipt_has_no_resulting_value(client, ask, setup, monkeypatch):
+    _, admin, ev, h = setup
+    p = _proposal(ask(h, "turn off chat", event_id=str(ev.id)))
+    monkeypatch.setattr(actions, "asgi_executor", lambda app, **kw: (
+        lambda *a: actions.PlatformResponse(403, {"detail": "no"})))
+    receipt = _confirm(client, h, p["id"]).json()["receipt"]
+    assert receipt["result"] is None and receipt["actor"]["id"] == str(admin.id)
+
+
+def test_timeout_is_marked_on_the_receipt_and_audit(client, db, ask, setup, monkeypatch):
+    _, _, ev, h = setup
+    p = _proposal(ask(h, "turn off chat", event_id=str(ev.id)))
+    monkeypatch.setattr(actions, "asgi_executor", lambda app, **kw: (
+        lambda *a: actions.PlatformResponse(None, error="timeout")))
+    receipt = _confirm(client, h, p["id"]).json()["receipt"]
+    assert receipt["timeout"] is True and receipt["error_code"] == "OPGUIDE_TIMEOUT"
+    row = db.scalar(select(AuditEvent).where(AuditEvent.correlation_id == receipt["correlation_id"],
+                                             AuditEvent.kind == "action"))
+    assert row.outcome == "unknown_timeout"
+
+
+def test_message_audit_links_to_the_proposal_it_created(db, ask, setup):
+    _, _, ev, h = setup
+    reply = ask(h, "turn off chat", event_id=str(ev.id))
+    p = _proposal(reply)
+    row = db.scalar(select(AuditEvent).where(
+        AuditEvent.kind == "message",
+        AuditEvent.final_response_ref == reply["message"]["id"]))
+    assert row.correlation_id == p["correlation_id"]
+    proposal_row = db.scalar(select(AuditEvent).where(AuditEvent.kind == "proposal",
+                                                      AuditEvent.final_response_ref == p["id"]))
+    assert proposal_row.correlation_id == row.correlation_id
+
+
+def test_ttl_expiry_is_audited_when_touched(client, db, ask, setup):
+    _, admin, ev, h = setup
+    p = _proposal(ask(h, "turn off chat", event_id=str(ev.id)))
+    row = db.get(Proposal, uuid.UUID(p["id"]))
+    row.expires_at = now() - timedelta(seconds=1)
+    db.commit()
+    assert _confirm(client, h, p["id"], "ttl-key-0001").status_code == 409
+    db.expire_all()
+    audits = db.scalars(select(AuditEvent).where(AuditEvent.correlation_id == p["correlation_id"],
+                                                 AuditEvent.outcome == "expired")).all()
+    assert len(audits) == 1 and audits[0].actor_id == admin.id
+    assert audits[0].authorization_result == "expired_ttl"
+
+
+def test_ttl_expiry_is_audited_by_the_sweep_without_a_click(db, ask, setup):
+    org, admin, ev, h = setup
+    p = _proposal(ask(h, "turn off chat", event_id=str(ev.id)))
+    row = db.get(Proposal, uuid.UUID(p["id"]))
+    row.expires_at = now() - timedelta(seconds=1)
+    db.commit()
+    # Any later message from the same user sweeps their expired proposals.
+    ask(h, "what does conditional readiness mean")
+    db.expire_all()
+    assert db.get(Proposal, uuid.UUID(p["id"])).status == "expired"
+    assert db.scalar(select(AuditEvent).where(AuditEvent.correlation_id == p["correlation_id"],
+                                              AuditEvent.outcome == "expired"))
+    # A global sweep never double-audits.
+    assert actions.expire_due(db) == 0
+
+
+def test_global_sweep_expires_other_users_proposals(db, world, ask, setup):
+    org, admin, ev, h = setup
+    p = _proposal(ask(h, "turn off chat", event_id=str(ev.id)))
+    row = db.get(Proposal, uuid.UUID(p["id"]))
+    row.expires_at = now() - timedelta(seconds=1)
+    db.commit()
+    assert actions.expire_due(db) >= 1
+    db.commit()
+    audit_row = db.scalar(select(AuditEvent).where(AuditEvent.correlation_id ==
+                                                   p["correlation_id"],
+                                                   AuditEvent.outcome == "expired"))
+    assert audit_row.role_context == "org_admin" and audit_row.org_id == org.id

@@ -50,6 +50,8 @@ os.environ["GUIDE_EVENT_CONTEXT_KEY"] = "test-event-context-signing-key-01234567
 os.environ["GUIDE_ALLOWED_ORIGINS"] = "https://www.zoikostream.test"
 os.environ["GUIDE_ALLOW_MISSING_ORIGIN"] = "true"
 os.environ["GUIDE_LLM_PROVIDER"] = "mock"
+os.environ["GUIDE_MAINTENANCE_ENABLED"] = "false"  # tests drive purge/reconcile directly
+os.environ["GUIDE_STATUS_ENDPOINT"] = ""  # D1 is mocked per test
 os.environ["GUIDE_EMBEDDING_PROFILE"] = "hash:v1"  # deterministic, no model download
 os.environ["GUIDE_CONTACT_ENDPOINT"] = "http://contact.invalid/api/contact"
 
@@ -60,7 +62,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.guide import (  # noqa: E402
-    adapters, crypto, db as guide_db, llm, orchestrator, ratelimit, registry,
+    adapters, breaker, crypto, db as guide_db, llm, metrics, orchestrator, ratelimit, registry,
 )
 from app.guide.knowledge import embeddings, ingest  # noqa: E402
 from app.guide.asgi import MOUNT_PATH, create_app  # noqa: E402
@@ -92,6 +94,18 @@ def _reset_caches():
     ratelimit.reset_all()
     orchestrator._inflight.clear()
     adapters.set_lead_adapter(None)
+    breaker.reset()
+    metrics.reset()
+
+
+def _truncate_existing_local_tables():
+    """A run that stopped mid-way can leave session rows behind; seed-data downgrades then
+    fail on their foreign keys. Clears whichever local tables exist (none on a fresh DB)."""
+    with guide_db.get_engine().begin() as conn:
+        existing = [t for t in _LOCAL_TABLES
+                    if conn.execute(text("SELECT to_regclass(:t)"), {"t": t}).scalar()]
+        if existing:
+            conn.execute(text("TRUNCATE " + ", ".join(existing) + " CASCADE"))
 
 
 def ingest_corpus(directory: Path = FIXTURES / "knowledge"):
@@ -117,11 +131,13 @@ def migrated_db():
     guide_db.reset_engine()
     cfg = Config(str(SERVER / "guide_alembic.ini"))
     cfg.set_main_option("script_location", str(SERVER / "app/guide/migrations"))
+    _truncate_existing_local_tables()
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
     _reset_caches()
     ingest_corpus()
     yield
+    _truncate_existing_local_tables()
     guide_db.reset_engine()
 
 
@@ -132,6 +148,8 @@ def clean_tables(migrated_db):
         conn.execute(text("TRUNCATE " + ", ".join(_LOCAL_TABLES) + " CASCADE"))
         conn.execute(text("UPDATE guide_runtime_config SET config_value = "
                           "'{\"enabled\": true}' WHERE config_key = 'guide.enabled'"))
+        conn.execute(text("DELETE FROM guide_runtime_config WHERE config_key LIKE "
+                          "'guide.feature.%'"))
     yield
     _reset_caches()
 

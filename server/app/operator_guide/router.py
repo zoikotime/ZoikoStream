@@ -29,7 +29,7 @@ from app.security import get_current_user
 
 from . import (
     actions, attention, audit, composer, context as context_svc, conversations, errors,
-    governance, policy, schema,
+    governance, memory, policy, schema,
 )
 from .intents import Intent, classify
 from .tools.base import notice
@@ -127,8 +127,7 @@ def bootstrap(route: str = Query("", max_length=300), event_id: str | None = Non
         "context": context_svc.public(ctx),
         "capabilities": caps,
         "attention": attention.summary(db, actor),
-        "suggestions": composer.suggestions_for(ctx["_event"], live=composer._mode(
-            ctx["_event"]) == "live"),
+        "suggestions": composer.suggestions_for_ctx(ctx, actor),
         "recent": conversations.listing(db, actor, limit=5),
     }
 
@@ -163,21 +162,33 @@ def post_message(body: MessageIn, actor: policy.Actor = Depends(actor_dep),
         # An explicitly selected event is checked strictly: another tenant's id is a 404.
         ctx = {**ctx, "_event": policy.resolve_event(db, actor, body.event_id)}
         ctx["event"] = context_svc.event_brief(ctx["_event"])
-    elif ctx["_event"] is None and text:
+    if text and body.action is None:
+        # An event named in the message ("is Spring Gala ready?") becomes the context, even
+        # over a selected one — and the switch is announced in the thread, never silent.
         named = context_svc.event_named_in(db, actor, text)
-        if named is not None:
+        if named is not None and (ctx["_event"] is None or named.id != ctx["_event"].id):
             ctx["_event"], ctx["event"] = named, context_svc.event_brief(named)
 
+    conv = conversations.own(db, actor, body.conversation_id) if body.conversation_id else None
+    history = memory.history(db, conv)
+    intent = _structured_intent(body.action) if body.action else classify(text)
+    # §13: a follow-up ("and the replay?") reuses the previous turn's event and topic.
+    intent, ctx = memory.follow_up(db, actor, conv, text, intent, ctx)
+    actions.expire_due(db, actor=actor)
+
     public_ctx = context_svc.public(ctx)
-    conv = (conversations.own(db, actor, body.conversation_id) if body.conversation_id
-            else conversations.start(db, actor, text or body.action.action_id, public_ctx))
+    change = memory.context_change(conv.context if conv is not None else None, public_ctx)
+    if conv is None:
+        conv = conversations.start(db, actor, text or body.action.action_id, public_ctx)
+    notice_msg = (conversations.add(db, conv, "guide", change, intent="context.change",
+                                    payload=_context_payload(change)) if change else None)
     user_text = text or _describe_action(body.action)
     user_msg = conversations.add(db, conv, "user", user_text, context=public_ctx)
 
-    intent = _structured_intent(body.action) if body.action else classify(text)
     savepoint = db.begin_nested()
     try:
-        composed = composer.compose(db, actor, ctx, text, intent, conversation_id=conv.id)
+        composed = composer.compose(db, actor, ctx, text, intent, conversation_id=conv.id,
+                                    history=history)
         savepoint.commit()
     except Exception:
         savepoint.rollback()
@@ -197,12 +208,22 @@ def post_message(body: MessageIn, actor: policy.Actor = Depends(actor_dep),
                  source_refs=[s["id"] for s in payload["sources"]],
                  tool_plan=[{"tool": t} for t in composed.tools],
                  authorization=composed.authorization, response_ref=str(guide_msg.id),
+                 correlation_id=composed.correlation_id,
                  latency_ms=int((time.monotonic() - started) * 1000))
     if random.random() < PURGE_PROBABILITY:
         conversations.purge_expired(db)
+        actions.expire_due(db)
     db.commit()
     return {"conversation_id": str(conv.id), "user_message_id": str(user_msg.id),
-            "message": conversations.message_out(guide_msg), "context": public_ctx}
+            "message": conversations.message_out(guide_msg), "context": public_ctx,
+            "context_notice": conversations.message_out(notice_msg) if notice_msg else None}
+
+
+def _context_payload(text: str) -> dict:
+    """A context-change notice as a thread item (§4.2); rendered as a divider, not an answer."""
+    return {"answer": text, "notice": "context", "blocks": [], "sources": [], "actions": [],
+            "suggestions": [], "mode": "standard", "intent": "context.change",
+            "explanation": None, "stale": False}
 
 
 def _structured_intent(action: StructuredAction) -> Intent:

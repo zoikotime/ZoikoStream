@@ -7,6 +7,7 @@ import { useOrgScope } from "../../../components/organization/orgScope";
 import { CARD } from "../../../components/organization/console/consoleStyles";
 import { sectionPath, useEventWorkspace } from "./workspace";
 import { dateBlock, fmtZoned } from "../../../data/eventTime";
+import AskGuideButton from "../../../operator-guide/AskGuideButton";
 
 // The context every Event Workspace section opens with (ZST-UX-NAV-001 §3.1; EVT-02..07
 // frames): where you are (Organization › All Events › event › section), WHICH event — its
@@ -81,7 +82,10 @@ export default function EventSectionHeader({ title, subtitle, actions, eyebrow, 
               {event.start_time ? fmtZoned(event.start_time, event.timezone) : "No start time set"} · All actions scoped to this event
             </p>
           </div>
-          {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <AskGuideButton question="Is this event ready?" eventId={event.id} />
+            {actions}
+          </div>
         </div>
       </header>
     );

@@ -1,4 +1,4 @@
-import { lazy } from "react";
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
@@ -56,6 +56,8 @@ import PrivacyPolicy from "./pages/PrivacyPolicy";
 import PrivacyCenter from "./pages/organization/PrivacyCenter";
 import GuideMount from "./guide/GuideMount";
 import OperatorGuideMount from "./operator-guide/OperatorGuideMount";
+// The full-page public Guide (/guide). Split so the homepage never downloads it.
+const GuidePage = /* @__PURE__ */ lazy(() => import("./guide/GuidePage"));
 
 // ── /* @__PURE__ */ on every lazy() below ───────────────────────────────────────────────
 // Without it these 29 declarations are top-level FUNCTION CALLS, which Rollup must assume
@@ -242,6 +244,12 @@ export default function App() {
                 a privacy policy reachable without a login for every app that ships
                 (RELEASE.md §5), and a policy behind a sign-in is not one. */}
             <Route path="/privacy" element={<PrivacyPolicy />} />
+
+            {/* ZoikoStream Guide as a full page — public, NOT behind LandingOrDashboard, and
+                not shipped in the native app (same as the popup Guide). */}
+            {!IS_NATIVE && (
+              <Route path="/guide" element={<Suspense fallback={<PageSpinner />}><GuidePage /></Suspense>} />
+            )}
 
             {/* The customer Privacy Center (PRV-001 -> PRV-004). Every privacy email
                 links here — the verify link, the status lookup, the export download and

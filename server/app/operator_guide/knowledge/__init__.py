@@ -26,7 +26,7 @@ CORPUS_VERSION = "2026.10"
 _WORD = re.compile(r"[a-z0-9]+")
 _STOP = frozenset("""a an and are as at be by can do does for from has have how i if in is it its
 me my no not of on or our so that the their them then there these this to was we what when where
-which who why will with you your""".split())
+which who why will with work works you your""".split())
 
 
 def tokens(text: str) -> list[str]:
@@ -41,6 +41,7 @@ class Section:
     text: str
     version: str
     path: str
+    api: str | None = None          # API version for developer documentation (§6.15)
 
     @property
     def id(self) -> str:
@@ -50,7 +51,8 @@ class Section:
     def source(self) -> Source:
         return Source(id=self.id, label=f"{self.doc_title} — {self.heading}",
                       source_class="documentation", owner="ZoikoStream documentation",
-                      version=self.version, detail={"path": self.path})
+                      version=self.version,
+                      detail={"path": self.path, **({"api": self.api} if self.api else {})})
 
 
 def _parse(path: Path) -> list[Section]:
@@ -66,7 +68,7 @@ def _parse(path: Path) -> list[Section]:
         heading, _, body = chunk.partition("\n")
         out.append(Section(meta.get("id", path.stem), meta.get("title", path.stem),
                            heading.strip(), body.strip(), meta.get("version", CORPUS_VERSION),
-                           meta.get("path", "")))
+                           meta.get("path", ""), meta.get("api") or None))
     return out
 
 
@@ -110,3 +112,8 @@ def index() -> Index:
 
 def search(query: str, k: int = 3) -> list[Section]:
     return [s for s, _ in index().search(query, k=k)]
+
+
+def api_version() -> str | None:
+    """The platform API version the developer documentation describes (front matter)."""
+    return next((s.api for s in index().sections if s.api), None)

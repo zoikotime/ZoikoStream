@@ -1,0 +1,18 @@
+# ── Public Guide governance (RBAC §5-8 domain approval, §7 separation of duties) ──────────
+# TO BE CONFIRMED: the team handles below are PLACEHOLDERS. Create the teams in the zoikotime
+# GitHub organization (or replace the handles) and enable "Require review from Code Owners"
+# on the protected branch, otherwise this block has no effect.
+#
+# Approved public knowledge: content approvers review every source change; pricing, legal /
+# privacy and security sources additionally need their domain approver (SOD-03/04/05).
+/server/app/guide/knowledge/sources/                    @zoikotime/guide-content-approvers
+/server/app/guide/knowledge/sources/pricing-plans.md    @zoikotime/guide-content-approvers @zoikotime/commercial-approvers
+/server/app/guide/knowledge/sources/privacy-notice.md   @zoikotime/guide-content-approvers @zoikotime/privacy-legal-approvers
+/server/app/guide/knowledge/sources/trust-security.md   @zoikotime/guide-content-approvers @zoikotime/security-approvers
+# Prompt / policy releases (SOD-02): prompt approvers, not the prompt author alone.
+/server/app/guide/prompts.py                            @zoikotime/guide-prompt-approvers
+/server/app/guide/prompt_versions/                      @zoikotime/guide-prompt-approvers
+/server/app/guide/policy.py                             @zoikotime/guide-prompt-approvers @zoikotime/security-approvers
+# Evaluation datasets and gates (SOD-08: independent evaluation evidence).
+/server/guide_eval/                                     @zoikotime/guide-ai-qa
+/server/app/guide/knowledge/gate/                       @zoikotime/guide-ai-qa

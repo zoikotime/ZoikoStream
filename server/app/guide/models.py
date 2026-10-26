@@ -70,7 +70,8 @@ HANDOFF_TARGETS = ("sales", "support", "organizer", "sign_in", "help_center", "s
                    "privacy")
 HANDOFF_OUTCOMES = ("pending", "route_available", "confirmed_submission", "failed", "unknown")
 OPERATION_TYPES = ("lead_submit", "handoff_submit")
-OPERATION_OUTCOMES = ("in_progress", "confirmed", "failed", "unknown")
+# dead_letter: an `unknown` outcome the reconciler gave up on (ARCH §12.2; migration 0005).
+OPERATION_OUTCOMES = ("in_progress", "confirmed", "failed", "unknown", "dead_letter")
 FEEDBACK_TARGETS = ("answer", "session")
 FEEDBACK_RATINGS = ("up", "down")
 
@@ -322,11 +323,15 @@ class GuideConsent(GuideBase):
         _check_in("purpose", CONSENT_PURPOSES, "ck_guide_consent_purpose"),
         _check_in("status", CONSENT_STATUSES, "ck_guide_consent_status"),
         Index("ix_guide_consent_current", "session_id", "purpose", text("recorded_at DESC")),
+        Index("ix_guide_consent_purge_after", "purge_after"),
     )
 
     consent_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    session_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("guide_sessions.session_id", ondelete="CASCADE"), nullable=False)
+    # SET NULL (migration 0005): a receipt is evidence of a purpose decision and is kept for
+    # its own 24-month baseline (Security/Privacy §16), long after the 30-day session row.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("guide_sessions.session_id", ondelete="SET NULL",
+                   name="fk_guide_consents_session"))
     receipt_ref: Mapped[str] = mapped_column(String(48), nullable=False, unique=True)
     purpose: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -345,6 +350,8 @@ class GuideLeadFlow(GuideBase):
         _check_in("status", LEAD_FLOW_STATUSES, "ck_guide_lead_status"),
         Index("ix_guide_lead_session_started", "session_id", text("started_at DESC")),
         Index("ix_guide_lead_purge_after", "purge_after"),
+        Index("ix_guide_lead_email_lookup", "email_lookup_hash",
+              postgresql_where=text("email_lookup_hash IS NOT NULL")),
     )
 
     flow_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -360,6 +367,9 @@ class GuideLeadFlow(GuideBase):
     consent_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("guide_consents.consent_id", ondelete="SET NULL"))
     source_intent: Mapped[str | None] = mapped_column(String(32))
+    # HMAC of the normalized work email (crypto.keyed_hash, purpose LEAD_EMAIL_LOOKUP): lets a
+    # verified privacy-rights request find this lead without decrypting (Security/Privacy §20).
+    email_lookup_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
     row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     started_at: Mapped[datetime] = _now()
     updated_at: Mapped[datetime] = _now()

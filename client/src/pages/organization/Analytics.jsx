@@ -43,6 +43,7 @@ import {
 } from "../../components/organization/console/ConsoleUI";
 import { useHashScroll } from "./event/workspace";
 import { exportTextFile } from "../../utils/export";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 
 // One toast slot for the export, so a retry replaces the last outcome instead of stacking.
 const EXPORT_TOAST = "analytics-export";
@@ -566,6 +567,7 @@ export default function OrganizationAnalytics() {
           // Console vocabulary, not a page-local field style: CONSOLE.select and the console
           // Button are what every other screen in this shell uses.
           <>
+            <AskGuideButton question="How did our events perform?" />
             <div className="relative">
               <FiCalendar className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-neutral-400" aria-hidden="true" />
               <select

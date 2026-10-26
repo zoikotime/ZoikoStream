@@ -35,6 +35,8 @@ class OpGuideSettings(BaseSettings):
     # Governed actions.
     OPGUIDE_PROPOSAL_TTL_MINUTES: int = 10
     OPGUIDE_ACTION_TIMEOUT_SECONDS: float = 15.0
+    # Per read tool: a database statement budget, so one slow read cannot hold an answer.
+    OPGUIDE_TOOL_TIMEOUT_SECONDS: float = 8.0
 
     # Abuse/cost control per signed-in user.
     OPGUIDE_MESSAGES_PER_MINUTE: int = 30

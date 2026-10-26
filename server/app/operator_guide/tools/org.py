@@ -15,6 +15,7 @@ from app.models.status_page import PublicStatusIncident, ScheduledMaintenance
 from app.models.support_ticket import SupportTicket
 from app.models.webhook import WebhookEndpoint
 
+from .. import errors, knowledge
 from ..policy import Actor, is_org_admin
 from ..sources import Source, iso, now
 from .base import ToolContext, ToolResult, nav, notice, register, row, status_card
@@ -34,6 +35,14 @@ def _key_state(rec: dict, at: datetime) -> str:
     return "active"
 
 
+def technical_context(actor: Actor) -> dict:
+    """API version + environment, attached to every technical answer (§6.15)."""
+    env = "Test" if getattr(actor.org, "is_test", False) else "Production"
+    api = knowledge.api_version()
+    return {"api": api, "environment": env,
+            "label": f"Environment: {env}" + (f" · API: {api}" if api else "")}
+
+
 @register(id="org.developer", title="Developer platform", owner="Developer platform",
           risk="R0", capability="docs_qa")
 def org_developer(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
@@ -41,9 +50,11 @@ def org_developer(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
                  source_class="authoritative", owner="Developer platform", updated_at=now())
     if not is_org_admin(actor.user):
         # The platform restricts the developer console to organization admins.
-        return ToolResult("org.developer", [notice("info", "API credentials and webhooks are "
-                          "managed by your organization admin. Guide can still explain how "
-                          "the API works.")], [], summary="Developer settings are admin-only.",
+        return ToolResult("org.developer", [notice("info", errors.permission_denied(
+                          "API credentials and webhooks") + " They are managed by your "
+                          "organization admin. Guide can still explain how the API works.",
+                          rule="Platform permissions")], [],
+                          summary=errors.permission_denied("API credentials and webhooks"),
                           facts={"restricted": True})
     t = now()
     keys = [_key_state(k, t) for k in (actor.org.api_keys or [])]
@@ -65,13 +76,16 @@ def org_developer(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
                             if h.consecutive_failures else None]))))
     if not hooks:
         rows.append(row("Webhooks", "inactive", value="None configured"))
-    return ToolResult("org.developer", [status_card("Developer platform", rows, [src]),
+    tech = technical_context(actor)
+    return ToolResult("org.developer", [status_card("Developer platform", rows, [src],
+                                                    subtitle=tech["label"]),
                                         notice("info", "Keys and signing secrets are never shown "
                                                        "in Guide.")],
                       [src], summary=f"{keys.count('active')} active API key(s) and "
                                      f"{len(hooks)} webhook endpoint(s).",
                       actions=[nav("Open developer platform", "/organization/developers")],
-                      facts={"active_keys": keys.count("active"), "webhooks": len(hooks),
+                      facts={"api": tech["api"], "environment": tech["environment"],
+                             "active_keys": keys.count("active"), "webhooks": len(hooks),
                              "failing_webhooks": sum(1 for h in hooks if h.consecutive_failures)})
 
 

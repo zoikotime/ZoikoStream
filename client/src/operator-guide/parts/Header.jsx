@@ -20,7 +20,14 @@ function EventSelect({ context, onSelect }) {
   return (
     <div className="og-event-select">
       <label htmlFor={id} className="og-sr">Event context</label>
-      <select id={id} value={current} onChange={(e) => onSelect(e.target.value || null)}>
+      <select
+        id={id}
+        value={current}
+        onChange={(e) => {
+          const picked = options.find((ev) => ev.id === e.target.value);
+          onSelect(e.target.value || null, picked?.title ?? null);
+        }}
+      >
         <option value="">No event selected</option>
         {!known && <option value={current}>{context.event.title}</option>}
         {options.map((e) => (

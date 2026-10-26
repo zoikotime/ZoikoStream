@@ -2,12 +2,26 @@
 // follows the stages of an answer, and shimmer lines where the answer will appear. Purely
 // decorative motion — screen readers hear one polite status, and reduced-motion users get a
 // still version (operator-guide.css).
+//
+// In Live Mode nothing loops (§17: "no pulsing during LIVE state"): one static line instead.
 import { useEffect, useState } from "react";
 
 const STAGES = ["Reading your workspace", "Checking live sources", "Preparing your answer"];
 const STAGE_MS = 1400;
 
-export default function Thinking() {
+function LiveThinking() {
+  return (
+    <div className="og-thinking og-thinking-static" role="status" aria-label="Guide is checking">
+      <span className="og-thinking-static-text">Checking live sources…</span>
+    </div>
+  );
+}
+
+export default function Thinking({ live = false }) {
+  return live ? <LiveThinking /> : <AnimatedThinking />;
+}
+
+function AnimatedThinking() {
   const [stage, setStage] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setStage((s) => Math.min(s + 1, STAGES.length - 1)), STAGE_MS);

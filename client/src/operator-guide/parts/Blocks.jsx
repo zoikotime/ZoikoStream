@@ -2,10 +2,21 @@
 // + colour — never colour alone — and every card names its sources.
 import { useState } from "react";
 import {
-  ArrowRight, CircleCheck, CircleDot, CircleHelp, CircleX, Copy, Info, Loader2, Lock,
-  TriangleAlert,
+  ArrowRight, CircleCheck, CircleDot, CircleHelp, CircleX, Code2, Copy, Info, LifeBuoy, Loader2,
+  Lock, ShieldCheck, TriangleAlert, UserRound,
 } from "lucide-react";
 import { safeHref } from "./links";
+
+// §6.15: API version and environment on technical answers and documentation.
+export function TechnicalMeta({ technical }) {
+  if (!technical) return null;
+  return (
+    <p className="og-technical">
+      <Code2 size={12} aria-hidden="true" />
+      Environment: {technical.environment}{technical.api ? ` · API: ${technical.api}` : ""}
+    </p>
+  );
+}
 
 const STATE_META = {
   ready: { tone: "ok", icon: CircleCheck, text: "Ready" },
@@ -113,14 +124,61 @@ function DiagnosticCard({ block }) {
   );
 }
 
+// Authoritative timestamps, shown in UTC so every operator reads the same clock.
+function fmtTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.toISOString().slice(11, 16)} UTC`;
+}
+
 function TimelineCard({ block }) {
   return (
     <Card title={block.title}>
       <ol className="og-timeline">
         {block.items.map((it, i) => (
-          <li key={i}><time>{it.at}</time> {it.text}</li>
+          <li key={`${it.at}-${i}`} className="og-timeline-item">
+            <StateIcon state={it.state || "info"} />
+            <time dateTime={it.at} title={it.at}>{fmtTime(it.at)}</time>
+            <span>{it.text}</span>
+          </li>
         ))}
       </ol>
+    </Card>
+  );
+}
+
+// §8 Escalation Card: the human routes this user may take. A support case is only ever a
+// proposal the user reviews and confirms — nothing is sent from here.
+function EscalationCard({ block, onApply, onNavigate, disabled }) {
+  return (
+    <Card title={block.title} badge={<LifeBuoy size={16} aria-hidden="true" className="og-tone-muted" />}>
+      <p className="og-card-sub">{block.text}</p>
+      {block.context?.summary && <p className="og-escalation-context"><span className="og-muted">Context to share:</span> {block.context.summary}</p>}
+      <div className="og-inline-actions">
+        {block.routes.map((r) => {
+          if (r.kind === "proposal") {
+            return (
+              <button key={r.label} type="button" className="og-btn og-btn-primary" disabled={disabled} onClick={() => onApply(r)}>
+                {r.label}
+              </button>
+            );
+          }
+          if (r.kind === "navigate" && safeHref(r.href)) {
+            return (
+              <button key={r.href} type="button" className="og-btn" onClick={() => onNavigate(r.href)}>
+                {r.label} <ArrowRight size={14} aria-hidden="true" />
+              </button>
+            );
+          }
+          if (r.kind === "contact") {
+            return <p key={r.label} className="og-small"><strong>{r.label}.</strong> {r.text}</p>;
+          }
+          return null;
+        })}
+      </div>
+      {block.routes.some((r) => r.kind === "proposal") && (
+        <p className="og-muted og-small">You review the case before anything is sent.</p>
+      )}
     </Card>
   );
 }
@@ -139,6 +197,7 @@ function Notice({ block }) {
 function DocsCard({ block, onNavigate }) {
   return (
     <Card title={block.title}>
+      <TechnicalMeta technical={block.technical} />
       <div className="og-docs">
         {block.items.map((d) => (
           <article key={d.source_id} className="og-doc">
@@ -264,6 +323,11 @@ function ProposalCard({ block, onConfirm, onCancel }) {
       {block.impact?.length > 0 && (
         <ul className="og-impact">{block.impact.map((line) => <li key={line}>{line}</li>)}</ul>
       )}
+      {block.permission && (
+        <p className="og-permission">
+          <ShieldCheck size={14} aria-hidden="true" /><span className="og-sr">Permission: </span>{block.permission}
+        </p>
+      )}
 
       {block.status === "proposed" && (
         <div className="og-inline-actions">
@@ -280,7 +344,15 @@ function ProposalCard({ block, onConfirm, onCancel }) {
           {block.status === "succeeded" ? <CircleCheck size={16} aria-hidden="true" /> : <TriangleAlert size={16} aria-hidden="true" />}
           <div>
             <p>{receipt.message}{receipt.reason ? ` ${receipt.reason}` : ""}</p>
+            {(receipt.actor || receipt.result) && (
+              <p className="og-small">
+                {receipt.actor?.name && <><UserRound size={12} aria-hidden="true" /> By {receipt.actor.name}</>}
+                {receipt.actor?.name && receipt.result && " · "}
+                {receipt.result && <>Result: <strong>{receipt.result}</strong></>}
+              </p>
+            )}
             <p className="og-small og-muted">
+              {receipt.timeout && <>The service timed out · </>}
               {receipt.reference && <>Reference {receipt.reference} · </>}
               {receipt.reconciled && <>Confirmed by re-checking current state · </>}
               Receipt {receipt.correlation_id}
@@ -310,6 +382,7 @@ export default function Block({ block, handlers, disabled }) {
     case "choices": return <Choices block={block} onChoose={handlers.choose} disabled={disabled} />;
     case "draft": return <DraftCard block={block} onApply={handlers.apply} disabled={disabled} />;
     case "proposal": return <ProposalCard block={block} onConfirm={handlers.confirm} onCancel={handlers.cancel} />;
+    case "escalation": return <EscalationCard block={block} onApply={handlers.apply} onNavigate={handlers.navigate} disabled={disabled} />;
     default: return null; // unknown block types are ignored, never rendered raw
   }
 }

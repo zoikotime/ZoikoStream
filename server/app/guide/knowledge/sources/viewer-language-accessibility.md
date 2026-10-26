@@ -7,6 +7,12 @@ risk_class: LOW
 authority_rank: 90
 version: "2026.10"
 origin_files: [client/src/pages/watch/viewerLanguage.jsx, client/src/pages/watch/EventWatch.jsx, client/src/components/watch/AccessWindowNotice.jsx, client/src/components/watch/ViewerErrorState.jsx]
+author: guide-engineering
+owner_role: accessibility
+# RBAC §5-8 approval evidence. Not yet recorded: production ingest refuses this
+# source until a designated approver signs off (see knowledge/governance.py).
+approved_by: pending-approval
+approved_at: null
 ---
 
 # Viewer Help: Language and Read Aloud

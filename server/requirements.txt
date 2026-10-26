@@ -17,6 +17,7 @@ email-validator
 httpx
 livekit-api
 google-cloud-storage
+google-cloud-kms>=3,<4
 
 stripe>=15.3,<16
 

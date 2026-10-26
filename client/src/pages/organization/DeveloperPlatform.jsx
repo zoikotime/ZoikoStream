@@ -18,6 +18,7 @@ import OrganizationPageHeader from "../../components/organization/OrganizationPa
 import {
   Banner, IconChip, KpiRow, KpiTile, Panel, PanelLink, Tag,
 } from "../../components/organization/console/ConsoleUI";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 
 // Developer Platform — the org console's build surface: what ZoikoStream is, the docs
 // entry points, and whether the platform is currently in a state worth building against.
@@ -300,6 +301,7 @@ export default function DeveloperPlatform() {
         subtitle="Build secure integrations with governed API access and event-driven workflows."
         actions={
           <>
+            <AskGuideButton question="Show our API keys and webhooks" />
             <ConsoleButton href="/organization/credentials" variant="secondary" size="sm" leftIcon={FiKey}>
               API credentials
             </ConsoleButton>

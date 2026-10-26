@@ -1,8 +1,10 @@
 // One turn. Guide answers follow §7: direct answer → current state → why → next action →
-// sources/freshness. Live Mode answers are terse and carry no suggestions.
+// sources/freshness. Live Mode answers are terse and carry no suggestions. Facts and Guide's
+// own interpretation are kept visibly apart (§6.3): the "why" and any inferred signal are
+// labelled "Guide interpretation". A context change is a divider in the thread (§4.2).
 import { useState } from "react";
-import { ArrowRight, ChevronDown, Radio, ThumbsDown, ThumbsUp } from "lucide-react";
-import Block from "./Blocks";
+import { ArrowRight, ChevronDown, Lightbulb, Radio, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
+import Block, { TechnicalMeta } from "./Blocks";
 import { safeHref } from "./links";
 import { opGuide } from "../operatorGuideApi";
 
@@ -75,6 +77,13 @@ export default function Message({ message, handlers, pending, isLast }) {
   if (message.role === "user") {
     return <div className="og-msg og-msg-user"><p>{message.text}</p></div>;
   }
+  if (message.intent === "context.change") {
+    return (
+      <p className="og-context-notice" role="status">
+        <RefreshCw size={12} aria-hidden="true" /> {message.text}
+      </p>
+    );
+  }
   const p = message.payload || {};
   const live = p.mode === "live";
   const actions = (p.actions || []).filter((a) => safeHref(a.href));
@@ -84,14 +93,22 @@ export default function Message({ message, handlers, pending, isLast }) {
         <p className="og-live-tag"><Radio size={12} aria-hidden="true" /> Live Mode</p>
       )}
       <p className="og-answer">{p.answer ?? message.text}</p>
+      <TechnicalMeta technical={p.technical} />
       {(p.blocks || []).map((b, i) => (
         <Block key={`${b.type}-${b.id || i}`} block={b} handlers={handlers} disabled={pending} />
       ))}
       {p.explanation && (
-        <div className="og-why">
-          <p className="og-why-label">Why</p>
+        <div className="og-why og-interpretation">
+          <p className="og-why-label">
+            <Lightbulb size={12} aria-hidden="true" /> Why · Guide interpretation
+          </p>
           <p>{p.explanation}</p>
         </div>
+      )}
+      {p.inference && !p.explanation && (
+        <p className="og-interpretation-note">
+          <Lightbulb size={12} aria-hidden="true" /> Includes Guide interpretation — labelled in the sources.
+        </p>
       )}
       {actions.length > 0 && (
         <div className="og-inline-actions">

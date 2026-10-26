@@ -3,8 +3,11 @@
 Order matters and encodes policy:
   1. blocked  — R5 critical live controls and R6 destructive / secret operations are
                 recognised FIRST, so no phrasing can reach an action or a tool with them.
+                A how-to QUESTION about one ("how do I delete an event?") is answered from
+                documentation instead, with a note that Guide cannot do it (§25).
   2. action   — R3/R4 governed changes, recognised only in imperative form.
   3. draft    — R2 draft generation (never applied without a separate confirmation).
+     escalate — a request for human help; Guide offers routes, it never contacts anyone.
   4. chat     — greeting, identity, capabilities, thanks.
   5. read     — R0/R1 tools chosen by topic vocabulary; definitional phrasing adds docs.
   6. docs     — anything else is a documentation question (or an honest gap).
@@ -19,7 +22,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Intent:
-    kind: str                                   # blocked | action | draft | chat | read | docs
+    kind: str                    # blocked | action | draft | escalate | chat | read | docs
     name: str
     tools: list[str] = field(default_factory=list)
     docs: bool = False
@@ -66,6 +69,13 @@ BLOCKED = [
 READINESS_QUESTION = _rx(r"\b(ready|good|clear|ok(ay)?|safe)\s+(to|for)\s+(go(ing)?\s+live|start|"
                          r"launch|broadcast)\b|\bcan\s+(we|i)\s+go\s+live\b|\bbefore\s+(we\s+)?"
                          r"go(ing)?\s+live\b|\bwhat('s|\s+is)\s+(blocking|stopping)\b")
+
+# A question about HOW to do something is never a request to do it. Imperatives ("delete the
+# recording", "can you rotate the key") do not match and stay blocked.
+HOW_TO = _rx(r"^\s*(?:(?:and|so|ok(?:ay)?)\s*,?\s+)?(?:how\s+(?:do|can|should|would|could)\s+"
+             r"(?:i|we|one|someone)\b|how\s+to\b|where\s+(?:do|can)\s+(?:i|we)\b|"
+             r"what(?:'s|\s+is)\s+the\s+(?:way|process|procedure|workflow)\s+(?:to|for)\b|"
+             r"is\s+(?:it|there\s+a\s+way)\s+(?:possible\s+)?to\b|can\s+(?:i|we)\b)")
 
 # ── 2. Governed actions (imperative only) ────────────────────────────────────────────
 _LEAD = r"^\s*(?:please\s+|pls\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|" \
@@ -127,6 +137,13 @@ DRAFT_KINDS = [
     ("announcement", _rx(r"\b(announce|announcement|invitation|invite|promo)\w*\b")),
     ("description", _rx(r"\b(description|summary|blurb)\b")),
 ]
+
+ESCALATE = _rx(r"\b(talk|speak|chat)\s+(to|with)\s+(a\s+|an\s+|someone\s+(in|from)\s+)?"
+               r"(human|person|people|someone|support|agent|engineer|real\s+person)\b|"
+               r"\b(contact|reach|call|email|get\s+hold\s+of)\s+(zoiko\s*stream\s+)?"
+               r"(support|a\s+human|someone)\b|\bescalate\b|\bneed\s+(a\s+)?human\b|"
+               r"\bhuman\s+(help|support)\b|\bget\s+help\s+from\s+(a\s+)?(person|human|"
+               r"support)\b")
 
 # ── 4. Conversation ──────────────────────────────────────────────────────────────────
 CHAT = [
@@ -195,6 +212,8 @@ def classify(text: str) -> Intent:
         return Intent("read", "event.readiness", tools=["event.readiness"])
     for name, risk, pattern in BLOCKED:
         if pattern.search(t):
+            if HOW_TO.search(t):
+                return Intent("docs", "docs.how_to", docs=True, params={"blocked": name})
             return Intent("blocked", name, risk=risk)
 
     for pattern, action, params in ACTIONS:
@@ -209,6 +228,9 @@ def classify(text: str) -> Intent:
     if DRAFT.search(t):
         kind = next((k for k, p in DRAFT_KINDS if p.search(t)), "description")
         return Intent("draft", f"draft.{kind}", params={"kind": kind})
+
+    if ESCALATE.search(t):
+        return Intent("escalate", "escalate")
 
     for name, pattern in CHAT:
         if pattern.search(t):
@@ -229,3 +251,15 @@ def classify(text: str) -> Intent:
             ranked.append("event.live")
         return Intent("read", ranked[0], tools=ranked, docs=definitional)
     return Intent("docs", "docs", docs=True)
+
+
+# ── Follow-ups (§13 conversation memory) ─────────────────────────────────────────────
+# "and the replay?", "what about access?", "why?" — a turn that leans on the previous one.
+FOLLOW_UP = _rx(r"^\s*(?:and|also|plus|then|so|ok(?:ay)?\s+and)\b|^\s*(?:what|how)\s+about\b|"
+                r"^\s*(?:what|how)\s+(?:else|now)\b|^\s*(?:and\s+)?(?:why|how\s+come|really|"
+                r"since\s+when|anything\s+else)\s*\??\s*$")
+
+
+def is_follow_up(text: str) -> bool:
+    t = " ".join((text or "").split())
+    return bool(t) and len(t.split()) <= 8 and bool(FOLLOW_UP.search(t))

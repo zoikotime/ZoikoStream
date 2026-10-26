@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 
 from app.models.event import Event, EventAccessLink
 from app.models.support_ticket import SupportTicket
+from app.models.user import User
 
 from . import audit, errors, policy
 from .config import get_settings
@@ -321,14 +322,28 @@ def _check_permission(db: Session, actor: Actor, spec: Spec, ev: Event | None) -
                                    "host. An organization admin can make this change.")
 
 
+def _permission_basis(db: Session, actor: Actor, spec: Spec, ev: Event | None) -> str:
+    """Why the platform allows this actor to make this change, in the platform's own terms
+    (§6.7 "Permission"). Called only after _check_permission has passed."""
+    if actor.role == "super_admin":
+        return "Allowed: platform super admin"
+    if policy.is_org_admin(actor.user):
+        return "Allowed: organization admin"
+    if ev is not None and ev.created_by == actor.user.id:
+        return "Allowed: you created this event"
+    return "Allowed: you host this event"
+
+
 def card(p: Proposal) -> dict:
     """The proposal as the UI renders it (§6.11)."""
     s = p.summary or {}
     return {"type": "proposal", "id": str(p.id), "action_id": p.action_id, "risk": p.risk_class,
             "status": p.status, "title": s.get("title"), "target": s.get("target"),
             "change": s.get("change"), "impact": s.get("impact", []),
+            "permission": s.get("permission"),
             "confirm_label": s.get("confirm_label"), "cancel_label": "Cancel",
-            "expires_at": iso(p.expires_at), "receipt": p.receipt}
+            "expires_at": iso(p.expires_at), "correlation_id": p.correlation_id,
+            "receipt": p.receipt}
 
 
 def propose(db: Session, actor: Actor, action_id: str, params: dict, *, event: Event | None,
@@ -351,7 +366,8 @@ def propose(db: Session, actor: Actor, action_id: str, params: dict, *, event: E
                           "target": {"type": plan.target_type, "id": plan.target_id,
                                      "label": plan.target_label},
                           "change": {k: v for k, v in plan.change.items() if k != "value"},
-                          "impact": plan.impact},
+                          "impact": plan.impact,
+                          "permission": _permission_basis(db, actor, spec, event)},
                  status="proposed", correlation_id=audit.new_id("cor"),
                  expires_at=now() + timedelta(minutes=get_settings().OPGUIDE_PROPOSAL_TTL_MINUTES))
     db.add(p)
@@ -385,8 +401,34 @@ def _own(db: Session, actor: Actor, proposal_id) -> Proposal:
 
 def _expire_if_due(db: Session, p: Proposal) -> None:
     if p.status == "proposed" and p.expires_at <= now():
-        p.status = "expired"
-        db.flush()
+        _mark_expired(db, p)
+
+
+def _mark_expired(db: Session, p: Proposal) -> bool:
+    """proposed -> expired, atomically, with its audit row (§16: an expiry is an outcome)."""
+    flipped = db.execute(update(Proposal).where(Proposal.id == p.id,
+                                                Proposal.status == "proposed")
+                         .values(status="expired")).rowcount
+    if flipped != 1:
+        return False
+    db.refresh(p)
+    owner = db.get(User, p.actor_id)
+    audit.write(db, org_id=p.org_id, actor_id=p.actor_id,
+                role=owner.role if owner is not None else "unknown", kind="action",
+                outcome="expired", intent=p.action_id, authorization="expired_ttl",
+                correlation_id=p.correlation_id, response_ref=str(p.id),
+                tool_plan=[{"tool": p.action_id, "risk": p.risk_class, "target": p.target_id}])
+    db.flush()
+    return True
+
+
+def expire_due(db: Session, *, actor: Actor | None = None, limit: int = 50) -> int:
+    """Expire proposals past their TTL — the caller's own when ``actor`` is given (cheap, on
+    every message), otherwise a small batch across all tenants (opportunistic sweep)."""
+    stmt = select(Proposal).where(Proposal.status == "proposed", Proposal.expires_at <= now())
+    if actor is not None:
+        stmt = stmt.where(Proposal.org_id == actor.org_id, Proposal.actor_id == actor.user.id)
+    return sum(_mark_expired(db, p) for p in db.scalars(stmt.limit(limit)).all())
 
 
 def cancel(db: Session, actor: Actor, proposal_id) -> dict:
@@ -426,6 +468,7 @@ def confirm(db: Session, actor: Actor, proposal_id, *, idempotency_key: str,
     p = _own(db, actor, proposal_id)
     _expire_if_due(db, p)
     if p.status == "expired":
+        db.commit()  # keep the expiry's audit row
         raise errors.Conflict("This proposal expired. Ask again and I will check the current "
                               "state first.")
     if p.status != "proposed":
@@ -473,12 +516,16 @@ def confirm(db: Session, actor: Actor, proposal_id, *, idempotency_key: str,
 
     receipt = {"correlation_id": p.correlation_id, "action": p.action_id, "risk": p.risk_class,
                "target": (p.summary or {}).get("target"),
-               "change": (p.summary or {}).get("change"), "requested_at": iso(started)}
+               "change": (p.summary or {}).get("change"), "requested_at": iso(started),
+               # §14: who acted, and (below) the resulting value read back from the platform.
+               "actor": {"id": str(actor.user.id), "name": actor.user.full_name},
+               "result": None}
     if response.status_code is not None and 200 <= response.status_code < 300:
         status, outcome = "succeeded", "succeeded"
         receipt["verified"], observed = _observe(db, actor, spec, p)
         receipt["reference"] = _reference(response.body) or _reference_from(p, observed)
         receipt["message"] = _success_text(p)
+        receipt["result"] = _result_text(p, observed, receipt["reference"])
     elif response.status_code is not None and response.status_code < 500:
         status, outcome = "failed", f"failed_{response.status_code}"
         receipt["message"] = errors.TOOL_FAILED
@@ -490,9 +537,14 @@ def confirm(db: Session, actor: Actor, proposal_id, *, idempotency_key: str,
             status, outcome = "succeeded", "succeeded_reconciled"
             receipt.update(verified=True, reconciled=True, message=_success_text(p),
                            reference=_reference_from(p, observed))
+            receipt["result"] = _result_text(p, observed, receipt["reference"])
         else:
             status, outcome = "unknown", "unknown"
             receipt["message"] = errors.OUTCOME_UNKNOWN
+        if response.error == "timeout":
+            # A timeout is never treated as success or failure: it is reconciled above.
+            receipt.update(timeout=True, error_code=errors.Timeout.code)
+            outcome += "_timeout"
     receipt["completed_at"] = iso(now())
     p.status, p.receipt, p.executed_at = status, receipt, now()
     audit.record(db, actor, kind="action", outcome=outcome, intent=p.action_id,
@@ -577,6 +629,18 @@ def _platform_reason(body) -> str | None:
     if isinstance(detail, dict):
         detail = detail.get("message")
     return str(detail)[:300] if isinstance(detail, str) else None
+
+
+def _result_text(p: Proposal, observed, reference: str | None) -> str | None:
+    """The resulting value as read back from authoritative state, in display words."""
+    if p.action_id == "support.open_case":
+        return f"Case {reference}" if reference else "Case opened"
+    if p.action_id == "access_link.revoke":
+        return "Revoked" if observed else None
+    change = (p.summary or {}).get("change") or {}
+    if observed == p.params.get("value"):
+        return change.get("to")
+    return None if observed is None else str(observed)
 
 
 def _success_text(p: Proposal) -> str:

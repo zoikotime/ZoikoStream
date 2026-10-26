@@ -57,4 +57,12 @@ def test_route_surface_is_the_documented_one():
         ("POST", "/sessions/{session_id}/feedback"),
     }
     assert len(documented) == 13  # API §2: 13 operations
+    # Cross-agent contracts beyond the 13 public operations: lead draft (C6) and the
+    # health/metrics probes (C8). Nothing else may appear.
+    documented |= {
+        ("PATCH", "/sessions/{session_id}/leads/{lead_flow_id}/draft"),
+        ("GET", "/health/live"),
+        ("GET", "/health/ready"),
+        ("GET", "/internal/metrics"),
+    }
     assert routes == documented

@@ -86,7 +86,11 @@ class ContextUpdate(Strict):
 
 class SupportFlowStart(Strict):
     flow_type: FlowType
+    # Idempotent start (API §16): a replay with the same id returns the same flow.
     client_request_id: uuid.UUID | None = None
+    # C3 / Conversation Flow §11: replacing an active flow that has progress needs the
+    # visitor's explicit confirmation; without it the server answers 409 confirm_required.
+    confirm_replace: bool = False
 
 
 class SupportStepSubmit(Strict):
@@ -140,6 +144,205 @@ class FeedbackSubmit(Strict):
     target_type: Literal["answer", "session"]
     target_id: str | None = Field(default=None, max_length=64)
     rating: Literal["up", "down"]
-    reason_code: Literal["not_helpful", "incorrect", "unclear", "too_long", "other",
-                         "helpful"] | None = None
+    reason_code: Literal["not_helpful", "incorrect", "unclear", "out_of_date", "too_long",
+                         "other", "helpful"] | None = None
     comment: str | None = Field(default=None, max_length=500)
+
+
+# ── Response contracts (documentation; API §8, §10, §13; C4, C5, C7) ──────────────────────
+# Routes return plain dicts. These models describe those bodies in the OpenAPI document
+# (API §22) and are deliberately NOT used as response_model, which would silently drop any
+# field the model does not list.
+
+class Open(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class FieldError(Open):
+    field: str
+    code: str
+    message: str
+
+
+class Problem(Open):
+    """RFC 9457 problem details with a stable machine code (API §5)."""
+    type: str
+    title: str
+    status: int
+    detail: str
+    code: str
+    request_id: str | None = None
+    correlation_id: str | None = None
+    retryable: bool
+    field_errors: list[FieldError] | None = None
+
+
+class Action(Open):
+    action_id: str
+    type: str
+    label: str
+    href: str | None = None
+
+
+class Source(Open):
+    source_id: str
+    title: str
+    source_type: str | None = None
+    version: str | None = None
+    updated_at: str | None = None
+    canonical_path: str | None = None
+    freshness: Literal["current", "stale"] | None = None
+    stale: bool | None = None
+    external: bool | None = None
+    external_url: str | None = Field(default=None, pattern=r"^https://")
+
+
+class Uncertainty(Open):
+    state: Literal["none", "partial", "gap"]
+    message: str | None = None
+
+
+class ClarificationOption(Open):
+    id: str
+    label: str
+
+
+class Clarification(Open):
+    """C4: at most one clarifying question with 2–4 chips (Conversation Flow §6.1, CF-AT-04).
+    A chip sends its label as the visitor's next message."""
+    question: str
+    options: list[ClarificationOption] = Field(min_length=2, max_length=4)
+
+
+class Paused(Open):
+    """C7: a capability switched off at runtime (G3) and the direct routes that still work."""
+    feature: Literal["leads", "viewer_support"]
+    message: str
+    routes: list[Action]
+
+
+class AssistantMessage(Open):
+    message_id: str
+    text: str
+    answer_class: str
+    grounded: bool
+    sources: list[Source]
+    actions: list[Action]
+    uncertainty: Uncertainty
+    notice: str | None = None
+    resume: dict | None = None
+    suggestions: list[dict] | None = None
+    clarification: Clarification | None = None
+    paused: Paused | None = None
+    missing_topic_code: str | None = None
+    intent_class: str | None = None
+    # CF §10.1: free text that is a viewer issue starts that flow; this is its first step
+    # (same shape as the POST /support-flows response).
+    support_flow: dict | None = None
+
+
+class MessageResult(Open):
+    request_id: str
+    session_id: str
+    user_message_id: str
+    assistant_message: AssistantMessage
+    session_state: str
+    replayed: bool | None = None
+
+
+class StatusCard(Open):
+    """C5: the D1 public status, shown at the playback flow's public-status step (PB-06)."""
+    state: Literal["operational", "degraded", "outage", "unknown"]
+    summary: str
+    checked_at: str
+    status_url: str
+
+
+class SupportStep(Open):
+    step_id: str
+    prompt: str
+    input_type: str
+    options: list[dict]
+    allow_skip: bool
+    allow_back: bool
+
+
+class SupportFlow(Open):
+    flow_id: str
+    flow_type: str
+    title: str
+    status: str
+    resolution_code: str | None
+    step: SupportStep | None
+    message: str | None
+    notice: str | None
+    actions: list[Action]
+    status_card: StatusCard | None = None
+    next_flow: dict | None = None
+
+
+class HandoffResult(Open):
+    handoff_id: str
+    target: str
+    outcome: Literal["route_available", "confirmed_submission", "failed", "unknown"]
+    message: str
+    actions: list[Action]
+    replayed: bool | None = None
+
+
+class SessionBody(Open):
+    session_id: str
+    session_state: str
+    expires_at: str
+    idle_timeout_seconds: int
+    context_version: int
+    event_context: dict | None
+
+
+class SessionCreated(SessionBody):
+    csrf_token: str
+    assistant: dict
+    welcome: str
+    suggested_intents: list[dict]
+    privacy: dict
+
+
+class Bootstrap(Open):
+    api_version: str
+    assistant: dict
+    enabled: bool
+    locale: str
+    welcome: str | None
+    suggested_intents: list[dict]
+    limits: dict
+    privacy: dict
+    direct_routes: list[Action]
+    unavailable_reason: Literal["disabled", "degraded"] | None = None
+
+
+class Consent(Open):
+    purpose: str
+    status: str
+    notice_version: str
+    recorded_at: str
+    receipt_id: str
+
+
+class LeadFlow(Open):
+    flow_id: str
+    flow_kind: str
+    status: str
+    schema_version: str | None = None
+    purpose_notice: dict | None = None
+    consent: dict | None = None
+    fields: list[dict] | None = None
+    missing_required: list[str] | None = None
+
+
+class LeadOutcome(Open):
+    flow_id: str
+    outcome: Literal["confirmed", "failed", "unknown"]
+    message: str
+    submission_reference: str | None
+    replayed: bool
+    actions: list[Action]

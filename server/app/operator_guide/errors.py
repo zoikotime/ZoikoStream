@@ -49,6 +49,12 @@ class Unavailable(GuideError):
     status, code = 503, "OPGUIDE_UNAVAILABLE"
 
 
+class Timeout(GuideError):
+    """A read tool or platform call did not answer within its time budget. Nothing is
+    assumed about the result: a read is not shown, a write is reconciled (actions.py)."""
+    status, code = 504, "OPGUIDE_TIMEOUT"
+
+
 class OutcomeUnknown(GuideError):
     status, code = 504, "OPGUIDE_OUTCOME_UNKNOWN"
 
@@ -58,6 +64,10 @@ GUIDE_UNAVAILABLE = "Guide is temporarily unavailable. Core ZoikoStream controls
 TOOL_FAILED = "The service did not confirm the change. No successful change has been recorded."
 OUTCOME_UNKNOWN = ("The request was submitted, but completion is not confirmed. Check current "
                    "state before retrying.")
+
+
+def timed_out(service: str) -> str:
+    return f"{service} did not respond in time. Nothing was changed; try again in a moment."
 
 
 def no_data(data: str, obj: str) -> str:

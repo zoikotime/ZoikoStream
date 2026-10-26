@@ -1,12 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, within, waitFor } from "@testing-library/react";
+import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
 vi.mock("../api", () => ({ default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
+const auth = vi.hoisted(() => ({ user: { role: "org_admin" } }));
+vi.mock("../auth/AuthContext", () => ({ useAuth: () => auth }));
 
 import api from "../api";
 import OperatorGuide from "./OperatorGuide";
+import AskGuideButton from "./AskGuideButton";
+import { askGuide, setGuideAvailable } from "./askGuide";
 import { consoleRoute } from "./operatorGuideApi";
 import { eventIdFrom, isConsolePath } from "./eligibility";
 import { safeHref } from "./parts/links";
@@ -75,6 +79,8 @@ async function openPanel(user) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  auth.user = { role: "org_admin" };
+  window.__opguidePending = undefined;
 });
 
 describe("eligibility and links", () => {
@@ -207,5 +213,240 @@ describe("governed actions", () => {
     await user.type(within(panel).getByLabelText("Ask Guide"), "turn off chat{Enter}");
     await user.click(await within(panel).findByRole("button", { name: "Confirm: Turn off chat" }));
     expect(await within(panel).findByText(/This proposal expired/)).toBeInTheDocument();
+  });
+});
+
+const OTHER = { id: "99999999-8888-7777-6666-555555555555", title: "Board Meeting", status: "published", start_time: null };
+
+async function ask(user, panel, text) {
+  await user.type(within(panel).getByLabelText("Ask Guide"), `${text}{Enter}`);
+}
+
+describe("inline Ask Guide entry points (§1.1, §5)", () => {
+  it("renders nothing unless Guide can open on this page", () => {
+    setGuideAvailable(false);
+    render(<MemoryRouter><AskGuideButton question="Is this event ready?" eventId={EVENT.id} /></MemoryRouter>);
+    expect(screen.queryByRole("button", { name: /ask guide/i })).not.toBeInTheDocument();
+    act(() => setGuideAvailable(true));
+    expect(screen.getByRole("button", { name: "Ask Guide" })).toBeInTheDocument();
+    act(() => setGuideAvailable(false));
+  });
+
+  it("opens Guide and asks with the page's event attached", async () => {
+    const user = setup();
+    api.post.mockResolvedValueOnce({ data: READINESS });
+    act(() => setGuideAvailable(true));
+    render(<MemoryRouter><AskGuideButton question="Is this event ready?" eventId={OTHER.id} /></MemoryRouter>);
+    await screen.findByRole("button", { name: /open guide/i });
+    await user.click(screen.getByRole("button", { name: "Ask Guide" }));
+    await screen.findByRole("dialog", { name: "Guide" });
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/operator-guide/messages",
+      expect.objectContaining({ text: "Is this event ready?", event_id: OTHER.id })));
+  });
+
+  it("a click before Guide has loaded is picked up when it mounts", async () => {
+    askGuide({ question: "Who can access this event?", eventId: OTHER.id, route: "/organization/events" });
+    api.post.mockResolvedValueOnce({ data: READINESS });
+    setup();
+    expect(await screen.findByRole("dialog", { name: "Guide" })).toBeInTheDocument();
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/operator-guide/messages",
+      expect.objectContaining({ text: "Who can access this event?", event_id: OTHER.id })));
+    expect(window.__opguidePending).toBeUndefined();
+  });
+
+  it("a stale parked request is ignored", async () => {
+    window.__opguidePending = { question: "old", eventId: null, at: Date.now() - 60_000 };
+    setup();
+    await screen.findByRole("button", { name: /open guide/i });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+describe("context changes are visible (§4.2)", () => {
+  it("shows the server's context notice before the question it applies to", async () => {
+    const user = setup();
+    api.post.mockResolvedValueOnce({ data: READINESS })
+      .mockResolvedValueOnce({ data: { ...guideMessage({ answer: "Yes." }, "m2"), context: { ...CONTEXT, event: OTHER },
+        context_notice: { id: "n1", role: "guide", intent: "context.change", text: "Context: now Board Meeting" } } });
+    const panel = await openPanel(user);
+    await ask(user, panel, "Is this event ready?");
+    await within(panel).findByText(/^Not yet\./, { selector: ".og-answer" });
+    await ask(user, panel, "Is Board Meeting ready?");
+    const notice = (await within(panel).findByText("Context: now Board Meeting")).closest(".og-context-notice");
+    const items = [...within(panel).getByLabelText("Conversation").querySelectorAll(".og-msg, .og-context-notice")];
+    expect(items[items.indexOf(notice) + 1]).toHaveClass("og-msg-user");
+  });
+
+  it("a named event stays the context for the next turn", async () => {
+    const user = setup();
+    api.post.mockResolvedValueOnce({ data: { ...READINESS, context: { ...CONTEXT, event: OTHER } } })
+      .mockResolvedValueOnce({ data: guideMessage({ answer: "Public." }, "m2") });
+    const panel = await openPanel(user);
+    await ask(user, panel, "Is Board Meeting ready?");
+    await within(panel).findByText(/^Not yet\./, { selector: ".og-answer" });
+    await ask(user, panel, "who can access it?");
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2));
+    expect(api.post.mock.calls[1][1]).toEqual(expect.objectContaining({ event_id: OTHER.id }));
+  });
+
+  it("picking an event mid-conversation adds a thread notice at once", async () => {
+    const user = setup();
+    api.get.mockImplementation((url) => {
+      if (url.endsWith("/bootstrap")) return Promise.resolve({ data: BOOT });
+      if (url.endsWith("/context/events")) return Promise.resolve({ data: { items: [EVENT, OTHER] } });
+      return Promise.resolve({ data: BOOT.attention });
+    });
+    api.post.mockResolvedValueOnce({ data: READINESS });
+    const panel = await openPanel(user);
+    await ask(user, panel, "Is this event ready?");
+    await within(panel).findByText(/^Not yet\./, { selector: ".og-answer" });
+    const select = within(panel).getByLabelText("Event context");
+    await within(select).findByRole("option", { name: "Board Meeting" });
+    await user.selectOptions(select, OTHER.id);
+    expect((await within(panel).findByText("Context: now Board Meeting")).closest("[role=status]")).not.toBeNull();
+  });
+});
+
+describe("answer structure", () => {
+  it("labels the model explanation as Guide interpretation", async () => {
+    const user = setup();
+    api.post.mockResolvedValueOnce({ data: guideMessage({ ...READINESS.message.payload, inference: true }) });
+    const panel = await openPanel(user);
+    await ask(user, panel, "Is this event ready?");
+    expect(await within(panel).findByText(/Why · Guide interpretation/)).toBeInTheDocument();
+    expect(within(panel).getByText("No host is assigned yet.").closest(".og-interpretation")).not.toBeNull();
+  });
+
+  it("flags inferred signals when there is no explanation", async () => {
+    const user = setup();
+    api.post.mockResolvedValueOnce({ data: guideMessage({ answer: "Viewers fell.", inference: true }) });
+    const panel = await openPanel(user);
+    await ask(user, panel, "why are viewers dropping");
+    expect(await within(panel).findByText(/Includes Guide interpretation/)).toBeInTheDocument();
+  });
+
+  it("shows API version and environment on technical answers", async () => {
+    const user = setup();
+    const technical = { api: "v1", environment: "Production", label: "Environment: Production · API: v1" };
+    api.post.mockResolvedValueOnce({ data: guideMessage({
+      answer: "A webhook endpoint receives event notifications.", technical,
+      blocks: [{ type: "docs", title: "From ZoikoStream documentation", technical, items: [{ heading: "Webhooks", doc: "Developer platform", text: "…", source_id: "doc:developer#webhooks", path: "/organization/developers" }] }],
+    }) });
+    const panel = await openPanel(user);
+    await ask(user, panel, "what is a webhook");
+    expect(await within(panel).findAllByText(/Environment: Production · API: v1/)).toHaveLength(2);
+  });
+
+  it("renders an incident timeline in UTC from recorded timestamps", async () => {
+    const user = setup();
+    api.post.mockResolvedValueOnce({ data: guideMessage({
+      answer: "Incident SEV2 is open (delayed).",
+      blocks: [{ type: "timeline", title: "Timeline · Town Hall", items: [
+        { at: "2026-10-09T14:27:00Z", text: "Broadcast started", state: "active" },
+        { at: "2026-10-09T14:31:00Z", text: "Incident SEV2 opened", state: "confirmed" }] }],
+    }) });
+    const panel = await openPanel(user);
+    await ask(user, panel, "what's wrong");
+    const card = await within(panel).findByRole("region", { name: "Timeline · Town Hall" });
+    expect(within(card).getByText("14:27 UTC")).toHaveAttribute("dateTime", "2026-10-09T14:27:00Z");
+    expect(within(card).getByText("Incident SEV2 opened")).toBeInTheDocument();
+  });
+
+  it("escalation offers a support-case proposal that still needs confirming", async () => {
+    const user = setup();
+    api.post
+      .mockResolvedValueOnce({ data: guideMessage({ answer: "Program health is degraded.", blocks: [{
+        type: "escalation", title: "Get human help", text: "I can prepare a support case for you to review.",
+        context: { summary: "Town Hall: program degraded" },
+        routes: [{ kind: "proposal", label: "Prepare a support case", action_id: "support.open_case", params: { text: "Town Hall: program degraded" } },
+          { kind: "navigate", type: "navigate", label: "Open Support & Status", href: "/organization/support" }],
+      }] }) })
+      .mockResolvedValueOnce({ data: guideMessage({ answer: "Review this change.", blocks: [{ ...PROPOSAL, id: "p9", title: "Open a support case", confirm_label: "Confirm: Open support case" }] }, "m2") });
+    const panel = await openPanel(user);
+    await ask(user, panel, "what's wrong");
+    const card = await within(panel).findByRole("region", { name: "Get human help" });
+    expect(within(card).getByText(/Town Hall: program degraded/)).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: /open support & status/i })).toBeInTheDocument();
+    await user.click(within(card).getByRole("button", { name: "Prepare a support case" }));
+    expect(api.post.mock.calls[1][1]).toEqual(expect.objectContaining({ action: { action_id: "support.open_case", params: { text: "Town Hall: program degraded" } } }));
+    expect(await within(panel).findByRole("button", { name: "Confirm: Open support case" })).toBeInTheDocument();
+  });
+
+  it("a host's escalation names the org admin and offers no case", async () => {
+    const user = setup();
+    api.post.mockResolvedValueOnce({ data: guideMessage({ answer: "Your organization admin can open a support case for you.", blocks: [{
+      type: "escalation", title: "Get human help", text: "Support cases are opened by your organization admin.", context: {},
+      routes: [{ kind: "contact", label: "Contact your organization admin", text: "Organization admins open support cases." }],
+    }] }) });
+    const panel = await openPanel(user);
+    await ask(user, panel, "I need to talk to a human");
+    const card = await within(panel).findByRole("region", { name: "Get human help" });
+    expect(within(card).getByText("Contact your organization admin.")).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /support case/i })).not.toBeInTheDocument();
+  });
+
+  it("proposal shows its permission basis and the receipt shows actor and result", async () => {
+    const user = setup();
+    api.post
+      .mockResolvedValueOnce({ data: guideMessage({ answer: "Review this change.", blocks: [{ ...PROPOSAL, permission: "Allowed: you host this event" }] }) })
+      .mockResolvedValueOnce({ data: { ...PROPOSAL, status: "succeeded", receipt: { message: "Chat changed from On to Off.", correlation_id: "cor_1", actor: { id: "u1", name: "Dana Ops" }, result: "Off" } } });
+    const panel = await openPanel(user);
+    await ask(user, panel, "turn off chat");
+    expect(await within(panel).findByText("Allowed: you host this event")).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Confirm: Turn off chat" }));
+    expect(await within(panel).findByText(/By Dana Ops/)).toBeInTheDocument();
+    expect(within(panel).getByText(/By Dana Ops/)).toHaveTextContent("By Dana Ops · Result: Off");
+  });
+});
+
+describe("Live Mode (§6.9, §17)", () => {
+  const LIVE_BOOT = { ...BOOT, context: { ...CONTEXT, event: { ...EVENT, status: "live" } } };
+
+  it("home has a one-click live health check", async () => {
+    const user = setup({ boot: LIVE_BOOT });
+    api.post.mockResolvedValueOnce({ data: guideMessage({ answer: "No critical issue detected.", mode: "live" }) });
+    const panel = await openPanel(user);
+    await user.click(within(panel).getByRole("button", { name: "How is the broadcast doing?" }));
+    expect(api.post).toHaveBeenCalledWith("/operator-guide/messages", expect.objectContaining({ text: "How is the broadcast doing?", event_id: EVENT.id }));
+  });
+
+  it("the thinking indicator is static while live", async () => {
+    const user = setup({ boot: LIVE_BOOT });
+    api.post.mockReturnValueOnce(new Promise(() => {}));
+    const panel = await openPanel(user);
+    await ask(user, panel, "status?");
+    expect(await within(panel).findByText("Checking live sources…")).toBeInTheDocument();
+    expect(panel.querySelector(".og-orbit")).toBeNull();
+    expect(panel).toHaveClass("og-live");
+  });
+
+  it("refreshes context while open on a live event", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = setup({ boot: LIVE_BOOT });
+      await openPanel(user);
+      const boots = () => api.get.mock.calls.filter(([u]) => u.endsWith("/bootstrap")).length;
+      await waitFor(() => expect(boots()).toBeGreaterThanOrEqual(2)); // mount + on open
+      const before = boots();
+      await vi.advanceTimersByTimeAsync(15_500);
+      expect(boots()).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not poll when the event is not live", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = setup();
+      await openPanel(user);
+      const boots = () => api.get.mock.calls.filter(([u]) => u.endsWith("/bootstrap")).length;
+      await waitFor(() => expect(boots()).toBeGreaterThanOrEqual(2));
+      const before = boots();
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(boots()).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

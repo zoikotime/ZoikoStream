@@ -32,6 +32,7 @@ import {
   Banner, DarkCard, Footnote, IconChip, KpiRow, KpiTile, Panel, Tag,
 } from "../../components/organization/console/ConsoleUI";
 import { ALL_CATEGORIES, categoryOptions, matchesCategory } from "./recordingCategories";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 
 // Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
 // as a dependency, and a fresh `[]` literal on every render would defeat every one of them
@@ -715,6 +716,7 @@ export default function OrganizationRecordings() {
         subtitle="One secure library for your event recordings, replay readiness and processing status."
         actions={
           <>
+            <AskGuideButton question="Where is the replay?" />
             {data?.at && (
               <span className={cx("inline-flex items-center gap-1.5 text-[12px]", CONSOLE.faint)}>
                 <FiClock aria-hidden="true" /> As of {fmtAsOf(data.at)}

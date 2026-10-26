@@ -10,11 +10,15 @@ import re
 from dataclasses import dataclass, field
 
 from .knowledge.retrieval import EvidencePack
-from .prompts import ANSWER_CLASSES, SYSTEM_PROMPT
+from .prompts import ANSWER_CLASSES, all_system_prompts
 from .secrets_detect import detect
 
 MAX_ANSWER_CHARS = 1500
-MAX_ACTIONS = 3
+# Prompt §15 "At most two prominent actions" and §28.1 "One material clarification at a
+# time" — the same limits the policy envelope states to the model (pub-policy max_actions /
+# max_clarifying_questions), so prompt and validator cannot disagree.
+MAX_ACTIONS = 2
+MAX_QUESTIONS = 1
 
 _URL = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
 _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
@@ -39,8 +43,8 @@ _HIDDEN_MARKERS = [m.lower() for m in (
     "SYSTEM: ZOIKOSTREAM GUIDE", "<public_evidence", "<policy>", "boundary_state",
     "allowed_actions", "response_profile", "answerability_state", "RETRIEVED CONTENT\n",
     "validation_feedback", "profile_guidance")]
-_SYSTEM_LINES = [ln.strip().lower() for ln in SYSTEM_PROMPT.splitlines()
-                 if len(ln.strip()) > 40]
+_SYSTEM_LINES = sorted({ln.strip().lower() for prompt in all_system_prompts()
+                        for ln in prompt.splitlines() if len(ln.strip()) > 40})
 # V-10 / do-not-say lexicon (§15.2).
 _DO_NOT_SAY = re.compile(
     r"(?i)\b(100%\s+secure|completely\s+secure|unhackable|guaranteed?|fully\s+compliant|"
@@ -49,6 +53,61 @@ _DO_NOT_SAY = re.compile(
 # company and is rejected like any other unsupported claim.
 _BRAND_VARIANT = re.compile(r"\bZ\w{1,6}\s?Stream\b", re.I)
 _NUMBER = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s?%|\b\d{2,}[\d,]*(?:\.\d+)?\b")
+
+
+# ── V-05 claim-to-evidence (RAG §18.1) ─────────────────────────────────────────────────────
+# Each material sentence must be lexically supported by the evidence it cites: most of its
+# content words (6-char stems, so "streams"/"streaming" match) must occur in that evidence.
+# A sentence that mostly says things the evidence does not is "unsupported expansion" and
+# fails like an unsupported number: one regeneration, then the gap template.
+CLAIM_MIN_TERMS = 4          # shorter sentences carry too little to judge
+CLAIM_MIN_COVERAGE = 0.5     # share of a sentence's content terms found in cited evidence
+_WORD = re.compile(r"[a-z0-9]+")
+# Function words and assistant/routing vocabulary: overlap on these proves nothing, and
+# lacking them in the evidence is not an unsupported claim.
+_CLAIM_STOP = set("""
+about above after again also although always another anyone anything around because been
+before being below between both cannot could does doing done down during each either else
+enough even every from further have having here into itself just like make many more most
+much must need only other otherwise over own same should since some such than that their
+them then there these they thing things this those though through under until upon very
+want were what whatever when where whether which while will with within without would your
+yours yourself you're it's that's there's don't can't isn't aren't won't doesn't
+zoikostream guide help helps helpful information details detail page pages approved public
+source sources visit check request demo sales team contact support link links route
+please happy glad sure question questions answer offer option options next step steps
+learn find mention mentioned confirm confirms provide provides available currently today
+""".split())
+# Sentences that make no factual claim about ZoikoStream: offers, routing, hedges, questions.
+_NON_CLAIM = re.compile(
+    r"(?i)^\s*(i\s+can|i\s+could|i'?d|i\s+don'?t|i\s+do\s+not|i\s+can'?t|i\s+cannot|you\s+can|"
+    r"you\s+could|you\s+may|you\s+might|if\s+you|let\s+me|would\s+you|feel\s+free|for\s+more|"
+    r"to\s+(learn|find|get|see|request)|the\s+approved\s+(public\s+)?sources?|please)\b")
+
+
+def _stems(text: str) -> set[str]:
+    return {w[:6] for w in _WORD.findall(text.lower().replace("'", ""))
+            if len(w) > 3 and w not in _CLAIM_STOP}
+
+
+def unsupported_claims(text: str, evidence_text: str) -> list[str]:
+    """Sentences of `text` whose content is mostly absent from `evidence_text`."""
+    support = _stems(evidence_text)
+    bad = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+        s = sentence.strip()
+        if not s or s.endswith("?") or _NON_CLAIM.match(s):
+            continue
+        terms = _stems(s)
+        if len(terms) < CLAIM_MIN_TERMS:
+            continue
+        if len(terms & support) / len(terms) < CLAIM_MIN_COVERAGE:
+            bad.append(s)
+    return bad
+
+
+def question_count(text: str) -> int:
+    return len(re.findall(r"\?(?=\s|$)", text))
 
 
 @dataclass
@@ -71,7 +130,8 @@ def _norm_num(s: str) -> str:
 
 
 def validate(data: dict | None, *, pack: EvidencePack, allowed_action_ids: list[str],
-             high_risk: bool) -> Validated:
+             high_risk: bool, max_actions: int = MAX_ACTIONS,
+             max_questions: int = MAX_QUESTIONS) -> Validated:
     failures: list[str] = []
     # V-01 schema
     if not isinstance(data, dict):
@@ -99,7 +159,7 @@ def validate(data: dict | None, *, pack: EvidencePack, allowed_action_ids: list[
         else "ZoikoStream", text)
 
     # V-03 actions
-    action_ids = [a for a in dict.fromkeys(actions) if a in allowed_action_ids][:MAX_ACTIONS]
+    action_ids = [a for a in dict.fromkeys(actions) if a in allowed_action_ids][:max_actions]
     # Source ids must be ones actually supplied this turn.
     refs = pack.source_refs()
     source_ids = [s for s in dict.fromkeys(sources) if s in refs]
@@ -119,6 +179,8 @@ def validate(data: dict | None, *, pack: EvidencePack, allowed_action_ids: list[
         failures.append("V-10 output uses an absolute or prohibited claim")
     if len(text) > MAX_ANSWER_CHARS:
         failures.append("V-10 answer is too long")
+    if question_count(text) > max_questions:
+        failures.append("V-10 asks more than one clarifying question")
 
     # V-05 grounding: a factual answer must cite, and every number it states must appear in
     # the evidence it cites (prices, durations, counts, percentages — V-06 for amounts).
@@ -130,6 +192,11 @@ def validate(data: dict | None, *, pack: EvidencePack, allowed_action_ids: list[
         unsupported = [n for n in _NUMBER.findall(text) if _norm_num(n) not in evidence_nums]
         if unsupported:
             failures.append("V-05 states numbers not present in the cited evidence")
+        if source_ids:
+            cited = " ".join(f"{e.title} {e.heading_path} {e.text}" for e in pack.evidence
+                             if e.source_id in source_ids)
+            if unsupported_claims(text, cited):
+                failures.append("V-05 makes claims the cited evidence does not support")
     if high_risk and unc == "none" and not source_ids:
         failures.append("V-05 high-risk answer without evidence")
 

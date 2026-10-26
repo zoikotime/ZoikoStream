@@ -72,6 +72,8 @@ def get_embedder(profile: str | None = None):
     raise ValueError(f"unknown embedding profile {chosen!r}")
 
 
-def document_input(title: str, heading_path: str, text: str) -> str:
-    # RAG §8 embedding input: limited structural prefix + faithful unit text.
-    return f"Title: {title}\nSection: {heading_path}\nContent:\n{text}"
+def document_input(title: str, heading_path: str, text: str, topic: str | None = None) -> str:
+    """RAG §8 embedding input: a limited structural prefix (title, section, topic) + the
+    faithful unit text. No private workflow metadata, hidden instructions or internal ids."""
+    return (f"Title: {title}\nSection: {heading_path}\nTopic: {topic or heading_path}\n"
+            f"Content:\n{text}")
