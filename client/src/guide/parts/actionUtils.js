@@ -7,6 +7,8 @@ const KNOWN = new Set([
   "open_status", "__local",
 ]);
 
+export const isKnownActionType = (type) => KNOWN.has(type);
+
 export const isSafeHref = (href) =>
   typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && !href.includes("\\");
 

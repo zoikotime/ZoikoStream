@@ -1,7 +1,6 @@
 import { useCallback, useId, useState } from "react";
-import { AlertTriangle, FileText, Info, ShieldAlert, ThumbsDown, ThumbsUp, WifiOff } from "lucide-react";
+import { AlertTriangle, Clock, ExternalLink, FileText, Info, ShieldAlert, ThumbsDown, ThumbsUp, WifiOff } from "lucide-react";
 import Actions from "./Actions";
-import GuideAvatar from "./GuideAvatar";
 import { isSafeHref } from "./actionUtils";
 import { useNestedLayer } from "./nested";
 import { disclosureHead } from "./disclosure";
@@ -67,6 +66,30 @@ function AnswerText({ text, expanded, onToggle }) {
   );
 }
 
+// Generation progress (C2, Figma §5 Guide/Progress, §10.2 "Response started: subtle progress
+// state; no prolonged fake human typing"). Stages come from the server's response.progress.
+const PROGRESS_COPY = {
+  sent: "Sending your question…",
+  retrieving: "Searching ZoikoStream sources…",
+  drafting: "Writing an answer…",
+  checking: "Checking the answer against sources…",
+};
+
+// SourceChip variants (Figma §5): FreshnessWarning when the server marks the source as past
+// its review date; External when the approved destination is a public page on another site
+// (server-allowlisted https URL; opened in a new tab with rel=noopener noreferrer, WF UX-015).
+const STALE = new Set(["stale", "warning", "review_due"]);
+const isStale = (s) => s?.stale === true || STALE.has(s?.freshness);
+function safeExternalUrl(s) {
+  if (s?.external !== true || typeof s.external_url !== "string") return null;
+  try {
+    const u = new URL(s.external_url);
+    return u.protocol === "https:" && !u.username && !u.password ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
 function Sources({ sources, onAction }) {
   const [open, setOpen] = useState(null);
   // An expanded source detail is a nested layer: Back/Escape closes it before Guide.
@@ -77,21 +100,28 @@ function Sources({ sources, onAction }) {
   return (
     <div>
       <div className="zg-sources">
-        {sources.map((s) => (
-          <button
-            key={s.source_id}
-            type="button"
-            className="zg-source"
-            aria-expanded={open === s.source_id}
-            onClick={() => {
-              if (open !== s.source_id) track("source_opened", { source_id: s.source_id });
-              setOpen(open === s.source_id ? null : s.source_id);
-            }}
-          >
-            <FileText aria-hidden="true" size={14} />
-            <span>Source: {s.title}</span>
-          </button>
-        ))}
+        {sources.map((s) => {
+          const stale = isStale(s);
+          const external = !!safeExternalUrl(s);
+          const Icon = stale ? Clock : external ? ExternalLink : FileText;
+          return (
+            <button
+              key={s.source_id}
+              type="button"
+              className={`zg-source${stale ? " zg-source--stale" : ""}${external ? " zg-source--external" : ""}`}
+              aria-expanded={open === s.source_id}
+              onClick={() => {
+                if (open !== s.source_id) track("source_opened", { source_id: s.source_id });
+                setOpen(open === s.source_id ? null : s.source_id);
+              }}
+            >
+              <Icon aria-hidden="true" size={14} />
+              <span>Source: {s.title}</span>
+              {stale && <span className="zg-source-flag">May be out of date</span>}
+              {external && <span className="zg-sr">, external site</span>}
+            </button>
+          );
+        })}
       </div>
       {current && (
         <div className="zg-source-details">
@@ -100,7 +130,25 @@ function Sources({ sources, onAction }) {
             Public {current.source_type} source · Version {current.version}
             {current.updated_at ? ` · Updated ${new Date(current.updated_at + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}` : ""}
           </span>
-          {isSafeHref(current.canonical_path) && (
+          {isStale(current) && (
+            <span className="zg-source-warning">
+              <AlertTriangle aria-hidden="true" size={14} /> This source is due for review and may be out of date.
+            </span>
+          )}
+          {safeExternalUrl(current) ? (
+            <div style={{ marginTop: 6 }}>
+              <a
+                className="zg-link"
+                href={safeExternalUrl(current)}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => track("cta_clicked", { cta_id: "source", cta_type: "external_source", source_id: current.source_id })}
+              >
+                Open public source <ExternalLink aria-hidden="true" size={14} />
+                <span className="zg-sr"> (opens in a new tab)</span>
+              </a>
+            </div>
+          ) : isSafeHref(current.canonical_path) && (
             <div style={{ marginTop: 6 }}>
               <button
                 type="button"
@@ -125,7 +173,7 @@ function Feedback({ messageId, sent, onSent }) {
     const reasonCode = reason || (rating === "up" ? "helpful" : undefined);
     try {
       await sendFeedback({ target_type: "answer", target_id: messageId, rating, reason_code: reasonCode });
-      track("feedback_submitted", { response_id: messageId, helpful: rating === "up", reason_code: reasonCode });
+      track("feedback_submitted", { response_id: messageId, helpful: rating === "up", rating, reason_code: reasonCode });
       onSent();
     } catch {
       setError(true);
@@ -158,22 +206,52 @@ function Feedback({ messageId, sent, onSent }) {
       <button type="button" className="zg-iconbtn" aria-label="No, this wasn't helpful" onClick={() => setState("reasons")}>
         <ThumbsDown aria-hidden="true" />
       </button>
-      {error && <span role="alert">Feedback couldn't be sent.</span>}
+      {error && <span role="alert">Feedback couldn&apos;t be sent.</span>}
     </div>
   );
 }
 
-export default function AssistantMessage({ item, onAction, onResume, onSuggest, onPatch = () => {} }) {
+// One material clarification as chips (C4, CF §6.1, Figma WF-04): choosing one sends its label
+// as the visitor's next message; the set is then shown selected and disabled (GC-005). Typing
+// freely instead is always possible (WF-04 A5).
+function Clarification({ clarification, chosen, onChoose }) {
+  const id = useId();
+  const options = Array.isArray(clarification?.options) ? clarification.options.slice(0, 4) : [];
+  if (options.length < 2 || typeof clarification.question !== "string") return null;
+  return (
+    <div className="zg-clarify">
+      <p className="zg-clarify-q" id={id}>{clarification.question}</p>
+      <div className="zg-chips" role="group" aria-labelledby={id}>
+        {options.map((o) => (
+          <button
+            key={o.id}
+            type="button"
+            className={`zg-chip${chosen === o.id ? " is-selected" : ""}`}
+            aria-pressed={chosen === o.id}
+            disabled={!!chosen}
+            onClick={() => onChoose(o)}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Assistant messages are clean reading blocks, not chat bubbles, with no avatar (Figma §7.2,
+// WF-03): a small "Guide" label, then the answer, its source and its actions.
+export default function AssistantMessage({ item, onAction, onResume, onSuggest, onClarify, onPatch = () => {} }) {
   const { msg, streaming, incomplete } = item;
   const boundary = BOUNDARY[msg.answer_class];
   const Icon = boundary?.icon;
   const chosen = item.chosenSuggestion;
+  const pausedRoutes = Array.isArray(msg.paused?.routes) ? msg.paused.routes.filter((r) => r && typeof r === "object") : [];
   return (
-    <div className="zg-row">
-      <GuideAvatar />
-      <div className="zg-msg">
+    <div className="zg-msg zg-msg--assistant">
+      <p className="zg-speaker" aria-hidden="true">Guide</p>
       <span className="zg-sr">Guide said:</span>
-      <div className={`zg-bubble zg-answer${boundary ? " zg-bubble--boundary" : ""}`}>
+      <div className={`zg-block zg-answer${boundary ? " zg-block--boundary" : ""}`}>
         {boundary && (
           // Gap/restricted/degraded are never styled as success (Figma DQ-09).
           <span className="zg-badge">
@@ -196,16 +274,35 @@ export default function AssistantMessage({ item, onAction, onResume, onSuggest, 
           )
         ) : null}
         {streaming && !msg.text && (
-          <span className="zg-typing" aria-label="Guide is replying">
-            <span />
-            <span />
-            <span />
-          </span>
+          <p className="zg-progress" role="status">
+            <span className="zg-progress-dot" aria-hidden="true" />
+            {PROGRESS_COPY[item.progress] || PROGRESS_COPY.sent}
+          </p>
         )}
       </div>
       {!streaming && !incomplete && (
         <>
           <Sources sources={msg.sources} onAction={onAction} />
+          {msg.clarification && onClarify && (
+            <Clarification
+              clarification={msg.clarification}
+              chosen={item.chosenClarification}
+              onChoose={(o) => {
+                onPatch(item.id, { chosenClarification: o.id });
+                onClarify(o.label);
+              }}
+            />
+          )}
+          {msg.paused && typeof msg.paused.message === "string" && (
+            // C7: a paused feature's own approved message and routes, verbatim.
+            <>
+              <div className="zg-notice zg-notice--warning" role="status" style={{ marginTop: 12 }}>
+                <AlertTriangle aria-hidden="true" />
+                <span>{msg.paused.message}</span>
+              </div>
+              <Actions actions={pausedRoutes} onAction={onAction} />
+            </>
+          )}
           <Actions actions={msg.actions} onAction={onAction} />
           {msg.resume && (
             <div className="zg-links">
@@ -240,7 +337,6 @@ export default function AssistantMessage({ item, onAction, onResume, onSuggest, 
           )}
         </>
       )}
-      </div>
     </div>
   );
 }

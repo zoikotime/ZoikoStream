@@ -8,7 +8,7 @@
 // localStorage (Security/Privacy §8); ending or restarting the conversation clears it all.
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import * as api from "./guideApi";
-import { track } from "./guideAnalytics";
+import { bucketLatency, bucketLength, getGuideAnalyticsConsent, track } from "./guideAnalytics";
 
 let seq = 0;
 const nextId = () => `g${++seq}`;
@@ -33,6 +33,12 @@ const initial = {
   expiresAt: null,
   activityAt: 0,
   idleWarning: null, // null | { canExtend }
+  // Polite live-region text (Figma §13): a completed answer, or the prompt of a viewer step
+  // that just started/advanced. `seq` makes a repeated identical text announce again.
+  announce: { text: "", seq: 0 },
+  // C3: a different viewer issue was chosen while a flow is in progress; awaiting the
+  // visitor's confirmation before its progress is replaced. { flowType, activeFlowType }
+  confirmReplace: null,
 };
 
 function reducer(state, action) {
@@ -76,6 +82,10 @@ function reducer(state, action) {
         ...state,
         items: state.items.map((it) => (it.id === action.id ? { ...it, ...action.patch } : it)),
       };
+    case "announce":
+      return { ...state, announce: { text: action.text || "", seq: state.announce.seq + 1 } };
+    case "confirm_replace":
+      return { ...state, confirmReplace: action.value };
     case "remove":
       return { ...state, items: state.items.filter((it) => it.id !== action.id) };
     default:
@@ -88,21 +98,53 @@ const RETRYABLE = new Set([
   "GUIDE_NETWORK_ERROR", "GUIDE_TIMEOUT", "GUIDE_STREAM_INTERRUPTED", "GUIDE_UNAVAILABLE",
   "GUIDE_RATE_LIMITED", "GUIDE_STATE_CONFLICT",
 ]);
-const isRetryable = (err) => RETRYABLE.has(err?.code) || err?.status >= 500;
+// A server-declared `retryable: false` (problem body or C2 response.error) is respected.
+const isRetryable = (err) =>
+  RETRYABLE.has(err?.code) || err?.problem?.retryable === true
+  || (err?.status >= 500 && err?.problem?.retryable !== false);
 
-const answerEvent = { knowledge_gap: "knowledge_gap", restricted: "restricted", degraded: "degraded" };
+const answerEvent = { restricted: "restricted", degraded: "degraded" };
 
-function trackAnswer(msg) {
+// PRD §16: answer_class, latency_bucket, source_count, grounded_flag (+ ids, never text).
+function trackAnswer(msg, latencyMs, intentClass) {
   const sources = Array.isArray(msg?.sources) ? msg.sources : [];
+  const latency = bucketLatency(latencyMs);
   track("answer_rendered", {
     response_id: msg?.message_id,
     response_type: msg?.answer_class,
+    answer_class: msg?.answer_class,
     grounded: !!msg?.grounded,
+    latency_bucket: latency,
     source_count: sources.length,
     source_ids: sources.map((s) => s.source_id),
     action_count: Array.isArray(msg?.actions) ? msg.actions.length : 0,
   });
-  if (answerEvent[msg?.answer_class]) track(answerEvent[msg.answer_class], { response_id: msg.message_id });
+  if (msg?.answer_class === "knowledge_gap") {
+    // PRD §16 guide_knowledge_gap: intent_class + missing_topic_code (server-supplied codes).
+    track("knowledge_gap", {
+      response_id: msg.message_id,
+      intent_class: msg.intent_class || intentClass || "unclassified",
+      missing_topic_code: msg.missing_topic_code || "unspecified",
+      latency_bucket: latency,
+    });
+  } else if (answerEvent[msg?.answer_class]) {
+    track(answerEvent[msg.answer_class], { response_id: msg.message_id, latency_bucket: latency });
+  }
+}
+
+// Escalation routes (CF §25) among the actions shown: guide_escalated = route shown (CF §30).
+const ESCALATION_TYPES = new Set(["handoff", "sign_in"]);
+function trackEscalationShown(actions, reason) {
+  const routes = (Array.isArray(actions) ? actions : []).filter((a) => ESCALATION_TYPES.has(a?.type));
+  if (routes.length) track("escalation_shown", { route_type: routes[0].target || routes[0].type, reason_code: reason });
+}
+
+// C7: a paused feature's routes may be action objects or destination ids from the registry.
+function pausedRoutes(paused, directRoutes) {
+  const list = Array.isArray(paused?.routes) ? paused.routes : [];
+  return list
+    .map((r) => (typeof r === "string" ? (directRoutes || []).find((d) => d.action_id === r) : r))
+    .filter(Boolean);
 }
 
 export function useGuide({ getPageContext, directRoutes }) {
@@ -151,7 +193,16 @@ export function useGuide({ getPageContext, directRoutes }) {
         rateLimited(err); // a stable RATE_LIMITED banner, not a notice per click (CF-AT-32)
         return;
       }
-      track("error", { error_class: code || "GUIDE_UNKNOWN", status: err?.status ?? 0 });
+      track("error", { error_class: code || "GUIDE_UNKNOWN", status: err?.status ?? 0, recoverable: isRetryable(err) });
+      // C7: a paused feature (G3) says so in its own approved words, with its own routes,
+      // instead of the generic "having trouble" notice.
+      const paused = err?.problem?.paused;
+      if (paused && typeof paused.message === "string") {
+        const routes = pausedRoutes(paused, directRoutes);
+        push({ kind: "notice", tone: "warning", text: paused.message, actions: routes, paused: paused.feature });
+        trackEscalationShown(routes, `${paused.feature || "feature"}_paused`);
+        return;
+      }
       if (code === "GUIDE_SESSION_INVALID") {
         api.clearSession();
         // One clear end state instead of a notice per click. A session that is rejected
@@ -184,11 +235,15 @@ export function useGuide({ getPageContext, directRoutes }) {
     [directRoutes, notice, rateLimited, trackEnded],
   );
 
-  const open = useCallback(async () => {
+  const entryRef = useRef("launcher");
+  const open = useCallback(async (entryPoint = "launcher") => {
+    entryRef.current = typeof entryPoint === "string" ? entryPoint : "launcher";
     if (api.getSession() && stateRef.current.status === "ready") return;
     dispatch({ type: "starting" });
     try {
-      const data = await api.createSession(getPageContext("launcher"));
+      // API PageContext.entry_point vocabulary: an inline CTA or a deep link is "inline".
+      const entry = entryRef.current === "launcher" ? "launcher" : "inline";
+      const data = await api.createSession(getPageContext(entry), getGuideAnalyticsConsent());
       createdAtRef.current = Date.now();
       endTrackedRef.current = false;
       dispatch({
@@ -250,7 +305,15 @@ export function useGuide({ getPageContext, directRoutes }) {
       dispatch({ type: "sending", value: true });
       let accepted = false;
       let partial = "";
-      track("message_sent", { message_id: cmid, intent_id: intentHint, is_retry: isRetry });
+      const startedAt = Date.now();
+      // PRD §16: intent_class + length_bucket; the text itself never leaves the conversation API.
+      track("message_sent", {
+        message_id: cmid,
+        intent_id: intentHint,
+        intent_class: intentHint || "free_text",
+        length_bucket: bucketLength(text.length),
+        is_retry: isRetry,
+      });
       try {
         const result = await api.sendMessage(
           { clientMessageId: cmid, text, intentHint },
@@ -258,6 +321,8 @@ export function useGuide({ getPageContext, directRoutes }) {
             onAccepted: () => {
               accepted = true;
             },
+            // C2: accessible progress line while nothing has streamed yet.
+            onProgress: (stage) => dispatch({ type: "patch", id: placeholderId, patch: { progress: stage } }),
             onDelta: (t) => {
               partial = t;
               dispatch({ type: "patch", id: placeholderId, patch: { msg: { text: t } } });
@@ -271,7 +336,17 @@ export function useGuide({ getPageContext, directRoutes }) {
         });
         dispatch({ type: "patch", id: userId, patch: { failed: null } });
         dispatch({ type: "rate_limit_cleared" });
-        trackAnswer(result.assistant_message);
+        dispatch({ type: "announce", text: result.assistant_message?.text || "" });
+        // CF §10.1: a viewer issue typed as free text starts its flow server-side; the answer
+        // carries the first step, rendered exactly like a flow started from a quick action.
+        const flow = result.assistant_message?.support_flow;
+        if (flow?.flow_id) {
+          push({ kind: "flow", flow, focusPending: true });
+          if (flow.step?.prompt) dispatch({ type: "announce", text: flow.step.prompt });
+          track("support_flow_started", { flow_type: flow.flow_type, step_id: flow.step?.step_id });
+        }
+        trackAnswer(result.assistant_message, Date.now() - startedAt, intentHint);
+        trackEscalationShown(result.assistant_message?.actions, result.assistant_message?.answer_class);
         return "answered";
       } catch (err) {
         if (err?.code === "GUIDE_STATE_CONFLICT") accepted = true; // server holds it, still answering
@@ -320,18 +395,55 @@ export function useGuide({ getPageContext, directRoutes }) {
   );
 
   // ── Viewer support flows ────────────────────────────────────────────────────────────────
+  const announceFlow = (flow) => {
+    const text = flow?.status === "in_progress" ? flow?.step?.prompt : flow?.message;
+    if (text) dispatch({ type: "announce", text });
+  };
+
+  const trackFlowEnd = (next, flowType) => {
+    const ft = next.flow_type || flowType;
+    if (next.status === "resolved") {
+      track("support_flow_resolved", { flow_type: ft, outcome: "resolved", resolution_code: next.resolution_code });
+    } else if (next.status === "escalated") {
+      track("support_flow_escalated", { flow_type: ft, outcome: "escalated", resolution_code: next.resolution_code, route_type: "support" });
+    }
+  };
+
+  // C3: starting a different viewer issue while one is in progress needs the visitor's
+  // confirmation (the server answers 409 confirm_required); on confirm the request is repeated
+  // with confirm_replace and the replaced flow is shown as switched.
   const startFlow = useCallback(
-    async (flowType) => {
+    async (flowType, { confirmReplace = false } = {}) => {
       try {
-        const flow = await api.startSupportFlow(flowType);
-        push({ kind: "flow", flow });
+        const flow = await api.startSupportFlow(flowType, { confirmReplace });
+        if (confirmReplace) {
+          stateRef.current.items
+            .filter((it) => it.kind === "flow" && it.flow.status === "in_progress" && it.flow.flow_id !== flow.flow_id)
+            .forEach((it) =>
+              dispatch({
+                type: "patch",
+                id: it.id,
+                patch: { flow: { ...it.flow, status: "cancelled", resolution_code: `switched_to_${flow.flow_type || flowType}` } },
+              }),
+            );
+        }
+        dispatch({ type: "confirm_replace", value: null });
+        push({ kind: "flow", flow, focusPending: true });
+        announceFlow(flow);
         track("support_flow_started", { flow_type: flow?.flow_type || flowType, step_id: flow?.step?.step_id });
       } catch (err) {
+        if (err?.code === "GUIDE_STATE_CONFLICT" && err?.problem?.confirm_required) {
+          dispatch({ type: "confirm_replace", value: { flowType, activeFlowType: err.problem.active_flow_type || null } });
+          return;
+        }
+        dispatch({ type: "confirm_replace", value: null });
         handleError(err);
       }
     },
     [handleError],
   );
+
+  const cancelReplace = useCallback(() => dispatch({ type: "confirm_replace", value: null }), []);
 
   const stepFlow = useCallback(
     async (itemId, flow, { optionId, command }) => {
@@ -342,12 +454,16 @@ export function useGuide({ getPageContext, directRoutes }) {
           optionId,
           command,
         });
-        dispatch({ type: "patch", id: itemId, patch: { flow: next, busy: false } });
+        // Focus moves to the new step heading and its prompt is announced (Figma §13.2).
+        dispatch({ type: "patch", id: itemId, patch: { flow: next, busy: false, focusPending: !next.next_flow } });
         track("support_flow_step", { flow_type: flow.flow_type, step_id: flow.step.step_id });
-        if (next.status === "resolved" || next.status === "escalated") {
-          track("support_flow_completed", { flow_type: next.flow_type || flow.flow_type, outcome: next.status });
+        trackFlowEnd(next, flow.flow_type);
+        if (next.next_flow) {
+          push({ kind: "flow", flow: next.next_flow, focusPending: true });
+          announceFlow(next.next_flow);
+        } else {
+          announceFlow(next);
         }
-        if (next.next_flow) push({ kind: "flow", flow: next.next_flow });
       } catch (err) {
         // A stale step returns the authoritative current state; re-render from it.
         const current = err?.problem?.current;
@@ -368,8 +484,12 @@ export function useGuide({ getPageContext, directRoutes }) {
         const existing = stateRef.current.items.find((it) => it.kind === "lead" && it.flow.flow_id === flow.flow_id);
         const carried = existing ? { values: existing.values, consent: existing.consent } : {};
         if (existing) dispatch({ type: "remove", id: existing.id });
-        push({ kind: "lead", flow, phase: "collecting", ...carried });
-        if (!existing) track("lead_started", { flow_kind: flow.flow_kind || kind, source_intent: sourceIntent });
+        push({ kind: "lead", flow, phase: "collecting", focusPending: true, ...carried });
+        if (!existing) {
+          // CF §30: guide_demo_started is a demo flow only; a sales flow is a lead/flow start.
+          const fk = flow.flow_kind || kind;
+          track(fk === "demo" ? "demo_started" : "sales_started", { flow_kind: fk, flow_type: `lead_${fk}`, source_intent: sourceIntent });
+        }
       } catch (err) {
         handleError(err);
       }
@@ -383,6 +503,7 @@ export function useGuide({ getPageContext, directRoutes }) {
       try {
         const result = await api.handoff(target);
         push({ kind: "notice", tone: "info", text: result.message, actions: result.actions || [] });
+        track("escalation_shown", { route_type: target });
       } catch (err) {
         handleError(err);
       }
@@ -456,6 +577,7 @@ export function useGuide({ getPageContext, directRoutes }) {
     send,
     retry,
     startFlow,
+    cancelReplace,
     stepFlow,
     startLead,
     handoffTo,

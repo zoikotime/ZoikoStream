@@ -5,6 +5,7 @@ import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import GuideWidget from "./GuideWidget";
 import { clearSession, parseSSE } from "./guideApi";
 import { renderable } from "./parts/actionUtils";
+import { setGuideAnalyticsConsent } from "./guideAnalytics";
 
 const json = (body, status = 200, headers = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -102,7 +103,10 @@ beforeEach(() => {
   clearSession();
   installFetch();
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  setGuideAnalyticsConsent(null);
+});
 
 describe("Guide widget", () => {
   it("bootstraps without a session and shows the launcher", async () => {
@@ -172,7 +176,7 @@ describe("Guide widget", () => {
     renderWidget();
     const dialog = await openGuide(user);
     await user.click(await within(dialog).findByRole("button", { name: "Viewer help" }));
-    expect(await within(dialog).findByText("What do you need help with?")).toBeInTheDocument();
+    expect(await within(dialog).findByRole("heading", { name: "What do you need help with?" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Video or buffering" })).toBeInTheDocument();
     expect(dialog.querySelector(".zg-card input")).toBeNull(); // no free-text/PIN field
   });
@@ -255,7 +259,7 @@ describe("Guide widget", () => {
     const group = await within(dialog).findByRole("group", { name: "Suggested topics" });
     expect(within(dialog).queryByText("Was this helpful?")).toBeNull(); // no rating small talk
     await user.click(within(group).getByRole("button", { name: "Viewer help" }));
-    expect(await within(dialog).findByText("What do you need help with?")).toBeInTheDocument();
+    expect(await within(dialog).findByRole("heading", { name: "What do you need help with?" })).toBeInTheDocument();
   });
 
   it("session creation failure shows the unavailable state with direct routes", async () => {
@@ -412,6 +416,7 @@ describe("Guide UX requirements", () => {
       "POST /sessions/s-1/lead-flows/l-1234567890/submit": () =>
         json({ outcome: "confirmed", message: "Thanks. The sales team will contact you.", submission_reference: "ZS-123" }),
     });
+    setGuideAnalyticsConsent("granted");
     const events = [];
     const onEvent = (e) => events.push(e.detail);
     window.addEventListener("zoikostream:guide-analytics", onEvent);
@@ -439,13 +444,17 @@ describe("Guide UX requirements", () => {
     expect(within(dialog).getByText("Public AI Assistant")).toBeInTheDocument(); // header back to default
     window.removeEventListener("zoikostream:guide-analytics", onEvent);
     const names = events.map((e) => e.event);
-    expect(names).toContain("guide_lead_started");
-    expect(names).toContain("guide_lead_submitted");
+    // CF §30: a demo flow is guide_demo_started (also a flow/lead start); confirmed only = submitted.
+    expect(names).toContain("guide_demo_started");
+    expect(events.find((e) => e.event === "guide_demo_started").aliases).toEqual(["guide_flow_started", "guide_lead_started"]);
+    expect(names).toContain("guide_demo_submitted");
+    expect(events.find((e) => e.event === "guide_demo_submitted").aliases).toContain("guide_lead_submitted");
     const blob = JSON.stringify(events);
     expect(blob).not.toMatch(/Jamie|jamie@example\.org|Acme/); // no lead values in analytics
   });
 
-  it("emits spec analytics events without message text or PII (WF §07, CF §30)", async () => {
+  it("emits spec analytics events without message text or PII (PRD §16, CF §30, WF §07)", async () => {
+    setGuideAnalyticsConsent("granted");
     const events = [];
     const onEvent = (e) => events.push(e.detail);
     window.addEventListener("zoikostream:guide-analytics", onEvent);
@@ -457,16 +466,25 @@ describe("Guide UX requirements", () => {
     await user.click(await within(dialog).findByRole("button", { name: "Product overview" }));
     await within(dialog).findByRole("button", { name: "Source: Use cases" });
     await user.type(within(dialog).getByLabelText("Ask Guide a question"), "my email is jamie@example.org{Enter}");
-    await waitFor(() => expect(events.filter((e) => e.event === "guide_response_rendered")).toHaveLength(2));
+    await waitFor(() => expect(events.filter((e) => e.event === "guide_answer_completed")).toHaveLength(2));
     await user.click(within(dialog).getAllByRole("button", { name: "No, this wasn't helpful" })[0]);
     await user.click(within(dialog).getByRole("button", { name: "Out of date" }));
     await within(dialog).findByText("Thanks for the feedback.");
     window.removeEventListener("zoikostream:guide-analytics", onEvent);
     const names = events.map((e) => e.event);
-    for (const n of ["guide_launcher_viewed", "guide_opened", "guide_intent_selected", "guide_message_sent", "guide_response_rendered", "guide_feedback_submitted"]) {
+    for (const n of ["guide_launcher_impression", "guide_opened", "guide_intent_selected", "guide_message_submitted", "guide_answer_completed", "guide_feedback"]) {
       expect(names).toContain(n);
     }
-    expect(events.find((e) => e.event === "guide_message_sent").aliases).toContain("guide_message_submitted");
+    // Wireframe §07 names travel as aliases of the same occurrence (no double counting).
+    expect(events.find((e) => e.event === "guide_launcher_impression").aliases).toContain("guide_launcher_viewed");
+    expect(events.find((e) => e.event === "guide_message_submitted").aliases).toContain("guide_message_sent");
+    expect(events.find((e) => e.event === "guide_answer_completed").aliases).toContain("guide_response_rendered");
+    expect(events.find((e) => e.event === "guide_feedback").aliases).toContain("guide_feedback_submitted");
+    // PRD §16 parameters: consent_state, intent_class + length_bucket, latency_bucket.
+    expect(events.find((e) => e.event === "guide_opened")).toMatchObject({ entry_point: "launcher", consent_state: "granted" });
+    const typed = events.filter((e) => e.event === "guide_message_submitted").at(-1);
+    expect(typed).toMatchObject({ intent_class: "free_text", length_bucket: "21_80" });
+    expect(events.find((e) => e.event === "guide_answer_completed")).toMatchObject({ answer_class: "factual", latency_bucket: "lt_1s", source_count: 1 });
     expect(events.find((e) => e.event === "guide_intent_selected").intent_id).toBe("I-PRODUCT");
     expect(window.dataLayer.map((e) => e.event)).toContain("guide_opened");
     const blob = JSON.stringify(events) + JSON.stringify(window.dataLayer);

@@ -92,6 +92,9 @@ async function request(method, path, { body, headers = {}, stream = false, signa
     throw new GuideError(0, { code: "GUIDE_NETWORK_ERROR", detail: "Guide couldn't be reached." });
   }
   if (res.ok && path.startsWith("/sessions")) markActivity();
+  // Capability rotation (Security §7): the cookie updates itself; the CSRF token is ours to swap.
+  const rotatedCsrf = res.headers.get("x-zs-csrf-rotated");
+  if (rotatedCsrf && session) session = { ...session, csrf: rotatedCsrf };
   if (res.status === 204 || res.status === 202) return null;
   if (stream && res.ok && (res.headers.get("content-type") || "").includes("text/event-stream")) {
     return res;
@@ -117,9 +120,15 @@ const sessionPath = (p) => {
 export const bootstrap = ({ pageId, pageType }) =>
   request("GET", `/bootstrap?page_id=${encodeURIComponent(pageId)}&page_type=${encodeURIComponent(pageType)}&locale=en-US`);
 
-export async function createSession(pageContext) {
+// consent_snapshot (API §7.1): the site's analytics choice at open, read from the consent
+// manager; Guide never asks for it itself.
+export async function createSession(pageContext, consentState = "unknown") {
   const data = await request("POST", "/sessions", {
-    body: { client_session_nonce: uuid(), page_context: pageContext },
+    body: {
+      client_session_nonce: uuid(),
+      page_context: pageContext,
+      consent_snapshot: { analytics: consentState, consent_version: null },
+    },
   });
   session = { id: data.session_id, csrf: data.csrf_token };
   return data;
@@ -136,8 +145,12 @@ export const endSession = async () => {
   }
 };
 
-export const startSupportFlow = (flowType) =>
-  request("POST", sessionPath("/support-flows"), { body: { flow_type: flowType } });
+// confirm_replace (C3): the visitor confirmed that a different viewer issue replaces the
+// active flow's progress. Without it the server answers 409 with confirm_required.
+export const startSupportFlow = (flowType, { confirmReplace = false } = {}) =>
+  request("POST", sessionPath("/support-flows"), {
+    body: { flow_type: flowType, ...(confirmReplace ? { confirm_replace: true } : {}) },
+  });
 
 export const submitSupportStep = (flowId, { stepId, optionId, command }) =>
   request("POST", sessionPath(`/support-flows/${flowId}/steps`), {
@@ -155,6 +168,12 @@ export const startLeadFlow = (flowKind, sourceIntent) =>
 
 export const updateLeadFlow = (flowId, fields) =>
   request("PATCH", sessionPath(`/lead-flows/${flowId}`), { body: { fields } });
+
+// Lead draft (C6, CF §3 "Preserve form draft server-side"): partial approved fields, saved on
+// blur so a paused or resumed lead flow keeps what the visitor typed. No consent needed to
+// hold a draft; the server encrypts it like other lead values and purges it with the session.
+export const saveLeadDraft = (flowId, fields) =>
+  request("PATCH", sessionPath(`/leads/${flowId}/draft`), { body: fields });
 
 export const cancelLeadFlow = (flowId) =>
   request("PATCH", sessionPath(`/lead-flows/${flowId}`), { body: { cancel: true } });
@@ -210,7 +229,7 @@ export const MESSAGE_TIMEOUT_MS = 60_000;
  * the server holds the answer under this client_message_id and a retry must reuse it.
  * Resolves to { assistant_message, session_state } in the same shape as the JSON API.
  */
-export async function sendMessage({ clientMessageId, text, intentHint }, { onDelta, onAccepted } = {}) {
+export async function sendMessage({ clientMessageId, text, intentHint }, { onDelta, onAccepted, onProgress } = {}) {
   const body = {
     client_message_id: clientMessageId,
     text,
@@ -228,13 +247,16 @@ export async function sendMessage({ clientMessageId, text, intentHint }, { onDel
     const res = await request("POST", sessionPath("/messages"), { body, stream: true, signal: controller?.signal });
     onAccepted?.();
     if (!(res instanceof Response)) return res; // server answered JSON
-    return await readStream(res, { onDelta, arm, controller });
+    return await readStream(res, { onDelta, onProgress, arm, controller });
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function readStream(res, { onDelta, arm, controller }) {
+// Progress stages the server reports before text arrives (C2): retrieving -> drafting -> checking.
+export const PROGRESS_STAGES = new Set(["retrieving", "drafting", "checking"]);
+
+async function readStream(res, { onDelta, onProgress, arm, controller }) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -243,14 +265,22 @@ async function readStream(res, { onDelta, arm, controller }) {
   let completed = null;
   const handle = ({ event, data }) => {
     if (!data) return;
-    if (event === "response.started") msg.message_id = data.assistant_message_id;
+    // started may carry a null id (the row is written only once the answer passes validation);
+    // completed carries the authoritative one.
+    if (event === "response.started") msg.message_id = data.assistant_message_id || msg.message_id;
     else if (event === "response.text.delta") {
       answer += typeof data.delta === "string" ? data.delta : "";
       onDelta?.(answer);
     } else if (event === "response.source") msg.sources.push(data);
     else if (event === "response.action") msg.actions.push(data);
-    else if (event === "response.completed") completed = data;
-    else if (event === "response.error") throw new GuideError(503, { code: "GUIDE_UNAVAILABLE" });
+    else if (event === "response.progress") {
+      if (PROGRESS_STAGES.has(data.stage)) onProgress?.(data.stage);
+    } else if (event === "response.completed") completed = data;
+    else if (event === "response.error") {
+      // C2: {code, retryable}. A stable code only; never a provider message.
+      const code = typeof data.code === "string" && /^GUIDE_[A-Z_]{1,48}$/.test(data.code) ? data.code : "GUIDE_UNAVAILABLE";
+      throw new GuideError(503, { code, retryable: data.retryable === true });
+    }
   };
   for (;;) {
     let chunk;
@@ -278,6 +308,7 @@ async function readStream(res, { onDelta, arm, controller }) {
     session_state: completed.session_state,
     assistant_message: {
       ...msg,
+      message_id: completed.assistant_message_id || msg.message_id,
       text: answer,
       answer_class: completed.answer_class,
       grounded: completed.grounded,
@@ -285,6 +316,11 @@ async function readStream(res, { onDelta, arm, controller }) {
       notice: completed.notice || undefined,
       resume: completed.resume || undefined,
       suggestions: Array.isArray(completed.suggestions) ? completed.suggestions : [],
+      clarification: completed.clarification || undefined,
+      paused: completed.paused || undefined,
+      missing_topic_code: completed.missing_topic_code || undefined,
+      intent_class: completed.intent_class || undefined,
+      support_flow: completed.support_flow || undefined,
     },
   };
 }

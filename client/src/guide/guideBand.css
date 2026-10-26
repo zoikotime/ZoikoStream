@@ -1,0 +1,53 @@
+/* Homepage Guide band: a light panel carrying the Guide page's topic cards, set on the dark
+   landing page. Brand gradient headline; 44 px targets; focus ring visible on both surfaces. */
+
+.zgb {
+  --zgp-ink: #0f172a;
+  --zgp-muted: #64748b;
+  box-sizing: border-box; padding: 32px; border-radius: 24px; background: #f6f7fc; color: #334155;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.35);
+  font-family: "Aptos", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+.zgb *, .zgb *::before, .zgb *::after { box-sizing: border-box; }
+.zgb a { text-decoration: none; }
+.zgb :focus-visible { outline: none; box-shadow: 0 0 0 3px #ffffff, 0 0 0 5px #7c3aed; }
+.zgb-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+.zgb-ident { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.zgb-avatar {
+  flex: none; display: grid; place-items: center; width: 60px; height: 60px; border-radius: 50%;
+  background: radial-gradient(circle at 50% 40%, #1b2257 0%, #0a0f2e 72%);
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18), 0 6px 18px rgba(10, 15, 46, 0.3);
+}
+.zgb-avatar img { width: 62%; height: auto; display: block; }
+.zgb-eyebrow { margin: 0; font-size: 13px; line-height: 18px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: #6d28d9; }
+.zgb h2 { margin: 4px 0 0; font-size: 32px; line-height: 38px; font-weight: 800; letter-spacing: -0.02em; color: var(--zgp-ink); }
+.zgb-grad {
+  background: linear-gradient(90deg, #06b6d4 0%, #4f7cff 38%, #a855f7 68%, #ec4899 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.zgb-open {
+  display: inline-flex; align-items: center; gap: 10px; min-height: 52px; padding: 0 24px; border-radius: 14px;
+  background: linear-gradient(135deg, #22d3ee 0%, #7c5cff 50%, #ec4899 100%); color: #fff; font-size: 16px; font-weight: 700;
+  box-shadow: 0 10px 24px rgba(124, 92, 255, 0.35); transition: transform 140ms ease, box-shadow 140ms ease;
+}
+.zgb-open:hover { transform: translateY(-1px); box-shadow: 0 12px 28px rgba(236, 72, 153, 0.38); }
+.zgb-open svg { width: 20px; height: 20px; }
+.zgb-lede { margin: 16px 0 24px; max-width: 720px; font-size: 17px; line-height: 26px; color: var(--zgp-muted); }
+.zgb-security {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 20px 0 0; padding: 14px 18px; border-radius: 12px;
+  background: #fdeff3; border: 1px solid #f9d6df; font-size: 15px; line-height: 22px; color: #334155;
+}
+.zgb-security svg { flex: none; width: 24px; height: 24px; color: #fff; fill: #e11d48; }
+.zgb-security strong { color: #e11d48; }
+
+@media (max-width: 767px) {
+  .zgb { padding: 20px 16px; border-radius: 18px; }
+  .zgb h2 { font-size: 24px; line-height: 30px; }
+  .zgb-avatar { width: 48px; height: 48px; }
+  .zgb-open { width: 100%; justify-content: center; }
+  .zgb-lede { font-size: 16px; line-height: 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .zgb-open { transition: none; }
+  .zgb-open:hover { transform: none; }
+}

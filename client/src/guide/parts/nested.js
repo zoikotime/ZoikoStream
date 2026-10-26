@@ -19,18 +19,27 @@ export function useNestedLayer(active, close) {
   }, [active, layers]);
 }
 
-export function createLayerStack() {
+/** `onChange(size)` lets the header show its Back control while a nested layer is open. */
+export function createLayerStack(onChange = () => {}) {
   const stack = [];
+  const changed = () => onChange(stack.length);
   return {
-    push: (entry) => stack.push(entry),
+    push: (entry) => {
+      stack.push(entry);
+      changed();
+    },
     remove: (entry) => {
       const i = stack.indexOf(entry);
-      if (i >= 0) stack.splice(i, 1);
+      if (i >= 0) {
+        stack.splice(i, 1);
+        changed();
+      }
     },
     /** Close the top-most layer; false when there is none. */
     closeTop: () => {
       const top = stack.pop();
       if (!top) return false;
+      changed();
       top.close();
       return true;
     },

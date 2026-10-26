@@ -1,0 +1,56 @@
+/* Guide help-topic cards, shared by the full Guide page (/guide) and the homepage band.
+   Pastel tone per topic; 44 px targets; reduced motion respected. */
+
+.zgp-topic, .zgp-topic * { box-sizing: border-box; }
+.zgp-topics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 0; padding: 0; list-style: none; }
+.zgp-topic {
+  position: relative; display: flex; align-items: flex-start; gap: 22px; width: 100%; height: 100%; min-height: 168px;
+  padding: 24px 22px 24px 20px; border-radius: 16px; border: 1px solid var(--zgp-tone-line); background: var(--zgp-tone-bg);
+  text-align: left; cursor: pointer; font: inherit; color: inherit;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: box-shadow 160ms ease, transform 160ms ease, border-color 160ms ease;
+}
+.zgp-topic:hover:not([disabled]) { box-shadow: 0 10px 28px rgba(15, 23, 42, 0.09); transform: translateY(-2px); border-color: var(--zgp-tone-tile); }
+.zgp-topic[disabled] { cursor: progress; }
+.zgp-topic[aria-busy="true"] { border-color: var(--zgp-tone-icon); }
+.zgp-topic-icon {
+  flex: none; display: grid; place-items: center; width: 68px; height: 68px; border-radius: 16px;
+  background: var(--zgp-tone-tile); color: var(--zgp-tone-icon);
+}
+.zgp-topic-icon svg { width: 32px; height: 32px; }
+.zgp-topic-text { flex: 1; min-width: 0; display: grid; gap: 14px; padding-top: 6px; padding-right: 40px; }
+.zgp-topic-title { font-size: 22px; line-height: 27px; font-weight: 750; color: var(--zgp-ink, #0f172a); letter-spacing: -0.01em; }
+.zgp-topic-desc { font-size: 16px; line-height: 23px; color: var(--zgp-muted, #64748b); }
+.zgp-topic-go {
+  position: absolute; right: 18px; top: 46px; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%;
+  background: #fff; color: var(--zgp-ink, #0f172a); box-shadow: 0 2px 8px rgba(15, 23, 42, 0.10);
+}
+.zgp-topic-go svg { width: 20px; height: 20px; }
+
+.zgp-tone--blue { --zgp-tone-bg: #eef4ff; --zgp-tone-line: #dfe9fd; --zgp-tone-tile: #dbe7ff; --zgp-tone-icon: #2563eb; }
+.zgp-tone--pink { --zgp-tone-bg: #fdf0f8; --zgp-tone-line: #f8dcee; --zgp-tone-tile: #fbd3e9; --zgp-tone-icon: #e0157c; }
+.zgp-tone--green { --zgp-tone-bg: #ecf9f4; --zgp-tone-line: #d3f1e5; --zgp-tone-tile: #1fbf88; --zgp-tone-icon: #ffffff; }
+.zgp-tone--violet { --zgp-tone-bg: #f3f1fd; --zgp-tone-line: #e5e0fa; --zgp-tone-tile: #e3dbfb; --zgp-tone-icon: #7c3aed; }
+.zgp-tone--amber { --zgp-tone-bg: #fff7ee; --zgp-tone-line: #fde8cf; --zgp-tone-tile: #fde4c4; --zgp-tone-icon: #ea7a0c; }
+.zgp-tone--rose { --zgp-tone-bg: #fdf0f3; --zgp-tone-line: #f9dae2; --zgp-tone-tile: #fbd3de; --zgp-tone-icon: #e11d48; }
+.zgp-tone--pink .zgp-topic-icon svg { fill: currentColor; }
+.zgp-tone--rose .zgp-topic-icon svg { stroke-width: 3; }
+/* "About": a filled orange disc with a white "i", as in the design. */
+.zgp-tone--amber .zgp-topic-icon svg { color: #fff; fill: var(--zgp-tone-icon); stroke: #fff; width: 34px; height: 34px; }
+.zgp-tone--amber .zgp-topic-icon svg circle { stroke: var(--zgp-tone-icon); }
+
+@media (max-width: 1024px) {
+  .zgp-topics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 767px) {
+  .zgp-topics { grid-template-columns: 1fr; gap: 12px; }
+  .zgp-topic { min-height: 0; gap: 16px; padding: 18px 16px; }
+  .zgp-topic-icon { width: 56px; height: 56px; }
+  .zgp-topic-title { font-size: 19px; line-height: 24px; }
+  .zgp-topic-text { gap: 8px; padding-top: 2px; }
+  .zgp-topic-go { top: 24px; right: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .zgp-topic { transition-duration: 100ms !important; transition-property: box-shadow, border-color !important; }
+  .zgp-topic:hover:not([disabled]) { transform: none; }
+}

@@ -1,45 +1,39 @@
 // ZoikoStream Guide — the public website assistant (ZST-UX-FIGMA-PUB-GUIDE-001).
-// Lazy-loaded by GuideMount. Owns the launcher (WF-01), the panel shell (WF-02 / WF-18
-// mobile), the conversation timeline and the composer. Workflow state comes from the server.
+// Lazy-loaded by GuideMount. Owns the launcher (WF-01), the panel shell (WF-02, tablet sheet,
+// WF-18 mobile), the conversation timeline and the composer. Workflow state comes from the
+// server. Brand surface shared with the full Guide page (/guide): navy header with the brand
+// mark, cyan -> violet -> pink gradient on the launcher and send control.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Activity, AlertTriangle, CalendarCheck, Captions, Clock, Code2, Compass, Headset, Info, LifeBuoy,
-  Lock, LogOut, MonitorPlay, MoreVertical, RotateCcw, SendHorizontal, ShieldCheck, Sparkles, Tag,
-  WifiOff, X, XCircle,
+  Activity, CalendarCheck, Captions, ChevronLeft, Code2, Compass, Headset,
+  Info, LifeBuoy, Lock, LogOut, Maximize2, MonitorPlay, MoreVertical, RotateCcw,
+  SendHorizontal, ShieldCheck, Sparkles, Tag, WifiOff, X,
 } from "lucide-react";
 import "./guide.css";
 import * as api from "./guideApi";
 import { buildPageContext, getGuideEventContextToken } from "./pageContext";
 import { viewerEventId, watchViewerEventContext } from "./viewerEventContext";
-import { RATE_LIMIT_COPY, useGuide } from "./useGuide";
-import { bucketCount, bucketSeconds, deviceClass, track } from "./guideAnalytics";
-import AssistantMessage from "./parts/AssistantMessage";
-import GuideAvatar from "./parts/GuideAvatar";
-import SupportStep from "./parts/SupportStep";
-import LeadForm from "./parts/LeadForm";
+import { useGuide } from "./useGuide";
+import { bucketCount, bucketSeconds, deviceClass, getGuideAnalyticsConsent, track } from "./guideAnalytics";
+import { GUIDE_OPEN_EVENT, setGuideAvailable, takePendingGuideOpen } from "./askGuide";
 import Actions from "./parts/Actions";
+import { ConversationItems, IdleBanner, RateLimitBanner, StatePanel } from "./parts/Conversation";
+import { OFFLINE_TEXT, OFFLINE_TITLE, QUICK_FLOWS, useOnline } from "./parts/conversationKit";
 import { isSafeHref } from "./parts/actionUtils";
 import { useGuideLauncher } from "./safeArea";
 import { isActiveLead, leadTitle } from "./parts/leadUtils";
 import { NestedLayers, createLayerStack } from "./parts/nested";
+import { markPrivacyNoticeSeen, privacyNoticeSeen } from "./parts/privacyNotice";
+import GuidePage from "./GuidePage";
 
 // Canonical welcome (Conversation Flow §28). The server's session `welcome` is authoritative;
 // this is only the fallback if a session response ever omits it.
 const CANONICAL_WELCOME =
   "Welcome to ZoikoStream Guide. I can help with product questions, pricing and demos, or viewer support.";
 
-// Quick intents that start a typed flow directly instead of asking the model (Conversation
-// Flow §4: quick actions route to the same engines as free text).
-const QUICK_FLOWS = {
-  "I-VIEWER": ["support", "viewer_other"],
-  "I-VIEWER-ACCESS": ["support", "viewer_access"],
-  "I-PLAYBACK": ["support", "playback"],
-  "I-CAPTIONS": ["support", "captions"],
-  "I-REPLAY": ["support", "replay"],
-  "I-DEMO": ["lead", "demo"],
-  "I-SALES": ["lead", "sales"],
-};
+// WF-02 "Popular: How secure is ZoikoStream?" — routed with its catalog intent.
+const POPULAR_QUESTION = { text: "How secure is ZoikoStream?", intent_id: "I-SECURITY" };
 
 // Decorative icon per suggested topic (labels come from the server's intent catalog).
 const INTENT_ICON = {
@@ -49,105 +43,44 @@ const INTENT_ICON = {
   "I-SECURITY": ShieldCheck, "I-DEVELOPER": Code2, "I-HUMAN": Headset,
 };
 
-const NOTICE_ICON = { warning: AlertTriangle, error: XCircle, info: Info, success: Info };
-
 // Mobile (< 768 px) is the full-screen shell (Figma §4.2, WF-18).
 const isMobile = () =>
   typeof window.matchMedia === "function"
     ? window.matchMedia("(max-width: 767px)").matches
     : window.innerWidth < 768;
 
-function Notice({ item, onAction }) {
-  const Icon = NOTICE_ICON[item.tone] || Info;
-  return (
-    <div>
-      <div className={`zg-notice zg-notice--${item.tone}`} role={item.tone === "error" ? "alert" : "status"}>
-        <Icon aria-hidden="true" />
-        <span>{item.text}</span>
-      </div>
-      <Actions actions={item.actions} onAction={onAction} />
-    </div>
-  );
-}
 
-// A message that did not get an answer: the text stays, with Retry (Figma §14, CF §24).
-const FAILED_COPY = {
-  GUIDE_TIMEOUT: "Guide took too long to answer. Your message is kept, so you can retry.",
-  GUIDE_STREAM_INTERRUPTED: "The answer was interrupted. Your message is kept, so you can retry.",
-  GUIDE_NETWORK_ERROR: "Guide couldn't be reached. Your message is kept, so you can retry.",
-  GUIDE_STATE_CONFLICT: "This message is still being answered. Retry in a moment.",
-  GUIDE_RATE_LIMITED: "Your message wasn't sent yet. You can retry when the wait is over.",
-};
+const FOCUSABLE =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-function FailedSend({ failed, disabled, onRetry, routes, onAction }) {
-  const copy = FAILED_COPY[failed.code];
-  const limited = failed.code === "GUIDE_RATE_LIMITED";
-  return (
-    <div className="zg-failed">
-      <div className={`zg-notice zg-notice--${limited ? "warning" : "error"}`} role={limited ? "status" : "alert"}>
-        {limited ? <AlertTriangle aria-hidden="true" /> : <XCircle aria-hidden="true" />}
-        <span>{copy || "Guide is having trouble right now. You can retry or use the website directly."}</span>
-      </div>
-      <div className="zg-actions">
-        <button type="button" className="zg-btn zg-btn--secondary" disabled={disabled} onClick={onRetry}>
-          <RotateCcw aria-hidden="true" size={16} /> Retry
-        </button>
-      </div>
-      {!copy && <Actions actions={routes} onAction={onAction} />}
-    </div>
-  );
-}
-
-// RATE_LIMITED (WF-16, CF §23, CF-AT-32): stable state with the approved copy, direct routes,
-// and — only when the server sent Retry-After — an accessible countdown. The countdown text
-// is a role="timer" (not announced every second) and works without animation.
-function RateLimitBanner({ rateLimit, routes, onAction }) {
-  const [now, setNow] = useState(() => Date.now());
+function useIsMobile() {
+  const [mobile, setMobile] = useState(isMobile);
   useEffect(() => {
-    if (!rateLimit.known) return undefined;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [rateLimit]);
-  const secs = rateLimit.known ? Math.max(0, Math.ceil((rateLimit.until - now) / 1000)) : null;
-  return (
-    <div className="zg-banner">
-      <div className="zg-notice zg-notice--warning" role="status">
-        <AlertTriangle aria-hidden="true" />
-        <div>
-          <span>{RATE_LIMIT_COPY}</span>
-          {secs !== null && (
-            <div className="zg-meta" role="timer" aria-live="off">
-              {secs > 0 ? `You can try again in ${secs} ${secs === 1 ? "second" : "seconds"}.` : "You can try again now."}
-            </div>
-          )}
-        </div>
-      </div>
-      <Actions actions={routes} onAction={onAction} />
-    </div>
-  );
+    const on = () => setMobile(isMobile());
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  return mobile;
 }
 
-// Polite, non-blocking warning before session expiry (Figma §13 "Timeout/session expiry").
-function IdleBanner({ warning, onStay }) {
-  return (
-    <div className="zg-banner">
-      <div className="zg-notice" role="status">
-        <Clock aria-hidden="true" />
-        <span>
-          {warning.canExtend
-            ? "This conversation will end soon because it has been inactive."
-            : "This conversation will end soon. You can start a new one at any time."}
-        </span>
-      </div>
-      {warning.canExtend && (
-        <div className="zg-actions" style={{ marginTop: 8 }}>
-          <button type="button" className="zg-btn zg-btn--secondary" onClick={onStay}>
-            Stay in conversation
-          </button>
-        </div>
-      )}
-    </div>
-  );
+// Mobile keyboard (Figma §4.2 "Composer sticky above soft keyboard", §9.2): the shell follows
+// the visual viewport, so the composer stays fully visible above the on-screen keyboard.
+function useVisualViewport(active) {
+  const [box, setBox] = useState(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!active || !vv) return undefined;
+    const sync = () => setBox({ height: Math.round(vv.height), top: Math.round(vv.offsetTop) });
+    const first = requestAnimationFrame(sync);
+    vv.addEventListener("resize", sync);
+    vv.addEventListener("scroll", sync);
+    return () => {
+      cancelAnimationFrame(first);
+      vv.removeEventListener("resize", sync);
+      vv.removeEventListener("scroll", sync);
+    };
+  }, [active]);
+  return active ? box : null;
 }
 
 const PUBLIC_STATUS = {
@@ -184,14 +117,18 @@ function PublicContext({ context }) {
   );
 }
 
-function StatePanel({ icon: Icon, title, text, children, role = "status" }) {
+// WF-12 first-use notice (exact wireframe copy).
+function PrivacyFirstUse({ onPrivacy, onContinue }) {
   return (
-    <div className="zg-state" role={role}>
-      <div className="zg-state-icon"><Icon aria-hidden="true" /></div>
-      <h3>{title}</h3>
-      <p>{text}</p>
-      {children}
-    </div>
+    <section className="zg-privacy" aria-labelledby="zg-privacy-h">
+      <h3 id="zg-privacy-h">Privacy in Guide</h3>
+      <p>Use Guide without sharing account credentials. We may process your messages to answer your request and operate the service.</p>
+      <p>Do not enter passwords, PINs, payment card details, or private event links.</p>
+      <div className="zg-actions">
+        <button type="button" className="zg-btn zg-btn--secondary" onClick={onPrivacy}>Privacy notice</button>
+        <button type="button" className="zg-btn zg-btn--ghost" onClick={onContinue}>Continue</button>
+      </div>
+    </section>
   );
 }
 
@@ -202,7 +139,14 @@ function splitWelcome(text) {
   return m ? [m[1], m[2]] : [t, null];
 }
 
-export default function GuideWidget({ page, pathname, suppressed = false }) {
+// variant "overlay": the launcher opens the full Guide page design over the current page
+// (GuidePage, with a close control) instead of the compact panel. The overlay owns the
+// conversation and stays mounted once opened, so closing and reopening keeps it. `pageLinks`
+// and `pageOpenHref` are passed through to GuidePage (the website's own paths/link opening).
+export default function GuideWidget({
+  page, pathname, suppressed = false, variant = "panel", pageLinks, pageOpenHref = null,
+}) {
+  const overlay = variant === "overlay";
   const navigate = useNavigate();
   const [boot, setBoot] = useState(null); // bootstrap config; null until loaded
   const [open, setOpen] = useState(false);
@@ -218,12 +162,24 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
       setMenuOpen(false);
     }
   }
+  const overlayRef = useRef(null);
+  const [overlayMounted, setOverlayMounted] = useState(false);
+  const [overlayRequest, setOverlayRequest] = useState(null); // CTA / deep-link quick action
+  const [maximized, setMaximized] = useState(false); // popup window vs full design
+  if (overlay && open && !overlayMounted) setOverlayMounted(true); // sticky: keeps the conversation
   const [draft, setDraft] = useState("");
   const [atBottom, setAtBottom] = useState(true);
   const [chosenIntent, setChosenIntent] = useState(null); // GC-005 selected quick reply
   const [pendingIntent, setPendingIntent] = useState(null);
-  const [layers] = useState(createLayerStack); // nested layers: Back/Escape close these first
+  const [privacySeen, setPrivacySeen] = useState(privacyNoticeSeen);
+  const [layerCount, setLayerCount] = useState(0);
+  // Nested layers: Back/Escape close these first. The count drives the header Back control.
+  const [layers] = useState(() => createLayerStack(setLayerCount));
+  const online = useOnline();
+  const mobile = useIsMobile();
+  const viewportBox = useVisualViewport(open && mobile);
   const launcherRef = useRef(null);
+  const panelRef = useRef(null);
   const titleRef = useRef(null);
   const bodyRef = useRef(null);
   const inputRef = useRef(null);
@@ -231,6 +187,7 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
   const historyArmedRef = useRef(false); // a Guide history entry is on top (mobile Back)
   const openedAtRef = useRef(0);
   const launcherTrackedRef = useRef(false);
+  const deepIntentRef = useRef(null); // quick action requested by an inline CTA / deep link
 
   const directRoutes = useMemo(() => boot?.direct_routes || [], [boot]);
   const getPageContext = useCallback(
@@ -261,6 +218,13 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
     };
   }, [page, boot]);
 
+  const available = !!boot?.enabled && !suppressed && !!page;
+  // Inline "Ask Guide" CTAs render only where Guide can actually open.
+  useEffect(() => {
+    setGuideAvailable(available);
+    return () => setGuideAvailable(false);
+  }, [available]);
+
   useEffect(() => {
     if (!boot?.enabled || !page || launcherTrackedRef.current) return;
     launcherTrackedRef.current = true;
@@ -287,10 +251,14 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
     return watchViewerEventContext(viewerEvent, () => refreshContext("launcher"));
   }, [viewerEvent, boot?.enabled, refreshContext]);
 
-  const openPanel = useCallback(() => {
+  const openPanel = useCallback((entryPoint = "launcher") => {
+    const entry = typeof entryPoint === "string" ? entryPoint : "launcher";
     setOpen(true);
     openedAtRef.current = Date.now();
-    track("opened", { entry_point: "launcher", page_id: page?.page_id, page_type: page?.page_type, device_class: deviceClass() });
+    track("opened", {
+      entry_point: entry, page_id: page?.page_id, page_type: page?.page_type,
+      device_class: deviceClass(), consent_state: getGuideAnalyticsConsent(),
+    });
     // Mobile full-screen shell: Back closes Guide instead of leaving the page (WF-18 A5).
     if (isMobile() && !historyArmedRef.current) {
       try {
@@ -300,8 +268,9 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
         /* history unavailable: Back simply behaves as the browser's default */
       }
     }
-    if (state.status === "closed" || state.status === "unavailable") g.open();
-  }, [g, state.status, page]);
+    // Offline: no session attempt now; it starts when the connection returns.
+    if (!overlay && (state.status === "closed" || state.status === "unavailable") && navigator.onLine !== false) g.open(entry);
+  }, [g, state.status, page, overlay]);
 
   const closePanel = useCallback(({ fromHistory = false } = {}) => {
     setOpen(false);
@@ -318,6 +287,34 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
     });
     requestAnimationFrame(() => launcherRef.current?.focus()); // focus returns to invoker
   }, []);
+
+  // Inline "Ask Guide" CTA / ?guide= deep link (WF §2.1): open Guide on the requested quick
+  // action. A typed flow (viewer help, demo, sales) starts; nothing is ever sent as text.
+  const handleOpenRequest = useCallback(
+    (req) => {
+      if (!req) return;
+      deepIntentRef.current = req.intentId || null;
+      // Overlay: GuidePage owns the conversation, so the request is handed to it.
+      if (overlay && req.intentId) setOverlayRequest({ intentId: req.intentId, at: Date.now() });
+      if (!open) openPanel(req.entryPoint || "inline_cta");
+    },
+    [open, openPanel, overlay],
+  );
+  useEffect(() => {
+    if (!available) return undefined;
+    const onOpen = () => handleOpenRequest(takePendingGuideOpen());
+    const first = requestAnimationFrame(onOpen); // a request made before Guide loaded
+    window.addEventListener(GUIDE_OPEN_EVENT, onOpen);
+    return () => {
+      cancelAnimationFrame(first);
+      window.removeEventListener(GUIDE_OPEN_EVENT, onOpen);
+    };
+  }, [available, handleOpenRequest]);
+
+  // Back online: an unstarted or failed session starts again by itself (Figma §14 "Offline").
+  useEffect(() => {
+    if (!overlay && online && open && (state.status === "closed" || state.status === "unavailable") && boot?.enabled) g.open();
+  }, [online, open, state.status, boot?.enabled, g, overlay]);
 
   // The header menu is a nested layer too.
   useEffect(() => {
@@ -347,10 +344,32 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
     return () => window.removeEventListener("popstate", onPop);
   }, [open, layers, closePanel]);
 
-  // Focus enters Guide on open (Figma §13.2).
+  // Focus enters Guide on open (Figma §13.2): the Guide heading, or the error heading when
+  // Guide opens straight into an unavailable/offline state.
   useEffect(() => {
-    if (open) requestAnimationFrame(() => titleRef.current?.focus());
-  }, [open]);
+    if (!open) return undefined;
+    const id = requestAnimationFrame(() => {
+      if (overlay) {
+        overlayRef.current?.querySelector(".zgp-close")?.focus();
+        return;
+      }
+      const err = bodyRef.current?.querySelector("[data-zg-initial-focus]");
+      (err || titleRef.current)?.focus();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [open, overlay]);
+
+  // Overlay: the page behind does not scroll while Guide covers it (maximized, or the popup
+  // filling a phone screen).
+  useEffect(() => {
+    if (!overlay || !open || (!maximized && !mobile)) return undefined;
+    const root = document.documentElement;
+    const previous = root.style.overflow;
+    root.style.overflow = "hidden";
+    return () => {
+      root.style.overflow = previous;
+    };
+  }, [overlay, open, maximized, mobile]);
 
   // Escape closes the top Guide layer. Nothing typed is lost: drafts and form values live in
   // the conversation state, which survives closing the panel (Figma §10.1).
@@ -365,6 +384,33 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [open, layers, closePanel]);
 
+  // Mobile full-screen shell is modal: Tab and Shift+Tab cycle inside Guide (WF-18, §13).
+  const onPanelKeyDown = (e) => {
+    if (!mobile || e.key !== "Tab" || !panelRef.current) return;
+    const nodes = [...panelRef.current.querySelectorAll(FOCUSABLE)].filter((n) => !n.closest("[hidden]"));
+    if (!nodes.length) return;
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || !panelRef.current.contains(active) || active === titleRef.current)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+  // Focus that escapes the modal shell (e.g. a click on the page behind) is brought back.
+  useEffect(() => {
+    if (!open || !mobile) return undefined;
+    const onFocusIn = (e) => {
+      const panel = panelRef.current;
+      if (panel && !panel.contains(e.target)) titleRef.current?.focus();
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [open, mobile]);
+
   // Follow new content only while the visitor is at the bottom (Figma §9.2).
   const onScroll = () => {
     const el = bodyRef.current;
@@ -374,21 +420,19 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
     if (atBottom && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   }, [state.items, atBottom]);
 
-  // Completed answers are announced once, politely; streaming tokens are not (Figma §13).
-  const announce = useMemo(() => {
-    const last = [...state.items].reverse().find((i) => i.kind === "assistant" && !i.streaming && !i.incomplete);
-    return last?.msg?.text || "";
-  }, [state.items]);
-
   const onAction = useCallback(
     (a) => {
       if (a.type === "__local" && a.action_id === "__new_session") return g.restart();
       if (a.action_id && a.action_id !== "source" && a.action_id !== "privacy-notice") {
-        track("cta_clicked", { cta_id: a.action_id, cta_type: a.type });
+        track("cta_clicked", { cta_id: a.action_id, cta_type: a.type, destination_id: a.action_id });
       }
       if (a.type === "start_support_flow") return g.startFlow(a.flow_type || "viewer_other");
       if (a.type === "start_lead_flow") return g.startLead(a.action_id === "talk-to-sales-flow" ? "sales" : "demo");
-      if (a.type === "handoff" && a.target === "organizer") return g.handoffTo("organizer");
+      if (a.type === "handoff" && a.target === "organizer") {
+        track("escalation_selected", { route_type: "organizer" });
+        return g.handoffTo("organizer");
+      }
+      if (a.type === "handoff" || a.type === "sign_in") track("escalation_selected", { route_type: a.target || a.type });
       if (isSafeHref(a.href)) {
         // In-app navigation keeps the conversation (Guide stays mounted across routes).
         if (historyArmedRef.current && window.history.state?.zgGuide) {
@@ -406,22 +450,46 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
     [g, navigate, closePanel],
   );
 
-  const onQuick = async (intent) => {
-    track("intent_selected", { intent_id: intent.intent_id, page_id: page?.page_id });
-    setChosenIntent(intent.intent_id);
-    setPendingIntent(intent.intent_id);
-    try {
-      const route = QUICK_FLOWS[intent.intent_id];
-      if (route?.[0] === "support") await g.startFlow(route[1]);
-      else if (route?.[0] === "lead") await g.startLead(route[1], intent.intent_id);
-      else await g.send(intent.label, intent.intent_id);
-    } finally {
-      setPendingIntent(null);
-    }
+  const acknowledgePrivacy = () => {
+    markPrivacyNoticeSeen();
+    setPrivacySeen(true);
   };
 
+  const onQuick = useCallback(
+    async (intent) => {
+      track("intent_selected", { intent_id: intent.intent_id, page_id: page?.page_id });
+      markPrivacyNoticeSeen();
+      setPrivacySeen(true);
+      setChosenIntent(intent.intent_id);
+      setPendingIntent(intent.intent_id);
+      try {
+        const route = QUICK_FLOWS[intent.intent_id];
+        if (route?.[0] === "support") await g.startFlow(route[1]);
+        else if (route?.[0] === "lead") await g.startLead(route[1], intent.intent_id);
+        else await g.send(intent.label, intent.intent_id);
+      } finally {
+        setPendingIntent(null);
+      }
+    },
+    [g, page],
+  );
+
+  // Once the session is ready, act on a quick action requested by a CTA or deep link: a typed
+  // flow starts; a question intent is only highlighted for the visitor to choose.
+  useEffect(() => {
+    if (state.status !== "ready" || !deepIntentRef.current) return;
+    const intentId = deepIntentRef.current;
+    deepIntentRef.current = null;
+    if (QUICK_FLOWS[intentId]) {
+      const known = state.suggested.find((i) => i.intent_id === intentId);
+      onQuick(known || { intent_id: intentId, label: intentId });
+    } else {
+      requestAnimationFrame(() => bodyRef.current?.querySelector(`[data-intent="${intentId}"]`)?.focus());
+    }
+  }, [state.status, state.suggested, onQuick]);
+
   const onResume = (resume) => {
-    if (resume.kind === "lead_flow") return g.startLead("demo");
+    if (resume.kind === "lead_flow") return g.startLead(resume.flow_kind === "sales" ? "sales" : "demo");
     const el = bodyRef.current?.querySelector(`[data-flow-id="${resume.flow_id}"]`);
     el?.scrollIntoView({ block: "center" });
     el?.querySelector("h3")?.focus();
@@ -434,26 +502,27 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
   const submit = (e) => {
     e.preventDefault();
     const text = draft;
-    if (!text.trim() || state.sending || rlActive) return;
+    if (!text.trim() || state.sending || rlActive || !online) return;
     setDraft("");
     setAtBottom(true);
+    acknowledgePrivacy();
     // Text the server could not take (too long, session ended) comes back to the composer.
     g.send(text).then((r) => {
       if (r === "recover") setDraft((d) => d || text.trim());
     });
   };
 
-  // Composer autogrow: 40px -> 144px, then scroll inside (Figma §3.4).
+  // Composer autogrow: 52 px -> 144 px control, then scroll inside (Figma §3.4).
   useEffect(() => {
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(144, Math.max(40, el.scrollHeight))}px`;
+    el.style.height = `${Math.min(142, Math.max(50, el.scrollHeight))}px`;
   }, [draft]);
 
   // Second in the shared bottom-right stack (guide/safeArea.js): if a console launcher were
   // ever mounted too, this one sits above it rather than on the same spot.
-  const showLauncher = !!boot?.enabled && !suppressed && !!page && !open;
+  const showLauncher = available && !open;
   useGuideLauncher(launcherRef, { order: 1, enabled: showLauncher });
 
   if (!boot?.enabled || suppressed) return null;
@@ -462,19 +531,50 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
   const maxChars = boot.limits?.max_message_chars || 4000;
   const isViewer = page?.page_type === "viewer";
   const header = state.eventContext?.event_display_name;
-  const canType = state.status === "ready" && !rlActive;
+  const canType = state.status === "ready" && !rlActive && online;
 
   // Header descriptor per Figma §8: degraded > lead flow > viewer context > default.
   const lastAnswer = [...state.items].reverse().find((i) => i.kind === "assistant" && !i.streaming);
   const degraded = state.status === "unavailable" || lastAnswer?.msg?.answer_class === "degraded";
-  const activeLead = [...state.items].reverse().find(isActiveLead);
+  const activeLeadIndex = state.items.findLastIndex(isActiveLead);
+  const activeLead = activeLeadIndex >= 0 ? state.items[activeLeadIndex] : null;
+  const activeFlowIndex = state.items.findLastIndex((i) => i.kind === "flow" && i.flow.status === "in_progress");
+  const activeFlow = activeFlowIndex >= 0 ? state.items[activeFlowIndex] : null;
   let descriptor = "Public AI Assistant";
   if (degraded) descriptor = "Help temporarily limited";
   else if (activeLead) descriptor = leadTitle(activeLead.flow);
-  else if (isViewer) descriptor = header ? `Viewer help · ${header}` : "Viewer help";
+  else if (isViewer || activeFlow) descriptor = header ? `Viewer help · ${header}` : "Viewer help";
+
+  // Header Back (Figma §8: viewer context, lead flow and nested mobile states): closes a
+  // nested layer first, then steps back inside the most recent flow — a viewer step goes back
+  // (or leaves the flow from its first step); a lead form returns from review to editing, or
+  // is paused with everything kept. Back never leaves the page.
+  const backTarget =
+    mobile && layerCount > 0
+      ? "layer"
+      : activeLead && activeLeadIndex > activeFlowIndex
+        ? "lead"
+        : activeFlow
+          ? "flow"
+          : null;
+  const headerBack = () => {
+    if (backTarget === "layer") {
+      layers.closeTop();
+    } else if (backTarget === "lead") {
+      const phase = activeLead.phase || "collecting";
+      g.patchItem(activeLead.id, phase === "collecting" ? { phase: "paused" } : { phase: "collecting", focusPending: true });
+    } else if (backTarget === "flow" && !activeFlow.busy) {
+      g.stepFlow(activeFlow.id, activeFlow.flow, { command: activeFlow.flow.step?.allow_back ? "back" : "cancel" });
+    }
+    if (backTarget !== "flow") requestAnimationFrame(() => titleRef.current?.focus());
+  };
 
   const [welcomeHeading, welcomeRest] = splitWelcome(state.welcome);
-  const quickDisabled = !!pendingIntent || state.sending || rlActive;
+  const quickDisabled = !!pendingIntent || state.sending || rlActive || !online;
+  const helpCenter = directRoutes.find((r) => r.action_id === "help-center");
+  const privacyHref = boot.privacy?.privacy_notice_href || "/privacy";
+  const openPrivacy = () => onAction({ action_id: "privacy-notice", type: "navigate", href: privacyHref, label: "Privacy" });
+  const panelStyle = viewportBox ? { "--zg-vvh": `${viewportBox.height}px`, "--zg-vvtop": `${viewportBox.top}px` } : undefined;
 
   return (
     <NestedLayers.Provider value={layers}>
@@ -484,22 +584,68 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
           ref={launcherRef}
           type="button"
           className={`zg-launcher${isViewer ? " zg-launcher--viewer" : ""}`}
-          onClick={openPanel}
+          onClick={() => openPanel("launcher")}
           aria-haspopup="dialog"
           aria-label="Open ZoikoStream Guide"
           title="Open ZoikoStream Guide"
         >
-          <GuideAvatar />
+          <span className="zg-launcher-mark" aria-hidden="true">
+            <img src="/zoiko-mark.png" alt="" />
+          </span>
         </button>
       )}
 
-      {open && (
-        <section className="zg-panel" role="dialog" aria-modal="false" aria-labelledby="zg-title">
+      {overlay && overlayMounted && (
+        <div
+          ref={overlayRef}
+          className={`zgp-shell zgp-shell--${maximized ? "max" : "popup"}`}
+          role="dialog"
+          aria-modal={maximized || mobile ? "true" : "false"}
+          aria-label="Zoiko Stream Guide"
+          hidden={!open}
+        >
+          <GuidePage
+            links={pageLinks}
+            openHref={pageOpenHref}
+            request={overlayRequest}
+            mode={maximized ? "max" : "popup"}
+            onMinimize={() => closePanel()}
+            onToggleMax={() => setMaximized((m) => !m)}
+            onClose={() => {
+              setMaximized(false);
+              closePanel();
+            }}
+          />
+        </div>
+      )}
+
+      {open && !overlay && (
+        <section
+          ref={panelRef}
+          className={`zg-panel${viewportBox ? " zg-panel--vv" : ""}`}
+          role="dialog"
+          aria-modal={mobile ? "true" : "false"}
+          aria-labelledby="zg-title"
+          onKeyDown={onPanelKeyDown}
+          style={panelStyle}
+        >
           <header className="zg-header">
-            <GuideAvatar size="lg" online />
+            {backTarget && (
+              <button type="button" className="zg-iconbtn" aria-label="Back" onClick={headerBack}>
+                <ChevronLeft aria-hidden="true" />
+              </button>
+            )}
+            {!backTarget && (
+              <span className="zg-brandmark" aria-hidden="true">
+                <img src="/zoiko-mark.png" alt="" />
+              </span>
+            )}
             <div className="zg-titles" ref={titleRef} tabIndex={-1}>
               <h2 id="zg-title">Guide</h2>
-              <p>{descriptor}</p>
+              <p>
+                {!degraded && <span className="zg-online" aria-hidden="true" />}
+                {descriptor}
+              </p>
             </div>
             <button
               type="button"
@@ -520,10 +666,21 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
                   type="button"
                   onClick={() => {
                     setMenuOpen(false);
-                    onAction({ type: "navigate", href: boot.privacy?.privacy_notice_href || "/privacy", label: "Privacy" });
+                    openPrivacy();
                   }}
                 >
                   <Lock aria-hidden="true" /> Privacy notice
+                </button>
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    closePanel();
+                    navigate("/guide");
+                  }}
+                >
+                  <Maximize2 aria-hidden="true" /> Open full page
                 </button>
                 {state.status === "ready" && (
                   <button
@@ -544,25 +701,26 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
           <div className="zg-body" ref={bodyRef} onScroll={onScroll}>
             <div className="zg-stack">
               {state.status === "starting" && (
-                <div className="zg-row">
-                  <GuideAvatar />
-                  <div className="zg-bubble">
-                    <span className="zg-typing" aria-label="Starting Guide">
-                      <span />
-                      <span />
-                      <span />
-                    </span>
-                  </div>
-                </div>
+                <p className="zg-progress" role="status">
+                  <span className="zg-progress-dot" aria-hidden="true" />
+                  Starting Guide…
+                </p>
               )}
 
-              {state.status === "unavailable" && (
+              {!online && state.status !== "ready" && (
+                <StatePanel icon={WifiOff} role="alert" title={OFFLINE_TITLE} text={OFFLINE_TEXT} focusHeading>
+                  <Actions actions={directRoutes} onAction={onAction} max={4} />
+                </StatePanel>
+              )}
+
+              {online && state.status === "unavailable" && (
                 // WF-15: Guide failure is independent of the site; direct routes remain.
                 <StatePanel
                   icon={WifiOff}
                   role="alert"
                   title="Guide is temporarily unavailable."
                   text="You can still use ZoikoStream normally."
+                  focusHeading
                 >
                   <Actions actions={directRoutes} onAction={onAction} max={4} />
                   <div className="zg-actions" style={{ justifyContent: "center" }}>
@@ -591,7 +749,6 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
 
               {state.status === "ready" && (
                 <div className="zg-welcome">
-                  <GuideAvatar size="xl" />
                   {isViewer ? (
                     <>
                       <h3>Help with this event</h3>
@@ -605,6 +762,7 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
                     </>
                   )}
                   {isViewer && state.eventContext && <PublicContext context={state.eventContext} />}
+                  {!privacySeen && <PrivacyFirstUse onPrivacy={openPrivacy} onContinue={acknowledgePrivacy} />}
                   {state.suggested.length > 0 && (
                     <>
                       <p className="zg-eyebrow-label" id="zg-topics">Popular topics</p>
@@ -616,6 +774,7 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
                             <button
                               key={i.intent_id}
                               type="button"
+                              data-intent={i.intent_id}
                               className={`zg-quick-card${selected ? " is-selected" : ""}`}
                               aria-pressed={selected}
                               disabled={quickDisabled}
@@ -629,52 +788,51 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
                       </div>
                     </>
                   )}
+                  {!isViewer && (
+                    <p className="zg-popular">
+                      <span>Popular:</span>{" "}
+                      <button
+                        type="button"
+                        className="zg-link"
+                        disabled={quickDisabled}
+                        onClick={() => {
+                          acknowledgePrivacy();
+                          track("intent_selected", { intent_id: POPULAR_QUESTION.intent_id, page_id: page?.page_id });
+                          g.send(POPULAR_QUESTION.text, POPULAR_QUESTION.intent_id);
+                        }}
+                      >
+                        {POPULAR_QUESTION.text}
+                      </button>
+                    </p>
+                  )}
                   {isViewer && (
                     <p className="zg-fineprint">Private organizer details are not available in public chat.</p>
                   )}
                   <p className="zg-fineprint">Answers are AI-generated from ZoikoStream&apos;s public information.</p>
+                  {/* WF-02 / Figma §7.1: "Privacy | Help Center" */}
+                  <nav className="zg-welcome-links" aria-label="Guide links">
+                    <button type="button" className="zg-link" onClick={openPrivacy}>Privacy</button>
+                    {helpCenter && isSafeHref(helpCenter.href) && (
+                      <button type="button" className="zg-link" onClick={() => onAction(helpCenter)}>Help Center</button>
+                    )}
+                  </nav>
                 </div>
               )}
 
-              {state.status === "ready" && state.items.map((item) => {
-                if (item.kind === "user") {
-                  return (
-                    <div key={item.id}>
-                      <div className="zg-row zg-row--user">
-                        <span className="zg-sr">You said:</span>
-                        <div className="zg-user">{item.text}</div>
-                      </div>
-                      {item.failed && (
-                        <FailedSend
-                          failed={item.failed}
-                          disabled={state.sending || rlActive}
-                          onRetry={() => g.retry(item.id)}
-                          routes={directRoutes}
-                          onAction={onAction}
-                        />
-                      )}
-                    </div>
-                  );
-                }
-                if (item.kind === "assistant") {
-                  return (
-                    <AssistantMessage
-                      key={item.id}
-                      item={item}
-                      onAction={onAction}
-                      onResume={onResume}
-                      onSuggest={onQuick}
-                      onPatch={g.patchItem}
-                    />
-                  );
-                }
-                if (item.kind === "flow") {
-                  return <SupportStep key={item.id} item={item} onStep={g.stepFlow} onAction={onAction} />;
-                }
-                if (item.kind === "lead") return <LeadForm key={item.id} item={item} onAction={onAction} onPatch={g.patchItem} />;
-                if (item.kind === "notice") return <Notice key={item.id} item={item} onAction={onAction} />;
-                return null;
-              })}
+              {state.status === "ready" && (
+                <ConversationItems
+                  g={g}
+                  directRoutes={directRoutes}
+                  online={online}
+                  rlActive={rlActive}
+                  onAction={onAction}
+                  onResume={onResume}
+                  onQuick={onQuick}
+                  onKeepFlow={() =>
+                    requestAnimationFrame(() => bodyRef.current?.querySelector(`[data-flow-id="${activeFlow?.flow.flow_id}"] h3`)?.focus())
+                  }
+                />
+              )}
             </div>
             {!atBottom && (
               <button
@@ -690,9 +848,20 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
             )}
           </div>
 
-          <div className="zg-sr" aria-live="polite" aria-atomic="true">{announce}</div>
+          <div className="zg-sr" aria-live="polite" aria-atomic="true">{state.announce.text}</div>
 
           <div className="zg-composer">
+            {!online && state.status === "ready" && (
+              <div className="zg-banner zg-offline" role="alert">
+                <div className="zg-notice zg-notice--warning">
+                  <WifiOff aria-hidden="true" />
+                  <div>
+                    <strong>{OFFLINE_TITLE}</strong>
+                    <div>{OFFLINE_TEXT}</div>
+                  </div>
+                </div>
+              </div>
+            )}
             {state.status === "ready" && state.rateLimit && (
               <RateLimitBanner rateLimit={state.rateLimit} routes={directRoutes} onAction={onAction} />
             )}
@@ -707,7 +876,7 @@ export default function GuideWidget({ page, pathname, suppressed = false }) {
                 rows={1}
                 value={draft}
                 maxLength={maxChars}
-                placeholder="Ask anything about ZoikoStream…"
+                placeholder="Ask Guide..."
                 disabled={!canType}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {

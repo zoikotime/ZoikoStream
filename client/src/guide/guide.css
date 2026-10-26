@@ -1,381 +1,429 @@
-/* ZoikoStream Guide — visual system.
-   Layout, sizing and accessibility rules follow ZST-UX-FIGMA-PUB-GUIDE-001 (440 px dock,
-   full-screen under 768 px, 44 px targets, visible focus, reduced motion). The palette uses
-   the site's own violet -> magenta brand (the same gradient as the event-page hero) so Guide
-   reads as native ZoikoStream. Every white-on-color pairing below is >= 4.5:1. Scoped under
-   .zg so nothing here can restyle the host page. */
+/* ZoikoStream Guide — popup visual system. Brand surface shared with the full Guide page
+   (/guide, guidePage.css): deep navy header and the cyan -> violet -> pink brand gradient on the
+   launcher and send control; violet is the single interactive accent. Layout per Figma §4: 440 px
+   dock (400-520), tablet right sheet (768-1023), full-screen shell under 768 px; 44 px
+   targets, 2 px focus ring, reduced-motion variant. Scoped under .zg so nothing here can
+   restyle the host page. */
 
 .zg {
-  --zg-brand: #6d28d9;          /* violet-700: white text 7.1:1 */
-  --zg-brand-strong: #5b21b6;
-  --zg-brand-text: #6d28d9;     /* brand-colored text on light surfaces */
-  --zg-accent: #a21caf;         /* fuchsia-700: white text 6.3:1 */
-  --zg-grad: linear-gradient(135deg, #5b21b6 0%, #7c3aed 48%, #a21caf 100%);
-  --zg-grad-soft: linear-gradient(135deg, #f3edff 0%, #fbeefd 100%);
-  --zg-ink: #1a1033;
-  --zg-text: #2b2440;
-  --zg-muted: #625a78;          /* 6.0:1 on white */
-  --zg-border: #e7e1f3;
-  --zg-surface: #ffffff;
-  --zg-subtle: #f7f4fd;
-  --zg-canvas: linear-gradient(180deg, #faf7ff 0%, #ffffff 220px);
-  --zg-success: #157347;
-  --zg-success-soft: #e8f6ee;
-  --zg-warning: #8a5a12;
-  --zg-warning-soft: #fdf4e3;
-  --zg-danger: #b42345;
-  --zg-danger-soft: #fdecef;
-  --zg-shadow-sm: 0 1px 2px rgba(26, 16, 51, 0.06), 0 2px 8px rgba(26, 16, 51, 0.05);
-  --zg-shadow-lg: 0 24px 64px rgba(46, 16, 101, 0.22), 0 4px 16px rgba(46, 16, 101, 0.10);
-  --zg-focus: 0 0 0 2px #fff, 0 0 0 4px #8b5cf6;
+  /* Core colors (brand): navy structure, violet accent */
+  --zs-guide-ink: #0B1033;
+  --zs-guide-ink-2: #1E2A5A;
+  --zs-guide-teal: #8B5CF6;
+  --zs-guide-cyan: #22D3EE;
+  --zs-guide-navy: #0A0F2E;
+  --zs-guide-brand-gradient: linear-gradient(135deg, #22D3EE 0%, #7C5CFF 50%, #EC4899 100%);
+  --zs-guide-text: #1B2B3D;
+  --zs-guide-muted: #5E7288;
+  --zs-guide-border: #D6DFE8;
+  --zs-guide-surface: #FFFFFF;
+  --zs-guide-subtle: #F4F7FA;
+  --zs-guide-success: #1E8E5A;
+  --zs-guide-warning: #B7791F;
+  --zs-guide-danger: #B23A48;
+  /* Derived (contrast-checked) roles. #8B5CF6 is the accent for fills, borders and focus; text
+     and white-on-fill use the deeper violet below so both pass 4.5:1. */
+  --zs-guide-teal-ink: #6D28D9;        /* violet text on white 7.1:1; white on it 7.1:1 */
+  --zs-guide-teal-soft: #F3EEFF;
+  --zs-guide-warning-ink: #7A4F10;     /* warning text on soft amber */
+  --zs-guide-warning-soft: #FBF3E4;
+  --zs-guide-danger-soft: #FBEDEF;
+  --zs-guide-success-soft: #E9F5EF;
+  /* §3.3 radii and elevation */
+  --zs-guide-radius-sm: 8px;
+  --zs-guide-radius-md: 12px;
+  --zs-guide-radius-lg: 16px;
+  --zs-guide-radius-xl: 20px;
+  --zs-guide-elevation-1: 0 2px 8px rgba(11, 31, 58, 0.08);
+  --zs-guide-elevation-2: 0 12px 32px rgba(11, 31, 58, 0.14);
+  /* §3.4 2 px visible high-contrast focus */
+  --zs-guide-focus: 0 0 0 2px var(--zs-guide-surface), 0 0 0 4px var(--zs-guide-ink-2);
   font-family: "Aptos", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
-  color: var(--zg-text);
+  color: var(--zs-guide-text);
 }
 .dark .zg {
-  --zg-brand-text: #c4b5fd;
-  --zg-ink: #f3efff;
-  --zg-text: #e4def5;
-  --zg-muted: #a99fc4;
-  --zg-border: #2e2547;
-  --zg-surface: #151027;
-  --zg-subtle: #1e1735;
-  --zg-canvas: linear-gradient(180deg, #1a1330 0%, #151027 220px);
-  --zg-grad-soft: linear-gradient(135deg, #261a47 0%, #2c1636 100%);
-  --zg-success: #5fd39b;
-  --zg-success-soft: #10291d;
-  --zg-warning: #f0c070;
-  --zg-warning-soft: #33280f;
-  --zg-danger: #f58ca0;
-  --zg-danger-soft: #3a1622;
-  --zg-shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.55);
-  --zg-focus: 0 0 0 2px #151027, 0 0 0 4px #a78bfa;
+  --zs-guide-ink: #EAF1F8;
+  --zs-guide-ink-2: #C9D8E8;
+  --zs-guide-teal-ink: #C4B5FD;
+  --zs-guide-teal-soft: #251A47;
+  --zs-guide-text: #DCE6F0;
+  --zs-guide-muted: #9DB0C4;
+  --zs-guide-border: #2A3D55;
+  --zs-guide-surface: #0F1B2D;
+  --zs-guide-subtle: #16253A;
+  --zs-guide-success: #5CCB95;
+  --zs-guide-success-soft: #0F2A1F;
+  --zs-guide-warning: #E3B062;
+  --zs-guide-warning-ink: #F0C98A;
+  --zs-guide-warning-soft: #33280F;
+  --zs-guide-danger: #F08C9A;
+  --zs-guide-danger-soft: #3A1622;
+  --zs-guide-elevation-2: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
 .zg *, .zg *::before, .zg *::after { box-sizing: border-box; }
-.zg :focus-visible { outline: none; box-shadow: var(--zg-focus); }
+.zg :focus-visible { outline: none; box-shadow: var(--zs-guide-focus); }
 .zg button { font-family: inherit; }
 .zg-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.zg-caption { font-size: 12px; line-height: 16px; } /* Caption / 12 — the type floor */
 
-/* ── Avatar (brand icon) ───────────────────────────────────────────────────────────── */
-.zg-avatar {
-  position: relative; flex: none; display: grid; place-items: center;
-  width: 32px; height: 32px; border-radius: 50%; background: #fff;
-  box-shadow: 0 0 0 1px rgba(109, 40, 217, 0.18), var(--zg-shadow-sm); overflow: hidden;
-}
-.zg-avatar img { width: 72%; height: 72%; object-fit: contain; }
-.zg-avatar--lg { width: 44px; height: 44px; }
-.zg-avatar--xl { width: 64px; height: 64px; box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12), var(--zg-shadow-sm); }
-.zg-online {
-  position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
-  background: #22c55e; border: 2px solid #fff;
-}
-
-/* ── Launcher (WF-01) ──────────────────────────────────────────────────────────────── */
-/* Launcher (Engineering Wireframe §3 / WF-01, Figma §4.1): a 56 x 56 icon button, bottom-right,
-   24 px inset at >= 1440 px and 20 px below; 52 x 52 above the safe area on phones (see the
-   mobile block). Accessible name "Open ZoikoStream Guide"; no unread badges. */
+/* ── Launcher (WF-01, Figma §4.1) ──────────────────────────────────────────────────────
+   56 x 56, bottom-right, 24 px inset at >= 1440 px and 20 px below; 52 x 52 above the safe area
+   on phones. The brand mark on a navy disc inside a brand-gradient ring. Accessible name
+   "Open ZoikoStream Guide"; no unread badges. */
 .zg-launcher {
-  /* --guide-lift / --guide-stack come from guide/safeArea.js (0 when unset): lifted over
-     bottom-docked chrome, stacked over any other launcher instead of on top of it. */
+  /* --guide-lift / --guide-stack come from guide/safeArea.js (0 when unset). */
   position: fixed; right: 20px; bottom: calc(20px + var(--guide-lift, 0px) + var(--guide-stack, 0px)); z-index: 60;
-  display: inline-grid; place-items: center; width: 56px; height: 56px; padding: 0;
-  border-radius: 999px; border: 0; background: var(--zg-grad); color: #fff; cursor: pointer;
-  box-shadow: 0 12px 32px rgba(91, 33, 182, 0.38), 0 2px 6px rgba(91, 33, 182, 0.25);
-  transition: transform 160ms ease, box-shadow 160ms ease;
+  display: inline-grid; place-items: center; width: 56px; height: 56px; padding: 2px;
+  border-radius: 999px; border: 0; background: var(--zs-guide-brand-gradient); cursor: pointer;
+  box-shadow: 0 10px 26px rgba(124, 92, 255, 0.38);
+  transition: box-shadow 140ms ease, transform 140ms ease;
 }
-.zg-launcher:hover { transform: translateY(-2px); box-shadow: 0 16px 40px rgba(91, 33, 182, 0.45), 0 2px 6px rgba(91, 33, 182, 0.25); }
-.zg-launcher .zg-avatar { width: 48px; height: 48px; }
-/* Soft attention halo, off for reduced motion. */
-.zg-launcher::before {
-  content: ""; position: absolute; inset: -3px; border-radius: inherit; z-index: -1;
-  background: var(--zg-grad); opacity: 0.35; animation: zg-halo 2.6s ease-out infinite;
+.zg-launcher-mark {
+  display: grid; place-items: center; width: 100%; height: 100%; border-radius: 999px;
+  background: radial-gradient(circle at 50% 40%, #1B2257 0%, var(--zs-guide-navy) 72%);
 }
-@keyframes zg-halo { 0% { transform: scale(0.96); opacity: 0.45; } 70%, 100% { transform: scale(1.12); opacity: 0; } }
+.zg-launcher-mark img { width: 62%; height: auto; display: block; }
+.zg-launcher:hover { box-shadow: 0 12px 30px rgba(236, 72, 153, 0.42); transform: translateY(-1px); }
 /* Opted-in controls scrolling past underneath: step out of the way until they have gone by. */
 html[data-guide-yield] .zg-launcher { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 150ms ease, visibility 0s linear 150ms; }
 @media (min-width: 1440px) { .zg-launcher { right: 24px; bottom: calc(24px + var(--guide-lift, 0px) + var(--guide-stack, 0px)); } }
 
 /* WF-10 "Public context": event, public status, public start time. */
-.zg-context { width: 100%; margin: 4px 0 2px; padding: 10px 12px; border-radius: 14px;
-  background: var(--zg-subtle); border: 1px solid var(--zg-border); text-align: left; }
-.zg-context .zg-eyebrow-label { margin: 0 0 6px; }
+.zg-context { width: 100%; margin: 4px 0 2px; padding: 12px 16px; border-radius: var(--zs-guide-radius-md);
+  background: var(--zs-guide-subtle); border: 1px solid var(--zs-guide-border); text-align: left; }
+.zg-context .zg-eyebrow-label { margin: 0 0 8px; }
 .zg-context dl { margin: 0; display: grid; gap: 4px; }
-.zg-context dl > div { display: flex; gap: 8px; justify-content: space-between; font-size: 13px; }
-.zg-context dt { color: var(--zg-muted); }
-.zg-context dd { margin: 0; color: var(--zg-ink); font-weight: 600; text-align: right; }
+.zg-context dl > div { display: flex; gap: 8px; justify-content: space-between; font-size: 14px; line-height: 20px; }
+.zg-context dt { color: var(--zs-guide-muted); }
+.zg-context dd { margin: 0; color: var(--zs-guide-ink); font-weight: 600; text-align: right; }
 
-/* ── Shell (WF-02 desktop / WF-18 mobile) ───────────────────────────────────────────── */
+/* ── Shell (WF-02 desktop dock / tablet sheet / WF-18 mobile) ─────────────────────────── */
 .zg-panel {
-  position: fixed; right: 20px; bottom: calc(20px + var(--guide-lift, 0px)); z-index: 61;
-  width: 440px; min-width: 400px; max-width: min(520px, calc(100vw - 40px));
-  height: min(720px, calc(100vh - 40px - var(--guide-lift, 0px))); max-height: calc(100vh - 40px - var(--guide-lift, 0px));
+  position: fixed; right: 16px; bottom: calc(16px + var(--guide-lift, 0px)); z-index: 61;
+  width: 440px; min-width: 400px; max-width: min(520px, calc(100vw - 32px));
+  height: min(720px, calc(100vh - 32px - var(--guide-lift, 0px))); max-height: calc(100vh - 32px - var(--guide-lift, 0px));
   display: flex; flex-direction: column;
-  background: var(--zg-surface); border-radius: 24px; overflow: hidden;
-  box-shadow: var(--zg-shadow-lg); border: 1px solid var(--zg-border);
-  animation: zg-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  background: var(--zs-guide-surface); border-radius: var(--zs-guide-radius-xl); overflow: hidden;
+  box-shadow: var(--zs-guide-elevation-2); border: 1px solid var(--zs-guide-border);
+  animation: zg-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
   transform-origin: bottom right;
 }
-@keyframes zg-in { from { opacity: 0; transform: translateY(12px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes zg-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
+/* Header (Figma §4.1: 64 px; §8 Back / title / close): deep navy band with the brand mark. */
 .zg-header {
-  position: relative; display: flex; align-items: center; gap: 12px; min-height: 72px;
-  padding: 14px 10px 14px 18px; background: var(--zg-grad); color: #fff;
+  position: relative; display: flex; align-items: center; gap: 4px; min-height: 64px;
+  padding: 10px 8px 10px 16px; background: var(--zs-guide-navy); color: #fff;
+  border-bottom: 1px solid rgba(124, 92, 255, 0.35);
 }
-.zg-header::after { /* subtle sheen */
-  content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: radial-gradient(120% 140% at 100% 0%, rgba(255, 255, 255, 0.18) 0%, transparent 55%);
+.zg-header > .zg-iconbtn:first-child { margin-left: -8px; }
+.zg-brandmark {
+  flex: none; display: grid; place-items: center; width: 40px; height: 40px; margin-right: 8px; border-radius: 50%;
+  background: radial-gradient(circle at 50% 40%, #1B2257 0%, #0D1236 70%); border: 1px solid rgba(255, 255, 255, 0.16);
 }
-.zg-header .zg-titles { flex: 1; min-width: 0; outline: none; position: relative; z-index: 1; }
-.zg-header h2 { margin: 0; font-size: 18px; font-weight: 700; line-height: 1.2; color: #fff; }
-.zg-header p { margin: 3px 0 0; display: flex; align-items: center; gap: 6px; font-size: 13px; line-height: 1.3; color: rgba(255, 255, 255, 0.92); }
-.zg-header .zg-iconbtn { color: #fff; position: relative; z-index: 1; }
-.zg-header .zg-iconbtn:hover { background: rgba(255, 255, 255, 0.16); }
-.zg-header .zg-avatar { position: relative; z-index: 1; }
+.zg-brandmark img { width: 62%; height: auto; display: block; }
+.zg-header .zg-titles { flex: 1; min-width: 0; outline: none; padding: 2px 4px; border-radius: var(--zs-guide-radius-sm); }
+.zg-header .zg-titles:focus-visible { box-shadow: 0 0 0 2px #fff; }
+.zg-header h2 { margin: 0; font-size: 20px; line-height: 26px; font-weight: 700; color: #fff; }
+.zg-header p { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; line-height: 18px; color: #DBE2F5; overflow-wrap: anywhere; }
+.zg-online { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #22C55E; }
+.zg-header .zg-iconbtn { color: #E7ECFB; }
+.zg-header .zg-iconbtn:hover { background: rgba(255, 255, 255, 0.08); }
+.zg-header .zg-iconbtn:focus-visible { box-shadow: 0 0 0 2px #fff; }
 .zg-iconbtn {
-  display: inline-grid; place-items: center; width: 44px; height: 44px; border-radius: 12px;
-  border: 0; background: transparent; color: var(--zg-muted); cursor: pointer;
+  flex: none; display: inline-grid; place-items: center; width: 44px; height: 44px; border-radius: var(--zs-guide-radius-md);
+  border: 0; background: transparent; color: var(--zs-guide-ink-2); cursor: pointer;
 }
-.zg-iconbtn:hover { background: var(--zg-subtle); }
+.zg-iconbtn:hover { background: var(--zs-guide-subtle); }
 .zg-iconbtn svg { width: 20px; height: 20px; }
 .zg-menu {
-  position: absolute; right: 12px; top: 64px; z-index: 3; min-width: 220px; padding: 6px;
-  background: var(--zg-surface); border: 1px solid var(--zg-border); border-radius: 14px;
-  box-shadow: var(--zg-shadow-lg); color: var(--zg-text);
+  position: absolute; right: 12px; top: 60px; z-index: 3; min-width: 220px; padding: 6px;
+  background: var(--zs-guide-surface); border: 1px solid var(--zs-guide-border); border-radius: var(--zs-guide-radius-md);
+  box-shadow: var(--zs-guide-elevation-2); color: var(--zs-guide-text);
 }
 .zg-menu button {
   display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 10px 12px;
-  border: 0; border-radius: 10px; background: transparent; color: var(--zg-text);
-  font-size: 14px; font-weight: 500; text-align: left; cursor: pointer;
+  border: 0; border-radius: var(--zs-guide-radius-sm); background: transparent; color: var(--zs-guide-text);
+  font-size: 14px; font-weight: 600; text-align: left; cursor: pointer;
 }
-.zg-menu button svg { width: 16px; height: 16px; color: var(--zg-muted); }
-.zg-menu button:hover { background: var(--zg-subtle); }
+.zg-menu button svg { width: 16px; height: 16px; color: var(--zs-guide-muted); }
+.zg-menu button:hover { background: var(--zs-guide-subtle); }
 
+/* Conversation: 20 px horizontal, 24 px top/bottom scroll padding (Figma §4.1). */
 .zg-body {
-  position: relative; flex: 1; overflow-y: auto; padding: 20px 18px 24px; scroll-padding: 24px;
-  background: var(--zg-canvas);
+  position: relative; flex: 1; overflow-y: auto; padding: 24px 20px; scroll-padding: 24px 0;
+  background: var(--zs-guide-surface);
 }
 .zg-stack > * + * { margin-top: 16px; }
 
-/* ── Welcome (WF-02) ────────────────────────────────────────────────────────────────── */
-.zg-welcome { text-align: center; padding: 8px 4px 0; }
-.zg-welcome .zg-avatar--xl { margin: 0 auto 12px; }
-.zg-welcome h3 { margin: 0 0 6px; font-size: 21px; font-weight: 750; color: var(--zg-ink); letter-spacing: -0.01em; }
-.zg-welcome > p { margin: 0 auto 18px; max-width: 340px; font-size: 15px; line-height: 1.5; color: var(--zg-muted); }
-.zg-eyebrow-label { margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--zg-muted); text-align: left; }
-.zg-quick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; }
+/* ── Welcome (WF-02, Figma §7.1: no avatar bubble) ──────────────────────────────────── */
+.zg-welcome { text-align: left; }
+.zg-welcome h3 { margin: 0 0 4px; font-size: 20px; line-height: 26px; font-weight: 700; color: var(--zs-guide-ink); }
+.zg-welcome > p { margin: 0 0 16px; font-size: 16px; line-height: 24px; color: var(--zs-guide-text); }
+.zg-eyebrow-label { margin: 16px 0 8px; font-size: 12px; line-height: 16px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--zs-guide-muted); }
+.zg-quick { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .zg-quick-card {
-  display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 10px 12px;
-  border-radius: 14px; border: 1px solid var(--zg-border); background: var(--zg-surface);
-  color: var(--zg-ink); font-size: 14px; font-weight: 600; line-height: 1.25; cursor: pointer;
-  box-shadow: var(--zg-shadow-sm); transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+  display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 10px 12px;
+  border-radius: var(--zs-guide-radius-md); border: 1px solid var(--zs-guide-border); background: var(--zs-guide-surface);
+  color: var(--zs-guide-ink); font-size: 14px; line-height: 18px; font-weight: 600; text-align: left; cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease;
 }
-.zg-quick-card:hover { transform: translateY(-1px); border-color: #c4b5fd; box-shadow: 0 6px 18px rgba(91, 33, 182, 0.12); }
-.zg-quick-icon {
-  flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
-  background: var(--zg-grad-soft); color: var(--zg-brand-text);
-}
+.zg-quick-card:hover { border-color: var(--zs-guide-teal); background: var(--zs-guide-subtle); }
+.zg-quick-icon { flex: none; display: grid; place-items: center; width: 28px; height: 28px; color: var(--zs-guide-teal-ink); }
 .zg-quick-icon svg { width: 18px; height: 18px; }
-.zg-fineprint { margin: 16px 0 0; font-size: 12px; line-height: 1.5; color: var(--zg-muted); text-align: center; }
+.zg-popular { margin: 16px 0 0; font-size: 14px; line-height: 20px; color: var(--zs-guide-muted); display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; }
+.zg-fineprint { margin: 16px 0 0; font-size: 12px; line-height: 16px; color: var(--zs-guide-muted); }
+.zg-welcome-links { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; font-size: 14px; }
+/* WF-12 first-use privacy notice */
+.zg-privacy {
+  margin: 0 0 8px; padding: 16px; border-radius: var(--zs-guide-radius-md);
+  background: var(--zs-guide-subtle); border: 1px solid var(--zs-guide-border);
+}
+.zg-privacy h3 { margin: 0 0 4px; font-size: 16px; line-height: 22px; font-weight: 700; color: var(--zs-guide-ink); }
+.zg-privacy p { margin: 0 0 6px; font-size: 14px; line-height: 20px; color: var(--zs-guide-text); }
+.zg-privacy .zg-actions { margin-top: 8px; }
+
 .zg-link {
-  color: var(--zg-brand-text); text-decoration: underline; text-underline-offset: 2px;
-  background: none; border: 0; padding: 0; font: inherit; font-weight: 600; cursor: pointer;
-  min-height: 24px; display: inline-flex; align-items: center;
+  color: var(--zs-guide-teal-ink); text-decoration: underline; text-underline-offset: 2px;
+  background: none; border: 0; padding: 0 2px; font: inherit; font-weight: 600; cursor: pointer;
+  min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; gap: 4px; border-radius: var(--zs-guide-radius-sm);
 }
-.zg-links { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 14px; }
+.zg-link[disabled] { color: var(--zs-guide-muted); cursor: not-allowed; }
+.zg-links { display: flex; gap: 0 16px; flex-wrap: wrap; margin-top: 8px; font-size: 14px; }
 
-/* ── Messages (WF-03) ───────────────────────────────────────────────────────────────── */
-.zg-row { display: flex; gap: 10px; align-items: flex-start; }
-.zg-row--user { justify-content: flex-end; }
-.zg-row > .zg-avatar { margin-top: 2px; }
-.zg-msg { min-width: 0; max-width: calc(100% - 42px); }
-.zg-bubble {
-  padding: 12px 14px; border-radius: 4px 18px 18px 18px; background: var(--zg-surface);
-  border: 1px solid var(--zg-border); box-shadow: var(--zg-shadow-sm);
-  font-size: 15px; line-height: 1.55; color: var(--zg-text); overflow-wrap: anywhere;
-}
-.zg-bubble p { margin: 0 0 8px; }
-.zg-bubble p:last-child { margin-bottom: 0; }
-.zg-bubble ul { margin: 0 0 8px; padding-left: 20px; }
+/* ── Messages (WF-03, Figma §7.2: clean reading blocks, not chat bubbles) ───────────── */
+.zg-msg { min-width: 0; }
+.zg-speaker { margin: 0 0 4px; font-size: 12px; line-height: 16px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--zs-guide-muted); }
+.zg-block { font-size: 16px; line-height: 24px; color: var(--zs-guide-text); overflow-wrap: anywhere; max-width: 68ch; }
+.zg-block p { margin: 0 0 12px; }
+.zg-block p:last-child { margin-bottom: 0; }
+.zg-block ul { margin: 0 0 12px; padding-left: 20px; }
+.zg-block--boundary { padding: 12px 16px; border-radius: var(--zs-guide-radius-md); background: var(--zs-guide-subtle); border: 1px solid var(--zs-guide-border); }
 .zg-user {
-  max-width: 82%; padding: 10px 14px; border-radius: 18px 18px 4px 18px;
-  background: var(--zg-grad); color: #fff; font-size: 15px; line-height: 1.5;
-  white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 6px 16px rgba(91, 33, 182, 0.22);
+  padding: 12px 16px; border-radius: var(--zs-guide-radius-md); background: var(--zs-guide-subtle);
+  color: var(--zs-guide-ink); font-size: 16px; line-height: 24px; white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.zg-bubble--boundary { background: var(--zg-subtle); }
 .zg-badge {
-  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 3px 9px; border-radius: 999px;
-  font-size: 12px; font-weight: 600; color: var(--zg-muted); background: var(--zg-surface); border: 1px solid var(--zg-border);
+  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 2px 8px; border-radius: var(--zs-guide-radius-sm);
+  font-size: 12px; line-height: 16px; font-weight: 600; color: var(--zs-guide-ink-2); background: var(--zs-guide-surface); border: 1px solid var(--zs-guide-border);
 }
-.zg-typing { display: inline-flex; gap: 5px; padding: 4px 2px; }
-.zg-typing span { width: 7px; height: 7px; border-radius: 50%; background: #a78bfa; animation: zg-dot 1.1s infinite ease-in-out; }
-.zg-typing span:nth-child(2) { animation-delay: 0.15s; }
-.zg-typing span:nth-child(3) { animation-delay: 0.3s; }
-@keyframes zg-dot { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-3px); opacity: 1; } }
+/* Guide/Progress (C2): a calm status line, not fake typing. */
+.zg-progress { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; line-height: 20px; color: var(--zs-guide-muted); }
+.zg-progress-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--zs-guide-teal); animation: zg-pulse 1.2s ease-in-out infinite; }
+@keyframes zg-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 
-.zg-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+/* Guide/SourceChip: Default, Hover, Focus, FreshnessWarning, External (Figma §5, §12.1). */
+.zg-sources { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .zg-source {
-  display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 10px; border-radius: 999px;
-  border: 1px solid var(--zg-border); background: var(--zg-subtle); color: var(--zg-brand-text);
-  font-size: 12px; font-weight: 600; cursor: pointer; max-width: 100%; text-align: left;
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 44px; padding: 8px 12px; border-radius: var(--zs-guide-radius-sm);
+  border: 1px solid var(--zs-guide-border); background: var(--zs-guide-surface); color: var(--zs-guide-teal-ink);
+  font-size: 14px; line-height: 18px; font-weight: 600; cursor: pointer; max-width: 100%; text-align: left;
+  transition: border-color 120ms ease, background-color 120ms ease;
 }
-.zg-source[aria-expanded="true"] { border-color: #c4b5fd; }
+.zg-source:hover { border-color: var(--zs-guide-teal); background: var(--zs-guide-subtle); }
+.zg-source[aria-expanded="true"] { border-color: var(--zs-guide-teal); background: var(--zs-guide-teal-soft); }
+.zg-source--stale { color: var(--zs-guide-warning-ink); border-color: var(--zs-guide-warning); background: var(--zs-guide-warning-soft); }
+.zg-source-flag { font-size: 12px; line-height: 16px; font-weight: 600; }
 .zg-source-details {
-  margin-top: 8px; padding: 12px; border: 1px solid var(--zg-border); border-radius: 14px; background: var(--zg-surface);
-  font-size: 13px; line-height: 1.5;
+  margin-top: 8px; padding: 12px 16px; border: 1px solid var(--zs-guide-border); border-radius: var(--zs-guide-radius-md); background: var(--zs-guide-subtle);
+  font-size: 14px; line-height: 20px;
 }
-.zg-source-details strong { display: block; color: var(--zg-ink); font-size: 14px; }
-.zg-meta { color: var(--zg-muted); }
+.zg-source-details strong { display: block; color: var(--zs-guide-ink); font-size: 14px; }
+.zg-source-details .zg-meta { font-size: 12px; line-height: 16px; }
+.zg-source-warning { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--zs-guide-warning-ink); }
+.zg-meta { color: var(--zs-guide-muted); }
+
+/* C4 clarification chips */
+.zg-clarify { margin-top: 12px; }
+.zg-clarify-q { margin: 0 0 8px; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--zs-guide-ink); }
+.zg-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .zg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .zg-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  min-height: 44px; padding: 10px 18px; border-radius: 999px; font-size: 14px; font-weight: 650;
-  line-height: 1.2; cursor: pointer; text-decoration: none; border: 1px solid transparent;
-  transition: transform 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+  min-height: 44px; padding: 10px 16px; border-radius: var(--zs-guide-radius-sm); font-size: 14px; font-weight: 600;
+  line-height: 18px; cursor: pointer; text-decoration: none; border: 1px solid transparent;
+  transition: background-color 120ms ease, border-color 120ms ease;
 }
 .zg-btn[disabled] { opacity: 0.55; cursor: not-allowed; }
-.zg-btn--primary { background: var(--zg-grad); color: #fff; box-shadow: 0 6px 16px rgba(91, 33, 182, 0.25); }
-.zg-btn--primary:hover:not([disabled]) { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(91, 33, 182, 0.32); }
-.zg-btn--secondary { background: var(--zg-surface); color: var(--zg-brand-text); border-color: #c4b5fd; }
-.zg-btn--secondary:hover { background: var(--zg-subtle); }
-.zg-btn--ghost { background: transparent; color: var(--zg-text); border-color: var(--zg-border); }
+.zg-btn--primary { background: var(--zs-guide-teal-ink); color: #fff; }
+.zg-btn--primary:hover:not([disabled]) { background: var(--zs-guide-ink-2); }
+.zg-btn--secondary { background: var(--zs-guide-surface); color: var(--zs-guide-teal-ink); border-color: var(--zs-guide-teal); }
+.zg-btn--secondary:hover:not([disabled]) { background: var(--zs-guide-teal-soft); }
+.zg-btn--ghost { background: transparent; color: var(--zs-guide-text); border-color: var(--zs-guide-border); }
+.zg-btn--ghost:hover:not([disabled]) { background: var(--zs-guide-subtle); }
 
-.zg-feedback { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 8px; font-size: 12px; color: var(--zg-muted); }
-.zg-feedback .zg-iconbtn { width: 34px; height: 34px; border-radius: 999px; }
-.zg-feedback .zg-iconbtn svg { width: 15px; height: 15px; }
-@media (pointer: coarse) { .zg-feedback .zg-iconbtn { width: 44px; height: 44px; } }
+/* Guide/Feedback: 44 x 44 targets regardless of pointer type (Figma §3.4). */
+.zg-feedback { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 8px; font-size: 14px; line-height: 20px; color: var(--zs-guide-muted); }
+.zg-feedback .zg-iconbtn { width: 44px; height: 44px; }
+.zg-feedback .zg-iconbtn svg { width: 18px; height: 18px; }
 .zg-chip {
-  min-height: 34px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--zg-border);
-  background: var(--zg-surface); color: var(--zg-text); font-size: 13px; font-weight: 600; cursor: pointer;
+  min-height: 44px; padding: 8px 14px; border-radius: var(--zs-guide-radius-sm); border: 1px solid var(--zs-guide-border);
+  background: var(--zs-guide-surface); color: var(--zs-guide-text); font-size: 14px; line-height: 18px; font-weight: 600; cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
 }
-.zg-chip:hover { border-color: #c4b5fd; background: var(--zg-subtle); }
+.zg-chip:hover { border-color: var(--zs-guide-teal); background: var(--zs-guide-subtle); }
 
 /* ── Notices / states (WF-13..16) ───────────────────────────────────────────────────── */
 .zg-notice {
-  display: flex; gap: 10px; padding: 12px 14px; border-radius: 14px; font-size: 14px; line-height: 1.5;
-  border: 1px solid var(--zg-border); background: var(--zg-surface); color: var(--zg-text);
+  display: flex; gap: 10px; padding: 12px 16px; border-radius: var(--zs-guide-radius-md); font-size: 14px; line-height: 20px;
+  border: 1px solid var(--zs-guide-border); background: var(--zs-guide-subtle); color: var(--zs-guide-text);
 }
-.zg-notice svg { flex: none; width: 18px; height: 18px; margin-top: 2px; color: var(--zg-brand-text); }
-.zg-notice--warning { background: var(--zg-warning-soft); border-color: color-mix(in srgb, var(--zg-warning) 30%, transparent); }
-.zg-notice--warning svg { color: var(--zg-warning); }
-.zg-notice--error { background: var(--zg-danger-soft); border-color: color-mix(in srgb, var(--zg-danger) 30%, transparent); }
-.zg-notice--error svg { color: var(--zg-danger); }
-.zg-notice--success { background: var(--zg-success-soft); border-color: color-mix(in srgb, var(--zg-success) 30%, transparent); }
-.zg-notice--success svg { color: var(--zg-success); }
+.zg-notice svg { flex: none; width: 18px; height: 18px; margin-top: 1px; color: var(--zs-guide-ink-2); }
+.zg-notice--warning { background: var(--zs-guide-warning-soft); border-color: var(--zs-guide-warning); }
+.zg-notice--warning svg { color: var(--zs-guide-warning-ink); }
+.zg-notice--error { background: var(--zs-guide-danger-soft); border-color: var(--zs-guide-danger); }
+.zg-notice--error svg { color: var(--zs-guide-danger); }
+.zg-notice--success { background: var(--zs-guide-success-soft); border-color: var(--zs-guide-success); }
+.zg-notice--success svg { color: var(--zs-guide-success); }
 
-.zg-state { text-align: center; padding: 28px 12px 8px; }
+.zg-state { text-align: left; padding: 8px 0; }
 .zg-state-icon {
-  display: grid; place-items: center; width: 56px; height: 56px; margin: 0 auto 12px; border-radius: 18px;
-  background: var(--zg-grad-soft); color: var(--zg-brand-text);
+  display: grid; place-items: center; width: 44px; height: 44px; margin: 0 0 12px; border-radius: var(--zs-guide-radius-md);
+  background: var(--zs-guide-subtle); color: var(--zs-guide-ink-2);
 }
-.zg-state-icon svg { width: 26px; height: 26px; }
-.zg-state h3 { margin: 0 0 6px; font-size: 18px; color: var(--zg-ink); }
-.zg-state p { margin: 0 auto 16px; max-width: 320px; font-size: 14px; line-height: 1.55; color: var(--zg-muted); }
-.zg-state .zg-actions { justify-content: center; }
+.zg-state-icon svg { width: 22px; height: 22px; }
+.zg-state h3 { margin: 0 0 4px; font-size: 20px; line-height: 26px; font-weight: 700; color: var(--zs-guide-ink); outline: none; border-radius: var(--zs-guide-radius-sm); }
+.zg-state p { margin: 0 0 16px; font-size: 16px; line-height: 24px; color: var(--zs-guide-text); }
 
-/* ── Cards: support step (WF-08/09) and lead form (WF-06) ───────────────────────────── */
+/* ── Cards: support step (WF-08/09), lead form (WF-06), confirm (C3), status (C5) ───── */
 .zg-card {
-  position: relative; padding: 18px 16px 16px; border-radius: 18px; border: 1px solid var(--zg-border);
-  background: var(--zg-surface); box-shadow: var(--zg-shadow-sm); overflow: hidden;
+  position: relative; padding: 20px; border-radius: var(--zs-guide-radius-md); border: 1px solid var(--zs-guide-border);
+  background: var(--zs-guide-surface); box-shadow: var(--zs-guide-elevation-1);
 }
-.zg-card::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--zg-grad); }
-.zg-card h3 { margin: 0 0 4px; font-size: 16px; font-weight: 700; line-height: 1.4; color: var(--zg-ink); }
-.zg-card .zg-eyebrow { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--zg-brand-text); }
-.zg-card .zg-eyebrow svg { width: 14px; height: 14px; }
-.zg-options { display: grid; gap: 8px; margin-top: 14px; }
+.zg-card h3 { margin: 0 0 4px; font-size: 16px; line-height: 22px; font-weight: 700; color: var(--zs-guide-ink); outline: none; border-radius: var(--zs-guide-radius-sm); }
+.zg-eyebrow { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 12px; line-height: 16px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--zs-guide-teal-ink); }
+.zg-eyebrow svg { width: 14px; height: 14px; }
+.zg-options { display: grid; gap: 8px; margin-top: 16px; }
 .zg-option {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  min-height: 48px; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--zg-border);
-  background: var(--zg-subtle); color: var(--zg-ink); font-size: 15px; font-weight: 550; text-align: left; cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
-}
-.zg-option svg { flex: none; width: 16px; height: 16px; color: var(--zg-muted); }
-.zg-option:hover { border-color: #a78bfa; background: var(--zg-surface); transform: translateX(2px); }
-.zg-option:hover svg { color: var(--zg-brand-text); }
-.zg-option[disabled] { opacity: 0.6; cursor: progress; transform: none; }
-.zg-step-nav { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 13px; }
-
-.zg-form { display: grid; gap: 14px; margin-top: 14px; }
-.zg-field label { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 600; color: var(--zg-ink); }
-.zg-field input, .zg-field select, .zg-field textarea {
-  width: 100%; min-height: 48px; padding: 11px 13px; border-radius: 12px; border: 1px solid var(--zg-border);
-  background: var(--zg-subtle); color: var(--zg-text); font-size: 16px; line-height: 1.4; font-family: inherit;
+  min-height: 48px; padding: 12px 16px; border-radius: var(--zs-guide-radius-md); border: 1px solid var(--zs-guide-border);
+  background: var(--zs-guide-surface); color: var(--zs-guide-ink); font-size: 16px; line-height: 22px; font-weight: 600; text-align: left; cursor: pointer;
   transition: border-color 120ms ease, background-color 120ms ease;
 }
-.zg-field input:focus, .zg-field select:focus, .zg-field textarea:focus { background: var(--zg-surface); border-color: #8b5cf6; }
-.zg-field textarea { min-height: 96px; resize: vertical; }
-.zg-field [aria-invalid="true"] { border-color: var(--zg-danger); }
-.zg-hint { margin-top: 4px; font-size: 12px; color: var(--zg-muted); }
-.zg-error { margin-top: 4px; font-size: 13px; color: var(--zg-danger); font-weight: 600; }
-.zg-consent { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.45; }
-.zg-consent input { width: 20px; height: 20px; min-height: 20px; margin-top: 1px; flex: none; accent-color: var(--zg-brand); }
-.zg-req { color: var(--zg-danger); }
+.zg-option svg { flex: none; width: 16px; height: 16px; color: var(--zs-guide-muted); }
+.zg-option:hover { border-color: var(--zs-guide-teal); background: var(--zs-guide-subtle); }
+.zg-option:hover svg { color: var(--zs-guide-teal-ink); }
+.zg-option[disabled] { opacity: 0.6; cursor: progress; }
+.zg-step-nav { display: flex; flex-wrap: wrap; gap: 0 16px; margin-top: 8px; font-size: 14px; }
+.zg-confirm { border-color: var(--zs-guide-warning); }
+.zg-confirm-text { margin: 0; font-size: 14px; line-height: 20px; }
+.zg-status { margin: 0 0 16px; padding: 12px 16px; border-radius: var(--zs-guide-radius-md); border: 1px solid var(--zs-guide-border); background: var(--zs-guide-subtle); }
+.zg-status .zg-eyebrow { color: var(--zs-guide-ink-2); }
+.zg-status-state { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 16px; line-height: 22px; color: var(--zs-guide-ink); }
+.zg-status-state svg { width: 18px; height: 18px; }
+.zg-status--success .zg-status-state svg { color: var(--zs-guide-success); }
+.zg-status--warning .zg-status-state svg { color: var(--zs-guide-warning-ink); }
+.zg-status--error .zg-status-state svg { color: var(--zs-guide-danger); }
+.zg-status-summary { margin: 4px 0 0; font-size: 14px; line-height: 20px; }
+.zg-status .zg-meta { margin: 4px 0 0; }
 
-/* ── Composer ───────────────────────────────────────────────────────────────────────── */
-.zg-composer { padding: 12px 14px 10px; border-top: 1px solid var(--zg-border); background: var(--zg-surface); }
-.zg-composer form {
-  display: flex; align-items: flex-end; gap: 8px; padding: 6px 6px 6px 14px; border-radius: 22px;
-  border: 1px solid var(--zg-border); background: var(--zg-subtle);
-  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+.zg-form { display: grid; gap: 16px; margin-top: 16px; }
+.zg-field label { display: block; margin-bottom: 6px; font-size: 14px; line-height: 18px; font-weight: 600; color: var(--zs-guide-ink); }
+.zg-field input, .zg-field select, .zg-field textarea {
+  width: 100%; min-height: 48px; padding: 12px 14px; border-radius: var(--zs-guide-radius-sm); border: 1px solid var(--zs-guide-border);
+  background: var(--zs-guide-surface); color: var(--zs-guide-text); font-size: 16px; line-height: 22px; font-family: inherit;
+  transition: border-color 120ms ease;
 }
-.zg-composer form:focus-within { border-color: #a78bfa; background: var(--zg-surface); box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.14); }
+.zg-field input:focus, .zg-field select:focus, .zg-field textarea:focus { border-color: var(--zs-guide-teal); }
+.zg-field textarea { min-height: 96px; resize: vertical; }
+.zg-field [aria-invalid="true"] { border-color: var(--zs-guide-danger); }
+.zg-hint { margin-top: 4px; font-size: 12px; line-height: 16px; color: var(--zs-guide-muted); }
+.zg-error { margin-top: 4px; font-size: 14px; line-height: 20px; color: var(--zs-guide-danger); font-weight: 600; }
+.zg-error-summary {
+  margin-top: 12px; padding: 12px 16px; border-radius: var(--zs-guide-radius-md); border: 1px solid var(--zs-guide-danger);
+  background: var(--zs-guide-danger-soft); font-size: 14px; line-height: 20px; outline: none;
+}
+.zg-error-summary p { margin: 0; color: var(--zs-guide-ink); }
+.zg-error-summary ul { margin: 4px 0 0; padding-left: 18px; }
+.zg-error-summary .zg-link { color: var(--zs-guide-danger); }
+.zg-consent { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 20px; min-height: 44px; }
+.zg-consent input { width: 22px; height: 22px; min-height: 22px; margin-top: 0; flex: none; accent-color: var(--zs-guide-teal-ink); }
+.zg-req { color: var(--zs-guide-danger); }
+
+/* ── Composer (Figma §3.4: 52 px minimum, 144 px maximum before internal scroll) ──────── */
+.zg-composer { padding: 12px 16px; border-top: 1px solid var(--zs-guide-border); background: var(--zs-guide-surface); }
+.zg-composer form {
+  display: flex; align-items: flex-end; gap: 8px; min-height: 52px; padding: 0 4px 3px 14px; border-radius: var(--zs-guide-radius-md);
+  border: 1px solid var(--zs-guide-border); background: var(--zs-guide-surface);
+  transition: border-color 120ms ease;
+}
+.zg-composer form:focus-within { border-color: var(--zs-guide-teal); box-shadow: 0 0 0 1px var(--zs-guide-teal); }
 .zg-composer textarea {
-  flex: 1; min-height: 40px; max-height: 144px; padding: 9px 0; border: 0; resize: none; background: transparent;
-  color: var(--zg-text); font-size: 16px; line-height: 1.4; font-family: inherit; /* 16px: no iOS zoom */
+  flex: 1; min-height: 50px; max-height: 142px; padding: 13px 0; border: 0; resize: none; background: transparent;
+  color: var(--zs-guide-text); font-size: 16px; line-height: 24px; font-family: inherit; /* 16px: no iOS zoom */
 }
 .zg-composer textarea:focus-visible { box-shadow: none; }
-.zg-composer textarea::placeholder { color: var(--zg-muted); }
+.zg-composer textarea::placeholder { color: var(--zs-guide-muted); }
 .zg-send {
-  flex: none; width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--zg-grad); color: #fff;
-  cursor: pointer; display: grid; place-items: center; box-shadow: 0 6px 14px rgba(91, 33, 182, 0.3);
-  transition: transform 120ms ease, opacity 120ms ease;
+  flex: none; width: 48px; height: 44px; border-radius: var(--zs-guide-radius-md); border: 0; background: var(--zs-guide-brand-gradient); color: #fff;
+  cursor: pointer; display: grid; place-items: center; box-shadow: 0 6px 14px rgba(124, 92, 255, 0.3);
+  transition: opacity 120ms ease, box-shadow 120ms ease;
 }
-.zg-send:hover:not([disabled]) { transform: scale(1.05); }
-.zg-send[disabled] { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
-.zg-send svg { width: 19px; height: 19px; }
-.zg-composer-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 0 4px; font-size: 11.5px; color: var(--zg-muted); }
+.zg-send:hover:not([disabled]) { box-shadow: 0 8px 18px rgba(236, 72, 153, 0.35); }
+.zg-send[disabled] { opacity: 0.4; cursor: not-allowed; }
+.zg-send svg { width: 20px; height: 20px; }
+.zg-composer-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; padding: 0 2px; font-size: 12px; line-height: 16px; color: var(--zs-guide-muted); }
 .zg-jump {
-  position: sticky; bottom: 8px; display: block; margin: 0 auto; min-height: 36px; padding: 6px 14px;
-  border-radius: 18px; border: 1px solid var(--zg-border); background: var(--zg-surface); color: var(--zg-brand-text);
-  font-size: 13px; font-weight: 650; box-shadow: var(--zg-shadow-lg); cursor: pointer;
+  position: sticky; bottom: 8px; display: block; margin: 12px auto 0; min-height: 44px; padding: 8px 16px;
+  border-radius: var(--zs-guide-radius-sm); border: 1px solid var(--zs-guide-border); background: var(--zs-guide-surface); color: var(--zs-guide-teal-ink);
+  font-size: 14px; font-weight: 600; box-shadow: var(--zs-guide-elevation-1); cursor: pointer;
 }
 
 /* Selected / disabled quick replies (GC-005). */
-.zg-quick-card.is-selected, .zg-chip.is-selected { border-color: var(--zg-brand); background: var(--zg-grad-soft); color: var(--zg-brand-text); }
-.zg-quick-card[disabled], .zg-chip[disabled] { cursor: default; transform: none; box-shadow: none; }
+.zg-quick-card.is-selected, .zg-chip.is-selected { border-color: var(--zs-guide-teal); background: var(--zs-guide-teal-soft); color: var(--zs-guide-teal-ink); }
+.zg-quick-card[disabled], .zg-chip[disabled] { cursor: default; }
 .zg-quick-card[disabled]:not(.is-selected), .zg-chip[disabled]:not(.is-selected) { opacity: 0.6; }
-.zg-quick-card[disabled]:hover, .zg-chip[disabled]:hover { transform: none; }
 
 /* Progressive disclosure toggle (PR-006), failed-send retry, lead review, composer banners. */
-.zg-more { margin-top: 6px; font-size: 14px; }
-.zg-failed { margin-top: 8px; margin-left: auto; max-width: 92%; }
-.zg-failed .zg-actions { justify-content: flex-end; margin-top: 8px; }
-.zg-review { margin: 12px 0 0; display: grid; gap: 6px; font-size: 14px; }
+.zg-more { margin-top: 4px; font-size: 14px; }
+.zg-failed { margin-top: 8px; }
+.zg-failed .zg-actions { margin-top: 8px; }
+.zg-review { margin: 12px 0 0; display: grid; gap: 6px; font-size: 14px; line-height: 20px; }
 .zg-review > div { display: flex; gap: 12px; justify-content: space-between; }
-.zg-review dt { color: var(--zg-muted); }
-.zg-review dd { margin: 0; color: var(--zg-ink); font-weight: 600; text-align: right; overflow-wrap: anywhere; }
-.zg-banner { margin-bottom: 10px; }
+.zg-review dt { color: var(--zs-guide-muted); }
+.zg-review dd { margin: 0; color: var(--zs-guide-ink); font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+.zg-banner { margin-bottom: 12px; }
 .zg-banner .zg-actions { margin-top: 8px; }
 
-/* ── Responsive & motion ────────────────────────────────────────────────────────────── */
+/* ── Responsive ──────────────────────────────────────────────────────────────────────── */
+/* Tablet 768-1023: right sheet, full viewport height, up to 480 px (Figma §4). */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .zg-panel {
+    top: 0; right: 0; bottom: 0; width: min(480px, 92vw); min-width: 0; max-width: none;
+    height: 100dvh; max-height: none; border-radius: var(--zs-guide-radius-xl) 0 0 var(--zs-guide-radius-xl);
+    border-right: 0;
+  }
+}
+/* Mobile < 768: full-screen shell, 56 px header + safe-area top, 16 px conversation padding,
+   composer sticky above the keyboard and the bottom safe area (Figma §4.2, WF-18). */
 @media (max-width: 767px) {
   .zg-panel {
     inset: 0; width: 100%; min-width: 0; max-width: none; height: 100dvh; max-height: none;
     border-radius: 0; border: 0; padding-bottom: env(safe-area-inset-bottom);
   }
-  .zg-header { padding-top: calc(14px + env(safe-area-inset-top)); }
-  .zg-body { padding: 16px; }
+  .zg-panel--vv { top: var(--zg-vvtop, 0px); bottom: auto; height: var(--zg-vvh, 100dvh); }
+  .zg-header { min-height: calc(56px + env(safe-area-inset-top)); padding: calc(6px + env(safe-area-inset-top)) 4px 6px 16px; }
+  .zg-body { padding: 20px 16px; }
   .zg-launcher {
     right: 16px; bottom: calc(16px + env(safe-area-inset-bottom) + var(--guide-lift, 0px) + var(--guide-stack, 0px));
     width: 52px; height: 52px;
   }
-  .zg-launcher .zg-avatar { width: 44px; height: 44px; }
 }
 @media (max-width: 360px) { .zg-quick { grid-template-columns: 1fr; } }
+
+/* Reduced motion (Figma §3.4: instant or <= 100 ms fade; no essential slide/scale). Covers
+   every Guide transition and animation: panel, launcher, send, chips, sources, composer. */
 @media (prefers-reduced-motion: reduce) {
-  .zg-panel, .zg-launcher, .zg-launcher::before, .zg-typing span, .zg-option, .zg-quick-card, .zg-btn {
-    animation: none !important; transition: none !important;
+  .zg *, .zg *::before, .zg *::after {
+    animation: none !important;
+    transition-property: opacity, background-color, border-color, color !important;
+    transition-duration: 100ms !important;
+    transition-timing-function: linear !important;
+    scroll-behavior: auto !important;
   }
-  .zg-launcher::before { display: none; }
+  .zg-panel, .zg-launcher { animation: none !important; transform: none !important; }
+  .zg-progress-dot { opacity: 1; }
 }

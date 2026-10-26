@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { AlertTriangle, CalendarCheck, CheckCircle2, XCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { AlertTriangle, CalendarCheck, CheckCircle2, PauseCircle, XCircle } from "lucide-react";
 import * as api from "../guideApi";
 import { track } from "../guideAnalytics";
 import Actions from "./Actions";
@@ -13,6 +13,10 @@ import { leadTitle } from "./leadUtils";
 // request", CF §8 L4). Everything the visitor typed, the step and the outcome live on the
 // timeline item (via onPatch), so closing/reopening Guide or switching views never loses them
 // (Figma §10.1, PR-013). Nothing is written to browser storage; cancel/submit clear it.
+//
+// Draft (C6, CF §3 "Preserve form draft server-side"): each field the visitor leaves is saved
+// to the lead draft endpoint (debounced, best effort), so the server can hand the values back
+// when the flow is resumed. Header Back pauses the form (phase "paused") without losing it.
 
 const COUNTRIES = (() => {
   try {
@@ -112,6 +116,35 @@ function Field({ field, value, error, onChange, onBlur, idPrefix }) {
   );
 }
 
+const DRAFT_DEBOUNCE_MS = 600;
+
+// Debounced, best-effort draft saves of the fields the visitor has left (C6). Only values that
+// pass the light client checks are sent; the server stays authoritative.
+function useLeadDraft(flow, values) {
+  const valuesRef = useRef(values);
+  const dirty = useRef(new Set());
+  const timer = useRef(null);
+  useEffect(() => {
+    valuesRef.current = values;
+  });
+  const flush = () => {
+    const fields = {};
+    for (const fid of dirty.current) {
+      const field = flow.fields.find((f) => f.field_id === fid);
+      const raw = String(valuesRef.current?.[fid] ?? "").trim();
+      if (field && raw && !validateField(field, raw)) fields[fid] = raw;
+    }
+    dirty.current.clear();
+    if (Object.keys(fields).length) api.saveLeadDraft(flow.flow_id, fields).catch(() => {});
+  };
+  useEffect(() => () => clearTimeout(timer.current), []);
+  return (fid) => {
+    dirty.current.add(fid);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(flush, DRAFT_DEBOUNCE_MS);
+  };
+}
+
 export default function LeadForm({ item, onAction, onPatch = () => {} }) {
   const { flow } = item;
   const idPrefix = `zg-lead-${flow.flow_id.slice(0, 8)}`;
@@ -123,7 +156,23 @@ export default function LeadForm({ item, onAction, onPatch = () => {} }) {
   const result = item.result || null;
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState(null);
+  const [summary, setSummary] = useState(false); // error summary when >1 field fails (Figma §13)
   const save = (patch) => onPatch(item.id, patch);
+  const saveDraft = useLeadDraft(flow, values);
+  const headingId = `${idPrefix}-title`;
+  const summaryId = `${idPrefix}-errors`;
+
+  // Lead flow opened or resumed: focus the flow heading (Figma §13.2 "Demo: Flow heading;
+  // first field after purpose text").
+  useEffect(() => {
+    if (!item.focusPending || phase !== "collecting") return;
+    const el = document.getElementById(headingId);
+    if (el) {
+      el.focus();
+      el.scrollIntoView?.({ block: "nearest" });
+    }
+    onPatch(item.id, { focusPending: false });
+  }, [item.focusPending, item.id, phase, headingId, onPatch]);
 
   const set = (fid, v) => {
     save({ values: { ...values, [fid]: v } });
@@ -135,10 +184,19 @@ export default function LeadForm({ item, onAction, onPatch = () => {} }) {
     if (!field || values[fid] === undefined) return;
     const err = validateField(field, values[fid]);
     setErrors((e) => ({ ...e, [fid]: err }));
+    saveDraft(fid);
   };
 
   const focusId = (id) => requestAnimationFrame(() => document.getElementById(id)?.focus());
+  // One error: focus that field. More than one: an error summary linking to each field, which
+  // takes focus (Figma §11.1 "move focus to error summary or first invalid field", §13).
   const focusFirstError = (errs) => {
+    const count = Object.values(errs).filter(Boolean).length;
+    setSummary(count > 1);
+    if (count > 1) {
+      focusId(summaryId);
+      return;
+    }
     const f = flow.fields.find((x) => errs[x.field_id]);
     if (f) focusId(`${idPrefix}-${f.field_id}`);
     else if (errs.consent) focusId(`${idPrefix}-consent`);
@@ -229,7 +287,6 @@ export default function LeadForm({ item, onAction, onPatch = () => {} }) {
     save({ phase: "cancelled", values: undefined, consent: false });
   };
 
-  const headingId = `${idPrefix}-title`;
   const title = leadTitle(flow);
   const submitLabel = flow.flow_kind === "sales" ? "Submit request" : "Submit demo request"; // WF-06 A4
 
@@ -263,6 +320,23 @@ export default function LeadForm({ item, onAction, onPatch = () => {} }) {
   }
   if (phase === "cancelled") {
     return <p className="zg-meta">Request cancelled. Nothing was sent.</p>;
+  }
+  if (phase === "paused") {
+    // Header Back left the form: nothing is lost, and it can be picked up again (CF §3).
+    return (
+      <section className="zg-card" aria-labelledby={headingId}>
+        <p className="zg-eyebrow"><PauseCircle aria-hidden="true" /> {title}</p>
+        <h3 id={headingId} tabIndex={-1}>Your request is paused. Your details are kept.</h3>
+        <div className="zg-actions">
+          <button type="button" className="zg-btn zg-btn--secondary" onClick={() => save({ phase: "collecting", focusPending: true })}>
+            Continue request
+          </button>
+          <button type="button" className="zg-btn zg-btn--ghost" onClick={cancel}>
+            Cancel
+          </button>
+        </div>
+      </section>
+    );
   }
 
   const errorBanner = (
@@ -334,6 +408,32 @@ export default function LeadForm({ item, onAction, onPatch = () => {} }) {
       </div>
 
       {errorBanner}
+
+      {summary && Object.values(errors).filter(Boolean).length > 1 && (
+        <div className="zg-error-summary" id={summaryId} tabIndex={-1} role="alert" aria-labelledby={`${summaryId}-h`}>
+          <p id={`${summaryId}-h`}>
+            <strong>Please fix {Object.values(errors).filter(Boolean).length} fields:</strong>
+          </p>
+          <ul>
+            {[...flow.fields.map((f) => [f.field_id, f.label]), ["consent", "Contact consent"]]
+              .filter(([fid]) => errors[fid])
+              .map(([fid, label]) => (
+                <li key={fid}>
+                  <a
+                    className="zg-link"
+                    href={`#${idPrefix}-${fid}`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      document.getElementById(`${idPrefix}-${fid}`)?.focus();
+                    }}
+                  >
+                    {label}: {errors[fid]}
+                  </a>
+                </li>
+              ))}
+          </ul>
+        </div>
+      )}
 
       <form className="zg-form" onSubmit={review} noValidate>
         {flow.fields.map((f) => (
