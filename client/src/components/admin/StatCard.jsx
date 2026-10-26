@@ -1,7 +1,7 @@
 import { FiArrowDownRight, FiArrowUpRight } from "react-icons/fi";
 import Counter from "../../ui/Counter";
 import { Sparkline } from "../../ui/charts";
-import { SERIES, cx, panelSurface, t150, type } from "../../ui/tokens";
+import { CONSOLE, SERIES, cx, panelSurface, t150, type } from "../../ui/tokens";
 
 // Metric tile: label + count-up value + trend delta (color + icon) + optional sparkline.
 // The delta + sparkline are what make the dashboard feel "alive". Renders a
@@ -57,7 +57,7 @@ export default function StatCard({
         )}
       </div>
       {hint && (
-        <p className="mt-1 text-[11px] leading-4 text-slate-400 dark:text-slate-500">{hint}</p>
+        <p className={cx("mt-1 text-[11px] leading-4", CONSOLE.faint)}>{hint}</p>
       )}
       {trend && (
         <div className="mt-2">

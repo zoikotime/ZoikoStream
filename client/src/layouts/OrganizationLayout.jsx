@@ -19,6 +19,11 @@ import { OrgScopeContext } from "../components/organization/orgScope";
 //
 // The window scope (workspace + range) lives here too, because the topbar owns the controls
 // while the Overview page owns the fetch; it reaches the page through OrgScopeContext.
+//
+// The Event Workspace (pages/organization/event/EventWorkspaceLayout) renders THIS layout with
+// its own rail (`renderNav`) and hands its event to the routed section through
+// `outletContext` — one shell, so entering an event changes the navigation and nothing else
+// (ZST-UX-NAV-001 §3.2).
 const REFRESH_MS = 30_000;
 
 // The rail's collapsed state is a per-operator preference, so it outlives the mount rather
@@ -34,7 +39,7 @@ const readCollapsed = () => {
   }
 };
 
-export default function OrganizationLayout() {
+export default function OrganizationLayout({ renderNav, outletContext, content } = {}) {
   const { data: state, loading, error, reload } = useApi(() =>
     api.get("/organization/console-state").then((r) => r.data)
   );
@@ -83,17 +88,21 @@ export default function OrganizationLayout() {
         // ~1400px a data table becomes a scan across the full width of a 27" display. Pages
         // that set their own narrower max-width still win inside this.
         mainClass="mx-auto w-full max-w-[1400px] p-4 sm:p-6 lg:px-8 lg:py-7"
+        outletContext={outletContext}
+        content={content}
         renderSidebar={({ open, setOpen }) => (
           <Sidebar
             open={open}
             onClose={() => setOpen(false)}
             state={state}
             collapsed={collapsed}
+            nav={renderNav ? renderNav({ state, collapsed, onNavigate: () => setOpen(false) }) : null}
           />
         )}
-        renderTopbar={({ setOpen }) => (
+        renderTopbar={({ open, setOpen }) => (
           <Topbar
             onMenuClick={() => setOpen((v) => !v)}
+            drawerOpen={open}
             state={state}
             unknown={unknown}
             onRetry={reload}

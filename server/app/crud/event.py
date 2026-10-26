@@ -27,6 +27,13 @@ from ..models.event import ARCHIVABLE_STATUSES, EVENT_STATUSES, ON_AIR_STATUSES,
 # BroadcastSession with a real started_at is the platform's own evidence that the event
 # was on air.
 DISPLAY_MISSED = "missed"
+# The Events page's "Live now" filter: every event on air, degraded included — a degraded
+# broadcast is still live to its viewers. A filter, never a status anything is set to.
+DISPLAY_ON_AIR = "on_air"
+# The Events page's "Upcoming" tab: everything before go-live that is not a draft, and not a
+# Scheduled event whose start has already been missed.
+DISPLAY_UPCOMING = "upcoming"
+UPCOMING_STATUSES = ("published", "scheduled", "ready_to_arm", "armed")
 DISPLAY_STATUSES = EVENT_STATUSES + (DISPLAY_MISSED,)
 # Which canonical statuses can become Missed. Only "scheduled": a draft's time is tentative,
 # and published / ready_to_arm / armed keep their own label (with a "start time passed" note).
@@ -322,6 +329,10 @@ def list_events(db, org_id, q=None, status=None, host_id=None, date_from=None, d
     # existing caller.
     if display_status == DISPLAY_MISSED:
         stmt = stmt.where(missed_clause(now))
+    elif display_status == DISPLAY_ON_AIR:
+        stmt = stmt.where(Event.status.in_(ON_AIR_STATUSES))
+    elif display_status == DISPLAY_UPCOMING:
+        stmt = stmt.where(Event.status.in_(UPCOMING_STATUSES), ~missed_clause(now))
     elif display_status:
         stmt = stmt.where(Event.status == display_status)
         if display_status in MISSED_FROM_STATUSES:

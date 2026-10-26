@@ -683,6 +683,63 @@ def _upcoming_stmt(include_test: bool, high_impact_only: bool, horizon: timedelt
     return stmt
 
 
+def _event_gates(db: Session, ev: Event, hosts: dict, single_path: set) -> list[dict]:
+    gates = _gate_results(ev, hosts, single_path)
+    commercial_gate = _commercial_gate(db, ev)
+    return gates + [commercial_gate] if commercial_gate is not None else gates
+
+
+def readiness_for(db: Session, ev: Event) -> dict:
+    """ONE event's readiness, from the same gates event_readiness evaluates for the upcoming
+    list — so the Event Workspace's Preparation section and every list that shows a verdict
+    can never disagree. Evaluated for the event in front of the caller whatever its status or
+    start time; the caller decides what a verdict means for an event already on air."""
+    hosts = _event_hosts(db, [ev.id])
+    single_path = set(db.scalars(
+        select(GovernanceRecord.event_id).where(
+            GovernanceRecord.kind == "single_path_override",
+            GovernanceRecord.resolved_at.is_(None),
+            GovernanceRecord.event_id == ev.id,
+        )
+    ).all())
+    gates = _event_gates(db, ev, hosts, single_path)
+    return {
+        "id": str(ev.id),
+        "impact": ev.impact or "standard",
+        "verdict": _verdict(gates),
+        "gates": gates,
+        "failing": [g["label"] for g in gates if not g["passed"]],
+    }
+
+
+def readiness_many(db: Session, events) -> dict:
+    """{event_id: {verdict, blockers, failing}} for a page of events, from the same gates —
+    three queries for the page plus the commercial gate where an event carries one. What the
+    Events list's Readiness column reads, so it can never disagree with the event's own
+    Preparation section."""
+    events = list(events)
+    if not events:
+        return {}
+    ids = [e.id for e in events]
+    hosts = _event_hosts(db, ids)
+    single_path = set(db.scalars(
+        select(GovernanceRecord.event_id).where(
+            GovernanceRecord.kind == "single_path_override",
+            GovernanceRecord.resolved_at.is_(None),
+            GovernanceRecord.event_id.in_(ids),
+        )
+    ).all())
+    out = {}
+    for ev in events:
+        gates = _event_gates(db, ev, hosts, single_path)
+        out[ev.id] = {
+            "verdict": _verdict(gates),
+            "blockers": sum(1 for g in gates if g["required"] and not g["passed"]),
+            "failing": sum(1 for g in gates if not g["passed"]),
+        }
+    return out
+
+
 def event_readiness(db: Session, include_test: bool, limit: int = 8,
                     high_impact_only: bool = True, *, horizon: timedelta | None = None,
                     org_filter: "OrgFilter | None" = None) -> list[dict]:
@@ -707,10 +764,7 @@ def event_readiness(db: Session, include_test: bool, limit: int = 8,
 
     out = []
     for ev in events:
-        gates = _gate_results(ev, hosts, single_path)
-        commercial_gate = _commercial_gate(db, ev)
-        if commercial_gate is not None:
-            gates = gates + [commercial_gate]
+        gates = _event_gates(db, ev, hosts, single_path)
         out.append({
             "id": str(ev.id),
             "title": ev.title or "Untitled event",
@@ -1349,6 +1403,54 @@ def health_window(db: Session, win: "ops_window.Window") -> dict:
     }
 
 
+def api_traffic(db: Session, range_: str = "24h", since=None, until=None) -> dict:
+    """The API-health figures on their own, for the traffic view behind the tile.
+
+    Nothing new is measured and nothing new is stored: this resolves a window the same way
+    the Command Center does and hands it to the same api_window(), so the dashboard tile and
+    the traffic page can never disagree about the same minute. The rows underneath are the
+    per-minute api_requests / api_errors / api_lat_le_* that run_request_stats_flusher
+    already writes from every process.
+
+    Separate from /admin/command-center on purpose: that endpoint answers for the whole
+    dashboard (sessions, audience, incidents, governance, upcoming), and a page that wants
+    request counts should not pay for all of it.
+    """
+    generated_at = _now()
+    win = ops_window.resolve(range_, since, until, now=generated_at)
+    return {"generated_at": generated_at, "range": win.as_dict(), **api_window(db, win)}
+
+
+def health_history_note(has_trend: bool, region: str | None) -> str | None:
+    """What the health card actually covers, for the selection that produced it.
+
+    record_samples writes ONE scalar per tick — platform_health_ok, the number of healthy
+    services across the whole platform. It carries no stage, region or test-mode dimension,
+    and health_window filters those rows by time and nothing else. So the time range is the
+    only filter the trend can honour; every other control on the page leaves it untouched.
+
+    The card has to say that, because a page with a region selected otherwise implies a
+    regional trend. The note used to be emitted only for the narrower scopes, and read
+    "...so the trend is shown for Core + Live Events only" — which described a trend that in
+    that branch was not being shown at all, and said nothing at all when a region was picked.
+
+    Current status and the trend are reported separately here on purpose: status IS scoped by
+    the stage selection (see _scoped_health), so the two do not share a caveat.
+    """
+    if has_trend:
+        # Core + Live Events is the whole platform, so the trend matches the scope asked for.
+        # Region is the only thing that can still be silently ignored.
+        if region:
+            return ("Health is sampled platform-wide, so this trend and the status above "
+                    "cover every region, not only the selected one.")
+        return None
+    if region:
+        return ("Health is sampled platform-wide, not per stage or region, so this scope "
+                "has no trend and the status above covers every region.")
+    return ("Health is sampled platform-wide, not per stage, so this scope has no trend. "
+            "The status above is current and does reflect it.")
+
+
 UPCOMING_HORIZON = timedelta(days=7)
 
 
@@ -1439,9 +1541,7 @@ def command_center(db: Session, user: User, range_: str = "live", region: str | 
                 "series": hist["series"] if hist else [],
                 "average_ok": hist["average_ok"] if hist else None,
                 "comparison": hist["comparison"] if hist else None,
-                "history_note": None if hist else (
-                    "Health history is sampled platform-wide, so the trend is shown for "
-                    "Core + Live Events only."),
+                "history_note": health_history_note(hist is not None, region),
                 "applies": {"range": "trend", "region": False, "scope": True,
                             "include_test": False},
             },

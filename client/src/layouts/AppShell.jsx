@@ -1,4 +1,5 @@
 import { Suspense, useEffect, useState } from "react";
+import "@fontsource-variable/inter";
 import { Outlet } from "react-router-dom";
 import Spinner from "../ui/Spinner";
 import { register } from "../ui/dismissStack";
@@ -14,6 +15,9 @@ import { register } from "../ui/dismissStack";
 // fetches the state both bars need, so a page that needs the same state (the console's
 // elevation grant, say) reads it from here instead of issuing a second request. Undefined
 // by default, which is exactly what <Outlet /> had before.
+// `content`, when given, is rendered INSTEAD of the routed page — a layout that must resolve
+// something first (the Event Workspace resolving its event) shows its loading / not-found /
+// error state there, so no routed page ever renders without what it depends on.
 export default function AppShell({
   renderSidebar,
   renderTopbar,
@@ -21,6 +25,7 @@ export default function AppShell({
   surface = "bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-200",
   mainClass = "p-4 sm:p-6 lg:p-8",
   outletContext,
+  content = null,
 }) {
   const [open, setOpen] = useState(false);
 
@@ -40,6 +45,14 @@ export default function AppShell({
     return layer.release;
   }, [open]);
 
+  // The consoles set in Inter (ZST-ENG-DASH-001 §5.3), the frames' family. On <html> rather
+  // than this wrapper so dialogs and toasts portalled to <body> match the page under them.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.add("zk-console");
+    return () => root.classList.remove("zk-console");
+  }, []);
+
   return (
     <div className={`flex ${fullHeight ? "h-screen overflow-hidden" : "min-h-screen"} ${surface}`}>
       {renderSidebar({ open, setOpen })}
@@ -56,7 +69,7 @@ export default function AppShell({
               </div>
             }
           >
-            <Outlet context={outletContext} />
+            {content ?? <Outlet context={outletContext} />}
           </Suspense>
         </main>
       </div>

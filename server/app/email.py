@@ -1632,8 +1632,12 @@ DEV_002_UNEXPECTED = (
 
 
 def api_credentials_url() -> str:
-    """Customer-facing Developer console. Never a Super Admin surface, never a raw API."""
-    return f"{public_base_url()}/organization/developer"
+    """Customer-facing Developer settings, where the key inventory (and the webhooks) live.
+    Never a Super Admin surface, never a raw API.
+
+    It used to be /organization/developer, which is not a console route: the catch-all sent
+    the reader to their dashboard instead of the key the email was about."""
+    return f"{public_base_url()}/organization/settings?tab=developer"
 
 
 def send_api_credential_created_email(to, *, org_name, credential_name, fingerprint,
@@ -1674,32 +1678,58 @@ def send_api_credential_created_email(to, *, org_name, credential_name, fingerpr
 # The expiry copy is likewise careful: it says the credential is MARKED expired, never that
 # access was blocked, because no authentication path enforces it yet.
 
-DEV_003_WARNING_SUBJECT = "Action required: Zoiko Stream API credential expires soon"
-DEV_003_EXPIRED_SUBJECT = "Zoiko Stream API credential expired"
-DEV_003_PREHEADER = "Review the credential and rotate it before it lapses."
-DEV_003_CTA = "Rotate credential"
+# Reminder subjects are "API key expires in 7 days" etc. (dev_003_warning_subject); the prefix
+# is what every reminder shares.
+DEV_003_WARNING_SUBJECT_PREFIX = "API key expires"
+DEV_003_EXPIRED_SUBJECT = "API key expired"
+DEV_003_PREHEADER = "Create a replacement key before this one expires."
+DEV_003_CTA = "Open Developer settings"
 DEV_003_ROTATION_GUIDANCE = (
-    "Create a replacement credential, move your integrations onto it, then revoke this one. "
-    "The new secret is shown only once, at creation."
+    "Create a replacement key while this one is still active, update your integration to use "
+    "it, check that it works, then revoke this one. The new key's secret is shown only once, "
+    "at creation. An expired key is never extended or reactivated."
 )
 
 
+def time_remaining_label(seconds: int) -> str:
+    """'in 7 days', 'in 1 day', 'in 4 hours', 'in less than an hour' — for a key still valid.
+
+    Whole days are rounded to the NEAREST day (the 7-day reminder, sent by an hourly sweep
+    somewhere inside 6 d 23 h – 7 d, reads "7 days"); under a day it is whole hours, rounded
+    DOWN, so the last day never overstates the time left."""
+    if seconds < 3600:
+        return "in less than an hour"
+    if seconds < 86400:
+        hours = seconds // 3600
+        return f"in {hours} hour{'s' if hours != 1 else ''}"
+    days = max(1, round(seconds / 86400))
+    return f"in {days} day{'s' if days != 1 else ''}"
+
+
+def dev_003_warning_subject(seconds: int) -> str:
+    return f"{DEV_003_WARNING_SUBJECT_PREFIX} {time_remaining_label(seconds)}"
+
+
 def send_credential_expiring_email(to, *, org_name, credential_name, fingerprint,
-                                   expires_at, days_left, access_note):
+                                   expires_at, seconds_left, access_note):
+    """DEV-003 reminder. Every argument is safe metadata: the key's label and hash-derived
+    fingerprint, never its secret or prefix."""
+    remaining = time_remaining_label(seconds_left)
     body_txt = (
-        f"The API credential {credential_name} for {org_name} expires at {expires_at} "
-        f"(in {days_left} days)."
+        f"Your API key '{credential_name}' for {org_name} expires {remaining}, on {expires_at}. "
+        "Create a replacement key and update your integration before that time."
     )
-    rows = [("Credential", credential_name), ("Organization", org_name),
+    rows = [("Key", credential_name), ("Organization", org_name),
             ("Fingerprint", fingerprint), ("Expires", expires_at),
+            ("Time remaining", remaining.removeprefix("in ").capitalize()),
             ("Current state", "Active"), ("Effect on access", access_note)]
     url = api_credentials_url()
     return _send(
-        to, DEV_003_WARNING_SUBJECT,
-        _org_shell("Credential expiring", "An API credential expires soon.",
+        to, dev_003_warning_subject(seconds_left),
+        _org_shell("API key expiring", f"An API key expires {remaining}.",
                    DEV_003_PREHEADER, rows, html.escape(body_txt), DEV_003_CTA, url,
                    DEV_003_ROTATION_GUIDANCE),
-        _org_text("An API credential expires soon.", DEV_003_PREHEADER, rows, body_txt,
+        _org_text(f"An API key expires {remaining}.", DEV_003_PREHEADER, rows, body_txt,
                   DEV_003_CTA, url, DEV_003_ROTATION_GUIDANCE,
                   "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
@@ -1709,19 +1739,20 @@ def send_credential_expiring_email(to, *, org_name, credential_name, fingerprint
 def send_credential_expired_email(to, *, org_name, credential_name, fingerprint,
                                   expired_at, access_note):
     body_txt = (
-        f"The API credential {credential_name} for {org_name} reached its expiry at "
-        f"{expired_at} and is now marked expired."
+        f"Your API key '{credential_name}' for {org_name} reached its expiry at {expired_at} "
+        "and is now marked expired. It stays expired: create a replacement key for any "
+        "integration that still uses it."
     )
-    rows = [("Credential", credential_name), ("Organization", org_name),
+    rows = [("Key", credential_name), ("Organization", org_name),
             ("Fingerprint", fingerprint), ("Expired", expired_at),
             ("Current state", "Expired"), ("Effect on access", access_note)]
     url = api_credentials_url()
     return _send(
         to, DEV_003_EXPIRED_SUBJECT,
-        _org_shell("Credential expired", "An API credential has expired.",
+        _org_shell("API key expired", "An API key has expired.",
                    DEV_003_PREHEADER, rows, html.escape(body_txt), DEV_003_CTA, url,
                    DEV_003_ROTATION_GUIDANCE),
-        _org_text("An API credential has expired.", DEV_003_PREHEADER, rows, body_txt,
+        _org_text("An API key has expired.", DEV_003_PREHEADER, rows, body_txt,
                   DEV_003_CTA, url, DEV_003_ROTATION_GUIDANCE,
                   "Zoiko Stream Developer Platform"),
         sender=_sender_identity(SENDER_DEVELOPER),
@@ -3614,8 +3645,11 @@ def send_reset_otp_email(to: str, name: str, otp: str) -> None:
 
 
 def send_assignment_email(to: str, name: str, event_title: str, role: str, org_name: str, event_url: str) -> None:
+    # Approved display name, as the organization invitations use: without it the From line is
+    # MAIL_FROM verbatim, so the brand recipients see depended on deployment configuration.
     _send(to, f"You've been added as {role} for {event_title}",
-          _assignment_html(name, event_title, role, org_name, event_url))
+          _assignment_html(name, event_title, role, org_name, event_url),
+          sender=_sender_identity(SENDER_DEFAULT))
 
 
 def send_self_host_confirmation_email(to: str, name: str, event_title: str, org_name: str,
@@ -3630,8 +3664,10 @@ def send_registration_confirmation_email(to: str, name: str, event_title: str, e
 
 
 def send_viewer_invite_email(to: str, name: str, event_title: str, watch_url: str, inviter_name: str) -> None:
+    # Same as send_assignment_email: the approved "Zoiko Stream" name around MAIL_FROM's address.
     _send(to, f"You're invited to watch {event_title}",
-          _viewer_invite_html(name, event_title, watch_url, inviter_name))
+          _viewer_invite_html(name, event_title, watch_url, inviter_name),
+          sender=_sender_identity(SENDER_DEFAULT))
 
 
 if __name__ == "__main__":

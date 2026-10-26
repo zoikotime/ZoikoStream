@@ -2,6 +2,7 @@
 // what was not measured (ZST-SPEC-VAP-001 §9; server/app/services/viewing_sessions.py).
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { CONSOLE } from "../../ui/tokens";
 import ViewingSessionsPanel from "./ViewingSessionsPanel";
 
 const SUMMARY = {
@@ -47,6 +48,13 @@ describe("ViewingSessionsPanel", () => {
     render(<ViewingSessionsPanel summary={{ measured: false, sessions_admitted: null }} reports={[]} />);
     expect(screen.getByText("No viewing sessions recorded in this window yet.")).toBeInTheDocument();
     expect(screen.queryByText("0")).toBeNull();
+  });
+
+  it("says it on the faint token, which holds AA — not slate-400 (2.63:1 on white)", () => {
+    render(<ViewingSessionsPanel summary={{ measured: false, sessions_admitted: null }} reports={[]} />);
+    const empty = screen.getByText("No viewing sessions recorded in this window yet.");
+    expect(empty).toHaveClass(...CONSOLE.faint.split(" "));
+    expect(empty).not.toHaveClass("text-slate-400");
   });
 
   it("labels sessions as sessions, not people", () => {

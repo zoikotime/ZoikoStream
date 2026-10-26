@@ -60,7 +60,24 @@ MAX_STARTUP_MS = 10 * 60 * 1000
 # Clock slack between the token being minted and the player's own count of watch time.
 ELAPSED_SLACK_MS = 2 * 60 * 1000
 
-WINDOWS = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30), "all": None}
+WINDOWS = {"24h": timedelta(hours=24), "7d": timedelta(days=7), "30d": timedelta(days=30),
+           "90d": timedelta(days=90), "all": None}
+
+# The activity series' bucket per window: hours for a day, days for 7–90 days, weeks for all
+# time (retention bounds "all" to PLAYBACK_QOE_RETENTION_DAYS, so it stays a short series).
+SERIES_BUCKET = {"24h": "hour", "7d": "day", "30d": "day", "90d": "day", "all": "week"}
+_BUCKET_STEP = {"hour": timedelta(hours=1), "day": timedelta(days=1), "week": timedelta(weeks=1)}
+_SERIES_MAX_POINTS = 400
+
+
+def _bucket_floor(dt: datetime, unit: str) -> datetime:
+    """The UTC start of the bucket holding `dt` — the same boundary as Postgres
+    date_trunc(unit, timezone('UTC', created_at)); weeks start on Monday."""
+    dt = dt.astimezone(timezone.utc)
+    if unit == "hour":
+        return dt.replace(minute=0, second=0, microsecond=0)
+    day = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return day - timedelta(days=day.weekday()) if unit == "week" else day
 
 # ── new-session budget (inflation protection) ──────────────────────────────────────────────
 #
@@ -339,6 +356,32 @@ def summarize(db: Session, org_id: uuid.UUID, *, event_id: uuid.UUID | None = No
             failures[mode][reason] = int(count)
 
     modes = {mode: _mode_figures(by_mode.get(mode), failures[mode]) for mode in PLAYBACK_MODES}
+
+    # Activity over the window (ORG-03 "Playback activity"): sessions that BEGAN in each UTC
+    # bucket, from the same rows as every other figure, with empty buckets as real zeros.
+    unit = SERIES_BUCKET[window]
+    bucket = func.date_trunc(unit, func.timezone("UTC", t.created_at)).label("bucket")
+    counted = {
+        row.bucket.replace(tzinfo=timezone.utc): (int(row.sessions), int(row.starts))
+        for row in db.execute(
+            select(bucket, func.count().label("sessions"), func.count().filter(started).label("starts"))
+            .where(*where).group_by(bucket)
+        ).all()
+    }
+    first = _bucket_floor(since, unit) if since is not None else (min(counted) if counted else _bucket_floor(now, unit))
+    points, cursor, last = [], first, _bucket_floor(now, unit)
+    while cursor <= last and len(points) < _SERIES_MAX_POINTS:
+        sessions, starts = counted.get(cursor, (0, 0))
+        points.append({"start": cursor.isoformat(), "sessions": sessions, "playback_starts": starts})
+        cursor += _BUCKET_STEP[unit]
+
+    # Sessions per event over the same window (ORG-03 "Access by event"); an event with none
+    # is simply absent, which the page reads as 0 for an event it lists.
+    by_event = {
+        str(eid): int(n)
+        for eid, n in db.execute(select(t.event_id, func.count()).where(*where).group_by(t.event_id)).all()
+    }
+
     combined: dict[str, int] = {}
     for mode in PLAYBACK_MODES:
         for reason, count in failures[mode].items():
@@ -356,6 +399,8 @@ def summarize(db: Session, org_id: uuid.UUID, *, event_id: uuid.UUID | None = No
             "failed_sessions": sum(m["failed_sessions"] for m in modes.values()),
             "failures": _ranked(combined),
         },
+        "series": {"bucket": unit, "timezone": "UTC", "points": points},
+        "by_event": by_event,
     }
 
 

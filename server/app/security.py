@@ -1,4 +1,5 @@
 import hmac
+import ipaddress
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -20,17 +21,49 @@ _bearer = HTTPBearer(auto_error=True)
 _bearer_optional = HTTPBearer(auto_error=False)
 
 
+def _parse_ip(raw: str | None) -> str | None:
+    """Parse and normalise an IP address string (IPv4 or IPv6), stripping any port.
+    Returns normalised IP string if valid, or None if invalid/empty/malformed."""
+    if not raw or not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw.startswith("["):
+        bracket_end = raw.find("]")
+        if bracket_end != -1:
+            raw = raw[1:bracket_end]
+    elif ":" in raw and raw.count(":") == 1:
+        raw = raw.split(":")[0]
+    try:
+        return str(ipaddress.ip_address(raw))
+    except ValueError:
+        return None
+
+
 def client_ip(request: Request) -> str | None:
-    """Deployed behind Cloud Run, whose frontend terminates the connection and sets
-    X-Forwarded-For itself — a caller cannot spoof this hop the way it could with a
-    self-managed reverse proxy. Without reading it, request.client.host is Cloud Run's
-    proxy address for every caller, not the real one."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
-    return request.client.host if request.client else None
+    """Read the real client IP, defending against X-Forwarded-For spoofing.
+
+    X-Forwarded-For is `client, proxy1, proxy2...` where proxies append to the right.
+    We trust `settings.TRUSTED_PROXY_HOPS` hops from the right end of the chain.
+    If TRUSTED_PROXY_HOPS <= 0 or the header is missing/malformed, fall back to peer address.
+    """
+    peer = _parse_ip(request.client.host) if getattr(request, "client", None) and request.client else None
+    trusted_hops = getattr(settings, "TRUSTED_PROXY_HOPS", 1)
+    if trusted_hops <= 0:
+        return peer
+
+    forwarded = request.headers.get("x-forwarded-for") if getattr(request, "headers", None) else None
+    if not forwarded:
+        return peer
+
+    hops = [p.strip() for p in forwarded.split(",") if p.strip()]
+    if not hops:
+        return peer
+
+    idx = -trusted_hops if len(hops) >= trusted_hops else 0
+    candidate = _parse_ip(hops[idx])
+    return candidate if candidate is not None else peer
 
 
 def hash_password(password: str) -> str:

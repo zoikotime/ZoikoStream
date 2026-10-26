@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { FiDownload, FiRefreshCw } from "react-icons/fi";
 import { CONSOLE, cx, focusRing, type } from "../../../ui/tokens";
-import { Select } from "../../../ui/forms";
+import Dropdown from "../../../ui/Dropdown";
+import DateTimeField from "../../../ui/DateTimeField";
 import { customWindowError } from "./commandWindow";
 
 // The console's window controls. Every value here is sent to /admin/command-center, so a
@@ -80,22 +81,20 @@ export default function CommandFilters({ value, onChange, regions = [], onRefres
       {/* Custom window — local wall-clock inputs, sent as UTC instants on Apply. */}
       {editing && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <input
-            type="datetime-local"
+          <DateTimeField
             aria-label="Window start"
             value={editing.from || ""}
             max={editing.to || undefined}
             onChange={(e) => setDraft({ ...editing, from: e.target.value })}
-            className={cx("rounded-lg border px-2 py-1.5 text-[12px]", CONSOLE.control)}
+            inputClassName={cx("rounded-lg border px-2 py-1.5 text-[12px]", CONSOLE.control)}
           />
           <span className={cx("text-[12px]", CONSOLE.faint)}>→</span>
-          <input
-            type="datetime-local"
+          <DateTimeField
             aria-label="Window end"
             value={editing.to || ""}
             min={editing.from || undefined}
             onChange={(e) => setDraft({ ...editing, to: e.target.value })}
-            className={cx("rounded-lg border px-2 py-1.5 text-[12px]", CONSOLE.control)}
+            inputClassName={cx("rounded-lg border px-2 py-1.5 text-[12px]", CONSOLE.control)}
           />
           <button
             type="button"
@@ -111,34 +110,35 @@ export default function CommandFilters({ value, onChange, regions = [], onRefres
         </div>
       )}
 
-      <Select
-        variant="console"
-        aria-label="Region"
-        value={value.region || ""}
-        onChange={(e) => set({ region: e.target.value || null })}
-        className="w-[9.5rem]"
-      >
-        <option value="">All regions</option>
-        {regions.map((r) => (
-          <option key={r.code} value={r.code}>
-            {r.label}
-          </option>
-        ))}
-      </Select>
+      {/* ui/Dropdown rather than a native <select>: a select's option list is drawn by the
+          browser, not by the page, so it takes no shadow, no border and no z-index from us —
+          on the dark console it reads as part of the page instead of above it. Dropdown is
+          the console's own listbox and the one these filters are meant to use ("ONE dropdown
+          for every console select"); it keeps the native keyboard contract and announces
+          through role="listbox" + aria-activedescendant.
 
-      <Select
-        variant="console"
-        aria-label="Scope"
-        value={value.scope}
-        onChange={(e) => set({ scope: e.target.value })}
+          `value`/`onChange` stay a plain value in and out, so the filter state and everything
+          downstream of it is unchanged — only the control drawing it is different. */}
+      <Dropdown
+        label="Region"
+        className="w-[9.5rem]"
+        width="w-[12rem]"
+        value={value.region || ""}
+        onChange={(v) => set({ region: v || null })}
+        options={[
+          { value: "", label: "All regions" },
+          ...regions.map((r) => ({ value: r.code, label: r.label })),
+        ]}
+      />
+
+      <Dropdown
+        label="Scope"
         className="w-[11.5rem]"
-      >
-        {SCOPES.map(([key, label]) => (
-          <option key={key} value={key}>
-            {label}
-          </option>
-        ))}
-      </Select>
+        width="w-[13rem]"
+        value={value.scope}
+        onChange={(v) => set({ scope: v })}
+        options={SCOPES.map(([key, label]) => ({ value: key, label }))}
+      />
 
       <label
         className={cx(

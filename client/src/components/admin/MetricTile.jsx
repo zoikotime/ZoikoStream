@@ -9,6 +9,11 @@ import { Sparkline } from "../../ui/charts";
 //
 // A tile whose metric has no source renders an em dash plus the reason — never a plausible
 // number. Both dashboards are read as ground truth during an incident.
+const linkCls = cx(
+  "text-[12px] font-semibold after:absolute after:inset-0 after:rounded-xl after:content-['']",
+  CONSOLE.link
+);
+
 export default function MetricTile({
   label,
   value,
@@ -95,15 +100,17 @@ export default function MetricTile({
 
       {to && (
         <div className={cx("mt-2 flex items-center justify-between border-t pt-2", CONSOLE.divider)}>
-          <Link
-            to={to}
-            className={cx(
-              "text-[12px] font-semibold after:absolute after:inset-0 after:rounded-xl after:content-['']",
-              CONSOLE.link
-            )}
-          >
-            {linkLabel} →
-          </Link>
+          {/* after:inset-0 stretches the link over the whole tile, so the card and its quick
+              link are one target and cannot lead to two different places. */}
+          {/* An in-page target is a plain <a>, not a router Link. react-router intercepts the
+              click and rewrites the hash WITHOUT scrolling, so <Link to="#x"> would change the
+              URL and move nothing; a real anchor keeps the browser's own behaviour, which also
+              makes the target work on a pasted link and on refresh. */}
+          {to.startsWith("#") ? (
+            <a href={to} className={linkCls}>{linkLabel} →</a>
+          ) : (
+            <Link to={to} className={linkCls}>{linkLabel} →</Link>
+          )}
           {age != null && <span className={cx("text-[11px]", type.mono, CONSOLE.faint)}>{age}</span>}
         </div>
       )}

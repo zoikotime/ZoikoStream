@@ -59,6 +59,15 @@ export async function initNativeChrome() {
   // browser defines window.Capacitor.
   if (IS_NATIVE || isNativeRuntime()) {
     document.documentElement.classList.add("native");
+    // viewport-fit=cover lets env(safe-area-inset-*) report real values. Some devices draw
+    // the app under the status bar regardless of `overlay: false` below (Android's enforced
+    // edge-to-edge), and the org topbar and drawer pad by the top inset to stay clear of it.
+    // Where the WebView is laid out below the bar, the inset is 0 and nothing moves. Set
+    // here, not in index.html, so the web build's viewport is untouched.
+    const viewport = document.querySelector('meta[name="viewport"]');
+    if (viewport && !viewport.content.includes("viewport-fit")) {
+      viewport.content += ", viewport-fit=cover";
+    }
   }
   if (!isNativeRuntime()) return;
 
@@ -68,7 +77,8 @@ export async function initNativeChrome() {
   await call("StatusBar", "setStyle", { style: "DARK" });
   await call("StatusBar", "setBackgroundColor", { color: "#0B0F19" });
   // NOT overlaid. Android then lays the WebView out below the status bar, every
-  // env(safe-area-inset-*) resolves to zero, and no layout has to account for a notch. The
+  // env(safe-area-inset-*) resolves to zero, and no layout has to account for a notch.
+  // (Not every device honours this: see viewport-fit above, and the org topbar.) The
   // alternative buys the watch page ~24px of edge-to-edge video and charges for it in every
   // layout pinned to 100dvh — the studio, the watch page, both shells — where `h-dvh` plus
   // safe-area body padding is an overflowing page rather than an inset one. See the note in
@@ -186,5 +196,46 @@ export async function openExternal(url) {
   const opened = await call("Browser", "open", { url, presentationStyle: "popover" });
   if (opened === undefined && typeof window !== "undefined") {
     window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
+/**
+ * Hand a generated text file (a CSV report) to the user from inside the app.
+ *
+ * The browser way — an <a download> on a blob: URL — goes nowhere in the Android WebView: it
+ * has no download handler for it, so the click is silently dropped. Here the file is written
+ * to the app's cache with the Filesystem plugin and offered through Android's share sheet
+ * (Save to Drive, Files, email…) with the Share plugin. The cache needs no storage
+ * permission, and the share sheet is how Android lets the USER decide where it lands.
+ *
+ * Both plugins are addressed by name like everything else in this file, so they must be
+ * installed in the app project (ZoikoStream-app: @capacitor/filesystem, @capacitor/share).
+ * Until they are, this reports "unsupported" and the caller says so — it never pretends.
+ *
+ * Unlike `call` above, the outcome is RETURNED rather than swallowed, because the caller's
+ * message depends on it. Never throws. Resolves to `{ ok: true }` or `{ ok: false, reason }`
+ * with reason "unsupported" | "write" | "share" | "cancelled".
+ */
+export async function saveFileNative({ filename, text, title }) {
+  const fsPlugin = plugin("Filesystem");
+  const share = plugin("Share");
+  if (typeof fsPlugin?.writeFile !== "function" || typeof share?.share !== "function") {
+    return { ok: false, reason: "unsupported" };
+  }
+  let uri;
+  try {
+    // "CACHE" and "utf8" are the values of the plugin's Directory.Cache and Encoding.UTF8.
+    const written = await fsPlugin.writeFile({ path: filename, data: text, directory: "CACHE", encoding: "utf8", recursive: true });
+    uri = written?.uri;
+  } catch {
+    return { ok: false, reason: "write" };
+  }
+  if (!uri) return { ok: false, reason: "write" };
+  try {
+    await share.share({ title: title || filename, dialogTitle: title || filename, files: [uri] });
+    return { ok: true };
+  } catch (error) {
+    // Dismissing the sheet rejects with "Share canceled": the user's choice, not a failure.
+    return { ok: false, reason: /cancel/i.test(String(error?.message ?? error)) ? "cancelled" : "share" };
   }
 }

@@ -20,7 +20,7 @@ import { notify } from "../ui/Toast";
 export default function useMutation({ success, error, onDone } = {}) {
   const [busy, setBusy] = useState(false);
   // Guards the busy reset against a component that unmounted mid-request — a row action
-  // that navigates away (EventDetails' delete does exactly that) would otherwise set state
+  // that navigates away (the event workspace's Delete does exactly that) would otherwise set state
   // on a gone component. The flag is owned by an effect so it cannot go stale.
   const alive = useRef(true);
   useEffect(() => {

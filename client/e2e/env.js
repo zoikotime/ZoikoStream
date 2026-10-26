@@ -3,5 +3,5 @@
 import { fileURLToPath } from "node:url";
 
 export const FRONTEND_URL = process.env.E2E_FRONTEND_URL || "http://127.0.0.1:5173";
-export const BACKEND_URL = process.env.E2E_BACKEND_URL || "http://127.0.0.1:8000";
+export const BACKEND_URL = process.env.E2E_BACKEND_URL || "http://127.0.0.1:8001";
 export const FIXTURES_PATH = fileURLToPath(new URL("./.auth/fixtures.json", import.meta.url));

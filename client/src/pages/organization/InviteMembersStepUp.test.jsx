@@ -85,7 +85,10 @@ describe("promotion to Admin asks for the acting admin's password", () => {
     promoteSam();
     const dlg = await stepUpDialog();
     expect(dlg).toHaveAccessibleDescription(/Granting Sam Host Admin access gives them full control of this organization/);
-    expect(within(dlg).getByLabelText("Your password")).toHaveFocus();
+    // Focus moves in the dialog's open effect, which React may run just after the dialog is
+    // committed (it opens from a rejected request, outside act). Wait for it rather than
+    // asserting on the same tick — under load that tick came first and the test failed.
+    await waitFor(() => expect(within(dlg).getByLabelText("Your password")).toHaveFocus());
     expect(api.patch).toHaveBeenCalledTimes(1);
     expect(api.patch).toHaveBeenCalledWith(SAM, { role: "org_admin" });
     expect(api.post).not.toHaveBeenCalled();
@@ -160,7 +163,12 @@ describe("promotion to Admin asks for the acting admin's password", () => {
   it("Escape cancels the same way", async () => {
     await renderPage();
     promoteSam();
-    await stepUpDialog();
+    const dlg = await stepUpDialog();
+    // The Escape listener (ui/Overlay) attaches in an effect, which React may run just after the
+    // dialog is committed (it opens from a rejected request, outside act). One Escape sent before
+    // it is lost for good, so wait for the dialog's own open effect (it focuses the password) —
+    // React has run the Overlay's effect by then. Under load the keypress used to come first.
+    await waitFor(() => expect(within(dlg).getByLabelText("Your password")).toHaveFocus());
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await waitFor(() => expect(samSelect().value).toBe("host"));

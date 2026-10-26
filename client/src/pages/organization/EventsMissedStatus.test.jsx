@@ -26,7 +26,8 @@ import api from "../../api";
 import { EVENT_STATUS, STATUS_FILTER_OPTIONS, displayStatusOf, statusMeta } from "../../data/events";
 import { ThemeProvider } from "../../theme/ThemeContext";
 import Events from "./Events";
-import EventDetails from "./EventDetails";
+import EventWorkspaceLayout from "./event/EventWorkspaceLayout";
+import EventOverview from "./event/EventOverview";
 
 const past = new Date(Date.now() - 3 * 3600_000).toISOString();
 const future = new Date(Date.now() + 3 * 86400_000).toISOString();
@@ -64,12 +65,15 @@ afterEach(() => vi.useRealTimers());
 const renderEvents = () => render(
   <ThemeProvider><MemoryRouter initialEntries={["/organization/events"]}><Events /></MemoryRouter></ThemeProvider>,
 );
-const badgeIn = (title) => screen.getByText(title).closest("tr");
+// The events table. Titles also appear in the side panels (Next on the schedule), so rows are
+// looked up inside the table; when the table is gone (an empty filter) nothing is in it.
+const table = () => within(screen.queryByRole("table") || document.createElement("div"));
+const badgeIn = (title) => table().getByText(title).closest("tr");
 
 describe("the Events table", () => {
   it("shows Missed for a past, never-started Scheduled event, Scheduled for a future one", async () => {
     renderEvents();
-    await screen.findByText("Event m1");
+    await table().findByText("Event m1");
     expect(within(badgeIn("Event m1")).getByText("Missed")).toBeInTheDocument();
     expect(within(badgeIn("Event m1")).queryByText("Start time passed")).toBeNull();
     expect(within(badgeIn("Event s1")).getByText("Scheduled")).toBeInTheDocument();
@@ -79,23 +83,23 @@ describe("the Events table", () => {
 
   it("counts only upcoming events as Scheduled", async () => {
     renderEvents();
-    await screen.findByText("Event m1");
-    const card = (label) => screen.getByText(label, { selector: "p" }).parentElement;
-    // 9 canonical scheduled = 4 upcoming + 5 missed; the card shows the upcoming 4.
-    await waitFor(() => expect(card("Scheduled")).toHaveTextContent(/^Scheduled4$/));
+    await table().findByText("Event m1");
+    // 9 canonical scheduled = 4 upcoming + 5 missed; the Upcoming tab counts the upcoming 4.
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /^Upcoming/ })).toHaveTextContent(/^Upcoming4$/));
   });
 
   it("offers a Missed filter, right after Scheduled, that asks the server for missed events", async () => {
     const user = userEvent.setup();
     renderEvents();
-    await screen.findByText("Event m1");
+    await table().findByText("Event m1");
     const select = screen.getByRole("combobox", { name: "Filter by status" });
     const options = within(select).getAllByRole("option").map((o) => o.value);
     expect(options.indexOf("missed")).toBe(options.indexOf("scheduled") + 1);
     await user.selectOptions(select, "missed");
     await waitFor(() => expect(lastParams()).toMatchObject({ display_status: "missed", page: 1 }));
-    await waitFor(() => expect(screen.queryByText("Event s1")).toBeNull());
-    expect(screen.getByText("Event m1")).toBeInTheDocument();
+    await waitFor(() => expect(table().queryByText("Event s1")).toBeNull());
+    expect(table().getByText("Event m1")).toBeInTheDocument();
     await user.selectOptions(select, "scheduled");
     await waitFor(() => expect(lastParams()).toMatchObject({ display_status: "scheduled" }));
   });
@@ -104,7 +108,7 @@ describe("the Events table", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     listed = [row("t1", "scheduled", { start_time: new Date(Date.now() - 60_000).toISOString() })];
     renderEvents();
-    await screen.findByText("Event t1");
+    await table().findByText("Event t1");
     expect(within(badgeIn("Event t1")).getByText("Scheduled")).toBeInTheDocument();
     // The grace period ran out; the server now reports it Missed.
     listed = [{ ...listed[0], display_status: "missed", start_overdue: true }];
@@ -123,7 +127,11 @@ describe("the event page", () => {
     render(
       <ThemeProvider>
         <MemoryRouter initialEntries={[`/organization/events/${MISSED.id}`]}>
-          <Routes><Route path="/organization/events/:id" element={<EventDetails />} /></Routes>
+          <Routes>
+            <Route path="/organization/events/:id" element={<EventWorkspaceLayout />}>
+              <Route index element={<EventOverview />} />
+            </Route>
+          </Routes>
         </MemoryRouter>
       </ThemeProvider>,
     );

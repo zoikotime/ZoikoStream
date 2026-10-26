@@ -98,6 +98,14 @@ const sortHeader = (header) => screen.getByRole("button", { name: header });
 const listCalls = () => vi.mocked(api.get).mock.calls.filter(([u]) => u === "/admin/users");
 const lastParams = () => listCalls()[listCalls().length - 1]?.[1]?.params;
 
+// The organization filter is a ui/Dropdown, not a <select> — a native option list is browser
+// chrome, so its height could not be constrained for a list of every tenant. Driven here the
+// way it is used: open the trigger, then click the organization by name.
+const pickOrg = async (u, name) => {
+  await u.click(screen.getByLabelText(/filter by organization/i));
+  await u.click(await screen.findByRole("option", { name }));
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   summaryFails = false;
@@ -185,7 +193,7 @@ describe("changing what is being asked resets to page 1", () => {
     const u = userEvent.setup();
     renderPage();
     await goToPageTwo(u);
-    await u.selectOptions(screen.getByLabelText(/filter by organization/i), "org-3");
+    await pickOrg(u, ORGS[3].name);
     await waitFor(() => expect(lastParams().page).toBe(1));
   });
 
@@ -264,11 +272,14 @@ describe("organization filter spans every tenant", () => {
     renderPage();
     await screen.findByText("User 0000");
 
-    const select = screen.getByLabelText(/filter by organization/i);
+    const u = userEvent.setup();
+    await u.click(screen.getByLabelText(/filter by organization/i));
+    const list = await screen.findByRole("listbox");
     await waitFor(() =>
-      expect(within(select).getAllByRole("option").length).toBe(ORGS.length + 1));  // + "All"
+      expect(within(list).getAllByRole("option").length).toBe(ORGS.length + 1));  // + "All"
     // The page holds 50 rows across 140 orgs; the old dropdown could only offer what it saw.
-    expect(within(select).getAllByRole("option").length).toBeGreaterThan(PAGE_SIZE);
+    // The menu is height-bounded and scrolls — bounding it must not shorten the LIST.
+    expect(within(list).getAllByRole("option").length).toBeGreaterThan(PAGE_SIZE);
   });
 
   it("pages the organizations endpoint to the end", async () => {
@@ -283,7 +294,7 @@ describe("organization filter spans every tenant", () => {
     renderPage();
     await screen.findByText("User 0000");
 
-    await u.selectOptions(screen.getByLabelText(/filter by organization/i), "org-7");
+    await pickOrg(u, ORGS[7].name);
     await waitFor(() => expect(lastParams().org_id).toBe("org-7"));
     // A name would be the old client-side match.
     expect(lastParams().org_id).not.toMatch(/^Org /);
@@ -294,7 +305,7 @@ describe("organization filter spans every tenant", () => {
     renderPage();
     await screen.findByText(new RegExp(`of ${TOTAL}`));
 
-    await u.selectOptions(screen.getByLabelText(/filter by organization/i), "org-7");
+    await pickOrg(u, ORGS[7].name);
     await waitFor(() => expect(screen.getByText(/of 8/)).toBeInTheDocument());
   });
 });

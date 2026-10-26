@@ -7,6 +7,7 @@
 // Missing data renders as "—" with a reason, never as 0: the server sends None for anything
 // it did not measure, and this panel keeps it that way.
 import Card from "../../ui/Card";
+import { CONSOLE } from "../../ui/tokens";
 
 const DASH = "—";
 
@@ -59,7 +60,7 @@ export default function ViewingSessionsPanel({ summary, reports = [] }) {
       </div>
 
       {!measured ? (
-        <p className="py-6 text-center text-sm text-slate-400 dark:text-slate-500">
+        <p className={`py-6 text-center text-sm ${CONSOLE.faint}`}>
           No viewing sessions recorded in this window yet.
         </p>
       ) : (

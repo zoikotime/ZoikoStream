@@ -1,12 +1,12 @@
-// The Events table's View and Delete are visible at rest.
+// The Events table's row actions (ORG-02): Open Workspace, and the row's "⋯" overflow holding
+// Copy viewer link and Delete — both controls visible at rest.
 //
-// They sat inside the shared DataTable's row-actions cell, which is `opacity-0` until the row
-// is hovered (or something in it is focused) — so on /organization/events the Actions column
-// looked empty and the actions had to be discovered by moving the pointer over each row. The
-// Events table now opts into always-visible actions (DataTable `alwaysShowRowActions`); hover
-// and focus only add emphasis. Tailwind is not loaded in jsdom, so visibility is asserted on
+// They sit inside the shared DataTable's row-actions cell, which is `opacity-0` until the row
+// is hovered (or something in it is focused) unless a table opts out — so on
+// /organization/events the Actions column once looked empty. The Events table opts into
+// always-visible actions (DataTable `alwaysShowRowActions`); hover and focus only add emphasis. Tailwind is not loaded in jsdom, so visibility is asserted on
 // the classes that would hide the controls, in both themes.
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -76,45 +76,52 @@ function hidingClasses(el) {
   return found;
 }
 
-const view = (title) => screen.getByRole("button", { name: `View ${title}` });
-const del = (title) => screen.getByRole("button", { name: `Delete ${title}` });
+// The events table. Titles also appear in the side panels (Next on the schedule), so rows are
+// always looked up inside the table.
+const table = () => within(screen.getByRole("table"));
+const view = (title) => table().getByRole("link", { name: `Open workspace for ${title}` });
+const more = (title) => table().getByRole("button", { name: `More actions for ${title}` });
+// Delete lives in the row's "⋯" menu (ZST-UX-NAV-001 §16.1), which is portalled to <body>.
+async function chooseDelete(user, title) {
+  await user.click(more(title));
+  await user.click(await screen.findByRole("menuitem", { name: "Delete event" }));
+}
 
-describe("View and Delete at rest", () => {
+describe("Open and More actions at rest", () => {
   it.each(["light", "dark"])("are visible without hovering anything (%s mode)", async (theme) => {
     renderPage(theme);
-    await screen.findByText("Testt");
+    await table().findByText("Testt");
     expect(document.documentElement.classList.contains("dark")).toBe(theme === "dark");
     for (const title of ["Testt", "new"]) {
-      for (const button of [view(title), del(title)]) {
-        expect(button).toBeVisible();
-        expect(hidingClasses(button)).toEqual([]);
+      for (const control of [view(title), more(title)]) {
+        expect(control).toBeVisible();
+        expect(hidingClasses(control)).toEqual([]);
       }
     }
   });
 
   it.each(["light", "dark"])("draw their icons in a readable colour, never transparent (%s mode)", async (theme) => {
     renderPage(theme);
-    await screen.findByText("Testt");
-    for (const button of [view("Testt"), del("Testt")]) {
-      const classes = [...button.classList];
+    await table().findByText("Testt");
+    for (const control of [view("Testt"), more("Testt")]) {
+      const classes = [...control.classList];
       // A real text colour for light mode and one for dark mode (the icon is currentColor).
-      expect(classes.some((c) => /^text-(slate|neutral|rose)-\d{3}$/.test(c))).toBe(true);
-      expect(classes.some((c) => /^dark:text-(slate|neutral|rose|white)/.test(c))).toBe(true);
+      expect(classes.some((c) => /^text-(slate|neutral|rose|violet)-\d{3}$/.test(c))).toBe(true);
+      expect(classes.some((c) => /^dark:text-(slate|neutral|rose|violet|white)/.test(c))).toBe(true);
       expect(classes).not.toContain("text-transparent");
     }
   });
 
-  it("sit under the Actions heading in every row, with the viewer link left in its own column", async () => {
+  it("sit under the Actions heading in every row: open, then the row's overflow menu", async () => {
     renderPage();
-    await screen.findByText("Testt");
+    await table().findByText("Testt");
     const headers = screen.getAllByRole("columnheader").map((th) => th.textContent.trim());
     const actionsAt = headers.indexOf("Actions");
     const row = view("Testt").closest("tr");
     const cells = within(row).getAllByRole("cell");
-    expect(within(cells[actionsAt]).getAllByRole("button").map((b) => b.getAttribute("aria-label")))
-      .toEqual(["View Testt", "Delete Testt"]);
-    expect(within(cells[headers.indexOf("Viewer link")])
-      .getByRole("button", { name: "Copy viewer link for Testt" })).toBeInTheDocument();
+    const controls = [...cells[actionsAt].querySelectorAll("a, button")].map((el) => el.getAttribute("aria-label"));
+    expect(controls).toEqual(["Open workspace for Testt", "More actions for Testt"]);
+    expect(more("Testt")).toHaveAttribute("aria-haspopup", "menu");
   });
 });
 
@@ -122,42 +129,68 @@ describe("hover and focus", () => {
   it("hover does not decide visibility: the same classes before, during and after", async () => {
     const user = userEvent.setup();
     renderPage("dark");
-    await screen.findByText("Testt");
+    await table().findByText("Testt");
     const row = view("Testt").closest("tr");
     const before = hidingClasses(view("Testt"));
     await user.hover(row);
     expect(hidingClasses(view("Testt"))).toEqual(before);
     await user.unhover(row);
     expect(hidingClasses(view("Testt"))).toEqual([]);
-    // Hover only adds emphasis on the control itself.
-    expect([...view("Testt").classList].some((c) => c.startsWith("hover:bg-"))).toBe(true);
+    // Hover only adds emphasis on the controls themselves.
+    expect([...view("Testt").classList].some((c) => c.startsWith("hover:text-"))).toBe(true);
+    expect([...more("Testt").classList].some((c) => c.startsWith("hover:bg-"))).toBe(true);
   });
 
-  it("keyboard focus reaches View then Delete, with a visible focus ring", async () => {
+  it("keyboard focus reaches Open then More actions; the menu opens on Enter and Escape returns", async () => {
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText("Testt");
+    await table().findByText("Testt");
     for (let i = 0; i < 40 && document.activeElement !== view("Testt"); i += 1) await user.tab();
     expect(view("Testt")).toHaveFocus();
     expect(view("Testt")).toHaveClass("focus-visible:ring-2");
     expect(hidingClasses(view("Testt"))).toEqual([]);
     await user.tab();
-    expect(del("Testt")).toHaveFocus();
-    expect(del("Testt")).toHaveClass("focus-visible:ring-2");
+    expect(more("Testt")).toHaveFocus();
+    expect(more("Testt")).toHaveClass("focus-visible:ring-2");
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("menuitem", { name: "Copy viewer link" })).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(screen.getByRole("menuitem", { name: "Delete event" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(more("Testt")).toHaveFocus();
+  });
+
+  // The menu is portalled to <body>. Tab must close it with focus back on its trigger, so the
+  // browser's Tab carries on from the row — not from the end of the page, where it reached a
+  // floating button in Chrome. (jsdom has no native Tab, so this pins the hand-back; the
+  // onward step was checked in a real browser.)
+  it("Tab closes the menu and hands focus back to its trigger first", async () => {
+    renderPage();
+    await table().findByText("Testt");
+    // Synchronous from here to the focus check: nothing else can move focus in between.
+    more("Testt").focus();
+    fireEvent.keyDown(more("Testt"), { key: "Enter" });
+    const first = screen.getByRole("menuitem", { name: "Copy viewer link" });
+    expect(first).toHaveFocus();
+    fireEvent.keyDown(first, { key: "Tab" });
+    expect(more("Testt")).toHaveFocus();
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    expect(more("Testt")).toHaveAttribute("aria-expanded", "false");
   });
 });
 
 describe("Delete keeps its rules", () => {
   // /organization/events is an org_admin route (App.jsx RoleRoute), and the server's
   // DELETE /events/{id} requires an organization admin (require_org_admin): everyone who can
-  // open this page may delete, so the button shows for every row — and the server still decides.
+  // open this page may delete, so the action shows for every row — and the server still decides.
 
   it("asks for confirmation, and does nothing when declined", async () => {
     const user = userEvent.setup();
     vi.spyOn(window, "confirm").mockReturnValue(false);
     renderPage();
-    await screen.findByText("Testt");
-    await user.click(del("Testt"));
+    await table().findByText("Testt");
+    await chooseDelete(user, "Testt");
     expect(window.confirm).toHaveBeenCalledWith('Delete "Testt"? This cannot be undone.');
     expect(api.delete).not.toHaveBeenCalled();
   });
@@ -167,9 +200,9 @@ describe("Delete keeps its rules", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(api.delete).mockResolvedValue({});
     renderPage();
-    await screen.findByText("Testt");
+    await table().findByText("Testt");
     const before = listCalls().length;
-    await user.click(del("Testt"));
+    await chooseDelete(user, "Testt");
     await waitFor(() => expect(api.delete).toHaveBeenCalledWith("/events/e1"));
     expect(notify.success).toHaveBeenCalledWith("Event deleted");
     await waitFor(() => expect(listCalls().length).toBeGreaterThan(before));
@@ -182,11 +215,11 @@ describe("Delete keeps its rules", () => {
       response: { status: 403, data: { detail: "Organization admin access required" } },
     });
     renderPage();
-    await screen.findByText("Testt");
-    await user.click(del("Testt"));
+    await table().findByText("Testt");
+    await chooseDelete(user, "Testt");
     await waitFor(() => expect(notify.error).toHaveBeenCalledWith("Organization admin access required"));
     expect(notify.success).not.toHaveBeenCalled();
-    expect(screen.getByText("Testt")).toBeInTheDocument();
+    expect(table().getByText("Testt")).toBeInTheDocument();
   });
 });
 

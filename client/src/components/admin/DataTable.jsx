@@ -124,6 +124,8 @@ export default function DataTable({
   initialSort = null,
   pageSize,
   minWidth = 640,
+  // What the rows are, for the pagination summary ("Showing 1–10 of 24 events"). Optional.
+  itemLabel,
   // A table wider than its scroller (minWidth on a phone) centres its empty state across the
   // FULL table width, so on a 360px screen most of it sits off to the right and the visible
   // column is blank space between the header row and a clipped message. pinEmpty sizes the
@@ -358,7 +360,9 @@ export default function DataTable({
                       aria-disabled={sortDisabled}
                       title={sortDisabled ? undefined : `Sort by ${typeof c.header === "string" ? c.header : c.key}`}
                       className={cx(
-                        "-mx-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5",
+                        // `uppercase`: preflight resets text-transform on <button>, which left
+                        // sortable headings in mixed case beside the uppercase plain ones.
+                        "-mx-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 uppercase",
                         sortDisabled
                           ? "cursor-default"
                           : cx(
@@ -473,11 +477,20 @@ export default function DataTable({
                 {/* py-20 gave an empty table ~250px of blank before the message even
                     began. Content-driven height reads as "nothing here yet" rather
                     than as a page that failed to load. */}
-                <td colSpan={colCount} className="px-4 py-12 text-center">
+                {/* `empty.compact` drops the decorative cluster for a SECONDARY table — a
+                    page that stacks two empty sections otherwise shows the same large
+                    placeholder twice and reads as clutter rather than as hierarchy. Opt-in:
+                    omit it and the state renders exactly as before. */}
+                <td colSpan={colCount} className={cx("px-4 text-center", empty?.compact ? "py-7" : "py-12")}>
                   <PinToView on={pinEmpty}>
                   {empty ? (
                     <div className="zk-fade-in mx-auto max-w-sm">
-                      {empty.icon && (
+                      {empty.icon && empty.compact && (
+                        <span className="mx-auto mb-2.5 grid h-9 w-9 place-items-center rounded-full bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400">
+                          <empty.icon className="text-[15px]" aria-hidden="true" />
+                        </span>
+                      )}
+                      {empty.icon && !empty.compact && (
                         // Concentric rings behind the glyph give the state a centre of gravity
                         // instead of a small grey dot floating in a large empty table.
                         <div className="relative mx-auto mb-5 grid h-20 w-20 place-items-center">
@@ -498,9 +511,11 @@ export default function DataTable({
                           </span>
                         </div>
                       )}
-                      <p className="text-[15px] font-semibold text-slate-900 dark:text-white">{empty.title}</p>
+                      <p className={cx("font-semibold text-slate-900 dark:text-white",
+                                       empty.compact ? "text-[13px]" : "text-[15px]")}>{empty.title}</p>
                       {empty.description && (
-                        <p className="mx-auto mt-1.5 max-w-xs text-[13px] leading-relaxed text-slate-500 dark:text-neutral-400">
+                        <p className={cx("mx-auto max-w-xs leading-relaxed text-slate-500 dark:text-neutral-400",
+                                         empty.compact ? "mt-1 text-[12px]" : "mt-1.5 text-[13px]")}>
                           {empty.description}
                         </p>
                       )}
@@ -527,6 +542,7 @@ export default function DataTable({
               ? Math.min(current * pageSize, serverTotal ?? sorted.length)
               : Math.min(current * pageSize, sorted.length)}{" "}
             of {serverPaged ? (serverTotal ?? sorted.length) : sorted.length}
+            {itemLabel ? ` ${itemLabel}` : ""}
           </p>
           <nav aria-label="Pagination" className="flex min-w-0 flex-wrap items-center gap-1">
             <PageBtn disabled={current === 1} onClick={() => goToPage(current - 1)} aria-label="Previous page">

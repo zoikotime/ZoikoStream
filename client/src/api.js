@@ -55,13 +55,19 @@ api.interceptors.response.use(
     //   • 401 specifically. A 403 means "authenticated but not allowed" — a real answer about
     //     permissions, and logging someone out for hitting a page above their role would be a
     //     bug, not security.
-    //   • The request actually CARRIED a token. Without this, a 401 from a public,
-    //     token-less call (a bad delivery/registration link) would clear a perfectly good
-    //     session belonging to whoever happened to be signed in.
+    //   • The request carried THE token this tab holds now. Without a token at all, a 401
+    //     from a public, token-less call (a bad delivery/registration link) would clear a
+    //     perfectly good session belonging to whoever happened to be signed in. With an
+    //     OLDER one — a request still in flight from a session that has since ended, answered
+    //     after the user signed in again — the 401 is about that old session; acting on it
+    //     cleared the new sign-in and told every tab it had ended. And once this tab has
+    //     already signed out, the remaining 401s of a burst have nothing left to announce.
     //   • Not one of the sign-in endpoints above.
-    const sentToken = !!config?.headers?.Authorization;
+    const sent = config?.headers?.Authorization;
+    const current = readToken();
+    const aboutCurrentSession = !!sent && !!current && sent === `Bearer ${current}`;
     const path = config?.url || "";
-    if (status === 401 && sentToken && !AUTH_ENDPOINT.test(path)) {
+    if (status === 401 && aboutCurrentSession && !AUTH_ENDPOINT.test(path)) {
       clearToken();
       try {
         // Legacy key from the build that treated a stored profile as proof of identity.
@@ -120,6 +126,17 @@ export const edgeErrorMessage = (e) => {
 // account — Billing's "Current subscription detected. Network Error" told people their
 // subscription was in trouble when the only fact in evidence was that one request got no
 // answer. These say what is actually known: we could not get an answer, and nothing changed.
+//
+// In a DEVELOPMENT build the unreachable message also names the API address the request went
+// to. A dev client pointed at the wrong server — another local project already listening on
+// the same port, or a stale VITE_API_URL — fails exactly like a dropped connection, because the
+// browser hides the CORS refusal from the page, and that address is the one fact that tells the
+// two apart. A production build keeps the plain sentence.
+const devApiHint = () =>
+  import.meta.env.DEV
+    ? ` (Development: the request went to ${API_BASE}. Make sure the ZoikoStream API is the server running there.)`
+    : "";
+
 export const transportMessage = (e) => {
   if (e?.response) return null;                 // the server DID answer; not a transport fault
   if (e?.code === "ECONNABORTED" || e?.code === "ETIMEDOUT") {
@@ -127,7 +144,7 @@ export const transportMessage = (e) => {
   }
   if (e?.code === "ERR_CANCELED") return null;  // we aborted it; the caller decides what to say
   if (e?.request) {
-    return "Couldn't reach the ZoikoStream server, so nothing was submitted. Check your connection and try again.";
+    return `Couldn't reach the ZoikoStream server, so nothing was submitted. Check your connection and try again.${devApiHint()}`;
   }
   return null;
 };

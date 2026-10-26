@@ -11,9 +11,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // Matches VITE_API_URL / the frontend's own default dev port pairing (see vite.config.js's
-// envDir: '..' — it reads the repo-root .env, which sets VITE_API_URL=http://127.0.0.1:8000).
+// envDir: '..' — it reads the repo-root .env, which sets VITE_API_URL=http://127.0.0.1:8001).
 const FRONTEND_URL = process.env.E2E_FRONTEND_URL || "http://127.0.0.1:5173";
-const BACKEND_URL = process.env.E2E_BACKEND_URL || "http://127.0.0.1:8000";
+const BACKEND_URL = process.env.E2E_BACKEND_URL || "http://127.0.0.1:8001";
+// The spawned API listens on BACKEND_URL's port, so overriding E2E_BACKEND_URL moves both together.
+const BACKEND_PORT = new URL(BACKEND_URL).port || "8001";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -42,7 +44,7 @@ export default defineConfig({
   webServer: [
     {
       command:
-        "..\\server\\venv\\Scripts\\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+        `..\\server\\venv\\Scripts\\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port ${BACKEND_PORT}`,
       cwd: "../server",
       url: `${BACKEND_URL}/health`,
       reuseExistingServer: true,

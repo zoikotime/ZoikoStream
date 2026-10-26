@@ -48,7 +48,7 @@ from app.services import webhooks as webhook_svc
 PASSWORD = "correct-horse-battery"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36"
 
-DEV_003_WARN = email_mod.DEV_003_WARNING_SUBJECT
+DEV_003_WARN = email_mod.DEV_003_WARNING_SUBJECT_PREFIX   # "API key expires in N days"
 DEV_003_EXPIRED = email_mod.DEV_003_EXPIRED_SUBJECT
 DEV_004_REVOKED = email_mod.DEV_004_REVOKED_SUBJECT
 DEV_004_ROTATED = email_mod.DEV_004_ROTATED_SUBJECT
@@ -299,7 +299,10 @@ def test_003_expiry_warning_and_expired_fire_once_and_are_truthful():
             finally:
                 db.close()
         assert stats["warned"] >= 1
-        payload = cap.of(DEV_003_WARN)
+        warnings = [c["payload"] for c in cap.calls if c["payload"]["subject"].startswith(DEV_003_WARN)]
+        assert warnings, cap.subjects
+        payload = warnings[-1]
+        assert payload["subject"] == "API key expires in 3 days"
         assert payload["html"] and payload["text"]
         text = payload["text"]
         assert created["fingerprint"] in text, "9 — fingerprint present"
@@ -316,7 +319,7 @@ def test_003_expiry_warning_and_expired_fire_once_and_are_truthful():
                 credential_lifecycle.sweep(db, _Bg())
             finally:
                 db.close()
-        assert DEV_003_WARN not in cap2.subjects, "one warning per credential"
+        assert not any(s.startswith(DEV_003_WARN) for s in cap2.subjects), "one warning per threshold"
 
         # 1/6 — force the lapse; state persists and the expired notice is truthful.
         db = SessionLocal()

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { SESSION_END_MESSAGES, clearSessionEndReason, peekSessionEndReason } from "../../auth/sessionStore";
 import { FiArrowRight, FiLock, FiMail } from "react-icons/fi";
@@ -11,6 +11,11 @@ import { Field, PasswordField, SubmitButton, CheckField } from "../../ui/forms";
 import AuthTabs from "./AuthTabs";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
+
+// One toast slot for "this sign-in failed". A refused or unreachable sign-in fails in
+// milliseconds, so Enter-then-click, or simply trying again, used to stack identical red
+// toasts; under one id each new failure REPLACES the one showing (ui/Toast.js).
+const SIGN_IN_TOAST = "auth:sign-in";
 
 // One login page for every role. After login the (later) backend decides the role; for now
 // fakeSession() infers it from the email so every dashboard is reachable from here.
@@ -43,15 +48,21 @@ export default function Login() {
   // action instead of a generic failure toast.
   const [needsVerification, setNeedsVerification] = useState(null); // { email }
   const [resending, setResending] = useState(false);
+  // Whether a sign-in request is in flight. A ref, not the `loading` state: the button only
+  // turns disabled after React re-renders, and a second submit (Enter then a click, a double
+  // tap) can arrive before that. Read and written synchronously, so it cannot.
+  const inFlight = useRef(false);
 
   const submit = async (e) => {
     e.preventDefault();
+    if (inFlight.current) return;
     const next = {};
     if (!isEmail(email)) next.email = "Enter a valid work email.";
     if (!password) next.password = "Enter your password.";
     setErrors(next);
     if (Object.keys(next).length) return;
 
+    inFlight.current = true;
     setLoading(true);
     setNeedsVerification(null);
     try {
@@ -66,9 +77,10 @@ export default function Login() {
       // renders while auth state is still resolving.
       const account = await setSession(data, { remember });
       if (!account) {
-        notify.error("Signed in, but the session could not be confirmed. Please try again.");
+        notify.error("Signed in, but the session could not be confirmed. Please try again.", { id: SIGN_IN_TOAST });
         return;
       }
+      notify.dismiss?.(SIGN_IN_TOAST);            // an earlier attempt's failure is now stale
       notify.success(`Welcome back, ${account.full_name}!`);
       // One authoritative destination. `from` is a REQUEST, not a permission: a saved
       // event-console deep-link is honoured only after the backend confirms the assignment
@@ -82,8 +94,9 @@ export default function Login() {
         setNeedsVerification({ email: error?.response?.data?.detail?.email });
         return;
       }
-      notify.error(errMsg(error, "Unable to sign in right now."));
+      notify.error(errMsg(error, "Unable to sign in right now."), { id: SIGN_IN_TOAST });
     } finally {
+      inFlight.current = false;
       setLoading(false);
     }
   };

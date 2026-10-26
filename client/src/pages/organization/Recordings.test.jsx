@@ -1,5 +1,5 @@
 // Organization Recordings: the library is truthful about what it holds and what happened.
-//   * "Total Storage" is "—" (No completed recordings) with nothing completed — never "0.0 GB".
+//   * "Storage used" is "—" (No completed recordings) with nothing completed — never "0.0 GB".
 //   * A measured zero-byte capture shows "0 B"; an unknown size shows "—".
 //   * Processing / storage-unavailable rows are counted as such, not folded into "0".
 //   * Failed attempts (not listed — no file) are named with their reason and event link.
@@ -48,8 +48,11 @@ const show = () =>
     </ThemeProvider>
   );
 
-// The StatsCard for a title: its value and hint.
-const kpi = (title) => screen.getByText(title).parentElement;
+// A KPI tile (or the library's storage figure) by its label: its value and caption.
+const kpi = (name) => screen.getByRole("group", { name });
+// The library table — the same recordings also appear under Recently captured and, when not
+// playable, under Processing & exceptions.
+const lib = () => within(screen.getByRole("region", { name: "Recording library" }));
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -58,8 +61,8 @@ describe("totals are truthful", () => {
     serve([]);
     show();
     expect(await screen.findByText(/presses Record during the broadcast/)).toBeInTheDocument();
-    expect(within(kpi("Total Storage")).getByText("—")).toBeInTheDocument();
-    expect(within(kpi("Total Storage")).getByText("No completed recordings")).toBeInTheDocument();
+    expect(within(kpi("Storage used")).getByText("—")).toBeInTheDocument();
+    expect(within(kpi("Storage used")).getByText("No completed recordings")).toBeInTheDocument();
     expect(screen.queryByText("0.0 GB")).toBeNull();
   });
 
@@ -67,8 +70,9 @@ describe("totals are truthful", () => {
     serve([rec({ state: "processing", url: null, size_bytes: null })],
           { ...EMPTY_SUMMARY, library_total: 1 });
     show();
-    expect(await within(kpi("Total Recordings")).findByText("1 processing")).toBeInTheDocument();
-    expect(within(kpi("Total Storage")).getByText("—")).toBeInTheDocument();
+    expect(await within(kpi("Processing")).findByText("1 processing")).toBeInTheDocument();
+    expect(within(kpi("Replay-ready")).getByText("0")).toBeInTheDocument();
+    expect(within(kpi("Storage used")).getByText("—")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Watch Replay/ })).toBeDisabled();
   });
 
@@ -76,11 +80,12 @@ describe("totals are truthful", () => {
     serve([], { ...EMPTY_SUMMARY, in_progress: 1, failed_attempts: 2,
                 latest_failure: { event_id: "e9", event_title: "Board meeting", error: "Egress unavailable", at: null } });
     show();
-    expect(await within(kpi("Total Recordings")).findByText("1 recording now · 2 attempts not captured")).toBeInTheDocument();
+    expect(await within(kpi("Processing")).findByText("1 recording now")).toBeInTheDocument();
+    expect(within(kpi("Needs attention")).getByText("2 attempts not captured")).toBeInTheDocument();
     const notice = screen.getByTestId("recording-failure-notice");
     expect(notice).toHaveTextContent("2 recording attempts did not capture a file.");
     expect(notice).toHaveTextContent("Board meeting — Egress unavailable");
-    expect(within(notice).getByRole("link", { name: /recording history/ })).toHaveAttribute("href", "/organization/events/e9?tab=Recording");
+    expect(within(notice).getByRole("link", { name: /recording history/ })).toHaveAttribute("href", "/organization/events/e9/replay");
   });
 
   it("reports a known total, a zero-byte file as 0 B, and excludes unknown sizes", async () => {
@@ -90,9 +95,9 @@ describe("totals are truthful", () => {
       rec({ id: "c", title: "Unsized", size_bytes: null }),
     ], { ...EMPTY_SUMMARY, library_total: 3 });
     show();
-    expect(await within(kpi("Total Storage")).findByText("2.0 GB")).toBeInTheDocument();
-    expect(within(kpi("Total Storage")).getByText("Excludes 1 recording of unknown size")).toBeInTheDocument();
-    const empty = screen.getByText("Empty capture").closest("[class*='rounded']").parentElement;
+    expect(await within(kpi("Storage used")).findByText("2.0 GB")).toBeInTheDocument();
+    expect(within(kpi("Storage used")).getByText("Excludes 1 recording of unknown size")).toBeInTheDocument();
+    const empty = lib().getByText("Empty capture").closest("tr");
     expect(within(empty).getByText("0 B")).toBeInTheDocument();
   });
 
@@ -105,7 +110,7 @@ describe("totals are truthful", () => {
   it("still renders the library when the summary is unavailable", async () => {
     serve([rec()], new Error("404"));
     show();
-    expect(await screen.findByText("Town hall")).toBeInTheDocument();
+    expect(await lib().findByText("Town hall")).toBeInTheDocument();
     expect(screen.queryByTestId("recording-failure-notice")).toBeNull();
   });
 });
@@ -119,19 +124,42 @@ describe("actions only for a real file", () => {
     const player = await screen.findByRole("dialog");
     expect(player.querySelector("video")).toHaveAttribute("src", "https://signed.example/r1.mp4");
     fireEvent.keyDown(document, { key: "Escape" });
-    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Download/ }));
     expect(open).toHaveBeenCalledWith("https://signed.example/r1.mp4", "_blank", "noopener");
-    expect(screen.getByRole("button", { name: "Share" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^Share/ })).toBeEnabled();
+    // The preview card plays the same file.
+    fireEvent.click(screen.getByRole("button", { name: "Play Town hall" }));
+    expect((await screen.findByRole("dialog")).querySelector("video")).toHaveAttribute("src", "https://signed.example/r1.mp4");
     open.mockRestore();
   });
 
   it("offers nothing playable for a file missing from storage", async () => {
     serve([rec({ state: "storage_unavailable", url: null })], { ...EMPTY_SUMMARY, library_total: 1 });
     show();
-    expect(await screen.findByText("Storage unavailable")).toBeInTheDocument();
+    expect(await lib().findByText("Storage unavailable")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Watch Replay/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Download" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Share" })).toBeDisabled();
-    await waitFor(() => expect(within(kpi("Total Recordings")).getByText("1 unavailable in storage")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /^Download/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Share/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /^Play / })).toBeNull();
+    await waitFor(() => expect(within(kpi("Needs attention")).getByText("1 unavailable in storage")).toBeInTheDocument());
+  });
+});
+
+describe("filters live in the URL", () => {
+  it("opens on the rail's Processing status link with only those recordings listed", async () => {
+    serve([rec({ id: "a", title: "Keynote" }), rec({ id: "b", title: "Finalising", state: "processing", url: null })],
+          { ...EMPTY_SUMMARY, library_total: 2 });
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={["/organization/recordings?state=processing"]}>
+          <Recordings />
+        </MemoryRouter>
+      </ThemeProvider>
+    );
+    expect(await lib().findByText("Finalising")).toBeInTheDocument();
+    expect(lib().queryByText("Keynote")).toBeNull();
+    expect(screen.getByRole("combobox", { name: "Filter by state" })).toHaveValue("processing");
+    // Recently captured is the newest of everything, not the filtered view.
+    expect(within(screen.getByRole("region", { name: "Recently captured" })).getByText("Keynote")).toBeInTheDocument();
   });
 });

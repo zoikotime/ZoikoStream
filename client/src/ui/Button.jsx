@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { brandButton, cx, focusRing } from "./tokens";
+import { consoleAction, cx, focusRing } from "./tokens";
 
 // ONE Button for the whole app, two appearances so both surfaces keep their exact look:
 //   appearance="marketing" (default) — emerald, rounded-xl, hover-lift (homepage + public/org marketing).
@@ -36,14 +36,15 @@ const C_BASE = cx(
 const C_SIZES = { sm: "h-8 px-3 text-[13px]", md: "h-9 px-3.5 text-sm", lg: "h-10 px-4 text-sm" };
 // Every variant gains a hover shadow so a console button reads as a raised control rather than a
 // bordered label — the secondary variant in particular was near-invisible on a white filter row.
-// Primary is a violet→indigo gradient rather than a flat fill, so the one action a screen
-// wants you to take is unmistakably the brightest thing on it. The gradient shifts lighter on
-// hover and the shadow deepens; `active:` returns it to the resting shadow so a press reads as
-// a press. Danger keeps a flat fill — a gradient on a destructive action reads as decoration.
+// Primary is a violet→magenta gradient rather than a flat fill, so the one action a screen
+// wants you to take is unmistakably the strongest thing on it. The gradient deepens on hover
+// (a lighter hover took white text under 4.5:1) and the shadow grows; `active:` returns it to
+// the resting shadow so a press reads as a press. Danger keeps a flat fill — a gradient on a
+// destructive action reads as decoration.
 const C_VARIANTS = {
-  // The brand ramp (tokens' `brandButton`) — same fill as the rail's active row, the topbar
-  // CTA and the selected segment, and brighter in dark mode.
-  primary: `${brandButton} active:shadow-sm`,
+  // The console action ramp (tokens' `consoleAction`) — the same violet → magenta fill as the
+  // rail's active row and the frames' primary buttons.
+  primary: `${consoleAction} active:shadow-sm`,
   secondary:
     "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:text-slate-200 dark:hover:border-white/20 dark:hover:bg-white/[0.07]",
   ghost:

@@ -26,7 +26,9 @@ from ..crud import organization as crud
 from ..db import get_db
 from ..email import UnsafeLinkError
 from ..services import account_lifecycle as lifecycle
+from ..services import activity_log
 from ..services import audience as audience_svc
+from ..services import event_workspace as event_workspace_svc
 from ..services import playback_qoe as playback_qoe_svc
 from ..services import payments as payment_svc
 from ..models.plan import RETIRED_PLAN_SLUGS, Plan
@@ -635,7 +637,7 @@ def audience_insights(
 
 @router.get("/playback/qoe")
 def playback_qoe_summary(
-    window: str = Query("all", pattern="^(24h|7d|30d|all)$"),
+    window: str = Query("all", pattern="^(24h|7d|30d|90d|all)$"),
     event_id: uuid.UUID | None = Query(None),
     org: Organization = Depends(get_my_org),
     db: Session = Depends(get_db),
@@ -1023,6 +1025,157 @@ def release_event_report(
     return DeliveryCreated(**DeliveryOut.model_validate(delivery).model_dump(), delivery_url=url)
 
 
+# ── Event Workspace read models (ZST-ENG-DASH-001 EVT-02 / EVT-04 / EVT-06 / EVT-07) ─────
+# Organization admin only, like every page of the workspace (App.jsx RoleRoute). The event is
+# resolved through the token's organization first, so another organization's event — or a
+# deleted one — is a non-disclosing 404 before anything about it is read.
+
+def _workspace_event(db: Session, org_id, event_id) -> Event:
+    ev = event_crud.get_event(db, org_id, event_id)
+    if ev is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    return ev
+
+
+@router.get("/events/{event_id}/readiness")
+def event_workspace_readiness(
+    event_id: uuid.UUID, org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    """The Preparation section's verdict: the same gates the Overview's upcoming list and the
+    platform console evaluate (services/ops.readiness_for), for this one event."""
+    return event_workspace_svc.readiness(db, _workspace_event(db, org.id, event_id))
+
+
+@router.get("/events/{event_id}/live-status")
+async def event_live_status(
+    event_id: uuid.UUID, org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    """Live Control's read-only status: broadcast session, inputs, recording, open incidents
+    and the audience on air now. Controls stay in the Producer Console; nothing here acts."""
+    return await event_workspace_svc.live_status(db, _workspace_event(db, org.id, event_id))
+
+
+@router.get("/events/{event_id}/insights")
+def event_insights(
+    event_id: uuid.UUID, org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    """The Insights section: the event's whole audience, feedback and playback quality, with
+    unmeasured figures as null rather than 0 (services/event_workspace)."""
+    return event_workspace_svc.insights(db, org, _workspace_event(db, org.id, event_id))
+
+
+_ACTIVITY_CATEGORY = "^(" + "|".join(activity_log.CATEGORIES) + ")$"
+_ACTIVITY_OUTCOME = "^(applied|denied|rejected|failed|pending|refused)$"
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _activity_response(db: Session, org: Organization, scope, scope_out: dict, *, category, outcome,
+                       actor, since, until, q, high_impact, page, page_size, with_events) -> dict:
+    if since is not None and until is not None and _utc(since) >= _utc(until):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "`since` must be before `until`")
+    filters = activity_log.filter_clause(
+        org.id, category=category, outcome=outcome, actor=actor, since=_utc(since),
+        until=_utc(until), q=q, high_impact=high_impact)
+    return {
+        **activity_log.page(db, org_id=org.id, scope=scope, filters=filters, page_no=page,
+                            page_size=page_size, with_events=with_events),
+        "scope": scope_out,
+        "summary": activity_log.summary(db, scope),
+        "actors": activity_log.actor_facets(db, scope, org.id),
+        "categories": [{"value": k, "label": v} for k, v in activity_log.CATEGORY_LABELS.items()],
+        **activity_log.boundaries(),
+        "as_of": activity_log.now_iso(),
+    }
+
+
+@router.get("/events/{event_id}/activity")
+def event_activity(
+    event_id: uuid.UUID,
+    category: str | None = Query(None, pattern=_ACTIVITY_CATEGORY),
+    outcome: str | None = Query(None, pattern=_ACTIVITY_OUTCOME),
+    actor: str | None = Query(None, max_length=64),
+    since: datetime | None = Query(None),
+    until: datetime | None = Query(None),
+    q: str | None = Query(None, max_length=100),
+    high_impact: bool = Query(False),
+    page: int = Query(1, ge=1, le=10000),
+    page_size: int = Query(25, ge=1, le=100),
+    org: Organization = Depends(get_my_org_admin),
+    db: Session = Depends(get_db),
+):
+    """The Event Workspace's Activity & Audit ledger (EVT-07): every recorded action and
+    refusal for this event, newest first, filtered and paginated on the server. Read-only —
+    nothing reachable from here changes the event (EVT-07 notes 6)."""
+    ev = _workspace_event(db, org.id, event_id)
+    scope_out = {"kind": "event", "event_id": str(ev.id), "title": ev.title or "Untitled event",
+                 "status": ev.status, "timezone": ev.timezone}
+    return _activity_response(
+        db, org, activity_log.scope_clause(org.id, ev.id), scope_out, category=category,
+        outcome=outcome, actor=actor, since=since, until=until, q=q, high_impact=high_impact,
+        page=page, page_size=page_size, with_events=False)
+
+
+@router.get("/events/{event_id}/activity/{entry_id}")
+def event_activity_entry(
+    event_id: uuid.UUID, entry_id: uuid.UUID,
+    org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    """One receipt, re-authorized on its own (EVT-07 QA G: a permission revoked mid-session
+    denies record detail). 404 for an entry outside this event, as for another org's event."""
+    ev = _workspace_event(db, org.id, event_id)
+    out = activity_log.entry(db, org_id=org.id, scope=activity_log.scope_clause(org.id, ev.id),
+                             entry_id=entry_id)
+    if out is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity record not found")
+    return {**out, "as_of": activity_log.now_iso()}
+
+
+@router.get("/activity")
+def org_activity(
+    event_id: uuid.UUID | None = Query(None),
+    category: str | None = Query(None, pattern=_ACTIVITY_CATEGORY),
+    outcome: str | None = Query(None, pattern=_ACTIVITY_OUTCOME),
+    actor: str | None = Query(None, max_length=64),
+    since: datetime | None = Query(None),
+    until: datetime | None = Query(None),
+    q: str | None = Query(None, max_length=100),
+    high_impact: bool = Query(False),
+    page: int = Query(1, ge=1, le=10000),
+    page_size: int = Query(25, ge=1, le=100),
+    org: Organization = Depends(get_my_org_admin),
+    db: Session = Depends(get_db),
+):
+    """Organization-wide Security & Audit ledger — the same reader as the event view over the
+    whole organization, optionally narrowed to one of its own events."""
+    if event_id is not None:
+        ev = _workspace_event(db, org.id, event_id)
+        scope = activity_log.scope_clause(org.id, ev.id)
+        scope_out = {"kind": "event", "event_id": str(ev.id), "title": ev.title or "Untitled event",
+                     "status": ev.status, "timezone": ev.timezone}
+    else:
+        scope = activity_log.scope_clause(org.id)
+        scope_out = {"kind": "organization", "organization_id": str(org.id), "name": org.name}
+    return _activity_response(
+        db, org, scope, scope_out, category=category, outcome=outcome, actor=actor, since=since,
+        until=until, q=q, high_impact=high_impact, page=page, page_size=page_size, with_events=True)
+
+
+@router.get("/activity/{entry_id}")
+def org_activity_entry(
+    entry_id: uuid.UUID, org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db),
+):
+    out = activity_log.entry(db, org_id=org.id, scope=activity_log.scope_clause(org.id),
+                             entry_id=entry_id, with_events=True)
+    if out is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity record not found")
+    return {**out, "as_of": activity_log.now_iso()}
+
+
 @router.delete("/live-inputs/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_live_input(
     endpoint_id: uuid.UUID, admin: User = Depends(get_current_user),
@@ -1093,9 +1246,14 @@ def update_branding(
 
 @router.get("/developer", response_model=OrgDeveloperOut)
 def get_developer(org: Organization = Depends(get_my_org_admin), db: Session = Depends(get_db)):
+    # One instant for every row and the counts, so a key exactly at its expiry cannot read as
+    # usable in the table and expired in the summary (crud.admin.key_lifecycle / key_summary).
+    now = datetime.now(timezone.utc)
     return OrgDeveloperOut(
-        api_keys=org.api_keys or [],
+        api_keys=admin_crud.list_api_keys(db, org, now),
         webhooks=crud.list_webhook_endpoints(db, org.id),
+        key_summary=admin_crud.key_summary(org.api_keys or [], now),
+        generated_at=now,
     )
 
 
@@ -1119,7 +1277,7 @@ def create_my_api_key(
     """Mint a key for the caller's OWN org. The raw key is in this response and nowhere
     else — only its sha256 is stored, so it can never be re-shown."""
     created = admin_crud.create_api_key(db, org, data.label,
-                                        expires_in_days=data.expires_in_days)
+                                        expires_in_days=data.expires_in_days, created_by=admin.id)
     # ZST-EC-001 DEV-002. The credential is committed before this line, so the notice
     # reports a credential that already exists; a delivery failure cannot unmake it. The
     # claim inside notify_credential_created keys off the credential id, so a retried
@@ -1161,7 +1319,7 @@ def create_developer_api_key(
     mint a credential — the org-admin dependency below is what the sibling /api-keys route
     already required, and minting is not a member-level action.
     """
-    created = admin_crud.create_api_key(db, org, data.label, data.expires_in_days)
+    created = admin_crud.create_api_key(db, org, data.label, data.expires_in_days, created_by=admin.id)
     admin_crud.create_audit_log(db, actor=admin, action="api_key.create", target_type="api_key",
                                 target_id=created.id, org_id=org.id,
                                 meta={"label": data.label, "fingerprint": created.fingerprint})
@@ -1677,6 +1835,38 @@ def list_org_users(
                                        sort_by=sort_by, order=order, page=page, page_size=page_size)
     org_name = admin.organization.name if admin.organization else None
     return Page(items=[_user_out(u, org_name) for u in users], total=total, page=page, page_size=page_size)
+
+
+@router.get("/team/access")
+def team_access(admin: User = Depends(require_org_admin), db: Session = Depends(get_db)):
+    """Event-scoped role grants across this organization (ORG-06 "Assigned access grants").
+
+    An EventAssignment row IS the grant — host or speaker on one event, live the moment it
+    exists — so the figure is a count of those rows on the organization's events that are not
+    deleted, plus each member's distinct events and roles. Read-only; tenant-scoped through
+    Event.org_id, like every other organization read here."""
+    from ..models import EventAssignment
+
+    scope = [Event.org_id == admin.org_id, Event.deleted_at.is_(None)]
+    grants = db.scalar(
+        select(func.count()).select_from(EventAssignment)
+        .join(Event, Event.id == EventAssignment.event_id).where(*scope)
+    ) or 0
+    members: dict[str, dict] = {}
+    for user_id, role, events in db.execute(
+        select(EventAssignment.user_id, EventAssignment.role, func.count(func.distinct(EventAssignment.event_id)))
+        .join(Event, Event.id == EventAssignment.event_id).where(*scope)
+        .group_by(EventAssignment.user_id, EventAssignment.role)
+    ).all():
+        entry = members.setdefault(str(user_id), {"events": 0, "roles": {}})
+        entry["roles"][role] = int(events)
+    for user_id, events in db.execute(
+        select(EventAssignment.user_id, func.count(func.distinct(EventAssignment.event_id)))
+        .join(Event, Event.id == EventAssignment.event_id).where(*scope)
+        .group_by(EventAssignment.user_id)
+    ).all():
+        members[str(user_id)]["events"] = int(events)
+    return {"grants": int(grants), "members": members}
 
 
 @router.get("/users/{user_id}", response_model=AdminUserOut)

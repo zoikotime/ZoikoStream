@@ -292,6 +292,9 @@ export default function SupportAccessPanel() {
           pageSize={10}
           minWidth={1000}
           empty={{
+            // Secondary to the ticket queue above, so on a quiet platform this reads as the
+            // smaller of two empty sections instead of a second full-size placeholder.
+            compact: true,
             icon: FiKey,
             title: status === "all" && !org ? "No support access has been requested" : "No requests match these filters",
             description: "Requests appear here from the moment they are raised, whatever the organization decides.",

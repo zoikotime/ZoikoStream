@@ -57,6 +57,7 @@ from ..models import (
     WebhookDelivery,
     WebhookEndpoint,
 )
+from ..models.event import ON_AIR_STATUSES
 from . import admin as admin_svc
 from . import ops as ops_svc
 # `engagement_score` is imported lazily inside analytics() rather than here. There is a real
@@ -1605,17 +1606,34 @@ def console_state(db: Session, org: Organization, user: User) -> dict:
         "badges": {
             "streaming_sessions": active_sessions,
             "webhooks": len(org.webhook_urls or []),
+            # On air = live or degraded (a degraded broadcast is still on air) — the same set
+            # the Events list's "Live now" filter shows, so the rail badge and the pages agree.
             "live_events": db.scalar(
                 select(func.count(Event.id)).where(
                     Event.org_id == org.id, Event.deleted_at.is_(None),
-                    Event.status == "live")
+                    Event.status.in_(ON_AIR_STATUSES))
             ) or 0,
         },
         "user": {"name": user.full_name, "email": user.email,
+                 # The role the API authorizes, so the rail shows exactly what the routes allow
+                 # (display only — every route and endpoint re-checks it).
+                 "role": user.role,
                  "role_label": _role_label(user.role),
                  # The console chrome (sidebar, account menu) shows the photo when there is one.
                  "avatar_url": user.avatar_url},
+        # Display metadata for the rail, never authority (ZST-ENG-DASH-001 §8.1). Developers is
+        # the conditional eighth item, "off by default" (§3.2): no plan carries an API
+        # entitlement, so it appears once the organization has actually set up developer
+        # access — an API key or a webhook endpoint. The pages stay reachable from
+        # Organization › Integrations either way.
+        "features": {"developers": developer_access_in_use(db, org)},
     }
+
+
+def developer_access_in_use(db: Session, org: Organization) -> bool:
+    if org.api_keys or org.webhook_urls:
+        return True
+    return bool(db.scalar(select(func.count(WebhookEndpoint.id)).where(WebhookEndpoint.org_id == org.id)))
 
 
 def _role_label(role: str | None) -> str:
@@ -1685,7 +1703,11 @@ def overview(db: Session, org: Organization, user: User, range_: str = "24h",
         "media_assets": media,
         "entitlements": ent,
         "api": api_posture(),
-        "attention": attention(db, org, ent, readiness),
+        # attention() is "things an org admin has to act on", every item linking to an
+        # admin-only page. Any member can read this overview, so below org_admin it is empty:
+        # a member who had just accepted their invitation was shown the organization's
+        # "N invitations awaiting acceptance · Manage", which was neither theirs nor theirs to act on.
+        "attention": attention(db, org, ent, readiness) if user.role in ("org_admin", "super_admin") else [],
         "upcoming_events": readiness,
         "developer_ops": developer_ops(db, org),
         "security_support": security_support(db, org),

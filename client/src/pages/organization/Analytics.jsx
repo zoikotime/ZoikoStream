@@ -5,12 +5,15 @@
 // Event + BroadcastSession + AnalyticsSnapshot. Device/location/traffic-source breakdowns
 // aren't shown here: nothing in this stack persists them historically (see the endpoint's
 // own `breakdowns_note`), so a bar chart for them would be invented, not measured.
-import { useMemo, useState } from "react";
-import { FiCalendar, FiChevronDown, FiDownload, FiUsers, FiClock, FiTrendingUp, FiActivity, FiInfo } from "react-icons/fi";
-import { CONSOLE, cx } from "../../ui/tokens";
+import { useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import {
+  FiCalendar, FiCheck, FiChevronDown, FiDownload, FiUsers, FiClock, FiTrendingUp, FiActivity, FiGlobe,
+  FiInfo, FiLock, FiPlay,
+} from "react-icons/fi";
+import { CONSOLE, cx, focusRing } from "../../ui/tokens";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
-import AskGuideButton from "../../operator-guide/AskGuideButton";
 import Card from "../../ui/Card";
 import Button, { ConsoleButton } from "../../ui/Button";
 import StatsCard from "../../ui/StatsCard";
@@ -34,8 +37,26 @@ import DataTable from "../../components/admin/DataTable";
 import ViewingSessionsPanel from "../../components/organization/ViewingSessionsPanel";
 import { fmtDate } from "../../data/events";
 import { formatEngagement, formatHoursTick, formatWatchTime } from "../../utils/analyticsFormat";
+import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
+import {
+  Banner, FactList, Footnote, KpiRow, KpiTile, Panel, PanelLink, Tag,
+} from "../../components/organization/console/ConsoleUI";
+import { useHashScroll } from "./event/workspace";
+import { exportTextFile } from "../../utils/export";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 
-const CHART = { violet: "#7c3aed", blue: "#3b82f6", emerald: "#10b981", amber: "#f59e0b", rose: "#f43f5e" };
+// One toast slot for the export, so a retry replaces the last outcome instead of stacking.
+const EXPORT_TOAST = "analytics-export";
+// What went wrong SAVING, by exportTextFile's reason. Generating the CSV fails separately.
+const EXPORT_FAILED = {
+  unsupported: "Exporting isn't available in the app yet. Export this report from ZoikoStream on the web.",
+  write: "Couldn't save the report file on this device.",
+  share: "Couldn't open the share sheet to save the report.",
+  download: "Couldn't download the report file.",
+  empty: "The report file came out empty, so nothing was saved.",
+};
+
+const CHART ={ violet: "#7c3aed", blue: "#3b82f6", emerald: "#10b981", amber: "#f59e0b", rose: "#f43f5e" };
 
 const RANGES = [
   { key: "7d", label: "Last 7 days" },
@@ -59,7 +80,15 @@ const METRICS = [
 // so a 30-event window was a fixed wall of rows. Every column is sortable now, with the
 // numeric ones sorting on their value rather than their formatted string.
 const reportColumns = [
-  { key: "event", header: "Event", sortable: true, className: "whitespace-nowrap", render: (r) => <span className="font-medium text-slate-800 dark:text-slate-100">{r.event}</span> },
+  // The event opens its own Insights section — the per-event view of these same figures.
+  { key: "event", header: "Event", sortable: true, className: "whitespace-nowrap", render: (r) => (
+    <Link
+      to={`/organization/events/${r.id}/insights`}
+      className={cx("rounded font-medium text-slate-800 hover:text-violet-600 dark:text-slate-100 dark:hover:text-violet-300", focusRing)}
+    >
+      {r.event}
+    </Link>
+  ) },
   { key: "date", header: "Date", sortable: true, sortValue: (r) => (r.date ? new Date(r.date).getTime() : 0), className: "whitespace-nowrap", render: (r) => (r.date ? fmtDate(r.date) : "—") },
   { key: "viewers", header: "Peak Viewers", align: "right", sortable: true, className: "whitespace-nowrap", render: (r) => r.viewers.toLocaleString() },
   { key: "watch_hours", header: "Watch Time", align: "right", sortable: true, className: "whitespace-nowrap", render: (r) => formatWatchTime(r.watch_hours) },
@@ -82,7 +111,7 @@ const reportColumns = [
           )}
         </div>
         <span
-          className={cx("tabular-nums font-medium", measured ? "text-slate-700 dark:text-slate-200" : "text-slate-400 dark:text-slate-500")}
+          className={cx("tabular-nums font-medium", measured ? "text-slate-700 dark:text-slate-200" : CONSOLE.faint)}
           title={measured ? undefined : "Not measured"}
         >
           {formatEngagement(r.engagement)}
@@ -122,15 +151,19 @@ function RankedBars({ title, subtitle, items, color, format, action, emptyText }
   const max = Math.max(...items.map((i) => i.value)) || 1;
   return (
     <Card padding="md">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div className="min-w-0">
+      {/* Wraps rather than squeezes. One unwrapping row let the title column shrink below its
+          longest word on a phone — "Performing" painted over the metric switch — while the
+          switch was squeezed until "Watch time" broke in two. The title now starts from
+          10rem, so the switch drops below it when both cannot fit side by side. */}
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1 basis-40">
           <h2 className="font-semibold text-slate-900 dark:text-white">{title}</h2>
           {subtitle && <p className="text-sm text-slate-500 dark:text-slate-400">{subtitle}</p>}
         </div>
         {action}
       </div>
       {items.length === 0 ? (
-        <p className="py-6 text-center text-sm text-slate-400 dark:text-slate-500">
+        <p className={cx("py-6 text-center text-sm", CONSOLE.faint)}>
           {emptyText || "No events with viewers in this window yet."}
         </p>
       ) : (
@@ -138,7 +171,8 @@ function RankedBars({ title, subtitle, items, color, format, action, emptyText }
           {items.map((i) => (
             <li key={i.label} className="group -mx-2 rounded-lg px-2 py-1 transition-colors hover:bg-slate-50 motion-reduce:transition-none dark:hover:bg-white/[0.03]">
               <div className="mb-1 flex items-center justify-between gap-2 text-sm">
-                <span className="truncate pr-2 text-slate-700 dark:text-slate-200">{i.label}</span>
+                {/* Truncated to one line; the full name is the tooltip (and is what a screen reader reads). */}
+                <span className="truncate pr-2 text-slate-700 dark:text-slate-200" title={i.label}>{i.label}</span>
                 <span className="shrink-0 font-medium tabular-nums text-slate-500 dark:text-slate-400">{format(i.value)}</span>
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
@@ -157,10 +191,172 @@ function RankedBars({ title, subtitle, items, color, format, action, emptyText }
   );
 }
 
+// Player reports (services/playback_qoe) are summarised over 24h / 7d / 30d / 90d / all — there
+// is no 12-month window, so that range shows the figure as not available rather than borrowing
+// a different window's numbers.
+const QOE_WINDOW = { "7d": "7d", "30d": "30d", "90d": "90d" };
+
+// "20m 29s", "1h 04m": an average, so seconds matter under an hour and not above.
+const fmtAvgWatch = (secs) => {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const sec = Math.round(secs % 60);
+  return h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(sec).padStart(2, "0")}s`;
+};
+const fmtCount = (v) => (typeof v === "number" ? v.toLocaleString() : "—");
+
+// Start success from viewers' own players: sessions that began playback over sessions that
+// reported. A start is a session, never a person.
+function StreamQuality({ total, available }) {
+  const sessions = total?.sessions;
+  const starts = total?.playback_starts;
+  const rate = sessions > 0 ? starts / sessions : null;
+  return (
+    <Panel
+      id="quality"
+      title="Stream quality"
+      subtitle="Reported by viewers' own players"
+      action={<PanelLink to="/organization/playback">Playback detail</PanelLink>}
+    >
+      <p className={cx("text-[10.5px] font-bold uppercase tracking-[0.14em]", CONSOLE.faint)}>Playback start success</p>
+      <p className={cx("mt-1 text-[32px] font-bold leading-10 tabular-nums", rate == null ? CONSOLE.faint : CONSOLE.heading)}>
+        {rate == null ? "—" : `${(rate * 100).toFixed(1)}%`}
+      </p>
+      <p className={cx("text-[12px]", CONSOLE.faint)}>
+        {!available
+          ? "Player reports cover up to the last 90 days"
+          : rate == null
+          ? "No player sessions reported in this window"
+          : `Across ${sessions.toLocaleString()} player sessions`}
+      </p>
+      {rate != null && (
+        <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-white/[0.08]" aria-hidden="true">
+          <div className="h-full rounded-full bg-gradient-to-r from-violet-500 via-sky-500 to-emerald-400" style={{ width: `${Math.min(100, rate * 100)}%` }} />
+        </div>
+      )}
+      <div className="mt-3">
+        <FactList
+          rows={[
+            ["Successful starts", fmtCount(starts)],
+            ["Sessions with a failure", fmtCount(total?.failed_sessions)],
+            ["Player sessions", fmtCount(sessions)],
+          ]}
+        />
+      </div>
+      <Footnote>Live and replay combined. A start is a player session, not a person.</Footnote>
+    </Panel>
+  );
+}
+
+// Regions, devices and traffic sources are not persisted anywhere (see the endpoint's
+// breakdowns_note), so this says so instead of drawing bars for figures nobody measured.
+function AudienceReach({ note }) {
+  return (
+    <Panel title="Audience reach" subtitle="Regions, devices and traffic sources" tag="Not measured" tagTone="slate">
+      <div className={cx("flex items-start gap-3 rounded-xl border border-dashed p-4 text-[12.5px]", CONSOLE.divider, CONSOLE.muted)}>
+        <FiGlobe aria-hidden="true" className="mt-0.5 shrink-0 text-[16px]" />
+        <p>{note || "Device, location and traffic-source breakdowns are not measured yet."}</p>
+      </div>
+    </Panel>
+  );
+}
+
+// How much of the window is measured: an event with no telemetry is counted as such, never as
+// an event whose audience was zero.
+const COVERAGE = [
+  ["measured", "bg-emerald-500", "Measured event datasets", "Watch-time telemetry recorded", "green"],
+  ["measured_zero", "bg-sky-500", "Measured with no watch time", "Telemetry recorded; nobody watched", "sky"],
+  ["unmeasured", "bg-amber-500", "No telemetry recorded", "Their watch figures read \u201c\u2014\u201d", "amber"],
+];
+
+function DataQuality({ counts, total }) {
+  return (
+    <Panel id="data-quality" title="Data quality & governance" subtitle={`Measurement coverage across ${total} event${total === 1 ? "" : "s"}`}>
+      <ul className={cx("divide-y", CONSOLE.divideY)}>
+        {COVERAGE.map(([key, dot, title, detail, tone]) => {
+          const n = counts[key] || 0;
+          return (
+            <li key={key} className="flex items-center gap-3 py-2.5">
+              <span aria-hidden="true" className={cx("h-2.5 w-2.5 shrink-0 rounded-full", dot)} />
+              <div className="min-w-0 flex-1">
+                <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>{title}</p>
+                <p className={cx("text-[12px]", CONSOLE.faint)}>{detail}</p>
+              </div>
+              <Tag tone={n > 0 ? tone : "slate"}>{n}</Tag>
+            </li>
+          );
+        })}
+      </ul>
+      <p className={cx("mt-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11.5px]", CONSOLE.divider, CONSOLE.faint)}>
+        <FiLock aria-hidden="true" className="mt-0.5 shrink-0" />
+        Figures are computed on the server for your organization only; the CSV export carries exactly what is shown here.
+      </p>
+    </Panel>
+  );
+}
+
+// ORG-05 "Playback starts over time": sessions that began playback in each UTC day (hour /
+// week for the shortest and longest windows), from the same player reports as the headline
+// row. A range the reports do not cover says so instead of borrowing another window.
+const STARTS_LABEL = {
+  hour: (d) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+  day: (d) => d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "UTC" }),
+  week: (d) => d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "UTC" }),
+};
+
+function PlaybackStarts({ series, available, failed, rangeLabel }) {
+  const label = STARTS_LABEL[series?.bucket] || STARTS_LABEL.day;
+  const data = (series?.points || []).map((p) => ({ label: label(new Date(p.start)), starts: p.playback_starts }));
+  const total = data.reduce((n, p) => n + p.starts, 0);
+  const empty = !available || failed || !series || total === 0;
+  return (
+    <ChartCard
+      title="Playback starts over time"
+      subtitle={`Sessions that began playback, per UTC ${series?.bucket || "day"} · ${rangeLabel}`}
+      height={240}
+      empty={empty}
+      emptyText={
+        !available
+          ? "Player reports cover up to the last 90 days."
+          : failed
+          ? "Player reports couldn't be read."
+          : "No playback starts were reported in this window."
+      }
+      action={<span className={cx("inline-flex items-center gap-1.5 text-[12px]", CONSOLE.body)}><span aria-hidden="true" className="h-2 w-2 rounded-full bg-violet-500" /> Playback starts</span>}
+    >
+      <div style={{ height: 240 }} role="img" aria-label={`Playback starts per ${series?.bucket || "day"} (UTC): ${total} in total.`}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data} margin={{ left: 0, right: 8, top: 8 }}>
+            <defs>
+              <linearGradient id="zk-an-starts" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={CHART.violet} stopOpacity={0.3} />
+                <stop offset="100%" stopColor={CHART.violet} stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-slate-100 dark:text-slate-800" vertical={false} />
+            <XAxis dataKey="label" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" minTickGap={24} />
+            <YAxis allowDecimals={false} fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" width="auto" />
+            <ChartTooltip formatter={(v) => [v.toLocaleString(), "Playback starts"]} />
+            <Area type="monotone" dataKey="starts" name="Playback starts" stroke={CHART.violet} strokeWidth={2} fill="url(#zk-an-starts)" activeDot={{ r: 4 }} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    </ChartCard>
+  );
+}
+
 export default function OrganizationAnalytics() {
+  useHashScroll();
   const [range, setRange] = useState("30d");
   const { data, loading, error, reload } = useApi(() =>
     api.get("/organization/analytics", { params: { range } }).then((r) => r.data)
+  );
+  const qoeWindow = QOE_WINDOW[range] || null;
+  // Optional: the page stands without player reports, and says which figures need them.
+  const qoe = useApi(() =>
+    qoeWindow
+      ? api.get("/organization/playback/qoe", { params: { window: qoeWindow } }).then((r) => r.data).catch(() => null)
+      : Promise.resolve(null)
   );
 
   // useApi fetches on mount and on reload() only — it has no deps array. Without this the
@@ -170,6 +366,7 @@ export default function OrganizationAnalytics() {
   if (range !== lastRange) {
     setLastRange(range);
     reload();
+    qoe.reload();
   }
 
   const rangeLabel = RANGES.find((r) => r.key === range)?.label ?? "";
@@ -261,6 +458,35 @@ export default function OrganizationAnalytics() {
       .map(([label, value]) => ({ label, value }));
   }, [reports]);
 
+  // The headline row (ORG-05): events in the window, player starts and start success from
+  // viewers' own players, and an average watch time weighted by each event's viewers.
+  const qoeTotal = typeof qoe.data?.total?.sessions === "number" ? qoe.data.total : null;
+  const startRate = qoeTotal?.sessions > 0 ? qoeTotal.playback_starts / qoeTotal.sessions : null;
+  const avgWatch = useMemo(() => {
+    // average_watch_seconds is total / viewers per event, so total / average recovers each
+    // event's viewers and the ratio of sums is the true weighted average.
+    let total = 0;
+    let viewers = 0;
+    let events = 0;
+    for (const r of reports) {
+      if (r.total_watch_seconds > 0 && r.average_watch_seconds > 0) {
+        total += r.total_watch_seconds;
+        viewers += r.total_watch_seconds / r.average_watch_seconds;
+        events += 1;
+      }
+    }
+    return viewers > 0 ? { seconds: total / viewers, events } : null;
+  }, [reports]);
+  const coverage = useMemo(() => {
+    const c = {};
+    for (const r of reports) {
+      const key = r.measurement_state || "unmeasured";
+      c[key] = (c[key] || 0) + 1;
+    }
+    return c;
+  }, [reports]);
+  const measuredEvents = (coverage.measured || 0) + (coverage.measured_zero || 0);
+
   const hasAudience = reports.some((r) => r.viewers > 0);
   const hasEngagement = reports.some((r) => r.engagement != null);
 
@@ -282,63 +508,94 @@ export default function OrganizationAnalytics() {
     [reports]
   );
 
-  const exportReport = () => {
-    // Headers say what the numbers ARE. "Peak Viewers" was already accurate here even when
-    // the card above said "Total Viewers"; the engagement column now names itself a score.
-    // A figure that was never measured exports as text, not as a numeric 0 that a
-    // spreadsheet would happily average.
-    const head = ["Event", "Date", "Peak Viewers", "Watch Time (hrs)", "Engagement Score (%)"];
-    const notMeasured = (v) => (v == null ? "Not measured" : v);
-    const body = reports.map((r) => [
-      r.event, r.date, r.viewers,
-      notMeasured(r.watch_hours == null ? null : r.watch_hours.toFixed(2)),
-      notMeasured(r.engagement),
-    ]);
-    const csv = [head, ...body]
-      .map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `zoikostream-analytics-${range}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    notify.success("Report exported");
+  // One export at a time: the ref stops a second tap in the same frame, the state drives the
+  // buttons' loading/disabled look.
+  const [exporting, setExporting] = useState(false);
+  const exportingRef = useRef(false);
+
+  const exportReport = async () => {
+    if (exportingRef.current) return;
+    if (!reports.length) {
+      notify.info("There are no events in this window to export.", { id: EXPORT_TOAST });
+      return;
+    }
+    let csv;
+    try {
+      // Headers say what the numbers ARE. "Peak Viewers" was already accurate here even when
+      // the card above said "Total Viewers"; the engagement column now names itself a score.
+      // A figure that was never measured exports as text, not as a numeric 0 that a
+      // spreadsheet would happily average.
+      const head = ["Event", "Date", "Peak Viewers", "Watch Time (hrs)", "Engagement Score (%)"];
+      const notMeasured = (v) => (v == null ? "Not measured" : v);
+      const body = reports.map((r) => [
+        r.event, r.date, r.viewers,
+        notMeasured(r.watch_hours == null ? null : r.watch_hours.toFixed(2)),
+        notMeasured(r.engagement),
+      ]);
+      csv = [head, ...body]
+        .map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(","))
+        .join("\n");
+    } catch {
+      notify.error("Couldn't generate the report from this data. Please refresh and try again.", { id: EXPORT_TOAST });
+      return;
+    }
+    exportingRef.current = true;
+    setExporting(true);
+    try {
+      // Named for the window the rows were fetched for (the payload says), not the <select>,
+      // which can already show the next range while that request is in flight.
+      const result = await exportTextFile(`zoikostream-analytics-${data?.range || range}.csv`, csv, "text/csv;charset=utf-8");
+      // Success is said only once the file was actually downloaded or handed to the share
+      // sheet — it used to be said unconditionally, after a click the Android app ignored.
+      if (result.ok) notify.success("Report exported", { id: EXPORT_TOAST });
+      else if (result.reason === "cancelled") notify.info("Export cancelled.", { id: EXPORT_TOAST });
+      else notify.error(EXPORT_FAILED[result.reason] || EXPORT_FAILED.download, { id: EXPORT_TOAST });
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
   };
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Analytics</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">Understand how your live events are performing</p>
-          <AskGuideButton question="How did our events perform?" className="mt-2" />
-        </div>
-
-        {/* Console vocabulary, not a page-local field style: CONSOLE.select and the console
-            Button are what every other screen in this shell uses, so these two now carry the
-            brand ramp and the shared focus ring instead of their own emerald copy. */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="relative">
-            <FiCalendar className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-neutral-400" aria-hidden="true" />
-            <select
-              value={range}
-              onChange={(e) => setRange(e.target.value)}
-              aria-label="Date range"
-              className={cx(CONSOLE.select, "appearance-none pl-9 pr-8")}
-            >
-              {RANGES.map((r) => (
-                <option key={r.key} value={r.key}>{r.label}</option>
-              ))}
-            </select>
-            <FiChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 dark:text-neutral-400" aria-hidden="true" />
-          </div>
-          <ConsoleButton onClick={exportReport} disabled={!reports.length} leftIcon={FiDownload}>
-            Export Report
-          </ConsoleButton>
-        </div>
-      </div>
+      <OrganizationPageHeader
+        breadcrumbs={[["Organization", "/organization/manage"], ["Analytics", "/organization/analytics"], ["Overview"]]}
+        eyebrow="Organization console / Cross-event intelligence"
+        title="Analytics"
+        subtitle="Understand audience activity, playback quality and event outcomes — without losing data context."
+        actions={
+          // Console vocabulary, not a page-local field style: CONSOLE.select and the console
+          // Button are what every other screen in this shell uses.
+          <>
+            <AskGuideButton question="How did our events perform?" />
+            <div className="relative">
+              <FiCalendar className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-neutral-400" aria-hidden="true" />
+              <select
+                value={range}
+                onChange={(e) => setRange(e.target.value)}
+                aria-label="Date range"
+                className={cx(CONSOLE.select, "appearance-none pl-9 pr-8")}
+              >
+                {RANGES.map((r) => (
+                  <option key={r.key} value={r.key}>{r.label}</option>
+                ))}
+              </select>
+              <FiChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 dark:text-neutral-400" aria-hidden="true" />
+            </div>
+            {data?.timezone && (
+              <span
+                className={cx("inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-[12.5px]", CONSOLE.control)}
+                title="Dates and chart buckets use your organization's time zone"
+              >
+                <FiClock aria-hidden="true" /> {data.timezone}
+              </span>
+            )}
+            <ConsoleButton onClick={exportReport} disabled={!reports.length || exporting} loading={exporting} leftIcon={FiDownload}>
+              Export Report
+            </ConsoleButton>
+          </>
+        }
+      />
 
       {/* A failed range switch shows a banner over the figures we already have rather than
           replacing them: losing the whole view because one refetch failed is worse than
@@ -366,11 +623,89 @@ export default function OrganizationAnalytics() {
           )}
           aria-busy={loading || undefined}
         >
-          {/* Summary cards */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            {kpis.map((k) => (
-              <StatsCard key={k.title} {...k} />
-            ))}
+          <KpiRow>
+            <KpiTile
+              icon={FiCalendar}
+              label="Events analysed"
+              value={reports.length}
+              caption={`${measuredEvents} with measured telemetry · ${rangeLabel}`}
+            />
+            <KpiTile
+              icon={FiPlay}
+              tone="sky"
+              label="Playback starts"
+              value={qoeTotal ? qoeTotal.playback_starts.toLocaleString() : null}
+              caption={qoeWindow ? "Player sessions, not unique people" : "Player reports cover up to 90 days"}
+            />
+            <KpiTile
+              icon={FiClock}
+              tone="violet"
+              label="Avg watch time"
+              value={avgWatch ? fmtAvgWatch(avgWatch.seconds) : null}
+              caption={avgWatch ? `Per viewer, weighted across ${avgWatch.events} event${avgWatch.events === 1 ? "" : "s"}` : "No watch-time telemetry in this window"}
+            />
+            <KpiTile
+              icon={FiCheck}
+              tone="green"
+              label="Start success"
+              value={startRate == null ? null : `${(startRate * 100).toFixed(1)}%`}
+              caption={startRate == null ? (qoeWindow ? "No player sessions reported" : "Player reports cover up to 90 days") : "Sessions that began playback"}
+            />
+          </KpiRow>
+
+          <Banner title="Know what the numbers mean." aside={<Tag tone="violet">Measured data only</Tag>}>
+            A playback start is a player session — not a verified individual. Figures are scoped to your organization&apos;s events, and anything that was not measured reads &ldquo;—&rdquo; rather than zero.
+          </Banner>
+
+          <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
+            <div className="min-w-0 space-y-6">
+              <PlaybackStarts series={qoe.data?.series} available={Boolean(qoeWindow)} failed={Boolean(qoe.error)} rangeLabel={rangeLabel} />
+
+              <Panel
+                id="performance"
+                title="Event performance"
+                subtitle="Cross-event comparison · open an event for its own Insights"
+                flush
+                action={
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={exportReport}
+                      disabled={!reports.length || exporting}
+                      aria-busy={exporting || undefined}
+                      className={cx("hidden items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-semibold disabled:opacity-40 sm:inline-flex", CONSOLE.control, focusRing)}
+                    >
+                      <FiDownload aria-hidden="true" /> Export CSV
+                    </button>
+                    <PanelLink to="/organization/events">View all events</PanelLink>
+                  </div>
+                }
+              >
+                {reports.length === 0 ? (
+                  <p className="border-t border-slate-100 px-5 py-10 text-center text-sm text-slate-400 dark:border-white/[0.08] dark:text-slate-500">No events in this window yet.</p>
+                ) : (
+                  <div className="border-t border-slate-100 dark:border-white/[0.08]">
+                    <DataTable
+                      columns={reportColumns}
+                      rows={reports}
+                      rowKey={(r) => r.id}
+                      minWidth={720}
+                      searchable
+                      searchKeys={["event"]}
+                      searchPlaceholder="Find an event…"
+                      initialSort={{ key: "viewers", dir: "desc" }}
+                      pageSize={10}
+                    />
+                  </div>
+                )}
+              </Panel>
+            </div>
+
+            <aside className="min-w-0 space-y-6" aria-label="Quality and coverage">
+              <StreamQuality total={qoeTotal} available={Boolean(qoeWindow)} />
+              <AudienceReach note={data.breakdowns_note} />
+              <DataQuality counts={coverage} total={reports.length} />
+            </aside>
           </div>
 
           {/* Trend — both series on one canvas with independent axes, so 24 viewers and
@@ -444,6 +779,47 @@ export default function OrganizationAnalytics() {
             </div>
           </ChartCard>
 
+          {/* Did the audience stay? — beside the four audience totals. */}
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <ChartCard
+              title="Audience retention"
+              subtitle="Watch hours against peak viewers · one point per event"
+              height={260}
+              empty={retention.length === 0}
+              emptyText={!reports.length ? "No events in this window yet." : "No events with an audience yet."}
+            >
+              <div style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  {/* Same rule as the trend chart: no negative left margin, and a Y axis as wide
+                      as its widest label — watch hours under an hour read 0.025h, not 25h. */}
+                  <ScatterChart margin={{ left: 0, right: 8, top: 8, bottom: 4 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-slate-100 dark:text-slate-800" />
+                    <XAxis type="number" dataKey="x" name="Peak viewers" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" />
+                    <YAxis type="number" dataKey="y" name="Watch hours" unit="h" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" width="auto" tickFormatter={formatHoursTick} />
+                    <ChartTooltip
+                      cursor={{ strokeDasharray: "3 3" }}
+                      formatter={(v, name) => [name === "Watch hours" ? `${v} hrs` : v.toLocaleString(), name]}
+                      labelFormatter={() => ""}
+                    />
+                    <Scatter data={retention} name="Events" fill={CHART.violet} fillOpacity={0.75} />
+                  </ScatterChart>
+                </ResponsiveContainer>
+              </div>
+              <p className={cx("mt-2 text-xs", CONSOLE.faint)}>
+                Up and to the right is a big audience that stayed. Far right but low means they
+                arrived and left.
+              </p>
+            </ChartCard>
+
+            <Panel title="Audience & engagement" subtitle={`Peaks, watch time and engagement · ${rangeLabel}`}>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {kpis.map((k) => (
+                  <StatsCard key={k.title} {...k} />
+                ))}
+              </div>
+            </Panel>
+          </div>
+
           {/* Ranking + engagement mix */}
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <RankedBars
@@ -474,80 +850,8 @@ export default function OrganizationAnalytics() {
             />
           </div>
 
-          {/* Did the audience stay? */}
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-            <ChartCard
-              title="Audience retention"
-              subtitle="Watch hours against peak viewers · one point per event"
-              height={260}
-              empty={retention.length === 0}
-              emptyText={!reports.length ? "No events in this window yet." : "No events with an audience yet."}
-            >
-              <div style={{ height: 260 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  {/* Same rule as the trend chart: no negative left margin, and a Y axis as wide
-                      as its widest label — watch hours under an hour read 0.025h, not 25h. */}
-                  <ScatterChart margin={{ left: 0, right: 8, top: 8, bottom: 4 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-slate-100 dark:text-slate-800" />
-                    <XAxis type="number" dataKey="x" name="Peak viewers" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" />
-                    <YAxis type="number" dataKey="y" name="Watch hours" unit="h" fontSize={11} tickLine={false} axisLine={false} stroke="currentColor" className="text-slate-400 dark:text-slate-500" width="auto" tickFormatter={formatHoursTick} />
-                    <ChartTooltip
-                      cursor={{ strokeDasharray: "3 3" }}
-                      formatter={(v, name) => [name === "Watch hours" ? `${v} hrs` : v.toLocaleString(), name]}
-                      labelFormatter={() => ""}
-                    />
-                    <Scatter data={retention} name="Events" fill={CHART.violet} fillOpacity={0.75} />
-                  </ScatterChart>
-                </ResponsiveContainer>
-              </div>
-              <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
-                Up and to the right is a big audience that stayed. Far right but low means they
-                arrived and left.
-              </p>
-            </ChartCard>
-
-            <Card padding="md" className="flex flex-col items-start gap-2">
-              <h2 className="font-semibold text-slate-900 dark:text-white">Device, location & traffic-source breakdowns</h2>
-              <p className="flex items-start gap-2 text-sm text-slate-500 dark:text-slate-400">
-                <FiInfo className="mt-0.5 shrink-0" />
-                {data.breakdowns_note}
-              </p>
-            </Card>
-          </div>
-
           {/* Session-aware metrics: additional to everything above, which is unchanged. */}
           <ViewingSessionsPanel summary={data.session_summary} reports={reports} />
-
-          {/* Recent reports */}
-          <Card padding="none" className="overflow-hidden">
-            <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-              <div>
-                <h2 className="font-semibold text-slate-900 dark:text-white">Recent Reports</h2>
-                <p className="text-sm text-slate-500 dark:text-slate-400">Per-event performance summary</p>
-              </div>
-              <button
-                onClick={exportReport}
-                className="hidden items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50 sm:inline-flex dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-              >
-                <FiDownload /> Export CSV
-              </button>
-            </div>
-            {reports.length === 0 ? (
-              <p className="px-5 py-10 text-center text-sm text-slate-400 dark:text-slate-500">No events in this window yet.</p>
-            ) : (
-              <DataTable
-                columns={reportColumns}
-                rows={reports}
-                rowKey={(r) => r.id}
-                minWidth={720}
-                searchable
-                searchKeys={["event"]}
-                searchPlaceholder="Find an event…"
-                initialSort={{ key: "viewers", dir: "desc" }}
-                pageSize={10}
-              />
-            )}
-          </Card>
         </div>
       )}
     </div>

@@ -8,6 +8,8 @@ import { CONSOLE, cx } from "../../ui/tokens";
 //   <Panel title="Services" flush> <table/> </Panel>   // flush = table draws edge-to-edge
 // `static` opts out of the hover response — use it for a panel that is purely decorative.
 export default function Panel({
+  // Opt-in anchor target, so a quick link elsewhere on the page can address this section.
+  id,
   eyebrow,
   title,
   description,
@@ -25,8 +27,10 @@ export default function Panel({
     // rather than a printed report. It is a border-only change — never a fill or a lift — so a
     // panel still never looks clickable, which most of them are not.
     <section
+      id={id}
       className={cx(
         CONSOLE.panel,
+        id && "scroll-mt-24",
         !isStatic && cx(CONSOLE.panelHover, "transition-colors duration-150 motion-reduce:transition-none"),
         className
       )}
@@ -35,7 +39,7 @@ export default function Panel({
         <header className="flex items-start justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
             {eyebrow && (
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              <p className={cx("text-[11px] font-semibold uppercase tracking-wider", CONSOLE.faint)}>
                 {eyebrow}
               </p>
             )}

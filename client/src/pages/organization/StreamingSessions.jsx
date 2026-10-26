@@ -165,6 +165,8 @@ export default function StreamingSessions() {
   return (
     <div className="space-y-6">
       <OrganizationPageHeader
+        breadcrumbs={[["Organization", "/organization/manage"], ["Events", "/organization/events"], ["Streaming sessions"]]}
+        eyebrow="Event operations / Sessions"
         title="Streaming Sessions"
         subtitle="Broadcasts this organization has run, with their live state and audience peaks."
         actions={
@@ -248,7 +250,7 @@ export default function StreamingSessions() {
                 iconOnly
                 aria-label={`Open the event behind ${s.title}`}
                 leftIcon={FiExternalLink}
-                href={`/organization/events/${s.event_id}`}
+                href={`/organization/events/${s.event_id}/live`}
               />
             )}
             empty={{

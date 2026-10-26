@@ -4,9 +4,12 @@ import { Link } from "react-router-dom";
 // lifetime set", which is exactly what the metric counts.
 import {
   FiKey, FiCopy, FiShield, FiRefreshCw, FiCheckCircle,
-  FiClock, FiSlash, FiFilter, FiPlus, FiTrash2,
+  FiClock, FiSlash, FiFilter, FiPlus, FiTrash2, FiAlertTriangle, FiRepeat,
 } from "react-icons/fi";
 import api, { errMsg } from "../../api";
+import {
+  EXPIRING_SOON_DAYS, badgeFor, expiryBanner, expiryDate, expiryText, expiryTooltip, lifecycleOf, summaryOf,
+} from "../../data/apiKeyExpiry";
 import useApi from "../../hooks/useApi";
 import { CONSOLE, cx, focusRing, type } from "../../ui/tokens";
 import { ConsoleButton } from "../../ui/Button";
@@ -30,33 +33,26 @@ import OrganizationErrorState from "./OrganizationErrorState";
 // super-admin console uses (crud.admin.create_api_key/revoke_api_key) — this is a separate,
 // org-bound endpoint (POST/DELETE /organization/developer/api-keys), not a frontend-only
 // unlock of the super-admin path.
-const WARN_DAYS = 30;
-
-const daysUntil = (iso) => {
-  if (!iso) return null;
-  const ms = new Date(iso).getTime() - Date.now();
-  return Number.isNaN(ms) ? null : Math.ceil(ms / 86_400_000);
-};
-
-// A key's real state, in precedence order: revoked beats expired beats expiring.
-// Tones are TONE keys (the console Badge palette), not STATUS keys. `group` is the coarse
-// bucket the status filter works on, so the filter and the badge can never disagree.
-function keyState(k) {
-  if (k.revoked) return { tone: "neutral", label: "Revoked", group: "revoked" };
-  const d = daysUntil(k.expires_at);
-  if (d == null) return { tone: "success", label: "Active", group: "active" };
-  if (d < 0) return { tone: "danger", label: "Expired", group: "expired" };
-  if (d <= WARN_DAYS) return { tone: "warning", label: `Expires in ${d}d`, group: "expiring" };
-  return { tone: "success", label: "Active", group: "active" };
-}
-
-// Only the states this page can actually produce (see keyState) — no aspirational options.
+// Each key's state comes from the server (crud.admin.key_lifecycle — usable while now <
+// expires_at, expired from that instant, "expiring soon" inside its last 30 days); the rules
+// for what the page SAYS about it live in data/apiKeyExpiry.js. The filter buckets are exactly
+// those server states, so the filter, the badge and the counts can never disagree.
 const STATUS_FILTERS = [
   { value: "all", label: "All statuses" },
   { value: "active", label: "Active", dot: <Dot className="bg-green-500" /> },
-  { value: "expiring", label: `Expiring within ${WARN_DAYS} days`, dot: <Dot className="bg-amber-500" /> },
+  { value: "expiring_soon", label: "Expiring soon", dot: <Dot className="bg-amber-500" /> },
   { value: "expired", label: "Expired", dot: <Dot className="bg-rose-500" /> },
   { value: "revoked", label: "Revoked", dot: <Dot className="bg-slate-400" /> },
+];
+
+// Overlapping rotation: the replacement is created while the old key is still valid, so the
+// integration moves across with no gap. Nothing about the old key changes until step 4 —
+// it is never extended, and its secret is never shown again.
+const ROTATION_STEPS = [
+  "Create the replacement key and store its secret — it is shown once.",
+  "Update your integration to use the new key.",
+  "Check that the integration works with it.",
+  "Revoke the old key.",
 ];
 
 function Dot({ className }) {
@@ -118,14 +114,17 @@ function RevealKeyDialog({ created, onClose }) {
   );
 }
 
-function CreateKeyModal({ open, onClose, onCreated }) {
+function CreateKeyModal({ open, onClose, onCreated, replacing = null }) {
   const [label, setLabel] = useState("");
   const [expiresInDays, setExpiresInDays] = useState("");
   const [saving, setSaving] = useState(false);
   const [wasOpen, setWasOpen] = useState(open);
   if (open !== wasOpen) {
     setWasOpen(open);
-    if (open) { setLabel(""); setExpiresInDays(""); }
+    if (open) {
+      setLabel(replacing ? `${replacing.label || "Key"} (replacement)`.slice(0, 80) : "");
+      setExpiresInDays("");
+    }
   }
 
   const create = async () => {
@@ -148,18 +147,29 @@ function CreateKeyModal({ open, onClose, onCreated }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="New API key"
+      title={replacing ? "Create a replacement key" : "New API key"}
       size="md"
       footer={
         <>
           <ConsoleButton variant="secondary" onClick={onClose} disabled={saving}>Cancel</ConsoleButton>
           <ConsoleButton disabled={!label.trim() || saving} loading={saving} onClick={create}>
-            Create key
+            {replacing ? "Create replacement" : "Create key"}
           </ConsoleButton>
         </>
       }
     >
       <div className="space-y-4">
+        {replacing && (
+          <div className={cx("rounded-lg px-3 py-2.5 text-[12px] leading-[18px]", CONSOLE.inset, CONSOLE.body)}>
+            <p>
+              <strong className="font-semibold">{replacing.label || "The current key"}</strong> stays as
+              it is until you revoke it or it expires — creating this key does not change it.
+            </p>
+            <ol className="mt-2 list-decimal space-y-0.5 pl-4" aria-label="Rotation steps">
+              {ROTATION_STEPS.map((step) => <li key={step}>{step}</li>)}
+            </ol>
+          </div>
+        )}
         <div>
           <Label variant="console" htmlFor="ck-label">Label</Label>
           <Input
@@ -199,31 +209,41 @@ function CreateKeyModal({ open, onClose, onCreated }) {
  */
 export default function ApiCredentials({ embedded = false }) {
   const { data, loading, error, reload } = useApi(() =>
-    api.get("/organization/developer").then((r) => r.data)
+    // The fetch time is stamped here, not read during render, for the rare payload that
+    // carries no server timestamp to measure against.
+    api.get("/organization/developer").then((r) => ({ ...r.data, fetchedAt: Date.now() }))
   );
   const [status, setStatus] = useState("all");
   const [creating, setCreating] = useState(false);
+  const [replacing, setReplacing] = useState(null);
   const [created, setCreated] = useState(null);
   const [revoking, setRevoking] = useState(null);
-  const keys = useMemo(() => data?.api_keys || [], [data]);
 
-  const summary = useMemo(() => {
-    const active = keys.filter((k) => !k.revoked && (daysUntil(k.expires_at) ?? 1) >= 0);
-    const expiring = active.filter((k) => {
-      const d = daysUntil(k.expires_at);
-      return d != null && d <= WARN_DAYS;
-    });
-    return {
-      total: keys.length,
-      active: active.length,
-      expiring: expiring.length,
-      nonExpiring: active.filter((k) => !k.expires_at).length,
-    };
-  }, [keys]);
+  // Every row, the counts and the banner measure against ONE instant: the server's.
+  const nowMs = data?.generated_at ? Date.parse(data.generated_at) : data?.fetchedAt;
+  const keys = useMemo(
+    () => (data?.api_keys || []).map((k) => ({ ...k, life: lifecycleOf(k, nowMs) })),
+    [data, nowMs]
+  );
+  const summary = useMemo(
+    () => summaryOf(keys, data?.key_summary, keys.map((k) => k.life)),
+    [keys, data]
+  );
+  const banner = expiryBanner(summary);
+  // The most urgent usable key, for the banner's "Create replacement key".
+  const mostUrgent = useMemo(
+    () => keys.filter((k) => k.life.usable && k.life.warning)
+      .sort((a, b) => a.life.seconds - b.life.seconds)[0] || null,
+    [keys]
+  );
+  const openCreate = (forKey = null) => {
+    setReplacing(forKey);
+    setCreating(true);
+  };
 
   // Client-side narrowing of an already-fetched inventory — no new request, no API change.
   const visible = useMemo(
-    () => (status === "all" ? keys : keys.filter((k) => keyState(k).group === status)),
+    () => (status === "all" ? keys : keys.filter((k) => k.life.status === status)),
     [keys, status]
   );
 
@@ -254,14 +274,20 @@ export default function ApiCredentials({ embedded = false }) {
       sortable: true,
       render: (k) => (
         <div className="flex min-w-0 items-center gap-3">
+          {/* An unusable key (expired, revoked) is muted, so it never reads as a working one. */}
           <span
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400"
+            className={cx(
+              "grid h-8 w-8 shrink-0 place-items-center rounded-lg",
+              k.life.usable
+                ? "bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400"
+                : "bg-slate-100 text-slate-400 dark:bg-white/[0.05] dark:text-slate-500"
+            )}
             aria-hidden="true"
           >
             <FiKey className="text-[14px]" />
           </span>
           <div className="min-w-0">
-            <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>
+            <p className={cx("truncate text-[13px] font-semibold", k.life.usable ? CONSOLE.heading : CONSOLE.muted)}>
               {k.label || "Untitled key"}
             </p>
             <p className={cx("truncate text-[11px]", CONSOLE.faint)}>
@@ -300,23 +326,42 @@ export default function ApiCredentials({ embedded = false }) {
       header: "Expires",
       sortable: true,
       sortValue: (k) => (k.expires_at ? new Date(k.expires_at).getTime() : Infinity),
-      render: (k) =>
-        k.expires_at ? (
-          <span className={cx("text-[13px]", CONSOLE.body)}>
-            {new Date(k.expires_at).toLocaleDateString()}
-          </span>
-        ) : (
-          <span className={cx("text-[13px]", CONSOLE.faint)} title="Minted without a lifetime">
-            Never
-          </span>
-        ),
+      // The time LEFT first ("Expires in 7 days", "Expired 21 days ago"), the date under it,
+      // and on hover the exact local moment (zone named) plus the UTC instant the server enforces.
+      render: (k) => {
+        if (!k.expires_at) {
+          return (
+            <span className={cx("text-[13px]", CONSOLE.faint)} title="Minted without a lifetime">
+              Never expires
+            </span>
+          );
+        }
+        const relative = expiryText(k.life, k.expires_at, nowMs);
+        const tone = k.life.status === "expired"
+          ? "text-rose-600 dark:text-rose-400"
+          : k.life.warning === "imminent"
+            ? "text-rose-600 dark:text-rose-400"
+            : k.life.warning
+              ? "text-amber-700 dark:text-amber-400"
+              : CONSOLE.body;
+        return (
+          // Spans, not <p>: index.css gives every <p> `text-wrap: pretty`, an unlayered rule that
+          // beats the whitespace-nowrap utility, and these two lines must not break mid-phrase.
+          <div className="min-w-0" title={expiryTooltip(k.expires_at)}>
+            <span className={cx("block whitespace-nowrap text-[13px] font-medium", k.life.status === "revoked" ? CONSOLE.faint : tone)}>
+              {relative}
+            </span>
+            <span className={cx("block whitespace-nowrap text-[11px]", CONSOLE.faint)}>{expiryDate(k.expires_at)}</span>
+          </div>
+        );
+      },
     },
     {
       key: "state",
       header: "Status",
       align: "right",
       render: (k) => {
-        const s = keyState(k);
+        const s = badgeFor(k.life);
         return <Badge tone={s.tone} dot>{s.label}</Badge>;
       },
     },
@@ -334,13 +379,15 @@ export default function ApiCredentials({ embedded = false }) {
             <ConsoleButton variant="secondary" size="sm" leftIcon={FiRefreshCw} onClick={reload} loading={loading}>
               Refresh
             </ConsoleButton>
-            <ConsoleButton size="sm" leftIcon={FiPlus} onClick={() => setCreating(true)}>
+            <ConsoleButton size="sm" leftIcon={FiPlus} onClick={() => openCreate()}>
               New key
             </ConsoleButton>
           </div>
         </div>
       ) : (
         <OrganizationPageHeader
+          breadcrumbs={[["Organization", "/organization/manage"], ["Developers", "/organization/developers"], ["API credentials"]]}
+          eyebrow="Integration workspace / Credentials"
           title="Credentials"
           subtitle="API keys this organization authenticates with. Secrets are shown once at creation and never stored in readable form."
           actions={
@@ -348,7 +395,7 @@ export default function ApiCredentials({ embedded = false }) {
               <ConsoleButton variant="secondary" leftIcon={FiRefreshCw} onClick={reload} loading={loading}>
                 Refresh
               </ConsoleButton>
-              <ConsoleButton leftIcon={FiPlus} onClick={() => setCreating(true)}>
+              <ConsoleButton leftIcon={FiPlus} onClick={() => openCreate()}>
                 New key
               </ConsoleButton>
             </>
@@ -357,6 +404,29 @@ export default function ApiCredentials({ embedded = false }) {
       )}
 
       {error && <OrganizationErrorState error={error} onRetry={reload} title="Couldn't load credentials" />}
+
+      {/* Advance notice, not alarm: a usable key inside its last 30 days. Nothing here (or
+          anywhere) extends a key — the remedy is a replacement created while this one works. */}
+      {banner && (
+        <div
+          role="status"
+          data-testid="key-expiry-banner"
+          className={cx(
+            "flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3",
+            banner.urgent
+              ? "border-amber-300 bg-amber-50 dark:border-amber-500/30 dark:bg-amber-500/10"
+              : "border-amber-200 bg-amber-50/60 dark:border-amber-500/20 dark:bg-amber-500/[0.06]"
+          )}
+        >
+          <p className="flex min-w-0 items-start gap-2.5 text-[13px] text-amber-900 dark:text-amber-200">
+            <FiAlertTriangle className="mt-0.5 shrink-0 text-[15px]" aria-hidden="true" />
+            <span>{banner.text}</span>
+          </p>
+          <ConsoleButton size="sm" leftIcon={FiRepeat} onClick={() => openCreate(mostUrgent)}>
+            Create replacement key
+          </ConsoleButton>
+        </div>
+      )}
 
       {/* Inventory at a glance. Every figure is derived from the fetched key list — the
           accents carry meaning (green healthy, amber needs attention) rather than decorating. */}
@@ -374,29 +444,29 @@ export default function ApiCredentials({ embedded = false }) {
           accent="green"
           label="Active"
           value={summary.active}
-          note="Usable right now"
+          note={summary.expiring_30d ? `Usable right now, ${summary.expiring_30d} expiring soon` : "Usable right now"}
           loading={loading}
         />
         <MetricCard
           icon={FiClock}
           accent="amber"
-          label={`Expiring within ${WARN_DAYS} days`}
-          value={summary.expiring}
-          note={summary.expiring ? "Plan a rotation" : "Nothing due"}
+          label={`Expiring within ${EXPIRING_SOON_DAYS} days`}
+          value={summary.expiring_30d}
+          note={summary.expiring_7d ? `${summary.expiring_7d} within 7 days` : summary.expiring_30d ? "Plan a rotation" : "Nothing due"}
           loading={loading}
         />
         <MetricCard
           icon={FiSlash}
           accent="blue"
           label="Non-expiring keys"
-          value={summary.nonExpiring}
-          note={summary.nonExpiring ? "Permanent liability" : "No permanent keys"}
+          value={summary.non_expiring}
+          note={summary.non_expiring ? "Permanent liability" : "No permanent keys"}
           loading={loading}
         />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <Panel title="Key inventory" count={summary.expiring} flush>
+        <Panel title="Key inventory" count={summary.expiring_30d} flush>
           <DataTable
             columns={columns}
             rows={visible}
@@ -422,6 +492,22 @@ export default function ApiCredentials({ embedded = false }) {
             minWidth={680}
             rowActions={(k) => (
               <>
+                {(k.life.warning || k.life.status === "expired") && (
+                  <button
+                    type="button"
+                    onClick={() => openCreate(k)}
+                    aria-label={`Create a replacement for ${k.label || "this key"}`}
+                    title="Create replacement"
+                    className={cx(
+                      "rounded-md p-1.5 transition-colors duration-150 motion-reduce:transition-none",
+                      "text-amber-600 dark:text-amber-400",
+                      "hover:bg-amber-50 hover:text-amber-700 dark:hover:bg-amber-500/10 dark:hover:text-amber-300",
+                      focusRing
+                    )}
+                  >
+                    <FiRepeat className="text-[14px]" />
+                  </button>
+                )}
                 {k.prefix && (
                   <button
                     type="button"
@@ -465,7 +551,7 @@ export default function ApiCredentials({ embedded = false }) {
                     title: "No credentials yet",
                     description: "This organization has no API keys. Create one to authenticate a server-side integration.",
                     action: (
-                      <ConsoleButton size="sm" leftIcon={FiPlus} onClick={() => setCreating(true)}>
+                      <ConsoleButton size="sm" leftIcon={FiPlus} onClick={() => openCreate()}>
                         New key
                       </ConsoleButton>
                     ),
@@ -496,6 +582,13 @@ export default function ApiCredentials({ embedded = false }) {
               separated
             />
             <StatRow
+              label="Expired"
+              value={loading ? null : summary.expired}
+              reason="Loading"
+              dot={summary.expired ? "danger" : "neutral"}
+              separated
+            />
+            <StatRow
               label="Active"
               value={loading ? null : summary.active}
               reason="Loading"
@@ -503,19 +596,19 @@ export default function ApiCredentials({ embedded = false }) {
               separated
             />
             <StatRow
-              label={`Expiring within ${WARN_DAYS} days`}
-              value={loading ? null : summary.expiring}
+              label={`Expiring within ${EXPIRING_SOON_DAYS} days`}
+              value={loading ? null : summary.expiring_30d}
               reason="Loading"
-              dot={summary.expiring ? "warning" : "neutral"}
-              tone={summary.expiring ? "text-amber-600 dark:text-amber-400" : undefined}
+              dot={summary.expiring_30d ? "warning" : "neutral"}
+              tone={summary.expiring_30d ? "text-amber-600 dark:text-amber-400" : undefined}
               separated
             />
             <StatRow
               label="Non-expiring keys"
-              value={loading ? null : summary.nonExpiring}
+              value={loading ? null : summary.non_expiring}
               reason="Loading"
-              dot={summary.nonExpiring ? "warning" : "neutral"}
-              tone={summary.nonExpiring ? "text-amber-600 dark:text-amber-400" : undefined}
+              dot={summary.non_expiring ? "warning" : "neutral"}
+              tone={summary.non_expiring ? "text-amber-600 dark:text-amber-400" : undefined}
               separated
             />
             <StatRow
@@ -564,7 +657,12 @@ export default function ApiCredentials({ embedded = false }) {
         </div>
       </div>
 
-      <CreateKeyModal open={creating} onClose={() => setCreating(false)} onCreated={(k) => { setCreated(k); reload(); }} />
+      <CreateKeyModal
+        open={creating}
+        replacing={replacing}
+        onClose={() => { setCreating(false); setReplacing(null); }}
+        onCreated={(k) => { setCreated(k); reload(); }}
+      />
       <RevealKeyDialog created={created} onClose={() => setCreated(null)} />
       <ConfirmDialog
         open={!!revoking}

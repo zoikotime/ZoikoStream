@@ -17,8 +17,10 @@ CreateStatus = Literal["draft", "published", "scheduled"]  # other states only v
 # retired value ("rehearsal", "processing", ...) is a 422, not a status anyone can set.
 EventStatus = Literal[EVENT_STATUSES]
 # What the console filters and labels by: every canonical status plus the derived "missed"
-# (crud/event.py). Accepted only as a list filter, never as a status to write.
-DisplayStatus = Literal[EVENT_STATUSES + ("missed",)]
+# (crud/event.py), "on_air" (live or degraded) for the Events page's Live now filter, and
+# "upcoming" (every pre-live, non-draft status, Missed excluded) for its Upcoming tab.
+# Accepted only as a list filter, never as a status to write.
+DisplayStatus = Literal[EVENT_STATUSES + ("missed", "on_air", "upcoming")]
 
 _SLUG = r"^[a-z0-9][a-z0-9-]*$"
 
@@ -128,6 +130,12 @@ class EventOut(BaseModel):
     # live. For a Missed event this is already what the label says; for published / ready /
     # armed the console adds a "start time passed" note.
     start_overdue: bool = False
+    # The readiness verdict for a pre-live event (services/ops gates — the same ones its
+    # Preparation section shows), set by the list route for the Events table's Readiness
+    # column. None for events past readiness (live, ended, cancelled) and everywhere else.
+    readiness_verdict: str | None = None
+    readiness_blockers: int | None = None
+    readiness_failing: int | None = None
 
     @computed_field
     @property

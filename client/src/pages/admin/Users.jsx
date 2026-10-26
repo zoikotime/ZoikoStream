@@ -5,6 +5,7 @@ import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, timeAgo } from "../
 import UserAvatar from "../../ui/UserAvatar";
 import api, { diagnoseLoadError, errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
+import Dropdown from "../../ui/Dropdown";
 import UserModal from "./UserModal";
 import { ASSIGNABLE_PLATFORM_ROLES, roleLabel } from "./roleInfo";
 
@@ -313,10 +314,27 @@ export default function Users() {
               be built from `new Set(rows.map(u => u.organization_name))` — the orgs present
               on the current page — so most tenants were simply not offered, and picking one
               filtered the page rather than the platform. */}
-          <select value={org} onChange={(e) => resetPage(() => setOrg(e.target.value))} className={selectCls} aria-label="Filter by organization">
-            <option value="all">All organizations</option>
-            {orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-          </select>
+          {/* ui/Dropdown, not a native <select>, for this one filter specifically: it lists
+              EVERY organization (useAllOrganizations walks the endpoint to the end), and a
+              native select's option list is browser chrome — its height and position are the
+              OS's to decide, so it ran the full height of the viewport and no CSS of ours
+              could bound it. Dropdown's panel is real DOM, so it takes a measured max-height
+              and scrolls inside itself.
+
+              The role and status filters beside it stay native: three or four options each,
+              nothing to overflow, and migrating them would churn the tests that drive them
+              without fixing anything. */}
+          <Dropdown
+            label="Filter by organization"
+            className="w-[13.5rem]"
+            width="w-[17rem]"
+            value={org}
+            onChange={(v) => resetPage(() => setOrg(v))}
+            options={[
+              { value: "all", label: "All organizations" },
+              ...orgs.map((o) => ({ value: o.id, label: o.name })),
+            ]}
+          />
           <select value={active} onChange={(e) => resetPage(() => setActive(e.target.value))} className={selectCls} aria-label="Filter by status">
             <option value="all">All statuses</option>
             <option value="active">Active</option>

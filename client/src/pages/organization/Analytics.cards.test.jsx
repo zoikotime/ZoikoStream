@@ -11,7 +11,7 @@
 // the counters tween from 0 through an IntersectionObserver that src/test/setup.js stubs as
 // a deliberately inert no-op, so every numeric card reads "0" in jsdom no matter what the
 // payload said — which is the one thing these assertions are about.
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -185,5 +185,74 @@ describe("a failure is not shown as zeroes", () => {
     open();
     expect(await screen.findByText(/Couldn't load analytics/i)).toBeInTheDocument();
     expect(screen.queryByText("Event Peak Viewers")).not.toBeInTheDocument();
+  });
+});
+
+describe("the headline row", () => {
+  const QOE = { total: { sessions: 200, playback_starts: 196, failed_sessions: 4, failures: [] } };
+  const TWO_EVENTS = {
+    ...MEASURED,
+    reports: [
+      ...MEASURED.reports,
+      { ...MEASURED.reports[0], id: "e2", event: "Town hall", total_watch_seconds: 3000, average_watch_seconds: 1000 },
+    ],
+  };
+  const tile = (name) => screen.getByRole("group", { name });
+
+  it("reads starts and start success from player reports, and weights average watch by viewers", async () => {
+    vi.mocked(api.get).mockImplementation((url) =>
+      Promise.resolve({ data: url === "/organization/playback/qoe" ? QOE : TWO_EVENTS }));
+    open();
+    await cardsReady();
+    await waitFor(() => expect(within(tile("Playback starts")).getByText("196")).toBeInTheDocument());
+    expect(within(tile("Start success")).getByText("98.0%")).toBeInTheDocument();
+    // (6000 + 3000) viewer-seconds over (12 + 3) viewers — not the mean of the two averages.
+    expect(within(tile("Avg watch time")).getByText("10m 00s")).toBeInTheDocument();
+    expect(within(tile("Events analysed")).getByText("2")).toBeInTheDocument();
+  });
+
+  it("shows no player figures for a range the reports do not cover", async () => {
+    vi.mocked(api.get).mockImplementation((url) =>
+      Promise.resolve({ data: url === "/organization/playback/qoe" ? QOE : MEASURED }));
+    open();
+    await cardsReady();
+    fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "12m" } });
+    await waitFor(() => expect(within(tile("Start success")).getByText("—")).toBeInTheDocument());
+    expect(within(tile("Playback starts")).getAllByText("Player reports cover up to 90 days")).toHaveLength(1);
+    const windows = vi.mocked(api.get).mock.calls
+      .filter(([url]) => url === "/organization/playback/qoe")
+      .map(([, config]) => config?.params?.window);
+    expect(windows).toEqual(["30d"]);
+  });
+});
+
+describe("playback starts over time", () => {
+  const SERIES = {
+    bucket: "day", timezone: "UTC",
+    points: [
+      { start: "2026-10-20T00:00:00+00:00", sessions: 3, playback_starts: 2 },
+      { start: "2026-10-21T00:00:00+00:00", sessions: 5, playback_starts: 4 },
+    ],
+  };
+  const QOE = { total: { sessions: 8, playback_starts: 6, failed_sessions: 0, failures: [] }, series: SERIES };
+
+  it("draws the server's per-day starts and names their total", async () => {
+    vi.mocked(api.get).mockImplementation((url) =>
+      Promise.resolve({ data: url === "/organization/playback/qoe" ? QOE : MEASURED }));
+    open();
+    await cardsReady();
+    expect(await screen.findByRole("img", { name: "Playback starts per day (UTC): 6 in total." })).toBeInTheDocument();
+  });
+
+  it("says so when nothing started, and when the range is beyond the player reports", async () => {
+    vi.mocked(api.get).mockImplementation((url) =>
+      Promise.resolve({ data: url === "/organization/playback/qoe"
+        ? { ...QOE, series: { ...SERIES, points: SERIES.points.map((p) => ({ ...p, playback_starts: 0 })) } }
+        : MEASURED }));
+    open();
+    await cardsReady();
+    expect(await screen.findByText("No playback starts were reported in this window.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Date range"), { target: { value: "12m" } });
+    expect(await screen.findByText("Player reports cover up to the last 90 days.")).toBeInTheDocument();
   });
 });

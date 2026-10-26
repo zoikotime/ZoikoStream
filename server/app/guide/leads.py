@@ -388,7 +388,8 @@ def submit(db: Session, request: Request, session: GuideSession, flow_id: uuid.U
     db.commit()  # durable BEFORE the network call; no transaction held across it
 
     # Only a validated IP, derived per GUIDE_TRUSTED_PROXY_HOPS — never raw header text.
-    result = lead_adapter().submit(payload, visitor_ip=ratelimit.client_ip(request))
+    result = lead_adapter().submit(payload, visitor_ip=ratelimit.client_ip(request),
+                                   server=request.scope.get("server"))
 
     op = db.get(GuideExternalOperation, op.operation_id, with_for_update=True)
     flow = db.get(GuideLeadFlow, flow.flow_id, with_for_update=True)

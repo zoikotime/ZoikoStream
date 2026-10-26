@@ -4,8 +4,58 @@ on:
   push:
     branches: [main]
 
+# One production deploy at a time, and never cancel one part-way: a run cancelled between the
+# schema step and the restart would leave the database ahead of the code (harmless: every schema
+# change is additive) but a run cancelled mid-restart is not something to invite.
+concurrency:
+  group: deploy-production-vm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
+  # Schema before code. The API never changes its own schema on boot (server/app/main.py), and
+  # the release that adds columns writes them immediately (models/audit_log.py: event_id,
+  # outcome and actor_role on every audited action), so they must exist before the VM starts
+  # serving the new code. This is the same step Cloud Build runs (cloudbuild.yaml `migrate`):
+  # server/create_tables.py from the pushed commit, idempotent, one statement per transaction,
+  # and it now verifies the result (every table and column the models declare is present).
+  # Any failure exits non-zero, so `deploy` below never runs.
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'          # the production image's interpreter (Dockerfile)
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install server dependencies
+        # The repo-root requirements.txt — the file the production image installs (Dockerfile).
+        run: pip install -r requirements.txt
+
+      - name: Require the production database URL
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::error::The DATABASE_URL secret is not configured for this repository. The schema cannot be applied, so the deploy is stopped rather than starting new code against an old schema."
+            exit 1
+          fi
+
+      - name: Apply and verify the schema
+        working-directory: server
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONUNBUFFERED: '1'
+        run: python create_tables.py
+
   deploy:
+    needs: migrate
     runs-on: ubuntu-latest
     steps:
       - name: SSH deploy

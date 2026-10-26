@@ -21,9 +21,11 @@ class FakeAdapter:
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes) or ["confirmed"]
         self.calls = []
+        self.servers = []
 
-    def submit(self, payload, *, visitor_ip):
+    def submit(self, payload, *, visitor_ip, server=None):
         self.calls.append(payload)
+        self.servers.append(server)
         return AdapterOutcome(self.outcomes.pop(0) if len(self.outcomes) > 1
                               else self.outcomes[0])
 
@@ -249,6 +251,15 @@ def test_contact_adapter_outcomes(monkeypatch, behavior, expected):
     out = ContactFlowAdapter().submit({"x": 1}, visitor_ip="203.0.113.9")
     assert out.outcome == expected
     assert seen["headers"]["X-Forwarded-For"] == "203.0.113.9"
+
+
+def test_submit_hands_the_adapter_the_socket_the_request_arrived_on(guide, fake):
+    # With GUIDE_CONTACT_ENDPOINT unset the adapter posts to this same server, on the port taken
+    # from this address (adapters.own_contact_endpoint) — so the route must pass it through.
+    flow = start(guide)
+    fill(guide, flow, VALID)
+    assert submit(guide, flow, consent(guide)["receipt_id"]).json()["outcome"] == "confirmed"
+    assert [list(s) for s in fake.servers] == [["testserver", 80]]
 
 
 # ── Handoff & feedback ─────────────────────────────────────────────────────────────────────

@@ -115,9 +115,9 @@ def test_lead_submit_forwards_only_the_validated_ip(guide):
     seen = {}
 
     class Capture(FakeAdapter):
-        def submit(self, payload, *, visitor_ip):
+        def submit(self, payload, *, visitor_ip, server=None):
             seen["ip"] = visitor_ip
-            return super().submit(payload, visitor_ip=visitor_ip)
+            return super().submit(payload, visitor_ip=visitor_ip, server=server)
     adapters.set_lead_adapter(Capture("confirmed"))
     flow = start(guide)
     fill(guide, flow, VALID)

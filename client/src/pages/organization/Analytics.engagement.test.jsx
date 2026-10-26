@@ -1,4 +1,4 @@
-// Organization Analytics — the Recent Reports table's Engagement cell.
+// Organization Analytics — the Event performance table's Engagement cell.
 //
 // THE BUG (production): events with no audience showed a bare "%" under a full-width rose
 // bar. The cell interpolated the raw value, and the analytics service sends `engagement:
@@ -59,7 +59,7 @@ const open = async () => {
       </MemoryRouter>
     </ThemeProvider>,
   );
-  await screen.findByText("Recent Reports");
+  await screen.findByText("Event performance");
   return screen.getAllByRole("table").find((t) => within(t).queryByText("Town hall"));
 };
 

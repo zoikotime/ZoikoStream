@@ -27,7 +27,8 @@ vi.mock("../../ui/Toast", () => ({
 }));
 vi.mock("../../auth/AuthContext", () => ({
   useAuth: () => ({
-    user: { full_name: "Vihari Owner", email: "owner@example.com" },
+    // The create action is offered only with the privilege to create (ZST-UX-NAV-001 §3.1).
+    user: { full_name: "Vihari Owner", email: "owner@example.com", role: "org_admin" },
     logout: vi.fn(),
   }),
 }));
@@ -42,7 +43,7 @@ const CONSOLE_STATE = {
   workspace: { label: "production", slug: "production" },
   workspaces: [{ label: "production", slug: "production" }],
   badges: {},
-  user: { name: "Vihari Owner", email: "owner@example.com", role: "Organization Owner" },
+  user: { name: "Vihari Owner", email: "owner@example.com", role: "org_admin", role_label: "Organization Owner" },
   health: { status: "ok" },
 };
 

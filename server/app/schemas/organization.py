@@ -217,6 +217,11 @@ class OrgDeveloperOut(BaseModel):
     """
     api_keys: list[ApiKeyOut] = []
     webhooks: list[WebhookEndpointOut] = []
+    # The inventory counts from the same rule as each row (crud.admin.key_summary): total,
+    # active (currently usable), expiring_30d, expiring_7d, expired, revoked, non_expiring.
+    key_summary: dict[str, int] | None = None
+    # When the lifecycle fields above were computed, so relative times read against it.
+    generated_at: datetime | None = None
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────

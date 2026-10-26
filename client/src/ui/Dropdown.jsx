@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FiCheck, FiChevronDown } from "react-icons/fi";
 import { CONSOLE, cx, focusRing } from "./tokens";
 
@@ -25,6 +25,15 @@ const SIZES = {
   lg: "h-11 rounded-xl text-sm",
 };
 
+// Menu geometry. MAX_H is what max-h-72 used to be, kept as the ceiling so a short list in a
+// tall window looks exactly as it did; MIN_H stops a cramped viewport producing a menu too
+// short to use, in which case it scrolls. GAP matches the mt-1.5/mb-1.5 offset and EDGE keeps
+// the menu off the viewport edge.
+const MAX_H = 288;
+const MIN_H = 160;
+const GAP = 6;
+const EDGE = 8;
+
 export default function Dropdown({
   value,
   onChange,
@@ -42,6 +51,7 @@ export default function Dropdown({
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
+  const [place, setPlace] = useState({ up: false, maxHeight: MAX_H });
   const rootRef = useRef(null);
   const listRef = useRef(null);
   const triggerRef = useRef(null);
@@ -60,6 +70,44 @@ export default function Dropdown({
     setActive(-1);
     if (refocus) triggerRef.current?.focus();
   };
+
+  // How tall the menu may be, and which way it opens.
+  //
+  // max-h-72 alone is a guess about the page, not about the screen: a trigger low in a short
+  // viewport still produced a menu running off the bottom, and a list of every organization
+  // (the Users filter walks all of them) is long enough to do it every time. The space that
+  // actually exists below the trigger — and above it — is measured here instead, and the menu
+  // opens upward when that is the side with room.
+  //
+  // Re-measured on scroll and resize because the trigger moves: the console's main region is
+  // its own scroll container, so the viewport gap changes without the window resizing.
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const measure = () => {
+      const r = triggerRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const below = window.innerHeight - r.bottom - GAP - EDGE;
+      const above = r.top - GAP - EDGE;
+      // Flip only when below is genuinely the worse side — never for a few pixels, which
+      // would make the menu jump sides as the page scrolls.
+      const up = below < Math.min(MAX_H, above) && above > below;
+      setPlace({ up, maxHeight: Math.max(MIN_H, Math.min(MAX_H, up ? above : below)) });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    // capture: the scroll happens on an ancestor (main), not on window.
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open]);
+
+  // Opening on the current selection is only useful if it is on screen.
+  useEffect(() => {
+    if (!open) return;
+    listRef.current?.querySelector('[data-active="true"]')?.scrollIntoView?.({ block: "nearest" });
+  }, [open, active]);
 
   useEffect(() => {
     if (!open) return;
@@ -178,13 +226,19 @@ export default function Dropdown({
             if (!rootRef.current?.contains(e.relatedTarget)) closeMenu({ refocus: false });
           }}
           className={cx(
-            "zk-pop-in absolute z-40 mt-1.5 max-h-72 overflow-auto rounded-xl border p-1 shadow-xl outline-none",
+            "zk-pop-in absolute z-40 rounded-xl border p-1 shadow-xl outline-none",
+            // overscroll-contain so reaching the end of the list does not start scrolling the
+            // page underneath it; overflow-x-hidden because a long name truncates rather than
+            // widening the menu.
+            "overflow-y-auto overflow-x-hidden overscroll-contain",
             "border-slate-200 bg-white shadow-slate-900/10",
             "dark:border-white/10 dark:bg-neutral-950 dark:shadow-black/60",
             "zk-scroll-thin",
+            place.up ? "bottom-full mb-1.5" : "top-full mt-1.5",
             align === "right" ? "right-0" : "left-0",
             width
           )}
+          style={{ maxHeight: place.maxHeight }}
         >
           {options.map((opt, i) => {
             const isSelected = opt.value === value;
@@ -194,6 +248,7 @@ export default function Dropdown({
                 id={`${listId}-${i}`}
                 role="option"
                 aria-selected={isSelected}
+                data-active={active === i || undefined}
                 aria-disabled={opt.disabled || undefined}
                 onMouseEnter={() => setActive(i)}
                 onClick={() => commit(i)}

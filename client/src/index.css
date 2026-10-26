@@ -3,6 +3,18 @@
 /* Class-based dark mode: `dark:` applies when <html class="dark"> is set. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Tell the BROWSER which scheme it is painting for.
+   A native control's popup — a <select>'s option list, a date/datetime picker's calendar,
+   scrollbars, autofill — is drawn by the browser, not by this stylesheet. No class or
+   utility reaches it; `color-scheme` is the only control there is. Unset, it defaults to
+   light, so the console could put itself in dark mode while every native popup stayed white:
+   opening a filter painted a large white option list over a black page. The theme toggle
+   writes `.dark` on <html>, so the scheme follows it here and the two can never disagree.
+   This is not cosmetic to one dropdown — the admin console alone has 24 native selects and
+   46 date/time inputs, and this is every one of them. */
+:root { color-scheme: light; }
+:root.dark { color-scheme: dark; }
+
 /* ---- Brand palette ----
    The app was built on emerald/teal. Rather than touch 300+ utility usages
    across 56 files, remap those two scales to the ZoikoStream logo colors:
@@ -49,9 +61,22 @@ body {
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
-/* Tighter optical tracking + balanced wrapping for display headings. */
-h1, h2, h3 { text-wrap: balance; }
-p { text-wrap: pretty; }
+/* Tighter optical tracking + balanced wrapping for display headings.
+   In the base layer, so a utility on the element still wins. Unlayered CSS beats every
+   Tailwind layer, and `text-wrap` sets the same wrap mode `white-space` does — so as plain
+   rules these silently cancelled every `truncate` / `whitespace-nowrap` on a <p> or heading
+   (names wrapped onto two lines instead of ending in an ellipsis). */
+@layer base {
+  h1, h2, h3 { text-wrap: balance; }
+  p { text-wrap: pretty; }
+  /* The consoles' type (AppShell adds the class): Inter with its default glyphs — the frames
+     use the double-storey a, so the body's cv11 is switched off here. Tabular numerals stay
+     opt-in per element (tabular-nums). */
+  html.zk-console {
+    font-family: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  html.zk-console body { font-feature-settings: normal; }
+}
 /* Counters and metrics shouldn't jitter as digits change width. */
 .zk-tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
 
