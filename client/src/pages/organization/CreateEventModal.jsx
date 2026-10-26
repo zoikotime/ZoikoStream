@@ -222,9 +222,14 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
       });
       // Hosts are assigned right after creation (the event needs an id first) — the
       // backend emails each newly-added host, so this alone covers "invite the host".
+      // Whose assignment email the server could not send (`email_sent: false` per host). The
+      // assignment itself stands either way; this only stops "scheduled" from implying that
+      // everyone has been told (BUG-009).
+      let unemailed = [];
       if (hostIds.size) {
         try {
-          await api.patch(`/events/${data.id}/hosts`, { user_ids: [...hostIds] });
+          const { data: hosts } = await api.patch(`/events/${data.id}/hosts`, { user_ids: [...hostIds] });
+          unemailed = (Array.isArray(hosts) ? hosts : []).filter((h) => h?.email_sent === false);
         } catch (hostError) {
           // The event DOES exist at this point. Saying only "failed" would invite a second
           // Schedule click and a duplicate event, so say exactly what happened, refresh the
@@ -269,6 +274,10 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
               ? `"${data.title}" scheduled. Allow pop-ups to open the Producer Console.`
               : `"${data.title}" scheduled`
       );
+      if (unemailed.length) {
+        const who = unemailed.map((h) => h.full_name || h.email).join(", ");
+        notify.warning(`${who} ${unemailed.length === 1 ? "is" : "are"} assigned, but the email couldn't be sent. Let them know directly.`);
+      }
       // The Organization tab stays where it is: list refreshed, modal closed, no navigation.
       onCreated?.();
       close();
