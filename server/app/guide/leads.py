@@ -16,7 +16,6 @@ import json
 import re
 import secrets
 import uuid
-from datetime import timedelta
 
 from email_validator import EmailNotValidError, validate_email
 from fastapi import Request
@@ -30,7 +29,7 @@ from .models import (
     GuideConsent, GuideExternalOperation, GuideLeadFieldValue, GuideLeadFlow, GuideSession,
 )
 from .secrets_detect import detect
-from .sessions import audit
+from .sessions import audit, on_secret_detected
 from .settings import get_settings
 
 SCHEMA_VERSION = "lead-v1"
@@ -222,6 +221,17 @@ def _validate_field(fid: str, raw) -> tuple[str | None, str | None]:
     return value, None
 
 
+def email_lookup_hash(email: str) -> bytes | None:
+    """Keyed lookup hash of a work email (guide_lead_flows.email_lookup_hash), used only to
+    locate records for a verified privacy-rights request (Security/Privacy §20). Normalized
+    the way the form normalizes it, then case-folded, so "Jamie@Example.org " matches."""
+    try:
+        normalized = validate_email(email.strip(), check_deliverability=False).normalized
+    except (EmailNotValidError, AttributeError):
+        return None
+    return crypto.keyed_hash(normalized.casefold(), purpose=crypto.PURPOSE_LEAD_EMAIL_LOOKUP)
+
+
 def update_fields(db: Session, request: Request, session: GuideSession, flow: GuideLeadFlow,
                   values: dict) -> list[dict]:
     """Saves every valid field and returns field errors for the rest — one bad field never
@@ -230,6 +240,7 @@ def update_fields(db: Session, request: Request, session: GuideSession, flow: Gu
         raise GuideProblem("GUIDE_STATE_CONFLICT", "This request can no longer be edited.",
                            extra={"current": render(db, flow, include_values=False)})
     errors = []
+    secret_classes: set[str] = set()
     allowed = set(flow.required_fields) | set(flow.optional_fields)
     for fid, raw in values.items():
         if fid not in allowed:
@@ -238,8 +249,12 @@ def update_fields(db: Session, request: Request, session: GuideSession, flow: Gu
             continue
         value, error = _validate_field(fid, raw)
         if error:
+            if isinstance(raw, str):
+                secret_classes.update(detect(raw).classes)
             errors.append({"field": fid, "code": "invalid", "message": error})
             continue
+        if fid == "work_email":
+            flow.email_lookup_hash = email_lookup_hash(value) if value else None
         row = db.get(GuideLeadFieldValue, (flow.flow_id, fid))
         if value == "":
             if row is not None:
@@ -261,6 +276,8 @@ def update_fields(db: Session, request: Request, session: GuideSession, flow: Gu
     audit(db, request, "lead_fields_updated", session_id=session.session_id,
           flow_id=str(flow.flow_id), fields=sorted(values), error_fields=sorted(
               e["field"] for e in errors), status=flow.status)
+    # A credential typed into the form is refused above and is a security event (SEC §7).
+    on_secret_detected(db, request, session, sorted(secret_classes))
     return errors
 
 
@@ -307,22 +324,20 @@ def _contact_payload(flow: GuideLeadFlow, values: dict[str, str]) -> dict:
             "topic": CONTACT_TOPIC, "message": "\n".join(lines)[:4000]}
 
 
-def _visitor_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for", "")
-    return fwd.split(",")[0].strip() or (request.client.host if request.client else None)
-
-
 def submit(db: Session, request: Request, session: GuideSession, flow_id: uuid.UUID, *,
            idempotency_key: str, consent_receipt_id: str | None) -> tuple[int, dict]:
     if not idempotency_key or not 16 <= len(idempotency_key) <= 128:
         raise GuideProblem("GUIDE_BAD_REQUEST", "A valid Idempotency-Key header is required.")
     flow = load_flow(db, session, flow_id)
-    key_hash = crypto.keyed_hash(idempotency_key, purpose="idem-lead")
+    key_hash = crypto.keyed_hash(idempotency_key, purpose=crypto.PURPOSE_IDEMPOTENCY_LEAD)
     values = _values(db, flow)
-    fingerprint = hashlib.sha256(json.dumps(
+    # Keyed: an unkeyed digest of lead values would let anyone holding a dump test guesses
+    # of a visitor's email against it.
+    fingerprint = crypto.keyed_hash(json.dumps(
         {"flow": str(flow.flow_id), "consent": consent_receipt_id,
-         "values": {k: crypto.digest(v).hex() for k, v in sorted(values.items())}},
-        sort_keys=True).encode()).digest()
+         "values": {k: hashlib.sha256(v.encode()).hexdigest()
+                    for k, v in sorted(values.items())}},
+        sort_keys=True), purpose=crypto.PURPOSE_LEAD_FINGERPRINT)
 
     prior = db.scalar(select(GuideExternalOperation).where(
         GuideExternalOperation.operation_type == "lead_submit",
@@ -372,7 +387,8 @@ def submit(db: Session, request: Request, session: GuideSession, flow_id: uuid.U
     payload = _contact_payload(flow, values)
     db.commit()  # durable BEFORE the network call; no transaction held across it
 
-    result = lead_adapter().submit(payload, visitor_ip=_visitor_ip(request))
+    # Only a validated IP, derived per GUIDE_TRUSTED_PROXY_HOPS — never raw header text.
+    result = lead_adapter().submit(payload, visitor_ip=ratelimit.client_ip(request))
 
     op = db.get(GuideExternalOperation, op.operation_id, with_for_update=True)
     flow = db.get(GuideLeadFlow, flow.flow_id, with_for_update=True)
@@ -385,8 +401,9 @@ def submit(db: Session, request: Request, session: GuideSession, flow_id: uuid.U
     if result.outcome == "confirmed":
         op.public_reference = f"GD-{secrets.token_hex(4).upper()}"
         # The contact inbox is now the system of record; the local copy is kept only for the
-        # short recovery window (Security/Privacy §16: 7 days after confirmation).
-        short = now + timedelta(days=7)
+        # short recovery window (Security/Privacy §16: 7 days after confirmation; configured
+        # by GUIDE_RETENTION_LEAD_CONFIRMED_DAYS).
+        short = retention.purge_after("lead_confirmed", at=now)
         db.execute(update(GuideLeadFieldValue).where(
             GuideLeadFieldValue.flow_id == flow.flow_id).values(purge_after=short))
         flow.purge_after = min(flow.purge_after, short)
@@ -402,14 +419,17 @@ def submit(db: Session, request: Request, session: GuideSession, flow_id: uuid.U
 
 def _outcome_response(db: Session, flow: GuideLeadFlow, op: GuideExternalOperation, *,
                       replayed: bool) -> tuple[int, dict]:
-    body = {"flow_id": str(flow.flow_id), "outcome": op.outcome,
-            "message": OUTCOME_COPY.get(op.outcome, OUTCOME_COPY["unknown"]),
+    # A dead-lettered operation is still UNCONFIRMED to the visitor (ARCH §12.2): same copy,
+    # same direct contact route, still no blind resubmission.
+    outcome = "unknown" if op.outcome == "dead_letter" else op.outcome
+    body = {"flow_id": str(flow.flow_id), "outcome": outcome,
+            "message": OUTCOME_COPY.get(outcome, OUTCOME_COPY["unknown"]),
             "submission_reference": op.public_reference if op.outcome == "confirmed" else None,
             "replayed": replayed, "actions": []}
-    if op.outcome != "confirmed":
+    if outcome != "confirmed":
         a = registry.action_for(db, "contact-sales")
         if a:
             body["actions"].append(a)
-    if op.outcome == "unknown":
+    if outcome == "unknown":
         raise GuideProblem("GUIDE_OUTCOME_UNKNOWN", OUTCOME_COPY["unknown"], extra=body)
     return 200, body

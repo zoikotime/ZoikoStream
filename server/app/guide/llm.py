@@ -16,6 +16,16 @@ Providers:
 A comma-separated value is an ordered fallback chain (FallbackProvider): with
 GUIDE_LLM_PROVIDER=anthropic,groq Claude answers, and Groq is used only when Claude errors,
 times out or truncates.
+
+Model eligibility (Prompt §19.1, Security §13.1): in production only providers listed in
+GUIDE_APPROVED_PROVIDERS (default "anthropic") may answer — "available is not equivalent to
+safe for fallback". An unapproved entry in the chain is refused and logged, never used.
+
+Routing profiles (§19): each prompt carries a RouteProfile (FAST_QA / DISCOVERY /
+HIGH_RISK_FACT) whose model / effort / max_tokens override the provider defaults.
+
+Token usage is returned on every result (summed across a fallback chain) so the orchestrator
+can record it on the audit trail and enforce the per-session budget (Architecture §21.1).
 """
 from __future__ import annotations
 
@@ -26,6 +36,7 @@ import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 
+from . import metrics
 from .prompts import TurnPrompt
 from .settings import get_settings
 
@@ -41,10 +52,45 @@ class ModelResult:
     profile: str = ""
     latency_ms: int = 0
     usage: dict = field(default_factory=dict)
+    provider: str = ""             # low-cardinality provider name (metrics label)
+    recorded: bool = False         # metrics already emitted (FallbackProvider)
+
+    @property
+    def input_tokens(self) -> int:
+        return int(self.usage.get("input_tokens") or 0)
+
+    @property
+    def output_tokens(self) -> int:
+        return int(self.usage.get("output_tokens") or 0)
+
+
+_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9_.:\-]")
+
+
+def provider_label(result: ModelResult) -> str:
+    return (result.provider or _LABEL_UNSAFE.sub("_", result.profile) or "unknown")[:64]
+
+
+def record(result: ModelResult) -> None:
+    """Golden-signal metrics for one model call (Architecture §20). Labels are enums only."""
+    if result.recorded:
+        return
+    result.recorded = True
+    label = provider_label(result)
+    metrics.observe("guide_answer_latency_seconds", result.latency_ms / 1000, provider=label)
+    if result.status != "ok":
+        metrics.incr("guide_model_errors_total", provider=label, kind=result.status)
+    if result.input_tokens:
+        metrics.incr("guide_tokens_total", result.input_tokens, provider=label,
+                     direction="input")
+    if result.output_tokens:
+        metrics.incr("guide_tokens_total", result.output_tokens, provider=label,
+                     direction="output")
 
 
 class MockProvider:
     profile = "mock"
+    name = "mock"
 
     # Words that say nothing about WHAT is asked; overlap on these is not relevance.
     _STOP = {"what", "which", "when", "where", "does", "have", "with", "your", "about", "there",
@@ -68,6 +114,10 @@ class MockProvider:
                          for i, (sid, body) in enumerate(found)), key=lambda t: (-t[0], t[1]))
         sources = ([(sid, body) for overlap, _i, sid, body in scored if overlap > 0]
                    if qterms else found)  # "What is ZoikoStream?" has no content words
+        if not sources and found and "answerability_state: SUPPORTED" in user:
+            # Retrieval already judged the evidence sufficient; a model answers from the top
+            # unit even when the visitor's wording shares no word with it ("explain ...").
+            sources = found[:1]
         if not sources:
             data = {"answer_text": "I don't have an approved ZoikoStream source that confirms "
                                    "that information.",
@@ -81,10 +131,12 @@ class MockProvider:
                     "answer_class": "factual", "used_source_ids": [sid],
                     "action_ids": prompt.allowed_action_ids[:1], "uncertainty": "none"}
         return ModelResult("ok", data, self.profile,
-                           int((time.monotonic() - started) * 1000))
+                           int((time.monotonic() - started) * 1000), provider=self.name)
 
 
 class AnthropicProvider:
+    name = "anthropic"
+
     def __init__(self):
         import anthropic  # deferred: the platform never needs it unless the Guide uses Claude
         s = get_settings()
@@ -99,49 +151,58 @@ class AnthropicProvider:
     def generate(self, prompt: TurnPrompt) -> ModelResult:
         a = self._anthropic
         started = time.monotonic()
+        route = prompt.route
+        model = route.model or self.model
+        effort = route.effort or self.effort
+        profile = f"{model}:{effort}"
         try:
             # No server-side model fallback: only the configured, evaluated model answers
             # (Security §13.1, SP-AT-20). Our own provider chain is the only fallback.
             response = self._client.beta.messages.create(
-                model=self.model,
-                max_tokens=MAX_OUTPUT_TOKENS,
+                model=model,
+                max_tokens=route.max_tokens or MAX_OUTPUT_TOKENS,
                 # Stable system prompt first so it can be cached across turns.
                 system=[{"type": "text", "text": prompt.system,
                          "cache_control": {"type": "ephemeral"}}],
                 messages=prompt.messages,
-                output_config={"effort": self.effort,
+                output_config={"effort": effort,
                                "format": {"type": "json_schema", "schema": prompt.schema}},
             )
         except a.APITimeoutError:
-            return ModelResult("timeout", profile=self.profile, latency_ms=self._ms(started))
+            return self._fail("timeout", profile, started)
         except a.RateLimitError:
             log.warning("guide model rate limited")
-            return ModelResult("error", profile=self.profile, latency_ms=self._ms(started))
+            return self._fail("error", profile, started)
         except a.APIStatusError as exc:
             log.error("guide model API error status=%s request_id=%s", exc.status_code,
                       getattr(exc, "request_id", None))
-            return ModelResult("error", profile=self.profile, latency_ms=self._ms(started))
+            return self._fail("error", profile, started)
         except a.APIConnectionError:
             log.error("guide model connection error")
-            return ModelResult("error", profile=self.profile, latency_ms=self._ms(started))
+            return self._fail("error", profile, started)
 
         usage = {"input_tokens": response.usage.input_tokens,
                  "output_tokens": response.usage.output_tokens,
                  "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens",
                                                     None)}
         if response.stop_reason == "refusal":
-            return ModelResult("refused", profile=self.profile, latency_ms=self._ms(started),
-                               usage=usage)
+            return ModelResult("refused", profile=profile, latency_ms=self._ms(started),
+                               usage=usage, provider=self.name)
         if response.stop_reason == "max_tokens":
-            return ModelResult("truncated", profile=self.profile, latency_ms=self._ms(started),
-                               usage=usage)
+            return ModelResult("truncated", profile=profile, latency_ms=self._ms(started),
+                               usage=usage, provider=self.name)
         text = next((b.text for b in response.content if b.type == "text"), None)
         try:
             data = json.loads(text) if text else None
         except json.JSONDecodeError:
             data = None
         return ModelResult("ok" if isinstance(data, dict) else "error", data,
-                           f"{response.model}:{self.effort}", self._ms(started), usage)
+                           f"{response.model}:{effort}", self._ms(started), usage,
+                           provider=self.name)
+
+    def _fail(self, status: str, profile: str, started: float) -> ModelResult:
+        return ModelResult(status, profile=profile, latency_ms=self._ms(started),
+                           provider=self.name)
 
     @staticmethod
     def _ms(started: float) -> int:
@@ -163,6 +224,8 @@ class GroqProvider:
     # never duplicate a visible answer (Architecture §18). Longer waits degrade immediately.
     MAX_RETRY_WAIT_SECONDS = 4.0
 
+    name = "groq"
+
     def __init__(self):
         s = get_settings()
         if not s.GROQ_API_KEY:
@@ -179,7 +242,8 @@ class GroqProvider:
             "model": self.model,
             "messages": [{"role": "system", "content": prompt.system}, *prompt.messages],
             "temperature": 0.2,
-            "max_completion_tokens": self.MAX_COMPLETION_TOKENS,
+            "max_completion_tokens": min(self.MAX_COMPLETION_TOKENS,
+                                         prompt.route.max_tokens or self.MAX_COMPLETION_TOKENS),
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": "guide_answer", "strict": True, "schema": prompt.schema}},
         }
@@ -191,10 +255,11 @@ class GroqProvider:
                                  headers={"Authorization": f"Bearer {self._key}"})
             except httpx.TimeoutException:
                 return ModelResult("timeout", profile=self.profile,
-                                   latency_ms=self._ms(started))
+                                   latency_ms=self._ms(started), provider=self.name)
             except httpx.HTTPError as exc:
                 log.error("guide model connection error: %s", type(exc).__name__)
-                return ModelResult("error", profile=self.profile, latency_ms=self._ms(started))
+                return ModelResult("error", profile=self.profile,
+                                   latency_ms=self._ms(started), provider=self.name)
             if res.status_code != 429 or attempt:
                 break
             wait = _retry_after(res)
@@ -203,11 +268,13 @@ class GroqProvider:
             time.sleep(wait)
         if res.status_code == 429:
             log.warning("guide model rate limited (retry-after=%s)", res.headers.get("retry-after"))
-            return ModelResult("error", profile=self.profile, latency_ms=self._ms(started))
+            return ModelResult("error", profile=self.profile, latency_ms=self._ms(started),
+                               provider=self.name)
         if res.status_code != 200:
             # Body is not logged: it can echo request content.
             log.error("guide model API error status=%s", res.status_code)
-            return ModelResult("error", profile=self.profile, latency_ms=self._ms(started))
+            return ModelResult("error", profile=self.profile, latency_ms=self._ms(started),
+                               provider=self.name)
         payload = res.json()
         choice = (payload.get("choices") or [{}])[0]
         usage = payload.get("usage") or {}
@@ -215,14 +282,14 @@ class GroqProvider:
                  "output_tokens": usage.get("completion_tokens")}
         if choice.get("finish_reason") == "length":
             return ModelResult("truncated", profile=self.profile, latency_ms=self._ms(started),
-                               usage=usage)
+                               usage=usage, provider=self.name)
         content = (choice.get("message") or {}).get("content")
         try:
             data = json.loads(content) if content else None
         except json.JSONDecodeError:
             data = None
         return ModelResult("ok" if isinstance(data, dict) else "error", data, self.profile,
-                           self._ms(started), usage)
+                           self._ms(started), usage, provider=self.name)
 
     @staticmethod
     def _ms(started: float) -> int:
@@ -252,19 +319,26 @@ class FallbackProvider:
 
     def generate(self, prompt: TurnPrompt) -> ModelResult:
         total_ms, result = 0, None
+        tokens_in = tokens_out = 0
         for i, provider in enumerate(self.providers):
             try:
                 result = provider.generate(prompt)
             except Exception:  # an unexpected provider bug must not skip the fallback
                 log.exception("guide model %s raised", provider.profile)
-                result = ModelResult("error", profile=provider.profile)
+                result = ModelResult("error", profile=provider.profile,
+                                     provider=getattr(provider, "name", ""))
+            record(result)  # per attempt, under the provider that actually ran
             total_ms += result.latency_ms
+            tokens_in += result.input_tokens
+            tokens_out += result.output_tokens
             if result.status not in self.RETRYABLE:
                 break
             if i + 1 < len(self.providers):
                 log.warning("guide model %s returned %s; falling back to %s", provider.profile,
                             result.status, self.providers[i + 1].profile)
         result.latency_ms = total_ms
+        # Every attempt spent tokens; the session budget counts all of them.
+        result.usage = {**result.usage, "input_tokens": tokens_in, "output_tokens": tokens_out}
         return result
 
 
@@ -272,12 +346,28 @@ _PROVIDERS = {"anthropic": lambda: AnthropicProvider(), "groq": lambda: GroqProv
               "mock": lambda: MockProvider()}
 
 
+def approved_providers() -> set[str]:
+    return {n.strip().lower() for n in get_settings().GUIDE_APPROVED_PROVIDERS.split(",")
+            if n.strip()}
+
+
 @lru_cache
 def get_provider():
-    names = [n.strip().lower() for n in get_settings().GUIDE_LLM_PROVIDER.split(",") if n.strip()]
+    s = get_settings()
+    names = [n.strip().lower() for n in s.GUIDE_LLM_PROVIDER.split(",") if n.strip()]
     unknown = [n for n in names if n not in _PROVIDERS]
     if not names or unknown:
-        raise ValueError(f"unknown GUIDE_LLM_PROVIDER {get_settings().GUIDE_LLM_PROVIDER!r}")
+        raise ValueError(f"unknown GUIDE_LLM_PROVIDER {s.GUIDE_LLM_PROVIDER!r}")
+    if s.is_production():
+        # §19.1: only evaluated, approved providers may answer in production. An unapproved
+        # fallback is dropped (not silently used); none approved => no generation (degraded).
+        refused = [n for n in names if n not in approved_providers()]
+        for name in refused:
+            log.error("guide model provider %s refused: not in GUIDE_APPROVED_PROVIDERS", name)
+            metrics.incr("guide_model_errors_total", provider=name, kind="unapproved")
+        names = [n for n in names if n not in refused]
+        if not names:
+            raise ValueError("no GUIDE_LLM_PROVIDER entry is in GUIDE_APPROVED_PROVIDERS")
     providers = []
     for name in names:
         try:

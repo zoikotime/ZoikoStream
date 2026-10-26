@@ -1,0 +1,3615 @@
+openapi: 3.1.0
+info:
+  title: ZoikoStream Public Guide API
+  version: 1.0.0
+  description: Public, anonymous ZoikoStream Guide API (ZST-API-PUB-GUIDE-001 v1.0). The browser holds
+    an opaque HttpOnly session capability cookie (zs_guide_sid) plus a per-session CSRF token sent as
+    X-ZS-CSRF on every mutating session route; there is no static client API key. Errors are RFC 9457
+    problem details with stable codes. Generated from the application by `python -m app.guide.openapi.export`;
+    do not edit by hand.
+paths:
+  /bootstrap:
+    get:
+      tags:
+      - bootstrap
+      summary: Bootstrap
+      description: 'Public presentation config. Creates NO session, cookie, record or profile
+
+        (API §6 "NO SILENT SESSION", API-AT-01).
+
+
+        Kill switch: answers 200 with `enabled: false` plus the direct routes, not 503. API §6
+
+        makes bootstrap the call that "determines whether Guide is enabled", and PR-041 needs
+
+        the direct routes in that answer; App. A''s 503 remains for a failure to answer at all.'
+      operationId: getBootstrap
+      parameters:
+      - name: page_id
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 64
+          pattern: ^[a-z0-9][a-z0-9_-]*$
+          default: home
+          title: Page Id
+      - name: page_type
+        in: query
+        required: false
+        schema:
+          enum:
+          - home
+          - product
+          - solutions
+          - pricing
+          - help
+          - viewer
+          - event
+          - contact
+          - trust
+          - privacy
+          - status
+          - developer
+          - other
+          type: string
+          default: home
+          title: Page Type
+      - name: locale
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 16
+          pattern: ^[a-z]{2,3}(-[A-Z]{2})?$
+          default: en-US
+          title: Locale
+      responses:
+        '200':
+          description: Public presentation config.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bootstrap'
+              examples:
+                enabled:
+                  value:
+                    api_version: '1.0'
+                    assistant:
+                      name: Guide
+                      descriptor: Public AI Assistant
+                    enabled: true
+                    locale: en-US
+                    welcome: Welcome to ZoikoStream Guide. I can help with product questions, pricing
+                      and demos, or viewer support.
+                    suggested_intents:
+                    - intent_id: I-PRICING
+                      label: Pricing & plans
+                      priority: 10
+                    - intent_id: I-DEMO
+                      label: Request a demo
+                      priority: 9
+                    limits:
+                      max_message_chars: 4000
+                      max_concurrent_requests: 1
+                    privacy:
+                      privacy_notice_href: /privacy
+                      terms_href: /trust
+                    direct_routes:
+                    - action_id: help-center
+                      type: open_help
+                      label: Contact ZoikoStream
+                      href: /contact
+                    - action_id: status-page
+                      type: open_status
+                      label: Service status
+                      href: /status
+                kill_switch:
+                  summary: Guide disabled
+                  value:
+                    api_version: '1.0'
+                    assistant:
+                      name: Guide
+                      descriptor: Public AI Assistant
+                    enabled: false
+                    locale: en-US
+                    suggested_intents: []
+                    limits:
+                      max_message_chars: 4000
+                      max_concurrent_requests: 1
+                    privacy:
+                      privacy_notice_href: /privacy
+                      terms_href: /trust
+                    direct_routes:
+                    - action_id: help-center
+                      type: open_help
+                      label: Contact ZoikoStream
+                      href: /contact
+                    - action_id: status-page
+                      type: open_status
+                      label: Service status
+                      href: /status
+                    unavailable_reason: disabled
+        '304':
+          description: Not modified (If-None-Match matched the ETag).
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: &id001
+                $ref: '#/components/schemas/Problem'
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Guide is unavailable right now. You can still use the Help Center, status
+                      page, or contact support directly.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions:
+    post:
+      tags:
+      - sessions
+      summary: Create Session
+      operationId: createSession
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionCreate'
+        required: true
+      responses:
+        '201':
+          description: Session created (or the same session returned to the client that already holds
+            its cookie). Sets the zs_guide_sid HttpOnly cookie.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCreated'
+              example:
+                session_id: 0be3c6a2-6f0e-4b8e-9d55-3f1f4a8f2c11
+                session_state: ACTIVE
+                expires_at: '2026-10-24T14:00:00Z'
+                idle_timeout_seconds: 1800
+                context_version: 1
+                csrf_token: csrf-example-token-not-real
+                assistant:
+                  name: Guide
+                  descriptor: Public AI Assistant
+                welcome: Welcome to ZoikoStream Guide. I can help with product questions, pricing and
+                  demos, or viewer support.
+                suggested_intents:
+                - intent_id: I-PRICING
+                  label: Pricing & plans
+                  priority: 10
+                - intent_id: I-DEMO
+                  label: Request a demo
+                  priority: 9
+                privacy:
+                  privacy_notice_href: /privacy
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '403':
+          description: GUIDE_PUBLIC_BOUNDARY_DENIED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_PUBLIC_BOUNDARY_DENIED:
+                  summary: Request is outside the public Guide
+                  value:
+                    type: /problems/public-boundary-denied
+                    title: Request is outside the public Guide
+                    status: 403
+                    detail: Request origin is not permitted.
+                    code: GUIDE_PUBLIC_BOUNDARY_DENIED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '409':
+          description: GUIDE_STATE_CONFLICT
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_STATE_CONFLICT:
+                  summary: Request conflicts with current state
+                  value:
+                    type: /problems/state-conflict
+                    title: Request conflicts with current state
+                    status: 409
+                    detail: This session request was already processed. Start a new session.
+                    code: GUIDE_STATE_CONFLICT
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Guide is unavailable right now. You can still use the Help Center, status
+                      page, or contact support directly.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions/{session_id}/context:
+    patch:
+      tags:
+      - sessions
+      summary: Update Context
+      operationId: updateSessionContext
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContextUpdate'
+      responses:
+        '200':
+          description: Updated session context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionBody'
+              example:
+                session_id: 0be3c6a2-6f0e-4b8e-9d55-3f1f4a8f2c11
+                session_state: ACTIVE
+                expires_at: '2026-10-24T14:00:00Z'
+                idle_timeout_seconds: 1800
+                context_version: 2
+                suggested_intents:
+                - intent_id: I-PRICING
+                  label: Pricing & plans
+                  priority: 10
+                - intent_id: I-DEMO
+                  label: Request a demo
+                  priority: 9
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '403':
+          description: GUIDE_PUBLIC_BOUNDARY_DENIED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_PUBLIC_BOUNDARY_DENIED:
+                  summary: Request is outside the public Guide
+                  value:
+                    type: /problems/public-boundary-denied
+                    title: Request is outside the public Guide
+                    status: 403
+                    detail: Request origin is not permitted.
+                    code: GUIDE_PUBLIC_BOUNDARY_DENIED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Guide is unavailable right now. You can still use the Help Center, status
+                      page, or contact support directly.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions/{session_id}/end:
+    post:
+      tags:
+      - sessions
+      summary: End Session
+      operationId: endSession
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      responses:
+        '204':
+          description: Session ended; the cookie is cleared.
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions/{session_id}/messages:
+    post:
+      tags:
+      - messages
+      summary: Submit Message
+      operationId: submitMessage
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: accept
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: application/json (default) or text/event-stream for the SSE contract (API §9).
+          title: Accept
+        description: application/json (default) or text/event-stream for the SSE contract (API §9).
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageSubmit'
+      responses:
+        '200':
+          description: 'Validated answer as JSON, or the SSE stream when Accept: text/event-stream (API
+            §9).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResult'
+              examples:
+                answer:
+                  value:
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    session_id: 0be3c6a2-6f0e-4b8e-9d55-3f1f4a8f2c11
+                    user_message_id: 2f6f0c1a-1b2c-4d3e-8f4a-5b6c7d8e9f0a
+                    assistant_message:
+                      message_id: 71b5a0c2-3d4e-4f5a-9b6c-7d8e9f0a1b2c
+                      text: Yes. ZoikoStream supports secure live events with private audience access,
+                        recording and replay.
+                      answer_class: discovery
+                      grounded: true
+                      sources:
+                      - source_id: product-live-events
+                        title: ZoikoStream Live Events
+                        source_type: product
+                        version: '2026.09'
+                        canonical_path: /
+                      actions:
+                      - action_id: request-demo
+                        type: start_lead_flow
+                        label: Request a demo
+                      uncertainty:
+                        state: none
+                    session_state: ACTIVE
+                clarification:
+                  summary: One clarifying question (C4)
+                  value:
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    session_id: 0be3c6a2-6f0e-4b8e-9d55-3f1f4a8f2c11
+                    user_message_id: 2f6f0c1a-1b2c-4d3e-8f4a-5b6c7d8e9f0a
+                    assistant_message:
+                      message_id: 71b5a0c2-3d4e-4f5a-9b6c-7d8e9f0a1b2c
+                      text: Happy to help you find the right setup.
+                      answer_class: discovery
+                      grounded: false
+                      sources: []
+                      actions: []
+                      uncertainty:
+                        state: none
+                      clarification:
+                        question: What kind of event are you planning?
+                        options:
+                        - id: live_event
+                          label: A live event
+                        - id: webinar
+                          label: A webinar or town hall
+                        - id: memorial
+                          label: A memorial service
+                    session_state: ACTIVE
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                stream:
+                  value: 'event: response.started
+
+                    data: {"request_id":"req_5f2a9c0d1e3b4a6f7c8d9e0a","assistant_message_id":null}
+
+
+                    event: response.progress
+
+                    data: {"stage":"retrieving"}
+
+
+                    event: response.progress
+
+                    data: {"stage":"drafting"}
+
+
+                    : keep-alive
+
+
+                    event: response.progress
+
+                    data: {"stage":"checking"}
+
+
+                    event: response.text.delta
+
+                    data: {"delta":"Yes. ZoikoStream supports secure live "}
+
+
+                    event: response.source
+
+                    data: {"source_id":"product-live-events","title":"ZoikoStream Live Events","version":"2026.09"}
+
+
+                    event: response.action
+
+                    data: {"action_id":"request-demo","type":"start_lead_flow","label":"Request a demo"}
+
+
+                    event: response.completed
+
+                    data: {"assistant_message_id":"71b5a0c2-3d4e-4f5a-9b6c-7d8e9f0a1b2c","grounded":true,"answer_class":"discovery","session_state":"ACTIVE"}
+
+
+                    '
+                error:
+                  summary: Failure after the stream started
+                  value: 'event: response.started
+
+                    data: {"request_id":"req_5f2a9c0d1e3b4a6f7c8d9e0a","assistant_message_id":null}
+
+
+                    event: response.error
+
+                    data: {"code":"GUIDE_UNAVAILABLE","retryable":true}
+
+
+                    '
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '403':
+          description: GUIDE_PUBLIC_BOUNDARY_DENIED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_PUBLIC_BOUNDARY_DENIED:
+                  summary: Request is outside the public Guide
+                  value:
+                    type: /problems/public-boundary-denied
+                    title: Request is outside the public Guide
+                    status: 403
+                    detail: Request origin is not permitted.
+                    code: GUIDE_PUBLIC_BOUNDARY_DENIED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '409':
+          description: GUIDE_STATE_CONFLICT
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_STATE_CONFLICT:
+                  summary: Request conflicts with current state
+                  value:
+                    type: /problems/state-conflict
+                    title: Request conflicts with current state
+                    status: 409
+                    detail: Guide is still answering your previous message.
+                    code: GUIDE_STATE_CONFLICT
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '413':
+          description: GUIDE_PAYLOAD_TOO_LARGE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_PAYLOAD_TOO_LARGE:
+                  summary: Request is too large
+                  value:
+                    type: /problems/payload-too-large
+                    title: Request is too large
+                    status: 413
+                    detail: Messages can be up to 4000 characters.
+                    code: GUIDE_PAYLOAD_TOO_LARGE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Guide is unavailable right now. You can still use the Help Center, status
+                      page, or contact support directly.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '504':
+          description: GUIDE_OUTCOME_UNKNOWN
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_OUTCOME_UNKNOWN:
+                  summary: Outcome could not be confirmed
+                  value:
+                    type: /problems/outcome-unknown
+                    title: Outcome could not be confirmed
+                    status: 504
+                    detail: I can't confirm whether that request was received yet. Please don't resubmit
+                      repeatedly; use the contact page if you need to follow up.
+                    code: GUIDE_OUTCOME_UNKNOWN
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions/{session_id}/consents/{purpose}:
+    put:
+      tags:
+      - consent
+      summary: Put Consent
+      operationId: putConsent
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: purpose
+        in: path
+        required: true
+        schema:
+          enum:
+          - sales_contact
+          - optional_analytics
+          type: string
+          title: Purpose
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsentPut'
+      responses:
+        '200':
+          description: Consent receipt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Consent'
+              example:
+                purpose: sales_contact
+                status: granted
+                notice_version: sales-contact-v1
+                recorded_at: '2026-10-23T14:06:00Z'
+                receipt_id: cns_0123456789abcdef01234567
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+  /sessions/{session_id}/lead-flows:
+    post:
+      tags:
+      - leads
+      summary: Start Lead Flow
+      operationId: startLeadFlow
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeadFlowStart'
+      responses:
+        '201':
+          description: Purpose notice and allowed fields, before any field is requested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadFlow'
+              example:
+                flow_id: 9a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d
+                flow_kind: demo
+                status: collecting
+                schema_version: lead-v1
+                purpose_notice:
+                  text: Tell us how to reach you. We'll use these details only to respond to your demo
+                    request.
+                  notice_version: sales-contact-v1
+                  privacy_href: /privacy
+                consent:
+                  purpose: sales_contact
+                  required: true
+                  notice_version: sales-contact-v1
+                  text: I agree that ZoikoStream may contact me about this request using the details I
+                    provide.
+                fields:
+                - field_id: full_name
+                  label: Full name
+                  type: text
+                  required: true
+                  max_length: 100
+                  autocomplete: name
+                - field_id: work_email
+                  label: Work email
+                  type: email
+                  required: true
+                  max_length: 254
+                  autocomplete: email
+                missing_required:
+                - full_name
+                - work_email
+                - country_code
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Requests through Guide are paused right now. You can still reach the ZoikoStream
+                      team through the contact page.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+                    paused:
+                      feature: leads
+                      message: Requests through Guide are paused right now. You can still reach the ZoikoStream
+                        team through the contact page.
+                      routes:
+                      - action_id: contact-sales
+                        type: handoff
+                        label: Talk to sales
+                        href: /contact
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions/{session_id}/lead-flows/{flow_id}:
+    patch:
+      tags:
+      - leads
+      summary: Update Lead Flow
+      operationId: updateLeadFlow
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: flow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Flow Id
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeadFlowUpdate'
+      responses:
+        '200':
+          description: The flow after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadFlow'
+              example:
+                flow_id: 9a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d
+                flow_kind: demo
+                status: collecting
+                schema_version: lead-v1
+                purpose_notice:
+                  text: Tell us how to reach you. We'll use these details only to respond to your demo
+                    request.
+                  notice_version: sales-contact-v1
+                  privacy_href: /privacy
+                consent:
+                  purpose: sales_contact
+                  required: true
+                  notice_version: sales-contact-v1
+                  text: I agree that ZoikoStream may contact me about this request using the details I
+                    provide.
+                fields:
+                - field_id: full_name
+                  label: Full name
+                  type: text
+                  required: true
+                  max_length: 100
+                  autocomplete: name
+                - field_id: work_email
+                  label: Work email
+                  type: email
+                  required: true
+                  max_length: 254
+                  autocomplete: email
+                missing_required:
+                - full_name
+                - work_email
+                - country_code
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '404':
+          description: GUIDE_RESOURCE_NOT_FOUND
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RESOURCE_NOT_FOUND:
+                  summary: Resource not found
+                  value:
+                    type: /problems/resource-not-found
+                    title: Resource not found
+                    status: 404
+                    detail: Resource not found.
+                    code: GUIDE_RESOURCE_NOT_FOUND
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '409':
+          description: GUIDE_STATE_CONFLICT
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_STATE_CONFLICT:
+                  summary: Request conflicts with current state
+                  value:
+                    type: /problems/state-conflict
+                    title: Request conflicts with current state
+                    status: 409
+                    detail: That step is no longer current.
+                    code: GUIDE_STATE_CONFLICT
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more fields need attention.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: work_email
+                      code: invalid
+                      message: Enter a valid email address.
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+  /sessions/{session_id}/leads/{lead_flow_id}/draft:
+    patch:
+      tags:
+      - leads
+      summary: Save Lead Draft
+      description: 'C6: hold what the visitor typed (saved on field blur) so a paused flow never re-asks
+
+        it. No consent is needed to hold a draft; nothing leaves Guide until the consented
+
+        submit. Values are encrypted like every lead value and purged with the session.'
+      operationId: saveLeadDraft
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: lead_flow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Lead Flow Id
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+              description: 'Partial approved lead fields: field_id -> value.'
+              title: Fields
+            examples:
+              partial:
+                summary: Fields typed so far
+                value:
+                  full_name: Alex Example
+                  organization: Example Events Co
+      responses:
+        '204':
+          description: Draft held.
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '404':
+          description: GUIDE_RESOURCE_NOT_FOUND
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RESOURCE_NOT_FOUND:
+                  summary: Resource not found
+                  value:
+                    type: /problems/resource-not-found
+                    title: Resource not found
+                    status: 404
+                    detail: Resource not found.
+                    code: GUIDE_RESOURCE_NOT_FOUND
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '409':
+          description: GUIDE_STATE_CONFLICT
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_STATE_CONFLICT:
+                  summary: Request conflicts with current state
+                  value:
+                    type: /problems/state-conflict
+                    title: Request conflicts with current state
+                    status: 409
+                    detail: That step is no longer current.
+                    code: GUIDE_STATE_CONFLICT
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '413':
+          description: GUIDE_PAYLOAD_TOO_LARGE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_PAYLOAD_TOO_LARGE:
+                  summary: Request is too large
+                  value:
+                    type: /problems/payload-too-large
+                    title: Request is too large
+                    status: 413
+                    detail: Messages can be up to 4000 characters.
+                    code: GUIDE_PAYLOAD_TOO_LARGE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Requests through Guide are paused right now. You can still reach the ZoikoStream
+                      team through the contact page.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+                    paused:
+                      feature: leads
+                      message: Requests through Guide are paused right now. You can still reach the ZoikoStream
+                        team through the contact page.
+                      routes:
+                      - action_id: contact-sales
+                        type: handoff
+                        label: Talk to sales
+                        href: /contact
+              schema: *id001
+  /sessions/{session_id}/lead-flows/{flow_id}/submit:
+    post:
+      tags:
+      - leads
+      summary: Submit Lead Flow
+      operationId: submitLeadFlow
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: flow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Flow Id
+      - name: Idempotency-Key
+        in: header
+        required: false
+        schema:
+          type: string
+          description: Required; 16-128 characters; unique per intended operation (API App. B).
+          default: ''
+          title: Idempotency-Key
+        description: Required; 16-128 characters; unique per intended operation (API App. B).
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeadSubmit'
+      responses:
+        '200':
+          description: Known outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadOutcome'
+              examples:
+                confirmed:
+                  value:
+                    flow_id: 9a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d
+                    outcome: confirmed
+                    message: Thanks — your request was received. The ZoikoStream team will use the details
+                      you shared to respond.
+                    submission_reference: GD-1A2B3C4D
+                    replayed: false
+                    actions: []
+                failed:
+                  value:
+                    flow_id: 9a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d
+                    outcome: failed
+                    message: Your request didn't go through. You can try again, or use the contact page
+                      directly.
+                    replayed: false
+                    actions:
+                    - action_id: contact-sales
+                      type: handoff
+                      label: Talk to sales
+                      href: /contact
+                replayed:
+                  value:
+                    flow_id: 9a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d
+                    outcome: confirmed
+                    message: Thanks — your request was received. The ZoikoStream team will use the details
+                      you shared to respond.
+                    submission_reference: GD-1A2B3C4D
+                    replayed: true
+                    actions: []
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '409':
+          description: GUIDE_STATE_CONFLICT
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_STATE_CONFLICT:
+                  summary: Request conflicts with current state
+                  value:
+                    type: /problems/state-conflict
+                    title: Request conflicts with current state
+                    status: 409
+                    detail: This Idempotency-Key was already used for a different request.
+                    code: GUIDE_STATE_CONFLICT
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: Please confirm we may contact you about this request.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: consent
+                      code: consent_required
+                      message: Consent is required to submit.
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Guide is unavailable right now. You can still use the Help Center, status
+                      page, or contact support directly.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '504':
+          description: GUIDE_OUTCOME_UNKNOWN
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_OUTCOME_UNKNOWN:
+                  summary: Outcome could not be confirmed
+                  value:
+                    type: /problems/outcome-unknown
+                    title: Outcome could not be confirmed
+                    status: 504
+                    detail: I can't confirm whether that request was received yet. Please don't resubmit
+                      repeatedly; use the contact page if you need to follow up.
+                    code: GUIDE_OUTCOME_UNKNOWN
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    flow_id: 9a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d
+                    outcome: unknown
+                    message: I can't confirm whether that request was received yet. Please don't resubmit
+                      repeatedly; use the contact page if you need to follow up.
+                    replayed: false
+                    actions:
+                    - action_id: contact-sales
+                      type: handoff
+                      label: Talk to sales
+                      href: /contact
+              schema: *id001
+  /sessions/{session_id}/handoffs:
+    post:
+      tags:
+      - handoffs
+      summary: Create Handoff
+      operationId: createHandoff
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: Idempotency-Key
+        in: header
+        required: false
+        schema:
+          type: string
+          description: Required; 16-128 characters; unique per intended operation (API App. B).
+          default: ''
+          title: Idempotency-Key
+        description: Required; 16-128 characters; unique per intended operation (API App. B).
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HandoffRequest'
+      responses:
+        '200':
+          description: Resolved route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HandoffResult'
+              examples:
+                route:
+                  value:
+                    handoff_id: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+                    target: support
+                    outcome: route_available
+                    message: ZoikoStream support can help with this. Use the contact page and choose the
+                      topic that fits.
+                    actions:
+                    - action_id: contact-support
+                      type: handoff
+                      label: Contact support
+                      href: /contact
+                    replayed: false
+                replayed:
+                  summary: Same Idempotency-Key
+                  value:
+                    handoff_id: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+                    target: support
+                    outcome: route_available
+                    message: ZoikoStream support can help with this. Use the contact page and choose the
+                      topic that fits.
+                    actions:
+                    - action_id: contact-support
+                      type: handoff
+                      label: Contact support
+                      href: /contact
+                    replayed: true
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '403':
+          description: GUIDE_PUBLIC_BOUNDARY_DENIED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_PUBLIC_BOUNDARY_DENIED:
+                  summary: Request is outside the public Guide
+                  value:
+                    type: /problems/public-boundary-denied
+                    title: Request is outside the public Guide
+                    status: 403
+                    detail: Request origin is not permitted.
+                    code: GUIDE_PUBLIC_BOUNDARY_DENIED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '409':
+          description: GUIDE_STATE_CONFLICT
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_STATE_CONFLICT:
+                  summary: Request conflicts with current state
+                  value:
+                    type: /problems/state-conflict
+                    title: Request conflicts with current state
+                    status: 409
+                    detail: This Idempotency-Key was already used for a different request.
+                    code: GUIDE_STATE_CONFLICT
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Guide is unavailable right now. You can still use the Help Center, status
+                      page, or contact support directly.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions/{session_id}/feedback:
+    post:
+      tags:
+      - feedback
+      summary: Submit Feedback
+      operationId: submitFeedback
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackSubmit'
+      responses:
+        '202':
+          description: Feedback accepted.
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions/{session_id}/support-flows:
+    post:
+      tags:
+      - support
+      summary: Start Support Flow
+      operationId: startSupportFlow
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SupportFlowStart'
+      responses:
+        '201':
+          description: The first step of the flow (or, for a replayed client_request_id, the same flow's
+            current state).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportFlow'
+              example:
+                flow_id: 6b0d2a4c-7f3e-4a1b-8c9d-0e1f2a3b4c5d
+                flow_type: viewer_access
+                title: Event access
+                status: in_progress
+                step:
+                  step_id: invitation_source
+                  prompt: How did you receive the event invitation?
+                  input_type: choice
+                  options:
+                  - option_id: email_invitation
+                    label: Email invitation
+                  - option_id: message_link
+                    label: Message or shared link
+                  - option_id: other
+                    label: Other
+                  allow_skip: false
+                  allow_back: false
+                notice: Never share your event PIN, password, or invitation link here.
+                actions: []
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '403':
+          description: GUIDE_PUBLIC_BOUNDARY_DENIED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_PUBLIC_BOUNDARY_DENIED:
+                  summary: Request is outside the public Guide
+                  value:
+                    type: /problems/public-boundary-denied
+                    title: Request is outside the public Guide
+                    status: 403
+                    detail: Request origin is not permitted.
+                    code: GUIDE_PUBLIC_BOUNDARY_DENIED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '409':
+          description: GUIDE_STATE_CONFLICT
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_STATE_CONFLICT:
+                  summary: Request conflicts with current state
+                  value:
+                    type: /problems/state-conflict
+                    title: Request conflicts with current state
+                    status: 409
+                    detail: You're partway through playback help. Starting a different viewer issue will
+                      replace that progress.
+                    code: GUIDE_STATE_CONFLICT
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    confirm_required: true
+                    active_flow_type: playback
+                    active_flow_id: 6b0d2a4c-7f3e-4a1b-8c9d-0e1f2a3b4c5d
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+        '503':
+          description: GUIDE_UNAVAILABLE
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_UNAVAILABLE:
+                  summary: Guide is temporarily unavailable
+                  value:
+                    type: /problems/unavailable
+                    title: Guide is temporarily unavailable
+                    status: 503
+                    detail: Viewer help in Guide is paused right now. Viewer support, the Help Center
+                      and the status page are still available directly.
+                    code: GUIDE_UNAVAILABLE
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+                    paused:
+                      feature: viewer_support
+                      message: Viewer help in Guide is paused right now. Viewer support, the Help Center
+                        and the status page are still available directly.
+                      routes:
+                      - action_id: viewer-support
+                        type: handoff
+                        label: Viewer support
+                        href: /contact
+                      - action_id: status-page
+                        type: open_status
+                        label: Service status
+                        href: /status
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              schema: *id001
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    field_errors:
+                    - field: page_id
+                      code: string_pattern_mismatch
+                      message: Value is invalid.
+  /sessions/{session_id}/support-flows/{flow_id}/steps:
+    post:
+      tags:
+      - support
+      summary: Submit Support Step
+      operationId: submitSupportStep
+      security:
+      - GuideSessionCookie: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Session Id
+      - name: flow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Flow Id
+      - name: X-ZS-CSRF
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 16
+          description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+            route.
+        description: Per-session CSRF token returned by POST /sessions. Required on every mutating session
+          route.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SupportStepSubmit'
+      responses:
+        '200':
+          description: The flow after the step.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportFlow'
+              examples:
+                next_step:
+                  value:
+                    flow_id: 6b0d2a4c-7f3e-4a1b-8c9d-0e1f2a3b4c5d
+                    flow_type: viewer_access
+                    title: Event access
+                    status: in_progress
+                    step:
+                      step_id: invitation_source
+                      prompt: How did you receive the event invitation?
+                      input_type: choice
+                      options:
+                      - option_id: email_invitation
+                        label: Email invitation
+                      - option_id: message_link
+                        label: Message or shared link
+                      - option_id: other
+                        label: Other
+                      allow_skip: false
+                      allow_back: false
+                    notice: Never share your event PIN, password, or invitation link here.
+                    actions: []
+                status_card:
+                  summary: PB-06 with D1 status
+                  value:
+                    flow_id: 6b0d2a4c-7f3e-4a1b-8c9d-0e1f2a3b4c5d
+                    flow_type: playback
+                    title: Playback help
+                    status: in_progress
+                    step:
+                      step_id: public_status
+                      prompt: You can check the public ZoikoStream status page for any reported service
+                        issue. A playback problem on one device doesn't by itself mean there's an outage.
+                        Is the video working now?
+                      input_type: boolean
+                      options:
+                      - option_id: 'yes'
+                        label: 'Yes'
+                      - option_id: 'no'
+                        label: 'No'
+                      allow_skip: false
+                      allow_back: true
+                    actions:
+                    - action_id: status-page
+                      type: open_status
+                      label: Service status
+                      href: /status
+                    status_card:
+                      state: operational
+                      summary: 'The public status page currently reports: No customer impact (checked
+                        2:05 PM UTC). The status page has the latest updates.'
+                      checked_at: '2026-10-23T14:05:00Z'
+                      status_url: /status
+        '400':
+          description: GUIDE_BAD_REQUEST
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_BAD_REQUEST:
+                  summary: Malformed request
+                  value:
+                    type: /problems/bad-request
+                    title: Malformed request
+                    status: 400
+                    detail: The request does not match the expected schema.
+                    code: GUIDE_BAD_REQUEST
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '401':
+          description: GUIDE_SESSION_INVALID
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_SESSION_INVALID:
+                  summary: Guide session is not valid
+                  value:
+                    type: /problems/session-invalid
+                    title: Guide session is not valid
+                    status: 401
+                    detail: Guide session is not valid.
+                    code: GUIDE_SESSION_INVALID
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '404':
+          description: GUIDE_RESOURCE_NOT_FOUND
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RESOURCE_NOT_FOUND:
+                  summary: Resource not found
+                  value:
+                    type: /problems/resource-not-found
+                    title: Resource not found
+                    status: 404
+                    detail: Resource not found.
+                    code: GUIDE_RESOURCE_NOT_FOUND
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '409':
+          description: GUIDE_STATE_CONFLICT
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_STATE_CONFLICT:
+                  summary: Request conflicts with current state
+                  value:
+                    type: /problems/state-conflict
+                    title: Request conflicts with current state
+                    status: 409
+                    detail: That step is no longer current.
+                    code: GUIDE_STATE_CONFLICT
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+                    current:
+                      flow_id: 6b0d2a4c-7f3e-4a1b-8c9d-0e1f2a3b4c5d
+                      flow_type: playback
+                      status: in_progress
+                      step:
+                        step_id: refresh
+              schema: *id001
+        '422':
+          description: GUIDE_VALIDATION_ERROR
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_VALIDATION_ERROR:
+                  summary: Request validation failed
+                  value:
+                    type: /problems/validation-error
+                    title: Request validation failed
+                    status: 422
+                    detail: One or more submitted fields are invalid.
+                    code: GUIDE_VALIDATION_ERROR
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: false
+              schema: *id001
+        '429':
+          description: GUIDE_RATE_LIMITED
+          content:
+            application/problem+json:
+              examples:
+                GUIDE_RATE_LIMITED:
+                  summary: Too many requests
+                  value:
+                    type: /problems/rate-limited
+                    title: Too many requests
+                    status: 429
+                    detail: Too many requests.
+                    code: GUIDE_RATE_LIMITED
+                    request_id: req_5f2a9c0d1e3b4a6f7c8d9e0a
+                    correlation_id: cor_1a2b3c4d5e6f7a8b9c0d1e2f
+                    retryable: true
+              schema: *id001
+components:
+  schemas:
+    Action:
+      properties:
+        action_id:
+          type: string
+          title: Action Id
+        type:
+          type: string
+          title: Type
+        label:
+          type: string
+          title: Label
+        href:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Href
+      additionalProperties: true
+      type: object
+      required:
+      - action_id
+      - type
+      - label
+      title: Action
+    AssistantMessage:
+      properties:
+        message_id:
+          type: string
+          title: Message Id
+        text:
+          type: string
+          title: Text
+        answer_class:
+          type: string
+          title: Answer Class
+        grounded:
+          type: boolean
+          title: Grounded
+        sources:
+          items:
+            $ref: '#/components/schemas/Source'
+          type: array
+          title: Sources
+        actions:
+          items:
+            $ref: '#/components/schemas/Action'
+          type: array
+          title: Actions
+        uncertainty:
+          $ref: '#/components/schemas/Uncertainty'
+        notice:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notice
+        resume:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Resume
+        suggestions:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Suggestions
+        clarification:
+          anyOf:
+          - $ref: '#/components/schemas/Clarification'
+          - type: 'null'
+        paused:
+          anyOf:
+          - $ref: '#/components/schemas/Paused'
+          - type: 'null'
+        missing_topic_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missing Topic Code
+        intent_class:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Intent Class
+        support_flow:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Support Flow
+      additionalProperties: true
+      type: object
+      required:
+      - message_id
+      - text
+      - answer_class
+      - grounded
+      - sources
+      - actions
+      - uncertainty
+      title: AssistantMessage
+    Bootstrap:
+      properties:
+        api_version:
+          type: string
+          title: Api Version
+        assistant:
+          additionalProperties: true
+          type: object
+          title: Assistant
+        enabled:
+          type: boolean
+          title: Enabled
+        locale:
+          type: string
+          title: Locale
+        welcome:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Welcome
+        suggested_intents:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+          title: Suggested Intents
+        limits:
+          additionalProperties: true
+          type: object
+          title: Limits
+        privacy:
+          additionalProperties: true
+          type: object
+          title: Privacy
+        direct_routes:
+          items:
+            $ref: '#/components/schemas/Action'
+          type: array
+          title: Direct Routes
+        unavailable_reason:
+          anyOf:
+          - type: string
+            enum:
+            - disabled
+            - degraded
+          - type: 'null'
+          title: Unavailable Reason
+      additionalProperties: true
+      type: object
+      required:
+      - api_version
+      - assistant
+      - enabled
+      - locale
+      - welcome
+      - suggested_intents
+      - limits
+      - privacy
+      - direct_routes
+      title: Bootstrap
+    Clarification:
+      properties:
+        question:
+          type: string
+          title: Question
+        options:
+          items:
+            $ref: '#/components/schemas/ClarificationOption'
+          type: array
+          maxItems: 4
+          minItems: 2
+          title: Options
+      additionalProperties: true
+      type: object
+      required:
+      - question
+      - options
+      title: Clarification
+      description: 'C4: at most one clarifying question with 2–4 chips (Conversation Flow §6.1, CF-AT-04).
+
+        A chip sends its label as the visitor''s next message.'
+    ClarificationOption:
+      properties:
+        id:
+          type: string
+          title: Id
+        label:
+          type: string
+          title: Label
+      additionalProperties: true
+      type: object
+      required:
+      - id
+      - label
+      title: ClarificationOption
+    Consent:
+      properties:
+        purpose:
+          type: string
+          title: Purpose
+        status:
+          type: string
+          title: Status
+        notice_version:
+          type: string
+          title: Notice Version
+        recorded_at:
+          type: string
+          title: Recorded At
+        receipt_id:
+          type: string
+          title: Receipt Id
+      additionalProperties: true
+      type: object
+      required:
+      - purpose
+      - status
+      - notice_version
+      - recorded_at
+      - receipt_id
+      title: Consent
+    ConsentPut:
+      properties:
+        status:
+          type: string
+          enum:
+          - granted
+          - denied
+          - withdrawn
+          title: Status
+        notice_version:
+          type: string
+          maxLength: 48
+          title: Notice Version
+        source:
+          type: string
+          const: guide
+          title: Source
+          default: guide
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      - notice_version
+      title: ConsentPut
+    ConsentSnapshot:
+      properties:
+        analytics:
+          type: string
+          enum:
+          - granted
+          - denied
+          - unknown
+          title: Analytics
+          default: unknown
+        consent_version:
+          anyOf:
+          - type: string
+            maxLength: 48
+          - type: 'null'
+          title: Consent Version
+      additionalProperties: false
+      type: object
+      title: ConsentSnapshot
+    ContextUpdate:
+      properties:
+        page_context:
+          $ref: '#/components/schemas/PageContext'
+      additionalProperties: false
+      type: object
+      required:
+      - page_context
+      title: ContextUpdate
+    FeedbackSubmit:
+      properties:
+        client_feedback_id:
+          type: string
+          format: uuid
+          title: Client Feedback Id
+        target_type:
+          type: string
+          enum:
+          - answer
+          - session
+          title: Target Type
+        target_id:
+          anyOf:
+          - type: string
+            maxLength: 64
+          - type: 'null'
+          title: Target Id
+        rating:
+          type: string
+          enum:
+          - up
+          - down
+          title: Rating
+        reason_code:
+          anyOf:
+          - type: string
+            enum:
+            - not_helpful
+            - incorrect
+            - unclear
+            - out_of_date
+            - too_long
+            - other
+            - helpful
+          - type: 'null'
+          title: Reason Code
+        comment:
+          anyOf:
+          - type: string
+            maxLength: 500
+          - type: 'null'
+          title: Comment
+      additionalProperties: false
+      type: object
+      required:
+      - client_feedback_id
+      - target_type
+      - rating
+      title: FeedbackSubmit
+    FieldError:
+      properties:
+        field:
+          type: string
+          title: Field
+        code:
+          type: string
+          title: Code
+        message:
+          type: string
+          title: Message
+      additionalProperties: true
+      type: object
+      required:
+      - field
+      - code
+      - message
+      title: FieldError
+    HandoffRequest:
+      properties:
+        target:
+          type: string
+          enum:
+          - support
+          - sales
+          - organizer
+          - sign_in
+          - help_center
+          - status
+          - privacy
+          title: Target
+        reason_code:
+          anyOf:
+          - type: string
+            pattern: ^[a-z_]{2,48}$
+          - type: 'null'
+          title: Reason Code
+      additionalProperties: false
+      type: object
+      required:
+      - target
+      title: HandoffRequest
+    HandoffResult:
+      properties:
+        handoff_id:
+          type: string
+          title: Handoff Id
+        target:
+          type: string
+          title: Target
+        outcome:
+          type: string
+          enum:
+          - route_available
+          - confirmed_submission
+          - failed
+          - unknown
+          title: Outcome
+        message:
+          type: string
+          title: Message
+        actions:
+          items:
+            $ref: '#/components/schemas/Action'
+          type: array
+          title: Actions
+        replayed:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Replayed
+      additionalProperties: true
+      type: object
+      required:
+      - handoff_id
+      - target
+      - outcome
+      - message
+      - actions
+      title: HandoffResult
+    LeadFlow:
+      properties:
+        flow_id:
+          type: string
+          title: Flow Id
+        flow_kind:
+          type: string
+          title: Flow Kind
+        status:
+          type: string
+          title: Status
+        schema_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Schema Version
+        purpose_notice:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Purpose Notice
+        consent:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Consent
+        fields:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Fields
+        missing_required:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Missing Required
+      additionalProperties: true
+      type: object
+      required:
+      - flow_id
+      - flow_kind
+      - status
+      title: LeadFlow
+    LeadFlowStart:
+      properties:
+        flow_kind:
+          type: string
+          enum:
+          - demo
+          - sales
+          title: Flow Kind
+          default: demo
+        source_intent:
+          anyOf:
+          - type: string
+            pattern: ^I-[A-Z-]{2,24}$
+          - type: 'null'
+          title: Source Intent
+      additionalProperties: false
+      type: object
+      title: LeadFlowStart
+    LeadFlowUpdate:
+      properties:
+        fields:
+          additionalProperties:
+            type: string
+          type: object
+          maxProperties: 8
+          title: Fields
+        cancel:
+          type: boolean
+          title: Cancel
+          default: false
+      additionalProperties: false
+      type: object
+      title: LeadFlowUpdate
+    LeadOutcome:
+      properties:
+        flow_id:
+          type: string
+          title: Flow Id
+        outcome:
+          type: string
+          enum:
+          - confirmed
+          - failed
+          - unknown
+          title: Outcome
+        message:
+          type: string
+          title: Message
+        submission_reference:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Submission Reference
+        replayed:
+          type: boolean
+          title: Replayed
+        actions:
+          items:
+            $ref: '#/components/schemas/Action'
+          type: array
+          title: Actions
+      additionalProperties: true
+      type: object
+      required:
+      - flow_id
+      - outcome
+      - message
+      - submission_reference
+      - replayed
+      - actions
+      title: LeadOutcome
+    LeadSubmit:
+      properties:
+        consent_receipt_id:
+          anyOf:
+          - type: string
+            maxLength: 48
+          - type: 'null'
+          title: Consent Receipt Id
+      additionalProperties: false
+      type: object
+      title: LeadSubmit
+    MessageResult:
+      properties:
+        request_id:
+          type: string
+          title: Request Id
+        session_id:
+          type: string
+          title: Session Id
+        user_message_id:
+          type: string
+          title: User Message Id
+        assistant_message:
+          $ref: '#/components/schemas/AssistantMessage'
+        session_state:
+          type: string
+          title: Session State
+        replayed:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Replayed
+      additionalProperties: true
+      type: object
+      required:
+      - request_id
+      - session_id
+      - user_message_id
+      - assistant_message
+      - session_state
+      title: MessageResult
+    MessageSubmit:
+      properties:
+        client_message_id:
+          type: string
+          format: uuid
+          title: Client Message Id
+        text:
+          type: string
+          maxLength: 20000
+          minLength: 1
+          title: Text
+        intent_hint:
+          anyOf:
+          - type: string
+            pattern: ^I-[A-Z-]{2,24}$
+          - type: 'null'
+          title: Intent Hint
+      additionalProperties: false
+      type: object
+      required:
+      - client_message_id
+      - text
+      title: MessageSubmit
+    PageContext:
+      properties:
+        page_id:
+          type: string
+          maxLength: 64
+          title: Page Id
+        page_type:
+          type: string
+          enum:
+          - home
+          - product
+          - solutions
+          - pricing
+          - help
+          - viewer
+          - event
+          - contact
+          - trust
+          - privacy
+          - status
+          - developer
+          - other
+          title: Page Type
+        path:
+          type: string
+          maxLength: 512
+          title: Path
+        locale:
+          type: string
+          maxLength: 16
+          title: Locale
+          default: en-US
+        timezone:
+          anyOf:
+          - type: string
+            maxLength: 64
+          - type: 'null'
+          title: Timezone
+        device_class:
+          type: string
+          enum:
+          - desktop
+          - tablet
+          - mobile
+          - unknown
+          title: Device Class
+          default: unknown
+        entry_point:
+          type: string
+          enum:
+          - launcher
+          - inline
+          - viewer_help
+          - contact
+          - pricing_cta
+          - other
+          title: Entry Point
+          default: launcher
+        public_event_context_token:
+          anyOf:
+          - type: string
+            maxLength: 4096
+          - type: 'null'
+          title: Public Event Context Token
+      additionalProperties: false
+      type: object
+      required:
+      - page_id
+      - page_type
+      - path
+      title: PageContext
+    Paused:
+      properties:
+        feature:
+          type: string
+          enum:
+          - leads
+          - viewer_support
+          title: Feature
+        message:
+          type: string
+          title: Message
+        routes:
+          items:
+            $ref: '#/components/schemas/Action'
+          type: array
+          title: Routes
+      additionalProperties: true
+      type: object
+      required:
+      - feature
+      - message
+      - routes
+      title: Paused
+      description: 'C7: a capability switched off at runtime (G3) and the direct routes that still work.'
+    Problem:
+      properties:
+        type:
+          type: string
+          title: Type
+        title:
+          type: string
+          title: Title
+        status:
+          type: integer
+          title: Status
+        detail:
+          type: string
+          title: Detail
+        code:
+          type: string
+          title: Code
+        request_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Request Id
+        correlation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Correlation Id
+        retryable:
+          type: boolean
+          title: Retryable
+        field_errors:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/FieldError'
+            type: array
+          - type: 'null'
+          title: Field Errors
+      additionalProperties: true
+      type: object
+      required:
+      - type
+      - title
+      - status
+      - detail
+      - code
+      - retryable
+      title: Problem
+      description: RFC 9457 problem details with a stable machine code (API §5).
+    SessionBody:
+      properties:
+        session_id:
+          type: string
+          title: Session Id
+        session_state:
+          type: string
+          title: Session State
+        expires_at:
+          type: string
+          title: Expires At
+        idle_timeout_seconds:
+          type: integer
+          title: Idle Timeout Seconds
+        context_version:
+          type: integer
+          title: Context Version
+        event_context:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Event Context
+      additionalProperties: true
+      type: object
+      required:
+      - session_id
+      - session_state
+      - expires_at
+      - idle_timeout_seconds
+      - context_version
+      - event_context
+      title: SessionBody
+    SessionCreate:
+      properties:
+        client_session_nonce:
+          type: string
+          format: uuid
+          title: Client Session Nonce
+        page_context:
+          $ref: '#/components/schemas/PageContext'
+        consent_snapshot:
+          $ref: '#/components/schemas/ConsentSnapshot'
+          default:
+            analytics: unknown
+      additionalProperties: false
+      type: object
+      required:
+      - client_session_nonce
+      - page_context
+      title: SessionCreate
+    SessionCreated:
+      properties:
+        session_id:
+          type: string
+          title: Session Id
+        session_state:
+          type: string
+          title: Session State
+        expires_at:
+          type: string
+          title: Expires At
+        idle_timeout_seconds:
+          type: integer
+          title: Idle Timeout Seconds
+        context_version:
+          type: integer
+          title: Context Version
+        event_context:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Event Context
+        csrf_token:
+          type: string
+          title: Csrf Token
+        assistant:
+          additionalProperties: true
+          type: object
+          title: Assistant
+        welcome:
+          type: string
+          title: Welcome
+        suggested_intents:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+          title: Suggested Intents
+        privacy:
+          additionalProperties: true
+          type: object
+          title: Privacy
+      additionalProperties: true
+      type: object
+      required:
+      - session_id
+      - session_state
+      - expires_at
+      - idle_timeout_seconds
+      - context_version
+      - event_context
+      - csrf_token
+      - assistant
+      - welcome
+      - suggested_intents
+      - privacy
+      title: SessionCreated
+    Source:
+      properties:
+        source_id:
+          type: string
+          title: Source Id
+        title:
+          type: string
+          title: Title
+        source_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Type
+        version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Version
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        canonical_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Canonical Path
+        freshness:
+          anyOf:
+          - type: string
+            enum:
+            - current
+            - stale
+          - type: 'null'
+          title: Freshness
+        stale:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Stale
+        external:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: External
+        external_url:
+          anyOf:
+          - type: string
+            pattern: ^https://
+          - type: 'null'
+          title: External Url
+      additionalProperties: true
+      type: object
+      required:
+      - source_id
+      - title
+      title: Source
+    StatusCard:
+      properties:
+        state:
+          type: string
+          enum:
+          - operational
+          - degraded
+          - outage
+          - unknown
+          title: State
+        summary:
+          type: string
+          title: Summary
+        checked_at:
+          type: string
+          title: Checked At
+        status_url:
+          type: string
+          title: Status Url
+      additionalProperties: true
+      type: object
+      required:
+      - state
+      - summary
+      - checked_at
+      - status_url
+      title: StatusCard
+      description: 'C5: the D1 public status, shown at the playback flow''s public-status step (PB-06).'
+    SupportFlow:
+      properties:
+        flow_id:
+          type: string
+          title: Flow Id
+        flow_type:
+          type: string
+          title: Flow Type
+        title:
+          type: string
+          title: Title
+        status:
+          type: string
+          title: Status
+        resolution_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Resolution Code
+        step:
+          anyOf:
+          - $ref: '#/components/schemas/SupportStep'
+          - type: 'null'
+        message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Message
+        notice:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notice
+        actions:
+          items:
+            $ref: '#/components/schemas/Action'
+          type: array
+          title: Actions
+        status_card:
+          anyOf:
+          - $ref: '#/components/schemas/StatusCard'
+          - type: 'null'
+        next_flow:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Next Flow
+      additionalProperties: true
+      type: object
+      required:
+      - flow_id
+      - flow_type
+      - title
+      - status
+      - resolution_code
+      - step
+      - message
+      - notice
+      - actions
+      title: SupportFlow
+    SupportFlowStart:
+      properties:
+        flow_type:
+          type: string
+          enum:
+          - viewer_access
+          - playback
+          - audio
+          - captions
+          - replay
+          - viewer_other
+          title: Flow Type
+        client_request_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Client Request Id
+        confirm_replace:
+          type: boolean
+          title: Confirm Replace
+          default: false
+      additionalProperties: false
+      type: object
+      required:
+      - flow_type
+      title: SupportFlowStart
+    SupportStep:
+      properties:
+        step_id:
+          type: string
+          title: Step Id
+        prompt:
+          type: string
+          title: Prompt
+        input_type:
+          type: string
+          title: Input Type
+        options:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+          title: Options
+        allow_skip:
+          type: boolean
+          title: Allow Skip
+        allow_back:
+          type: boolean
+          title: Allow Back
+      additionalProperties: true
+      type: object
+      required:
+      - step_id
+      - prompt
+      - input_type
+      - options
+      - allow_skip
+      - allow_back
+      title: SupportStep
+    SupportStepSubmit:
+      properties:
+        client_step_id:
+          type: string
+          format: uuid
+          title: Client Step Id
+        step_id:
+          type: string
+          maxLength: 64
+          title: Step Id
+        option_id:
+          anyOf:
+          - type: string
+            maxLength: 64
+          - type: 'null'
+          title: Option Id
+        command:
+          anyOf:
+          - type: string
+            enum:
+            - back
+            - restart
+            - cancel
+          - type: 'null'
+          title: Command
+      additionalProperties: false
+      type: object
+      required:
+      - client_step_id
+      - step_id
+      title: SupportStepSubmit
+    Uncertainty:
+      properties:
+        state:
+          type: string
+          enum:
+          - none
+          - partial
+          - gap
+          title: State
+        message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Message
+      additionalProperties: true
+      type: object
+      required:
+      - state
+      title: Uncertainty
+  securitySchemes:
+    GuideSessionCookie:
+      type: apiKey
+      description: Opaque anonymous session capability set by POST /sessions (Secure, HttpOnly, SameSite=Lax).
+        Not an identity; contains no PII.
+      in: cookie
+      name: zs_guide_sid
+servers:
+- url: /api/v1/public-guide
+  description: Logical base path (API §2)

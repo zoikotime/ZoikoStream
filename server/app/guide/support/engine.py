@@ -13,7 +13,7 @@ from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import registry, retention
+from .. import registry, retention, status
 from ..errors import GuideProblem
 from ..models import GuideSession, GuideSupportFlow, GuideSupportStepEvent
 from ..sessions import audit, current_event_claims
@@ -21,6 +21,17 @@ from . import flows as F
 
 MAX_STEPS_PER_FLOW = 40
 TERMINAL_STATUSES = ("resolved", "escalated", "cancelled")
+# Namespace for flow ids derived from a client_request_id (idempotent start, API §16).
+_START_NAMESPACE = uuid.UUID("5b0f6c1e-3d2a-4c55-9f0e-6a1d2b7c8e41")
+# PB-06 (Conversation Flow §12): the playback step at which D1 public status is material.
+STATUS_STEPS = {("playback", "public_status")}
+# The platform's published impact labels (GET /api/status overall_label) -> card state. An
+# unrecognised label is "unknown", never guessed into "operational" or "outage".
+_STATUS_STATE = {"No customer impact": "operational", "Operational": "operational",
+                 "Degraded performance": "degraded", "Partial outage": "outage",
+                 "Major outage": "outage"}
+STATUS_UNVERIFIED = ("I can't verify the current service status right now. The public status "
+                     "page has the latest updates.")
 
 
 # ── Presentation ───────────────────────────────────────────────────────────────────────────
@@ -49,6 +60,24 @@ def _escalation_actions(db: Session, claims: dict | None) -> list[dict]:
     return actions
 
 
+def status_card(db: Session) -> dict:
+    """C5 status card from the D1 public status adapter. Never infers an outage: only the
+    public status feed can say "outage" (CF-AT-19/20, PG-AT-13)."""
+    action = registry.action_for(db, "status-page")
+    url = (action or {}).get("href") or "/status"
+    current = status.current()
+    if current is None:
+        return {"state": "unknown", "summary": STATUS_UNVERIFIED,
+                "checked_at": _iso(retention.now()), "status_url": url}
+    return {"state": _STATUS_STATE.get(current.overall_label, "unknown"),
+            "summary": current.summary(), "checked_at": _iso(current.checked_at),
+            "status_url": url}
+
+
+def _iso(dt) -> str:
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 def render(db: Session, flow: GuideSupportFlow, claims: dict | None) -> dict:
     flow_def = F.FLOWS[flow.flow_type]
     body: dict = {"flow_id": str(flow.flow_id), "flow_type": flow.flow_type,
@@ -69,6 +98,8 @@ def render(db: Session, flow: GuideSupportFlow, claims: dict | None) -> dict:
             body["notice"] = F.SECRET_NOTICE
         body["actions"] = [a for a in (registry.action_for(db, d) for d in step.action_ids)
                            if a]
+        if (flow.flow_type, step.step_id) in STATUS_STEPS:
+            body["status_card"] = status_card(db)
     elif flow.status == "resolved":
         body["message"] = F.RESOLVED_MESSAGE
     elif flow.status == "escalated":
@@ -91,11 +122,11 @@ def _set_session_state(session: GuideSession, flow: GuideSupportFlow) -> None:
 
 
 def _new_flow(db: Session, session: GuideSession, flow_type: str,
-              claims: dict | None) -> GuideSupportFlow:
+              claims: dict | None, flow_id: uuid.UUID | None = None) -> GuideSupportFlow:
     flow_def = F.FLOWS[flow_type]
     first = _resolve_step(flow_def, flow_def.first_step, claims)
     flow = GuideSupportFlow(
-        flow_id=uuid.uuid4(), session_id=session.session_id, flow_type=flow_type,
+        flow_id=flow_id or uuid.uuid4(), session_id=session.session_id, flow_type=flow_type,
         status="in_progress", current_step_id=first.step_id, step_path=[], step_count=0,
         started_at=retention.now(), purge_after=retention.purge_after("support_flow"),
     )
@@ -116,16 +147,48 @@ def _cancel_active(db: Session, request: Request, session: GuideSession, reason:
               flow_id=str(flow.flow_id), flow_type=flow.flow_type, reason=reason)
 
 
-def start_flow(db: Session, request: Request, session: GuideSession, flow_type: str) -> dict:
+def start_flow(db: Session, request: Request, session: GuideSession, flow_type: str, *,
+               client_request_id: uuid.UUID | None = None,
+               confirm_replace: bool = False) -> dict:
     claims = current_event_claims(db, session)
+    flow_id = None
+    if client_request_id is not None:
+        # Idempotent start (API §16): the flow id is derived from the session and the
+        # client's request id, so a replay finds the flow it created — the primary key makes
+        # a duplicate impossible — and gets that flow's CURRENT state back.
+        flow_id = uuid.uuid5(_START_NAMESPACE, f"{session.session_id}:{client_request_id}")
+        existing = db.get(GuideSupportFlow, flow_id)
+        if existing is not None:
+            if existing.session_id != session.session_id or existing.flow_type != flow_type:
+                raise GuideProblem("GUIDE_STATE_CONFLICT", "This request id was already used "
+                                                           "for a different help flow.")
+            result = render(db, existing, claims)
+            db.commit()
+            return {**result, "replayed": True}
+
     # One active viewer flow per session. Starting another is an explicit user switch
-    # (Conversation Flow §3), so the previous one is closed, not silently merged.
+    # (Conversation Flow §3); when the active flow has progress the visitor must confirm
+    # before it is replaced (CF §11 "with user confirmation where data would be lost", C3).
+    active = db.scalars(select(GuideSupportFlow).where(
+        GuideSupportFlow.session_id == session.session_id,
+        GuideSupportFlow.status == "in_progress")
+        .order_by(GuideSupportFlow.started_at.desc()).with_for_update()).all()
+    in_use = next((f for f in active if f.step_count > 0), None)
+    if in_use is not None and not confirm_replace:
+        title = F.FLOWS[in_use.flow_type].title
+        raise GuideProblem(
+            "GUIDE_STATE_CONFLICT",
+            f"You're partway through {title.lower()}. Starting a different viewer issue "
+            "will replace that progress.",
+            extra={"confirm_required": True, "active_flow_type": in_use.flow_type,
+                   "active_flow_id": str(in_use.flow_id),
+                   "current": render(db, in_use, claims)})
     _cancel_active(db, request, session, "switched_by_user")
-    flow = _new_flow(db, session, flow_type, claims)
+    flow = _new_flow(db, session, flow_type, claims, flow_id)
     _set_session_state(session, flow)
     audit(db, request, "support_flow_started", session_id=session.session_id,
           flow_id=str(flow.flow_id), flow_type=flow_type, step_id=flow.current_step_id,
-          event_context=claims is not None)
+          event_context=claims is not None, replaced=in_use is not None)
     db.commit()
     return render(db, flow, claims)
 

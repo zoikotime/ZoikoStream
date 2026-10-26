@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from . import breaker
 from .settings import get_settings
 
 log = logging.getLogger(__name__)
@@ -68,13 +69,23 @@ def current() -> PublicStatus | None:
     with _lock:
         if _cache and time.monotonic() - _cache[0] < CACHE_SECONDS:
             return _cache[1]
+    # Architecture §17.1: while the status feed is known to be failing, say "can't verify"
+    # immediately instead of spending the full timeout on every status question.
+    b = breaker.get("status")
+    if not b.allow():
+        return None
     try:
         import httpx
         res = httpx.get(url, timeout=TIMEOUT_SECONDS, headers={"Accept": "application/json"})
         status = _parse(res.json()) if res.status_code == 200 else None
     except Exception as exc:
         log.warning("guide public status unavailable: %s", type(exc).__name__)
+        b.failure()
         return None
+    if status is None:
+        b.failure()  # 5xx / unexpected shape: the feed is not usable
+    else:
+        b.success()
     if status is not None:
         with _lock:
             _cache = (time.monotonic(), status)

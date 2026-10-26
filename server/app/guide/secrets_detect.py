@@ -54,6 +54,16 @@ _SECRET_QUERY_KEYS = re.compile(
 _SECRET_PATHS = re.compile(r"(?i)/(?:deliveries|e|accept-invite|invite|i)/[A-Za-z0-9_-]{6,}")
 
 
+# Classes that are credentials for SOMETHING: seeing one in Guide is a security event and the
+# session capability is rotated (Security/Privacy §7; sessions.on_secret_detected). Card
+# numbers and event PINs are redacted and refused but are not credentials for this session.
+ROTATION_CLASSES = frozenset({"password", "access_token", "secret_link"})
+
+
+def warrants_rotation(classes) -> bool:
+    return bool(classes) and any(c in ROTATION_CLASSES for c in classes)
+
+
 @dataclass
 class Detection:
     text: str

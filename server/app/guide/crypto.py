@@ -170,10 +170,35 @@ def decrypt(blob: bytes, *, context: str) -> str:
     return AESGCM(dek).decrypt(nonce, ct, context.encode()).decode("utf-8")
 
 
-def keyed_hash(value: str, *, purpose: str) -> bytes:
-    """HMAC-SHA256(purpose || value). `purpose` separates domains so a CSRF token can never
-    match a capability hash."""
-    return hmac.new(provider().hash_key, f"{purpose}\x00{value}".encode(),
+# Registered keyed-hash purposes. Any short ASCII label is accepted, but every stored hash
+# should use one of these so two features can never collide in the same domain.
+PURPOSE_SESSION_CAPABILITY = "session-capability"
+PURPOSE_SESSION_CSRF = "session-csrf"
+PURPOSE_SESSION_NONCE = "session-nonce"
+PURPOSE_IDEMPOTENCY_LEAD = "idem-lead"
+PURPOSE_LEAD_FINGERPRINT = "lead-fingerprint"
+PURPOSE_LEAD_EMAIL_LOOKUP = "lead-email-lookup"
+# guide_messages.content_digest: dedup/integrity of conversation text without an unkeyed
+# hash a guesser could test candidate messages against.
+PURPOSE_MESSAGE_CONTENT = "message-content"
+PURPOSE_RATE_LIMIT_KEY = "rate-limit-key"
+
+
+def keyed_hash(value: str | bytes, *, purpose: str) -> bytes:
+    """HMAC-SHA256 under the Guide hash key of `purpose` NUL `value` -> 32 bytes.
+
+    Use it for anything derived from visitor-supplied or secret material that must be
+    comparable but not reversible or guessable from a database dump: capability/CSRF
+    verifiers, Idempotency-Keys, conversation content digests, lookup keys. `purpose`
+    separates domains, so a CSRF token can never match a capability hash and a message digest
+    is useless as an email lookup. Use digest() only for PUBLIC material.
+
+        crypto.keyed_hash(text, purpose=crypto.PURPOSE_MESSAGE_CONTENT)
+    """
+    if not purpose or "\x00" in purpose:
+        raise ValueError("keyed_hash needs a non-empty purpose label without NUL")
+    data = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+    return hmac.new(provider().hash_key, purpose.encode() + b"\x00" + data,
                     hashlib.sha256).digest()
 
 

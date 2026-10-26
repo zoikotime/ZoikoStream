@@ -26,6 +26,11 @@ def purge_after(data_class: str, *, at: datetime | None = None) -> datetime:
         "event_context": timedelta(hours=s.GUIDE_RETENTION_EVENT_CONTEXT_HOURS),
         "support_flow": timedelta(days=s.GUIDE_RETENTION_SUPPORT_FLOW_DAYS),
         "lead": timedelta(days=s.GUIDE_RETENTION_LEAD_FAILED_DAYS),
+        # Local copy after a CONFIRMED submission: the contact inbox is now the system of
+        # record (Security/Privacy §16, Appendix B lead_local_after_confirmed_days).
+        "lead_confirmed": timedelta(days=s.GUIDE_RETENTION_LEAD_CONFIRMED_DAYS),
+        # Session-local content after an explicit End / New conversation (§16.1).
+        "accelerated": timedelta(hours=s.GUIDE_RETENTION_ACCELERATED_PURGE_HOURS),
         "handoff": timedelta(days=s.GUIDE_RETENTION_HANDOFF_DAYS),
         "feedback_comment": timedelta(days=s.GUIDE_RETENTION_FEEDBACK_COMMENT_DAYS),
         "feedback": timedelta(days=s.GUIDE_RETENTION_FEEDBACK_DAYS),
@@ -33,3 +38,9 @@ def purge_after(data_class: str, *, at: datetime | None = None) -> datetime:
         "audit": timedelta(days=s.GUIDE_RETENTION_AUDIT_DAYS),
     }
     return base + spans[data_class]
+
+
+def purge_grace() -> timedelta:
+    """How far past purge_after a row may be before it is a retention breach (Appendix B
+    purge_grace_hours; §17.1 "no row >24 hours past purge_after")."""
+    return timedelta(hours=get_settings().GUIDE_PURGE_GRACE_HOURS)

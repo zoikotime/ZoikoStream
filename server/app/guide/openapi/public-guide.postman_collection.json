@@ -1,0 +1,856 @@
+{
+  "info": {
+    "name": "ZoikoStream Public Guide API v1.0",
+    "description": "Executable companion to public-guide.openapi.yaml (API §23). Run in order; the cookie jar keeps the HttpOnly session cookie. Example identity data is synthetic.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000/api/v1/public-guide"
+    },
+    {
+      "key": "origin",
+      "value": "http://localhost:5173"
+    },
+    {
+      "key": "sessionId",
+      "value": ""
+    },
+    {
+      "key": "csrfToken",
+      "value": ""
+    },
+    {
+      "key": "supportFlowId",
+      "value": ""
+    },
+    {
+      "key": "leadFlowId",
+      "value": ""
+    },
+    {
+      "key": "consentReceiptId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "bootstrap",
+      "item": [
+        {
+          "name": "getBootstrap",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/bootstrap?page_id=home&page_type=home&locale=en-US",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "bootstrap"
+              ],
+              "query": [
+                {
+                  "key": "page_id",
+                  "value": "home"
+                },
+                {
+                  "key": "page_type",
+                  "value": "home"
+                },
+                {
+                  "key": "locale",
+                  "value": "en-US"
+                }
+              ]
+            },
+            "description": "Bootstrap"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('getBootstrap succeeds', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sessions",
+      "item": [
+        {
+          "name": "createSession",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions"
+              ]
+            },
+            "description": "Create Session",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"client_session_nonce\": \"{{$guid}}\",\n  \"page_context\": {\n    \"page_id\": \"home\",\n    \"page_type\": \"home\",\n    \"path\": \"/\",\n    \"locale\": \"en-US\",\n    \"device_class\": \"desktop\",\n    \"entry_point\": \"launcher\"\n  },\n  \"consent_snapshot\": {\n    \"analytics\": \"unknown\",\n    \"consent_version\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('createSession succeeds', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('sessionId', pm.response.json().session_id);",
+                  "pm.collectionVariables.set('csrfToken', pm.response.json().csrf_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "updateSessionContext",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "context"
+              ]
+            },
+            "description": "Update Context",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"page_context\": {\n    \"page_id\": \"pricing\",\n    \"page_type\": \"pricing\",\n    \"path\": \"/contact\",\n    \"locale\": \"en-US\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('updateSessionContext succeeds', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "endSession",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/end",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "end"
+              ]
+            },
+            "description": "End Session"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('endSession succeeds', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "messages",
+      "item": [
+        {
+          "name": "submitMessage",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "messages"
+              ]
+            },
+            "description": "Submit Message",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"client_message_id\": \"{{$guid}}\",\n  \"text\": \"Can ZoikoStream help us stream a memorial service?\",\n  \"intent_hint\": \"I-SOLUTION\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('submitMessage succeeds', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "support",
+      "item": [
+        {
+          "name": "startSupportFlow",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/support-flows",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "support-flows"
+              ]
+            },
+            "description": "Start Support Flow",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flow_type\": \"viewer_access\",\n  \"client_request_id\": \"{{$guid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('startSupportFlow succeeds', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('supportFlowId', pm.response.json().flow_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "submitSupportStep",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/support-flows/{{supportFlowId}}/steps",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "support-flows",
+                "{{supportFlowId}}",
+                "steps"
+              ]
+            },
+            "description": "Submit Support Step",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"client_step_id\": \"{{$guid}}\",\n  \"step_id\": \"invitation_source\",\n  \"option_id\": \"email_invitation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('submitSupportStep succeeds', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "consent",
+      "item": [
+        {
+          "name": "putConsent",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/consents/sales_contact",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "consents",
+                "sales_contact"
+              ]
+            },
+            "description": "Put Consent",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"granted\",\n  \"notice_version\": \"sales-contact-v1\",\n  \"source\": \"guide\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('putConsent succeeds', function () { pm.response.to.have.status(200); });",
+                  "pm.collectionVariables.set('consentReceiptId', pm.response.json().receipt_id);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "leads",
+      "item": [
+        {
+          "name": "startLeadFlow",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/lead-flows",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "lead-flows"
+              ]
+            },
+            "description": "Start Lead Flow",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"flow_kind\": \"demo\",\n  \"source_intent\": \"I-DEMO\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('startLeadFlow succeeds', function () { pm.response.to.have.status(201); });",
+                  "pm.collectionVariables.set('leadFlowId', pm.response.json().flow_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "saveLeadDraft",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/leads/{{leadFlowId}}/draft",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "leads",
+                "{{leadFlowId}}",
+                "draft"
+              ]
+            },
+            "description": "Save Lead Draft",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Alex Example\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('saveLeadDraft succeeds', function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "updateLeadFlow",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/lead-flows/{{leadFlowId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "lead-flows",
+                "{{leadFlowId}}"
+              ]
+            },
+            "description": "Update Lead Flow",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fields\": {\n    \"full_name\": \"Alex Example\",\n    \"work_email\": \"alex@example.com\",\n    \"country_code\": \"US\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('updateLeadFlow succeeds', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "submitLeadFlow",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/lead-flows/{{leadFlowId}}/submit",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "lead-flows",
+                "{{leadFlowId}}",
+                "submit"
+              ]
+            },
+            "description": "Submit Lead Flow",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"consent_receipt_id\": \"{{consentReceiptId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('submitLeadFlow succeeds', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "handoffs",
+      "item": [
+        {
+          "name": "createHandoff",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/handoffs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "handoffs"
+              ]
+            },
+            "description": "Create Handoff",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target\": \"support\",\n  \"reason_code\": \"user_requested\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('createHandoff succeeds', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "feedback",
+      "item": [
+        {
+          "name": "submitFeedback",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{origin}}"
+              },
+              {
+                "key": "X-ZS-CSRF",
+                "value": "{{csrfToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/feedback",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "sessions",
+                "{{sessionId}}",
+                "feedback"
+              ]
+            },
+            "description": "Submit Feedback",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"client_feedback_id\": \"{{$guid}}\",\n  \"target_type\": \"session\",\n  \"rating\": \"up\",\n  \"reason_code\": \"helpful\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('submitFeedback succeeds', function () { pm.response.to.have.status(202); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

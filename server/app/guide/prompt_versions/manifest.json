@@ -1,0 +1,19 @@
+{
+  "_comment": "Governed prompt and policy releases (Prompt \u00a722-23). Every file is pinned by sha256; a changed file must ship as a NEW version id. Active versions: GUIDE_PROMPT_VERSION / GUIDE_POLICY_VERSION (env) or runtime config guide.prompt_version / guide.policy_version; blank = default below.",
+  "default_prompt": "pub-guide-1.0.2",
+  "default_policy": "pub-policy-1.0.0",
+  "prompts": {
+    "pub-guide-1.0.2": {
+      "file": "pub-guide-1.0.2.md",
+      "sha256": "44aebf14f12c3096fc0d8482ab9e6afb33bf5c1dcaaa8bb39b9c7211b5177346",
+      "change_class": "baseline"
+    }
+  },
+  "policies": {
+    "pub-policy-1.0.0": {
+      "file": "pub-policy-1.0.0.json",
+      "sha256": "a34900457055c51336f737510ee1b0cdedc23848a2639a8dda07603c76a8b137",
+      "change_class": "baseline"
+    }
+  }
+}
