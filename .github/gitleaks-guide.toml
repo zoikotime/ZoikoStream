@@ -11,6 +11,8 @@ useDefault = true
 description = "Synthetic secrets used by Guide secret-handling tests"
 paths = [
   '''server/guide_eval/datasets/.*\.jsonl''',
+  # The builders that write those datasets carry the same fake curated values in source.
+  '''server/guide_eval/(build_datasets|generators)\.py''',
   '''server/guide_eval/calibration/.*\.jsonl''',
   '''server/app/guide/knowledge/gate/.*\.jsonl''',
   '''server/guide_tests/.*\.py''',

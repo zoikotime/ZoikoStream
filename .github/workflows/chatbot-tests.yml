@@ -58,7 +58,8 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # pytest is a test-only dependency, so it is not in the runtime requirements.txt.
+        run: pip install -r requirements.txt pytest
       - name: Create test databases
         env:
           PGPASSWORD: ci-only-password
