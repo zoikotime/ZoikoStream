@@ -1,0 +1,18 @@
+# Secret scanning for the public Guide paths (chatbot-tests.yml "security" job; SEC §26).
+# Default gitleaks rules, plus an allowlist for the evaluation datasets and test fixtures,
+# which deliberately contain FAKE credentials (secret-echo test cases: sk_live_ test keys,
+# Luhn-valid test card numbers, sample JWTs) to prove the Guide never echoes them.
+title = "ZoikoStream Guide gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic secrets used by Guide secret-handling tests"
+paths = [
+  '''server/guide_eval/datasets/.*\.jsonl''',
+  '''server/guide_eval/calibration/.*\.jsonl''',
+  '''server/app/guide/knowledge/gate/.*\.jsonl''',
+  '''server/guide_tests/.*\.py''',
+  '''client/src/guide/.*\.test\.jsx?''',
+]

@@ -11,12 +11,14 @@ on:
       - 'server/app/operator_guide/**'
       - 'server/app/routers/guide_event_context.py'
       - 'server/guide_tests/**'
+      - 'server/guide_eval/**'
       - 'server/operator_guide_tests/**'
       - 'server/create_tables.py'
       - 'client/src/guide/**'
       - 'client/src/operator-guide/**'
       - 'requirements.txt'
       - '.github/workflows/chatbot-tests.yml'
+      - '.github/gitleaks-guide.toml'
   workflow_dispatch:
 
 concurrency:
@@ -47,6 +49,7 @@ jobs:
       OPGUIDE_TEST_DATABASE_URL: postgresql://zoikostream:ci-only-password@localhost:5432/opguide_test
       DATABASE_URL: postgresql://zoikostream:ci-only-password@localhost:5432/platform_unused
       SECRET_KEY: ci-only-secret-key-not-used-anywhere-else
+      GUIDE_APP_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -70,6 +73,89 @@ jobs:
         working-directory: server/operator_guide_tests
         run: python -m pytest
 
+  eval-gate:
+    # Deterministic evaluation gate (ZST-AI-EVAL-PUB-GUIDE-001 §6-7, RAG §23/§31). BLOCKING.
+    # Builds the approved corpus with the PRODUCTION embedding profile (local fastembed model,
+    # no API key) and gates on retrieval + routing metrics: Recall@5/@20, MRR@10, nDCG@5,
+    # NO_SOURCE precision/recall, conflict and stale-block recall, ineligible-source leaks and
+    # intent routing accuracy. No model is called (GUIDE_LLM_PROVIDER=mock); no paid API.
+    name: Eval gate — deterministic retrieval/routing metrics
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: zoikostream
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U zoikostream" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      ENVIRONMENT: test
+      GUIDE_ENABLED: 'true'
+      GUIDE_DATABASE_URL: postgresql://zoikostream:ci-only-password@localhost:5432/guide_eval_ci
+      DATABASE_URL: postgresql://zoikostream:ci-only-password@localhost:5432/platform_unused
+      SECRET_KEY: ci-only-secret-key-not-used-anywhere-else
+      GUIDE_KEY_PROVIDER: local
+      GUIDE_LOCAL_MASTER_KEY: '0000000000000000000000000000000000000000000000000000000000000000'
+      GUIDE_LLM_PROVIDER: mock
+      GUIDE_EMBEDDING_PROFILE: fastembed:BAAI/bge-small-en-v1.5
+      GUIDE_STATUS_ENDPOINT: ''
+      GUIDE_APP_COMMIT: ${{ github.sha }}
+      GUIDE_KB_PUBLISHER: ci-eval-gate
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed_cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .fastembed_cache
+          key: fastembed-bge-small-en-v1.5
+      - name: Create database and migrate
+        env:
+          PGPASSWORD: ci-only-password
+        working-directory: server
+        run: |
+          psql -h localhost -U zoikostream -d postgres -c "CREATE DATABASE guide_eval_ci"
+          python - <<'PY'
+          from alembic import command
+          from alembic.config import Config
+          cfg = Config("guide_alembic.ini")
+          cfg.set_main_option("script_location", "app/guide/migrations")
+          command.upgrade(cfg, "head")
+          PY
+      - name: Datasets are reproducible from their generators
+        working-directory: server
+        run: |
+          python -m guide_eval.build_datasets
+          git diff --exit-code -- guide_eval/datasets app/guide/knowledge/gate
+      - name: Build the index (smoke tests + offline gate must pass to activate)
+        working-directory: server
+        run: python -m app.guide.knowledge.ingest
+      - name: Retrieval/routing gate (blocking)
+        working-directory: server
+        run: python -m guide_eval gate
+      - name: Dataset inventory (curated vs generated)
+        if: always()
+        working-directory: server
+        run: python -m guide_eval --list
+      - name: Upload gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guide-retrieval-gate
+          path: server/guide_eval/reports/retrieval-gate.json
+          if-no-files-found: ignore
+
   frontend:
     name: Frontend — chatbot widget tests + lint
     runs-on: ubuntu-latest
@@ -91,11 +177,8 @@ jobs:
         run: npx eslint src/guide src/operator-guide
 
   security:
-    name: Security scan (advisory)
+    name: Security scan (Guide-scoped blocking; platform advisory)
     runs-on: ubuntu-latest
-    # Advisory: findings are reported in the job log without blocking the PR, so the existing
-    # platform dependencies don't fail chatbot PRs. Review the output on every run.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,12 +187,33 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install scanners
-        run: pip install bandit pip-audit
-      - name: SAST (bandit) on the chatbot packages
-        run: bandit -q -r server/app/guide server/app/operator_guide server/app/routers/guide_event_context.py
-      - name: Dependency audit (pip-audit)
+        run: pip install bandit pip-audit cyclonedx-bom
+      - name: SAST (bandit) — Guide code, blocking at medium+ severity / high confidence
+        run: >-
+          bandit -q -r server/app/guide server/app/routers/guide_event_context.py
+          server/guide_eval --severity-level medium --confidence-level high
+      - name: SAST (bandit) — full Guide report, advisory
+        continue-on-error: true
+        run: bandit -q -r server/app/guide server/app/operator_guide server/guide_eval
+      - name: Secret scan (gitleaks) — Guide paths, blocking
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+            | tar xz -C /usr/local/bin gitleaks
+          for path in server/app/guide server/guide_eval server/guide_tests client/src/guide; do
+            gitleaks dir "$path" --config .github/gitleaks-guide.toml --redact --no-banner
+          done
+      - name: Dependency audit — Guide-only dependencies, blocking
+        run: |
+          # Packages only the Guide uses (keep in sync with requirements.txt's Guide block).
+          grep -E '^(anthropic|fastembed|pgvector|pyyaml)\b' requirements.txt > guide-requirements.txt
+          pip-audit -r guide-requirements.txt
+      - name: Dependency audit — all requirements, advisory
+        continue-on-error: true
         run: pip-audit -r requirements.txt
-      - name: Secret scan (gitleaks) on this PR's commits
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: SBOM (CycloneDX)
+        run: cyclonedx-py requirements requirements.txt --of JSON -o sbom.cdx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
