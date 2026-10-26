@@ -68,3 +68,63 @@ def test_invalid_claim_values_are_dropped():
 def test_session_without_token_has_no_event_context(guide):
     assert guide.body["event_context"] is None
     assert uuid.UUID(guide.session_id)
+
+
+# ── Platform issuer: claims from real event data (PR-023; API §18) ────────────────────────
+
+def _event(**kw):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    base = dict(id=uuid.uuid4(), title="Spring Memorial Service",
+                start_time=datetime(2026, 10, 10, 18, tzinfo=timezone.utc),
+                timezone="America/New_York", recording_enabled=True,
+                organization=SimpleNamespace(support_email="help@example.org"))
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _issuer(monkeypatch, viewer_status="ended", entitlement=None, expired=False):
+    from app.routers import guide_event_context as gec
+    monkeypatch.setattr(gec.crud, "viewer_status_of", lambda ev: viewer_status)
+    monkeypatch.setattr(gec.commercial_crud, "get_replay_entitlement",
+                        lambda db, eid, scope="audience": entitlement)
+    monkeypatch.setattr(gec.commercial_crud, "replay_access_expired", lambda ent: expired)
+    return gec
+
+
+def _ent(publish_state, watermark_status="not_applicable"):
+    from types import SimpleNamespace
+    return SimpleNamespace(publish_state=publish_state, watermark_status=watermark_status)
+
+
+def test_issuer_claims_survive_guide_verification_and_omit_unknowns(monkeypatch):
+    gec = _issuer(monkeypatch, entitlement=_ent("published", "ready"))
+    claims = gec.claims_for(_event(), db=object())
+    assert claims["replay_public_state"] == "available"
+    assert claims["organizer_contact_route"] == "organizer-support"
+    assert "help@example.org" not in str(claims)  # the address itself never leaves
+    # No persisted caption setting exists, so caption claims are omitted, not guessed.
+    assert "captions_available" not in claims and "caption_languages" not in claims
+    verified = event_context.verify(event_context.issue(claims))
+    assert verified.safe_claims == claims  # every issued claim passes Guide's allowlist
+
+
+def test_issuer_replay_state_mapping(monkeypatch):
+    cases = [(dict(entitlement=_ent("published", "pending")), {}, "pending"),
+             (dict(entitlement=_ent("validating")), {}, "pending"),
+             (dict(entitlement=_ent("published", "ready"), expired=True), {}, "unavailable"),
+             (dict(entitlement=None), {}, "unavailable"),               # ended, nothing
+             (dict(entitlement=None, viewer_status="scheduled"), {}, "unknown"),
+             (dict(entitlement=None), {"recording_enabled": False}, "unavailable")]
+    for issuer_kw, event_kw, expected in cases:
+        gec = _issuer(monkeypatch, **issuer_kw)
+        assert gec.claims_for(_event(**event_kw), db=object())["replay_public_state"] \
+            == expected, (issuer_kw, event_kw)
+
+
+def test_issuer_omits_organizer_route_without_public_contact(monkeypatch):
+    from types import SimpleNamespace
+    gec = _issuer(monkeypatch)
+    for org in (None, SimpleNamespace(support_email=None), SimpleNamespace(support_email=" ")):
+        assert "organizer_contact_route" not in gec.claims_for(_event(organization=org),
+                                                               db=object())

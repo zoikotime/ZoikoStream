@@ -6,6 +6,10 @@ canonical_path: "/contact"
 risk_class: LOW
 authority_rank: 90
 version: "t1"
+author: test-author
+owner_role: support
+approved_by: test-kb-approver
+approved_at: 2026-10-01
 ---
 
 ## Frequently asked questions

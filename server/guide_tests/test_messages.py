@@ -48,6 +48,15 @@ class NeverCalled:
         raise AssertionError("the model must not be called for this request")
 
 
+@pytest.fixture(autouse=True)
+def _closed_breakers():
+    """Degraded-path tests feed the model breaker failures; never let them leak."""
+    from app.guide import breaker
+    breaker.reset()
+    yield
+    breaker.reset()
+
+
 @pytest.fixture
 def model(monkeypatch):
     def install(provider):

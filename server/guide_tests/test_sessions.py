@@ -73,7 +73,10 @@ def test_session_is_pseudonymous_no_identity_columns(guide, db):
 
 def test_nonce_replay_is_a_conflict_not_a_second_session(client, db):
     payload = {"client_session_nonce": str(uuid.uuid4()), "page_context": page_context()}
-    assert client.post(f"{BASE}/sessions", json=payload).status_code == 201
+    first = client.post(f"{BASE}/sessions", json=payload)
+    assert first.status_code == 201
+    # A caller WITHOUT the session's cookie replaying the nonce gets nothing (API §16).
+    client.cookies.clear()
     res = client.post(f"{BASE}/sessions", json=payload)
     assert res.status_code == 409 and res.json()["code"] == "GUIDE_STATE_CONFLICT"
     assert _count(db, GuideSession) == 1

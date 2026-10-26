@@ -29,7 +29,7 @@ def test_public_questions_stay_public(text):
 
 
 @pytest.mark.parametrize("text,intent", [
-    ("Does it support captions?", "DISCOVERY"),       # capability -> grounded answer
+    ("Does it support captions?", "PRODUCT_QA"),      # capability -> grounded answer
     ("Do you offer replay?", "PRODUCT_QA"),
     ("I can't see captions", "CAPTIONS"),              # problem -> deterministic flow
     ("how do I turn on captions", "CAPTIONS"),

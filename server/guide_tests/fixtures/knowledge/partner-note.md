@@ -6,6 +6,10 @@ canonical_path: "/"
 risk_class: LOW
 authority_rank: 40
 version: "t1"
+author: test-author
+owner_role: product
+approved_by: test-kb-approver
+approved_at: 2026-10-01
 ---
 
 ## Partner note about pricing
