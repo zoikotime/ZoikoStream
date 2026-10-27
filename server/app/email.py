@@ -3644,18 +3644,20 @@ def send_reset_otp_email(to: str, name: str, otp: str) -> None:
     _send(to, "Your ZoikoStream password reset code", _otp_html(name, otp))
 
 
-def send_assignment_email(to: str, name: str, event_title: str, role: str, org_name: str, event_url: str) -> None:
+def send_assignment_email(to: str, name: str, event_title: str, role: str, org_name: str, event_url: str) -> bool:
+    """True only if Resend accepted the message (see _send)."""
     # Approved display name, as the organization invitations use: without it the From line is
     # MAIL_FROM verbatim, so the brand recipients see depended on deployment configuration.
-    _send(to, f"You've been added as {role} for {event_title}",
+    return _send(to, f"You've been added as {role} for {event_title}",
           _assignment_html(name, event_title, role, org_name, event_url),
           sender=_sender_identity(SENDER_DEFAULT))
 
 
 def send_self_host_confirmation_email(to: str, name: str, event_title: str, org_name: str,
-                                      start_time: "datetime | None", event_url: str) -> None:
-    """Informational only. The host assignment is live before this is queued."""
-    _send(to, f"You're hosting {event_title} on ZoikoStream",
+                                      start_time: "datetime | None", event_url: str) -> bool:
+    """Informational only. The host assignment is live before this is sent. True only if
+    Resend accepted the message (see _send)."""
+    return _send(to, f"You're hosting {event_title} on ZoikoStream",
           _self_host_html(name, event_title, org_name, start_time, event_url))
 
 

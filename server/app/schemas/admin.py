@@ -106,6 +106,10 @@ class AdminUserOut(BaseModel):
     staff_commercial_role: str | None = None
     # The member's own profile photo, or null (initials). Set only by its owner.
     avatar_url: str | None = None
+    # Only on an event-assignment save (PATCH /events/{id}/hosts|speakers): whether the
+    # assignment email to this person was accepted by the mail provider. None when nothing was
+    # sent (they already held the role) and on every other endpoint.
+    email_sent: bool | None = None
 
 
 class UserUpdate(BaseModel):

@@ -2,6 +2,7 @@ import logging
 import re
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ def _is_stripe_price_id(value: str) -> bool:
     return bool(_STRIPE_PRICE_ID.match((value or "").strip()))
 
 
+# The shortest idle limit that works with once-a-minute activity reporting (see _idle_floor).
+MIN_SESSION_IDLE_MINUTES = 5
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT_ENV, extra="ignore")
 
@@ -76,6 +81,25 @@ class Settings(BaseSettings):
     # Server-side write throttle: activity reports closer together than this are accepted but
     # do not write, so an active user costs at most one UPDATE per interval.
     SESSION_ACTIVITY_MIN_INTERVAL_SECONDS: int = 60
+
+    @field_validator("SESSION_IDLE_TIMEOUT_MINUTES")
+    @classmethod
+    def _idle_floor(cls, minutes: int) -> int:
+        """Never below MIN_SESSION_IDLE_MINUTES.
+
+        Activity is reported at most once a minute by the client and recorded at most once per
+        SESSION_ACTIVITY_MIN_INTERVAL_SECONDS here, so an idle limit near that interval expires
+        sessions that are in active use: at 1 the console signs everyone out about a minute
+        after sign-in whatever they are doing (tester bug BUG-011). A value that small is a
+        leftover from testing the timeout, not a policy, so it is raised and said so in the log.
+        """
+        if minutes < MIN_SESSION_IDLE_MINUTES:
+            log.warning(
+                "SESSION_IDLE_TIMEOUT_MINUTES=%s is below the %s-minute minimum; using %s. "
+                "Activity is only recorded once a minute, so a shorter limit signs out users "
+                "who are active.", minutes, MIN_SESSION_IDLE_MINUTES, MIN_SESSION_IDLE_MINUTES)
+            return MIN_SESSION_IDLE_MINUTES
+        return minutes
     # Retired. They set the JWT lifetime (24 h, or 30 days with "Remember me") before
     # sessions existed; a token now lives exactly as long as its session's absolute limit,
     # and "Remember me" no longer lengthens anything. Kept so existing env files still parse.
