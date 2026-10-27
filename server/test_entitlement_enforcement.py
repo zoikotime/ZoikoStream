@@ -1,19 +1,18 @@
 """Plan resolution separated from entitlement state (audit F1 Part A).
 
-The defect: both enforcement points resolved the plan through an ENTITLED-ONLY query, so a
-lapsed subscription resolved to plan=None and `None` was then read as "no ceiling". Losing
-entitlement therefore INCREASED usable capacity — a tenant over quota became compliant by
-having their trial expire, their subscription cancelled, or their organization suspended.
+The historical defect: storage/seat enforcement resolved the plan through an ENTITLED-ONLY
+query, so a lapsed subscription resolved to plan=None and `None` was then read as "no ceiling".
+Storage now fails closed without entitlement; stored plans remain available for other policies
+such as seat ceilings.
 
 The two concepts are now distinct:
 
     plan        = the subscription's stored plan          -> org.enforcement_plan()
     entitlement = status in SUBSCRIPTION_ENTITLED_STATES  -> unchanged
 
-Approved decision: an existing subscription's plan remains the QUANTITATIVE ceiling for storage
-and seats even when its state is not entitled. That is not entitlement — no state was added to
-SUBSCRIPTION_ENTITLED_STATES, and paid-feature access is a separate question these tests do not
-touch.
+Storage admission now requires entitlement: non-entitled organizations have a zero storage
+allowance even if a stored plan or platform default exists. Existing files are retained. The
+stored plan remains available to other enforcement such as seats, without granting entitlement.
 """
 import uuid
 
@@ -98,7 +97,7 @@ class TestEnforcementSeparation:
             made = []
             settings_snapshot = {}
             for key, fields in (
-                ("storage_limits", {"default_gb": None, "max_gb": None}),
+                ("storage_limits", {"default_gb": 50, "max_gb": 5000}),
                 ("streaming_limits", {
                     "default_hours": None, "default_concurrent_streams": None,
                 }),
@@ -165,19 +164,19 @@ class TestEnforcementSeparation:
 
     # 4/5/6/7 — THE FIX
     @pytest.mark.parametrize("state", NON_ENTITLED)
-    def test_a_lapsed_subscription_keeps_its_plan_as_the_storage_ceiling(self, ctx, state):
-        """Before F1 every one of these returned False — losing entitlement UNBLOCKED a tenant
-        that was over quota."""
+    def test_a_non_entitled_subscription_has_zero_storage_allowance(self, ctx, state):
         db, dev, _, mk = ctx
-        o = mk(f"lap{state[:4]}", storage=60.0, state=state)
+        o = mk(f"lap{state[:4]}", storage=0.0, state=state)
         db.commit()
         assert org_svc.enforcement_plan(db, o.id).id == dev.id
+        quota = org_svc.effective_storage_quota(db, o.id)
+        assert quota["limit"] == 0 and quota["source"] == "no_entitled_plan"
         assert bc._storage_over_limit(db, o.id) is True, \
-            f"{state} must not raise the storage ceiling"
+            f"{state} must not grant storage without entitlement"
 
     @pytest.mark.parametrize("state", NON_ENTITLED)
     def test_a_lapsed_subscription_remains_non_entitled(self, ctx, state):
-        """Keeping the ceiling must NOT have granted entitlement."""
+        """A stored non-entitled plan must NOT grant entitlement."""
         db, _, _, mk = ctx
         o = mk(f"nent{state[:4]}", state=state)
         db.commit()
@@ -199,29 +198,29 @@ class TestEnforcementSeparation:
         assert plan.max_users == 5 and used >= plan.max_users, \
             "the seat ceiling must still be reached, so the invite guard fires"
 
-    def test_the_business_plan_keeps_its_own_larger_ceiling(self, ctx):
-        """The ceiling is the subscription's OWN plan, not a fixed one."""
+    def test_a_lapsed_business_plan_does_not_grant_storage(self, ctx):
         db, _, biz, mk = ctx
-        o = mk("bizlapse", storage=60.0, plan=biz, state="canceled")
+        o = mk("bizlapse", storage=0.0, plan=biz, state="canceled")
         db.commit()
         assert org_svc.enforcement_plan(db, o.id).id == biz.id
-        assert bc._storage_over_limit(db, o.id) is False, "60 GB is under Business's 500 GB"
+        assert bc._storage_over_limit(db, o.id) is True
 
-    # 8 — no subscription and no configured fallback: fail closed, without fabricating a plan
+    # 8 — a stored default and a high platform ceiling must not grant non-entitled storage
     def test_an_organization_with_no_subscription_gets_no_fabricated_plan(self, ctx):
-        """A missing subscription and missing applicable default block new recordings."""
+        """A missing subscription blocks recording even when defaults are configured."""
         db, _, _, mk = ctx
-        o = mk("nosub", storage=60.0, sub=False)
+        o = mk("nosub", storage=0.0, sub=False)
         db.commit()
         assert org_svc.enforcement_plan(db, o.id) is None, "no plan may be fabricated"
+        quota = org_svc.effective_storage_quota(db, o.id)
+        assert quota["limit"] == 0 and quota["source"] == "no_entitled_plan"
         assert bc._storage_over_limit(db, o.id) is True, \
-            "an unconfigured storage quota must fail closed"
+            "neither a default allowance nor a platform ceiling grants storage"
 
     # 9 — display/reporting semantics preserved
     def test_the_overview_payload_still_reports_no_invented_ceiling(self, ctx):
-        """The reporting contract is untouched: a non-entitled org reports null limits, so no
-        meaningless progress bar is rendered. This is what test_no_plan_means_no_invented_
-        ceiling pins, and enforcement no longer depends on it."""
+        """A non-entitled organization reports no plan allowance while storage admission uses
+        the explicit zero-quota policy."""
         db, _, _, mk = ctx
         o = mk("display", storage=60.0, state="canceled")
         db.commit()
@@ -229,7 +228,9 @@ class TestEnforcementSeparation:
         assert ent["plan_slug"] is None and ent["plan"] is None
         for item in ent["items"]:
             assert item["limit"] is None and item["percent"] is None
-        # ...while enforcement, asked separately, still has a ceiling.
+        storage = next(item for item in ent["items"] if item["key"] == "storage")
+        assert storage["effective_limit"] == 0
+        assert storage["quota_source"] == "no_entitled_plan"
         assert org_svc.enforcement_plan(db, o.id) is not None
 
     # 10 — the trial warning
@@ -270,12 +271,12 @@ class TestEnforcementSeparation:
     # 11 — cross-organization isolation
     def test_one_organizations_plan_never_governs_another(self, ctx):
         db, dev, biz, mk = ctx
-        a = mk("isoA", storage=60.0, plan=dev, state="canceled")
-        b = mk("isoB", storage=60.0, plan=biz, state="canceled")
+        a = mk("isoA", storage=60.0, plan=dev, state="active")
+        b = mk("isoB", storage=60.0, plan=biz, state="active")
         db.commit()
         assert org_svc.enforcement_plan(db, a.id).id == dev.id
         assert org_svc.enforcement_plan(db, b.id).id == biz.id
-        # Developer's 50 GB blocks A; Business's 500 GB does not block B.
+        # Entitled plans retain their distinct storage allowances.
         assert bc._storage_over_limit(db, a.id) is True
         assert bc._storage_over_limit(db, b.id) is False
 

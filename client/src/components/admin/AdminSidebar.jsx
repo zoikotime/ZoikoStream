@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import toast from "react-hot-toast";
-import { FiX, FiActivity, FiCheckSquare, FiGrid, FiFilm, FiShield, FiUser, FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget, FiDollarSign, FiTrendingUp, FiFlag, FiPackage, FiLock } from "react-icons/fi";
+import { FiX, FiActivity, FiCheckSquare, FiGrid, FiFilm, FiShield, FiUser, FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget, FiDollarSign, FiTrendingUp, FiFlag, FiPackage, FiLock, FiLogOut } from "react-icons/fi";
 import api, { errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import useInterval from "../../hooks/useInterval";
@@ -59,7 +59,7 @@ const GROUPS = [
     label: "Platform",
     items: [
       { to: "/admin/media", label: "Media", icon: FiFilm },
-      { to: "/admin/subscriptions", label: "Usage & Entitlements", icon: FiBarChart2 },
+      { to: "/admin/usage-entitlements", label: "Usage & Entitlements", icon: FiBarChart2 },
       { to: "/admin/commerce", label: "Commerce", icon: FiDollarSign },
       { to: "/admin/analytics", label: "Analytics", icon: FiTrendingUp },
       { to: "/admin/support", label: "Support Operations", icon: FiClock },
@@ -156,8 +156,89 @@ function Elevation({ elevation, seconds, onEnd, onStart, busy, unknown }) {
   );
 }
 
+// The identity row at the foot of the rail, as the account control it looks like. It was a
+// plain div: nothing covered it, there was simply nothing to click. It now opens the topbar
+// avatar menu's two actions (AdminTopbar), upward, since the rail ends below it. The whole
+// row is the one target - avatar, name and role - so nothing interactive nests inside it.
+function AccountButton({ person, email, onNavigate, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+  const buttonRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const onKeyDown = (e) => {
+    if (e.key === "Escape" && open) {
+      setOpen(false);
+      buttonRef.current?.focus();
+    }
+  };
+
+  return (
+    <div ref={boxRef} onKeyDown={onKeyDown} className={cx("relative mt-1 border-t px-3 py-1.5", CONSOLE.divider)}>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Account"
+          className={cx(
+            "absolute inset-x-3 bottom-full z-10 mb-1 overflow-hidden rounded-xl border py-1 shadow-xl",
+            "border-slate-200 bg-white dark:border-white/10 dark:bg-neutral-950"
+          )}
+        >
+          <div className={cx("border-b px-4 py-2.5", CONSOLE.divider)}>
+            <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>{person.name || "Super Admin"}</p>
+            {email && <p className={cx("truncate text-[11px]", CONSOLE.faint)}>{email}</p>}
+          </div>
+          <Link
+            role="menuitem"
+            to="/admin/platform-configuration"
+            onClick={() => { setOpen(false); onNavigate?.(); }}
+            className={cx("flex w-full items-center gap-2.5 px-4 py-2.5 text-[13px]", CONSOLE.body, "hover:bg-slate-50 dark:hover:bg-white/[0.05]")}
+          >
+            <FiUser /> Profile
+          </Link>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={onLogout}
+            className="flex w-full items-center gap-2.5 px-4 py-2.5 text-[13px] text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-500/10"
+          >
+            <FiLogOut /> Log out
+          </button>
+        </div>
+      )}
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Account menu"
+        className={cx(
+          "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors",
+          "hover:bg-slate-50 dark:hover:bg-white/[0.05]",
+          focusRing
+        )}
+      >
+        <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white", brand.chip)}>
+          {initials(person.name)}
+        </span>
+        <span className="min-w-0">
+          <span className={cx("block truncate text-[13px] font-semibold", CONSOLE.heading)}>{person.name || "Super Admin"}</span>
+          <span className={cx("block truncate text-[11px]", CONSOLE.faint)}>{person.department || "—"}</span>
+        </span>
+      </button>
+    </div>
+  );
+}
+
 export default function AdminSidebar({ open, onClose, state, unknown, onChange }) {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const location = useLocation();
   const [busy, setBusy] = useState(false);
   const badges = state?.badges || {};
@@ -354,17 +435,7 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
               )
             }
           />
-          <div className={cx("mt-1 flex items-center gap-2.5 border-t px-6 py-3.5", CONSOLE.divider)}>
-            <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white", brand.chip)}>
-              {initials(person.name)}
-            </span>
-            <div className="min-w-0">
-              <p className={cx("truncate text-[13px] font-semibold", CONSOLE.heading)}>
-                {person.name || "Super Admin"}
-              </p>
-              <p className={cx("truncate text-[11px]", CONSOLE.faint)}>{person.department || "—"}</p>
-            </div>
-          </div>
+          <AccountButton person={person} email={person.email || user?.email} onNavigate={onClose} onLogout={logout} />
         </div>
       </aside>
     </>

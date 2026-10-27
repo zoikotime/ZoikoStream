@@ -66,7 +66,7 @@ DEFAULT_PLANS = [
 DEFAULT_SETTINGS = {
     "brand": {"category": "brand", "value": {"name": "ZoikoStream", "primary_color": "#8b5cf6",
                                              "support_email": "support@zoikostream.com"}},
-    "storage_limits": {"category": "limits", "value": {"default_gb": 50, "max_gb": 5000}},
+    "storage_limits": {"category": "limits", "value": {"max_gb": 5000}},
     "streaming_limits": {"category": "limits", "value": {
         "default_hours": 20, "default_concurrent_streams": None, "max_bitrate_kbps": 8000,
     }},

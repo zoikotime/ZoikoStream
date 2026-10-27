@@ -53,14 +53,15 @@ describe("the other metrics keep their own notes", () => {
     expect(text).toContain(NO_QUOTA_NOTE);
   });
 
-  it("storage reports a configured platform default as its effective ceiling", () => {
+  it("storage without an entitled plan reports that new recordings are blocked", () => {
     show(quota({
-      key: "storage", label: "Storage", unit: "GB", quota_state: "within",
-      effective_limit: 50, limit: null, enforced_limit: 50, quota_source: "platform_default",
-      percent: 0, remaining: 50,
+      key: "storage", label: "Storage", unit: "GB", quota_state: "at_limit",
+      effective_limit: 0, limit: null, enforced_limit: 0, quota_source: "no_entitled_plan",
+      percent: null, remaining: 0,
     }));
-    expect(note("storage")).toContain("0 / 50 GB");
-    expect(note("storage")).toContain("Platform default");
+    expect(note("storage")).toContain("0 / 0 GB");
+    expect(note("storage")).toContain("No entitled plan — new recordings are blocked until an entitled plan is in effect");
+    expect(note("storage")).not.toContain("Enforced ceiling 5000 GB");
   });
 
   it("members without a plan is unchanged", () => {

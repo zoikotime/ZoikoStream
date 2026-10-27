@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FiPlus, FiRefreshCw, FiSearch, FiShield } from "react-icons/fi";
 import {
   Badge, Button, DataTable, DetailField, KpiCard, Panel, CONSOLE, cx, type,
@@ -47,7 +47,22 @@ function useIncidentsData(status, orgId) {
 }
 
 function useOrgOptions() {
-  return useApi(() => api.get("/admin/organizations", { params: { page_size: 200 } }).then((r) => r.data.items));
+  return useApi(async () => {
+    const organizations = [];
+    let total = 0;
+    for (let page = 1; organizations.length < total || page === 1; page += 1) {
+      const { data } = await api.get("/admin/organizations", { params: { page, page_size: 100 } });
+      if (!Array.isArray(data.items) || !Number.isInteger(data.total)) {
+        throw new Error("Invalid organizations response");
+      }
+      organizations.push(...data.items);
+      total = data.total;
+      if (!data.items.length && organizations.length < total) {
+        throw new Error("Incomplete organizations response");
+      }
+    }
+    return organizations.sort((a, b) => a.name.localeCompare(b.name));
+  });
 }
 
 function OpenCaseModal({ open, onClose, orgs, onCreated }) {
@@ -198,15 +213,39 @@ export default function Security() {
   const [severity, setSeverity] = useState("all");
   const [selected, setSelected] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const orgFilterInitialized = useRef(false);
 
   const { data, loading, error, reload } = useIncidentsData(status, orgFilter);
-  const { data: orgs } = useOrgOptions();
+  const { data: orgs, loading: orgsLoading, error: orgsError, reload: reloadOrgs } = useOrgOptions();
+
+  useEffect(() => {
+    if (!orgFilterInitialized.current) {
+      orgFilterInitialized.current = true;
+      return;
+    }
+    reload();
+  }, [orgFilter, reload]);
 
   useInterval(reload, REFRESH_MS);
   const [ageSeconds, setAgeSeconds] = useState(0);
   useInterval(() => setAgeSeconds(Math.floor((Date.now() - data.fetched_at) / 1000)), 1000, Boolean(data));
 
   const incidents = data?.items || NONE;
+  const organizationList = orgs || NONE;
+  const orgOptionLabels = useMemo(() => {
+    const nameCounts = new Map();
+    organizationList.forEach((org) => {
+      const name = org.name.trim().toLowerCase();
+      nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+    });
+    return new Map(organizationList.map((org) => {
+      const name = org.name.trim().toLowerCase();
+      const label = nameCounts.get(name) > 1
+        ? `${org.name} · ${org.domain ? `${org.domain} · ` : ""}#${org.id}`
+        : org.name;
+      return [org.id, label];
+    }));
+  }, [organizationList]);
 
   // If the drawer's selected row is stale after a reload, resync it to the fresh copy.
   const selectedLive = selected ? incidents.find((i) => i.id === selected.id) || selected : null;
@@ -282,9 +321,22 @@ export default function Security() {
           </select>
           <select value={orgFilter} onChange={(e) => setOrgFilter(e.target.value)} className={CONSOLE.select} aria-label="Filter by organization">
             <option value="all">All organizations</option>
-            {(orgs || []).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            {orgsLoading && <option value="" disabled>Loading organizations…</option>}
+            {!orgsLoading && !orgsError && organizationList.length === 0 && <option value="" disabled>No organizations available</option>}
+            {orgsError && <option value="" disabled>Organizations unavailable</option>}
+            {organizationList.map((o) => <option key={o.id} value={o.id}>{orgOptionLabels.get(o.id)}</option>)}
           </select>
         </div>
+        {orgsLoading && <p role="status" className="px-4 pb-3 text-xs text-slate-500 dark:text-slate-400">Loading organizations…</p>}
+        {orgsError && (
+          <div role="alert" className="flex flex-wrap items-center gap-2 px-4 pb-3 text-xs text-rose-600 dark:text-rose-400">
+            <span>Couldn’t load organizations. Try again.</span>
+            <Button variant="secondary" size="sm" onClick={reloadOrgs}>Retry</Button>
+          </div>
+        )}
+        {!orgsLoading && !orgsError && organizationList.length === 0 && (
+          <p role="status" className="px-4 pb-3 text-xs text-slate-500 dark:text-slate-400">No organizations are available.</p>
+        )}
         <div className={cx("border-t", CONSOLE.divider)} />
         <DataTable
           columns={columns}

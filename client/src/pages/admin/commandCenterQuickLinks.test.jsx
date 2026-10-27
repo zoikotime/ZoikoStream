@@ -124,6 +124,39 @@ describe("the two tiles lead to different places", () => {
 });
 
 describe("Live Operations applies the view it is handed", () => {
+  it("allows zero current sessions alongside the latest 50 ended sessions", async () => {
+    vi.mocked(api.get).mockImplementation((_url, cfg) =>
+      Promise.resolve({
+        data: cfg?.params?.state === "recent"
+          ? Array.from({ length: 50 }, (_, index) => row({
+              id: `ended-${index}`,
+              ended_at: "2026-10-22T09:30:00Z",
+            }))
+          : [],
+      })
+    );
+    render(
+      <ThemeProvider>
+        <MemoryRouter>
+          <KpiRow
+            kpis={{
+              ...KPIS,
+              live_sessions: { ...KPIS.live_sessions, value: 0 },
+              concurrent_audience: { ...KPIS.concurrent_audience, value: 0, current: 0 },
+            }}
+            range={{ mode: "live" }}
+            age="3s"
+          />
+          <LiveEvents />
+        </MemoryRouter>
+      </ThemeProvider>
+    );
+
+    await screen.findByRole("button", { name: /Recently Ended.*50/ });
+    expect(within(tile("Live sessions")).getByText("0", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("Latest 50 ended sessions")).toBeInTheDocument();
+  });
+
   it("opens the live view for ?tab=live — the URL the tile links to", async () => {
     liveOps("/admin/live-events?tab=live");
     await screen.findByText("Keynote");

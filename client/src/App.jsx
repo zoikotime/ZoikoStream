@@ -169,6 +169,14 @@ function LegacyPlatformSettingsRedirect() {
   return <Navigate to={`/admin/platform-configuration${search}${hash}`} replace />;
 }
 
+// Keep existing Usage & Entitlements bookmarks working while using the feature's canonical
+// browser route. `/admin/subscriptions` remains the unchanged API path; preserve tab links
+// and other URL state when forwarding old page URLs.
+function LegacyUsageEntitlementsRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`/admin/usage-entitlements${search}${hash}`} replace />;
+}
+
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
 // so the console nav never 404s. Everything else in the sidebar is a real page below.
 const adminStubs = [];
@@ -381,7 +389,8 @@ export default function App() {
                   <Route path="/admin/live-events" element={<LiveEvents />} />
                   <Route path="/admin/live-events/:eventId" element={<AdminEventDetail />} />
                   <Route path="/admin/users" element={<IdentityAccess />} />
-                  <Route path="/admin/subscriptions" element={<Subscriptions />} />
+                  <Route path="/admin/usage-entitlements" element={<Subscriptions />} />
+                  <Route path="/admin/subscriptions" element={<LegacyUsageEntitlementsRedirect />} />
                   <Route path="/admin/analytics" element={<Analytics />} />
                   <Route path="/admin/audit" element={<AuditLogs />} />
                   <Route path="/admin/platform-configuration" element={<PlatformSettings />} />
