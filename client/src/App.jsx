@@ -177,6 +177,12 @@ function LegacyUsageEntitlementsRedirect() {
   return <Navigate to={`/admin/usage-entitlements${search}${hash}`} replace />;
 }
 
+// Keep existing Trust & Safety links working while using the feature's canonical route.
+function LegacyTrustSafetyRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`/admin/trust-safety${search}${hash}`} replace />;
+}
+
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
 // so the console nav never 404s. Everything else in the sidebar is a real page below.
 const adminStubs = [];
@@ -408,7 +414,8 @@ export default function App() {
                   <Route path="/admin/developers" element={<Developers />} />
                   <Route path="/admin/event-readiness" element={<EventReadiness />} />
                   <Route path="/admin/media" element={<AdminMedia />} />
-                  <Route path="/admin/security" element={<TrustSafety />} />
+                  <Route path="/admin/trust-safety" element={<TrustSafety />} />
+                  <Route path="/admin/security" element={<LegacyTrustSafetyRedirect />} />
                   <Route path="/admin/governance" element={<AdminGovernance />} />
                   <Route path="/admin/commerce" element={<Commerce />} />
                   <Route path="/admin/infrastructure" element={<Infrastructure />} />

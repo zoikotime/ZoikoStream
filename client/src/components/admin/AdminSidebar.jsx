@@ -51,7 +51,7 @@ const GROUPS = [
     items: [
       { to: "/admin/organizations", label: "Organizations", icon: FiGrid },
       { to: "/admin/users", label: "Identity & Access", icon: FiUser },
-      { to: "/admin/security", label: "Trust & Safety", icon: FiShield },
+      { to: "/admin/trust-safety", label: "Trust & Safety", icon: FiShield },
       { to: "/admin/audit", label: "Audit", icon: FiFileText },
     ],
   },

@@ -1,8 +1,6 @@
-// `/admin/security` is the canonical browser route; Trust & Safety is its user-facing
-// feature name. Keep the route, rail, breadcrumb and protected page in agreement.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -20,7 +18,7 @@ import { ThemeProvider } from "../../theme/ThemeContext";
 import Security from "./Security";
 import appSource from "../../App.jsx?raw";
 
-const CANONICAL = "/admin/security";
+const CANONICAL = "/admin/trust-safety";
 
 function Where() {
   const { pathname, search, hash } = useLocation();
@@ -37,6 +35,11 @@ function HistoryControls() {
   );
 }
 
+function LegacySecurityRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`${CANONICAL}${search}${hash}`} replace />;
+}
+
 const routed = (entry) =>
   render(
     <ThemeProvider>
@@ -45,7 +48,8 @@ const routed = (entry) =>
         <HistoryControls />
         <AdminSidebar open onClose={() => {}} state={{}} unknown={false} onChange={() => {}} />
         <Routes>
-          <Route path="/admin/security" element={<Security />} />
+          <Route path="/admin/trust-safety" element={<Security />} />
+          <Route path="/admin/security" element={<LegacySecurityRedirect />} />
           <Route path="/admin/audit" element={<h1>Audit</h1>} />
           <Route path="/admin/dashboard" element={<h1>Command Center</h1>} />
         </Routes>
@@ -65,10 +69,16 @@ beforeEach(() => {
 });
 
 describe("Trust & Safety route", () => {
-  it("uses /admin/security for direct navigation and refresh", async () => {
+  it("uses /admin/trust-safety for direct navigation and refresh", async () => {
     routed(CANONICAL);
     expect(await screen.findByRole("heading", { name: "Trust & Safety" })).toBeInTheDocument();
     expect(current()).toBe(CANONICAL);
+  });
+
+  it("redirects legacy /admin/security links while preserving query and hash", async () => {
+    routed("/admin/security?status=resolved#case-1");
+    expect(await screen.findByRole("heading", { name: "Trust & Safety" })).toBeInTheDocument();
+    expect(current()).toBe(`${CANONICAL}?status=resolved#case-1`);
   });
 
   it("highlights only Trust & Safety on its canonical route", async () => {
@@ -97,25 +107,37 @@ describe("Trust & Safety route", () => {
     expect(await screen.findByRole("heading", { name: "Trust & Safety" })).toBeInTheDocument();
   });
 
-  it("uses the feature label in the breadcrumb and has no competing route alias", async () => {
+  it("replaces a legacy URL in history rather than creating a redirect loop", async () => {
+    routed("/admin/security?tab=cases");
+    expect(await screen.findByRole("heading", { name: "Trust & Safety" })).toBeInTheDocument();
+    expect(current()).toBe(`${CANONICAL}?tab=cases`);
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await waitFor(() => expect(current()).toBe("/admin/dashboard"));
+    expect(await screen.findByRole("heading", { name: "Command Center" })).toBeInTheDocument();
+  });
+
+  it("uses the feature label in the breadcrumb and routes old URLs through a redirect", async () => {
     const topbar = await import("../../components/admin/AdminTopbar.jsx?raw");
     const sidebar = await import("../../components/admin/AdminSidebar.jsx?raw");
 
-    expect(topbar.default).toContain('security: "Trust & Safety"');
-    expect(sidebar.default).toContain('to: "/admin/security", label: "Trust & Safety"');
-    expect(appSource).toContain('<Route path="/admin/security" element={<TrustSafety />} />');
-    expect(appSource).not.toContain('path="/admin/trust-safety"');
+    expect(topbar.default).toContain('"trust-safety": "Trust & Safety"');
+    expect(sidebar.default).toContain('to: "/admin/trust-safety", label: "Trust & Safety"');
+    expect(appSource).toContain('<Route path="/admin/trust-safety" element={<TrustSafety />} />');
+    expect(appSource).toContain('<Route path="/admin/security" element={<LegacyTrustSafetyRedirect />} />');
+    expect(appSource).toContain('to={`/admin/trust-safety${search}${hash}`} replace');
   });
 
   it("keeps the page under the existing Super Admin guard and AdminLayout", () => {
     const guard = appSource.indexOf('<Route element={<RoleRoute allow={["super_admin"]} />}>');
     const shell = appSource.indexOf("<Route element={<AdminLayout />}>", guard);
-    const route = appSource.indexOf('<Route path="/admin/security" element={<TrustSafety />} />', shell);
-    const shellEnd = appSource.indexOf("</Route>", route);
+    const route = appSource.indexOf('<Route path="/admin/trust-safety" element={<TrustSafety />} />', shell);
+    const legacy = appSource.indexOf('<Route path="/admin/security" element={<LegacyTrustSafetyRedirect />} />', route);
+    const shellEnd = appSource.indexOf("</Route>", legacy);
 
     expect(guard).toBeGreaterThanOrEqual(0);
     expect(shell).toBeGreaterThan(guard);
     expect(route).toBeGreaterThan(shell);
-    expect(shellEnd).toBeGreaterThan(route);
+    expect(legacy).toBeGreaterThan(route);
+    expect(shellEnd).toBeGreaterThan(legacy);
   });
 });
