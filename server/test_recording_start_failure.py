@@ -27,7 +27,7 @@ import pytest
 import app.main  # noqa: F401  - import order; see test_live_socket_connect.py
 
 from app.db import SessionLocal
-from app.models import Event, LiveRecording, Organization, User
+from app.models import Event, LiveRecording, Organization, Plan, Subscription, User
 from app.security import hash_password
 from app.services import broadcast as bc
 from app.services import bus
@@ -67,12 +67,22 @@ def sent(monkeypatch):
 @pytest.fixture
 def world():
     db = SessionLocal()
-    made = {"ev": [], "u": [], "o": []}
+    made = {"ev": [], "u": [], "o": [], "plan": None, "sub": None}
     try:
         org = Organization(name=f"RecCo {uuid.uuid4().hex[:6]}", status="active")
         db.add(org)
         db.flush()
         made["o"] = [org.id]
+        plan = Plan(
+            name="Recording test plan", slug=f"recording-test-{uuid.uuid4().hex[:8]}",
+            max_storage_gb=50, max_streaming_hours=20, max_concurrent_streams=5,
+        )
+        db.add(plan)
+        db.flush()
+        sub = Subscription(org_id=org.id, plan_id=plan.id, status="active", seats=1)
+        db.add(sub)
+        db.flush()
+        made["plan"], made["sub"] = plan.id, sub.id
         user = User(org_id=org.id, full_name="Vihari Host", role="org_admin", is_active=True,
                     email=f"rec-{uuid.uuid4().hex[:10]}@example.com",
                     username=f"rec{uuid.uuid4().hex[:10]}",
@@ -95,8 +105,12 @@ def world():
                 db.execute(Event.__table__.delete().where(Event.id == eid))
             for uid in made["u"]:
                 db.execute(User.__table__.delete().where(User.id == uid))
+            if made["sub"]:
+                db.execute(Subscription.__table__.delete().where(Subscription.id == made["sub"]))
             for oid in made["o"]:
                 db.execute(Organization.__table__.delete().where(Organization.id == oid))
+            if made["plan"]:
+                db.execute(Plan.__table__.delete().where(Plan.id == made["plan"]))
             db.commit()
         except Exception:
             db.rollback()
@@ -208,6 +222,26 @@ def test_a_retry_succeeds_once_egress_recovers(world, sent, egress_fails, monkey
 
 # ── 1 & 4. the success path, and idempotency ───────────────────────────────────────────
 
+def test_quota_reservation_exists_before_calling_livekit(world, sent, monkeypatch):
+    async def inspect_reservation(room, quality, filepath):
+        db = SessionLocal()
+        try:
+            row = db.query(LiveRecording).filter(
+                LiveRecording.event_id == world["event"].id,
+            ).one()
+            assert row.status == "recording"
+            assert row.egress_id is None
+            assert row.enforced is False
+        finally:
+            db.close()
+        return "EG_reserved", None
+
+    monkeypatch.setattr(lk, "start_recording", inspect_reservation)
+    monkeypatch.setattr(lk, "gcs_config_error", lambda: None)
+    assert start(world) is None
+    assert rows(world)[0].egress_id == "EG_reserved"
+
+
 def test_a_successful_start_is_active_immediately(world, sent, egress_works):
     assert start(world) is None
 
@@ -228,6 +262,52 @@ def test_a_second_start_while_genuinely_recording_creates_no_second_egress(world
 
     assert start(world) == "A recording is already running"
     assert len(rows(world)) == 1
+
+
+def test_finite_storage_headroom_is_reserved_across_events(world, sent, egress_works):
+    start(world)
+    db = SessionLocal()
+    try:
+        other_event = Event(
+            org_id=world["org"].id, created_by=world["user"].id,
+            title="Second event", status="live", visibility="public",
+        )
+        db.add(other_event)
+        db.commit()
+        other_event_id = other_event.id
+    finally:
+        db.close()
+
+    ctx = mod.Ctx(
+        event_id=other_event_id, org_id=world["org"].id,
+        room=f"event_{other_event_id}", user_id=world["user"].id,
+        name="Vihari Host", identity=str(world["user"].id), role="org_admin",
+        can_moderate=True, can_host=True,
+    )
+    try:
+        result = asyncio.run(mod.dispatch(ctx, "recording.start", {}))
+        assert isinstance(result, str) and "remaining storage headroom" in result
+        assert rows(world)[0].status == "recording"
+    finally:
+        db = SessionLocal()
+        try:
+            db.query(Event).filter(Event.id == other_event_id).delete()
+            db.commit()
+        finally:
+            db.close()
+
+
+def test_exhausted_storage_quota_blocks_recording_admission(world, egress_works):
+    db = SessionLocal()
+    try:
+        db.get(Organization, world["org"].id).storage_used_gb = 50
+        db.commit()
+    finally:
+        db.close()
+
+    result = start(world)
+    assert isinstance(result, str) and "Storage quota reached" in result
+    assert rows(world) == []
 
 
 # ── 6. End Event over a failed attempt ─────────────────────────────────────────────────

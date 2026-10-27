@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NavLink } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import toast from "react-hot-toast";
 import { FiX, FiActivity, FiCheckSquare, FiGrid, FiFilm, FiShield, FiUser, FiBarChart2, FiClock, FiSliders, FiGlobe, FiFileText, FiTarget, FiDollarSign, FiTrendingUp, FiFlag, FiPackage, FiLock } from "react-icons/fi";
 import api, { errMsg } from "../../api";
@@ -64,7 +64,7 @@ const GROUPS = [
       { to: "/admin/analytics", label: "Analytics", icon: FiTrendingUp },
       { to: "/admin/support", label: "Support Operations", icon: FiClock },
       { to: "/admin/status", label: "System Status", icon: FiShield, badge: "system_status" },
-      { to: "/admin/settings", label: "Platform Configuration", icon: FiSliders },
+      { to: "/admin/platform-configuration", label: "Platform Configuration", icon: FiSliders },
     ],
   },
   {
@@ -158,9 +158,20 @@ function Elevation({ elevation, seconds, onEnd, onStart, busy, unknown }) {
 
 export default function AdminSidebar({ open, onClose, state, unknown, onChange }) {
   const { user } = useAuth();
+  const location = useLocation();
   const [busy, setBusy] = useState(false);
   const badges = state?.badges || {};
   const elevation = state?.elevation || null;
+  const onStatusRoute = location.pathname.replace(/\/+$/, "") === "/admin/status";
+  const requestedStatusTab = new URLSearchParams(location.search).get("tab");
+  const statusTab = ["status", "infrastructure", "traffic"].includes(requestedStatusTab)
+    ? requestedStatusTab
+    : "status";
+  const statusSubpages = [
+    { key: "status", label: "Overview", to: "/admin/status" },
+    { key: "infrastructure", label: "Media Infrastructure", to: "/admin/status?tab=infrastructure" },
+    { key: "traffic", label: "API Traffic", to: "/admin/status?tab=traffic" },
+  ];
 
   // Countdown ticks locally from the server's seconds_remaining (no request per second),
   // and re-seeds whenever console-state refreshes or a different grant appears.
@@ -232,43 +243,76 @@ export default function AdminSidebar({ open, onClose, state, unknown, onChange }
               </p>
               {group.items.map(({ to, label, icon: Icon, end, badge }) => {
                 const count = badges[badge] || 0;
+                const hasSubpages = to === "/admin/status";
                 return (
-                  <NavLink
-                    key={to}
-                    to={to}
-                    end={end}
-                    onClick={onClose}
-                    className={({ isActive }) =>
-                      cx(
-                        // Same geometry as the org rail: ~44px rows, read as a product
-                        // menu rather than a dense tool palette.
-                        "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-[14px] font-medium",
-                        "transition-colors duration-150 motion-reduce:transition-none",
-                        focusRing,
-                        isActive ? NAV_ON : CONSOLE.navOff
-                      )
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        <Icon
-                          className={cx("shrink-0 text-[17px]", isActive ? NAV_ICON_ON : CONSOLE.navIconOff)}
-                          aria-hidden="true"
-                        />
-                        <span className="min-w-0 flex-1 truncate">{label}</span>
-                        {count > 0 && (
-                          <span
-                            className={cx(
-                              "grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full px-1 text-[10px] font-bold",
-                              "bg-rose-500/15 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400"
-                            )}
-                          >
-                            {count}
-                          </span>
-                        )}
-                      </>
+                  <div key={to}>
+                    <NavLink
+                      to={to}
+                      end={end}
+                      onClick={onClose}
+                      ariaCurrent={hasSubpages && onStatusRoute ? "false" : "page"}
+                      aria-expanded={hasSubpages && onStatusRoute ? true : undefined}
+                      aria-controls={hasSubpages && onStatusRoute ? "admin-status-subpages" : undefined}
+                      className={({ isActive }) =>
+                        cx(
+                          // Same geometry as the org rail: ~44px rows, read as a product
+                          // menu rather than a dense tool palette.
+                          "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-[14px] font-medium",
+                          "transition-colors duration-150 motion-reduce:transition-none",
+                          focusRing,
+                          isActive ? NAV_ON : CONSOLE.navOff
+                        )
+                      }
+                    >
+                      {({ isActive }) => (
+                        <>
+                          <Icon
+                            className={cx("shrink-0 text-[17px]", isActive ? NAV_ICON_ON : CONSOLE.navIconOff)}
+                            aria-hidden="true"
+                          />
+                          <span className="min-w-0 flex-1 truncate">{label}</span>
+                          {count > 0 && (
+                            <span
+                              className={cx(
+                                "grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-full px-1 text-[10px] font-bold",
+                                "bg-rose-500/15 text-rose-600 dark:bg-rose-500/20 dark:text-rose-400"
+                              )}
+                            >
+                              {count}
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </NavLink>
+                    {hasSubpages && onStatusRoute && (
+                      <div
+                        id="admin-status-subpages"
+                        className="ml-5 mt-1 space-y-0.5 border-l border-slate-200 pl-2 dark:border-white/10"
+                      >
+                        {statusSubpages.map((subpage) => {
+                          const active = statusTab === subpage.key;
+                          return (
+                            <Link
+                              key={subpage.key}
+                              to={subpage.to}
+                              onClick={onClose}
+                              aria-current={active ? "page" : undefined}
+                              className={cx(
+                                "group relative flex items-center rounded-md border-l-2 px-3 py-2 text-[12px] font-medium",
+                                "transition-colors duration-150 motion-reduce:transition-none",
+                                focusRing,
+                                active
+                                  ? "border-violet-500 bg-violet-50 text-violet-700 dark:bg-violet-500/[0.16] dark:text-violet-200"
+                                  : "border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-neutral-400 dark:hover:bg-white/[0.08] dark:hover:text-white"
+                              )}
+                            >
+                              {subpage.label}
+                            </Link>
+                          );
+                        })}
+                      </div>
                     )}
-                  </NavLink>
+                  </div>
                 );
               })}
             </div>

@@ -334,6 +334,28 @@ def _current_session(db, ctx) -> BroadcastSession | None:
     )
 
 
+def _stream_quota_denial(db, org_id) -> str | None:
+    """Return a customer-safe reason when a new broadcast lacks or exhausts quota."""
+    org = db.get(Organization, org_id)
+    if org is None:
+        return "Streaming quotas are unavailable for this organization"
+
+    from . import org as org_svc
+    hours = org_svc.effective_streaming_hours_quota(db, org_id)
+    concurrency = org_svc.effective_concurrent_streams_quota(db, org_id)
+    if not hours["configured"] or not concurrency["configured"]:
+        return "Streaming quotas are not configured for this organization — contact your administrator"
+    if hours["limit"] is not None:
+        used_hours = org_svc._streaming_seconds(db, org_id) / 3600
+        if used_hours >= hours["limit"]:
+            return "Streaming-hours quota reached — end or review an existing broadcast before starting another"
+    if concurrency["limit"] is not None:
+        active = org_svc.active_stream_count(db, org_id)
+        if active >= concurrency["limit"]:
+            return "Concurrent-stream limit reached — end an existing broadcast before starting another"
+    return None
+
+
 _RECORDING_ROLE_ORDER = case(
     (LiveRecording.role == "primary", 0), (LiveRecording.role == "secondary", 1), else_=0
 )
@@ -370,33 +392,16 @@ def _feature_enabled(db, key: str, default: bool) -> bool:
 
 
 def _storage_over_limit(db, org_id) -> bool:
-    """True once the org's real usage (storage_used_gb, written from actual egress file
-    sizes — see record_egress_result) has reached its plan's max_storage_gb, OR the
-    platform-wide ceiling set in Settings.jsx's "Storage & Streaming Limits" panel
-    (services.platform_settings.storage_ceiling_gb) — whichever is lower. A plan with no
-    limit (Enterprise: max_storage_gb=None) falls through to the platform ceiling instead
-    of never blocking, so an unlimited plan still respects a platform-wide cap the console
-    admin set on purpose."""
+    """Whether a recording may be admitted under its effective server-side storage quota."""
     org = db.get(Organization, org_id)
     if org is None:
-        return False
-    # ENFORCEMENT resolution, not display resolution. This used to run the entitled-only query
-    # itself, so a trial_expired / canceled / closed / suspended subscription resolved to
-    # plan=None and the plan ceiling silently dropped out of `limits` below — leaving only the
-    # platform ceiling, or none at all. Losing entitlement therefore RAISED the storage cap
-    # (measured: 50 GB while trialing, 5000 GB once expired).
-    #
-    # Approved decision: an existing subscription's plan remains the quantitative ceiling even
-    # when its state is not entitled. `enforcement_plan` answers exactly that and nothing more —
-    # it does not make the organization entitled.
-    # Imported inside the function: services/org.py imports engagement_score from this
-    # module, so a module-level import here would be circular.
+        return True
     from . import org as org_svc
-    plan = org_svc.enforcement_plan(db, org_id)
-    limits = [l for l in (plan.max_storage_gb if plan else None, platform_settings.storage_ceiling_gb(db)) if l is not None]
-    if not limits:
-        return False
-    return float(org.storage_used_gb or 0) >= min(limits)
+    quota = org_svc.effective_storage_quota(db, org_id)
+    if not quota["configured"]:
+        return True
+    limit = quota["limit"]
+    return limit is not None and float(org.storage_used_gb or 0) >= limit
 
 
 def _seed_settings(ev: Event | None) -> dict:
@@ -465,16 +470,16 @@ async def _apply_settings(ctx, patch: dict) -> dict:
 
 # ── broadcast lifecycle ───────────────────────────────────────────────────────
 
-def _golive_gate(db, ctx) -> str | None:
+def _golive_gate(db, ctx) -> tuple[str, str] | None:
     """Commercial readiness check for the socket go-live path — the same authority the HTTP
-    lifecycle route uses. Returns a blocking message, or None to proceed.
+    lifecycle route uses. Returns a blocking message and code, or None to proceed.
 
     An event already live/degraded is a reconnect or a duplicate click, not a new escalation,
     so it is not re-gated (that would refuse a legitimate recovery mid-broadcast).
     """
     ev = db.get(Event, ctx.event_id)
     if ev is None:
-        return "Event not found"
+        return "Event not found", "event_not_found"
     if ev.status in ("live", "degraded"):
         return None
 
@@ -500,15 +505,19 @@ def _golive_gate(db, ctx) -> str | None:
     # the broadcast; the transition table still decides FROM where (published/scheduled/armed).
     transition = status_transition_error(ev.status, "live", ev.title, actor="platform")
     if transition:
-        return transition
+        return transition, "commercial_readiness_blocked"
 
     evaluation = commercial_crud.golive_readiness(db, ev)
     commercial_crud.audit_golive_decision(
         db, ev, evaluation, actor=db.get(User, ctx.user_id), target_state="live",
     )
     if evaluation["ready"]:
-        return None
-    return "Cannot go live — " + "; ".join(evaluation["blocking_reasons"])
+        quota_error = _stream_quota_denial(db, ctx.org_id)
+        return (quota_error, "quota_blocked") if quota_error else None
+    return (
+        "Cannot go live — " + "; ".join(evaluation["blocking_reasons"]),
+        "commercial_readiness_blocked",
+    )
 
 
 async def _golive(ctx, payload):
@@ -528,7 +537,8 @@ async def _golive(ctx, payload):
     # event is commercially allowed to deliver.
     gate = await mod.tx(lambda db: _golive_gate(db, ctx))
     if gate is not None:
-        return [("host", "broadcast.error", {"error": gate, "code": "commercial_readiness_blocked"})]
+        message, code = gate
+        return [("host", "broadcast.error", {"error": message, "code": code})]
 
     # Create the room first so a publisher has somewhere to join.
     enforced = await livekit.ensure_room(ctx.room)
@@ -537,7 +547,18 @@ async def _golive(ctx, payload):
         ev = db.get(Event, ctx.event_id)
         session = _current_session(db, ctx)
         if session and session.status == "live":
-            return session_out(session), None
+            return session_out(session), None, None
+        if session is None or session.status != "paused":
+            # Serialize quota evaluation with session creation. Concurrent go-live requests
+            # for different events in the same organization must not both consume the last slot.
+            locked_org = db.scalar(
+                select(Organization).where(Organization.id == ctx.org_id).with_for_update()
+            )
+            if locked_org is None:
+                return None, None, "Streaming quotas are unavailable for this organization"
+            denial = _stream_quota_denial(db, ctx.org_id)
+            if denial:
+                return None, None, denial
         if session is None:
             session = BroadcastSession(event_id=ctx.event_id, org_id=ctx.org_id,
                                        settings=_seed_settings(ev), created_by=ctx.user_id)
@@ -570,7 +591,7 @@ async def _golive(ctx, payload):
         act = mod.record(db, ctx, "system", "Host started the stream", audit="live.broadcast.golive",
                          target_type="broadcast_session", target_id=session.id,
                          meta={"enforced_in_livekit": enforced})
-        return session_out(session), act
+        return session_out(session), act, None
 
     try:
         out = await mod.tx(work)
@@ -583,7 +604,9 @@ async def _golive(ctx, payload):
         # the loser's request resolves cleanly instead of surfacing a 500.
         log.info("event %s: concurrent go-live insert conflict, retrying against the winner", ctx.event_id)
         out = await mod.tx(work)
-    session, act = out
+    session, act, quota_error = out
+    if quota_error:
+        return [("host", "broadcast.error", {"error": quota_error, "code": "quota_blocked"})]
     if act is None:
         # The session was already "live" — an idempotent double-click, OR the host's own
         # reconnect after a producer drop the sampler had marked degraded (see
@@ -1014,9 +1037,6 @@ async def _recording_start(ctx, payload):
     if not await mod.tx(lambda db: _feature_enabled(db, "recordings_enabled", default=True)):
         return "Recording is temporarily disabled platform-wide — contact support"
 
-    if await mod.tx(lambda db: _storage_over_limit(db, ctx.org_id)):
-        return "Storage limit reached for your plan — free up space or upgrade to keep recording"
-
     dual = await mod.tx(lambda db: commercial_crud.dual_recording_required(db, db.get(Event, ctx.event_id)))
     # Doc Section 14.1/17: R2/R3 events require two INDEPENDENT recording paths — same room,
     # two separate egress jobs, two separate rows/files — so a recorder failure on one never
@@ -1034,10 +1054,69 @@ async def _recording_start(ctx, payload):
     blocked = livekit.gcs_upload_blocked()
 
     roles = ("primary", "secondary") if dual else (None,)
-    started: list[tuple[str | None, str, str | None, str | None]] = []   # (role, filepath, egress_id, error)
+    paths = []
     for role in roles:
         suffix = f"-{role}" if role else ""
         filepath = f"zoikostream/{ctx.org_id}/{ctx.event_id}/{int(now.timestamp())}{suffix}.mp4"
+        paths.append((role, filepath))
+
+    def reserve(db):
+        org = db.scalar(
+            select(Organization).where(Organization.id == ctx.org_id).with_for_update()
+        )
+        if org is None:
+            return None, "Storage quota is unavailable for this organization"
+        if _current_recordings(db, ctx):
+            return None, "A recording is already running"
+
+        from . import org as org_svc
+        quota = org_svc.effective_storage_quota(db, ctx.org_id)
+        if not quota["configured"]:
+            return None, "Recording is unavailable until a storage quota is configured for this organization"
+        limit = quota["limit"]
+        used = float(org.storage_used_gb or 0)
+        if limit is not None and used >= limit:
+            return None, "Storage quota reached — remove stored recordings or contact your administrator"
+
+        if limit is not None:
+            active = db.scalars(
+                select(LiveRecording)
+                .where(
+                    LiveRecording.org_id == ctx.org_id,
+                    LiveRecording.status.in_(("recording", "paused")),
+                )
+                .with_for_update()
+            ).all()
+            if active:
+                return None, (
+                    "Another recording is using this organization's remaining storage headroom; "
+                    "wait for it to finish before starting another"
+                )
+
+        session = _current_session(db, ctx)
+        reservation_ids = []
+        for role, _filepath in paths:
+            row = LiveRecording(
+                event_id=ctx.event_id, org_id=ctx.org_id,
+                status="recording", quality=quality, role=role, started_at=now,
+                enforced=False, auto_upload=bool(settings.get("auto_upload", True)),
+                created_by=ctx.user_id,
+            )
+            if session:
+                row.session_id = session.id
+            db.add(row)
+            db.flush()
+            reservation_ids.append(str(row.id))
+        return reservation_ids, None
+
+    reservation_ids, reservation_error = await mod.tx(reserve)
+    if reservation_error:
+        return reservation_error
+    if reservation_ids is None:
+        raise RuntimeError("Storage reservation returned neither IDs nor an error")
+
+    started: list[tuple[str, str, str | None, str | None]] = []
+    for (_role, filepath), recording_id in zip(paths, reservation_ids):
         if blocked:
             egress_id, error = None, blocked
             log.warning("event %s: recording not started — storage misconfigured: %s",
@@ -1047,12 +1126,12 @@ async def _recording_start(ctx, payload):
             if egress_id is None and gcs_error:
                 error = gcs_error
                 log.warning("event %s: recording start not captured — %s", ctx.event_id, gcs_error)
-        started.append((role, filepath, egress_id, error))
+        started.append((recording_id, filepath, egress_id, error))
 
-    def work(db):
+    def finalize_start(db):
         rows = []
         session = _current_session(db, ctx)
-        for role, filepath, egress_id, error in started:
+        for recording_id, filepath, egress_id, error in started:
             # A path with no egress_id is NOT recording — LiveKit refused or never answered,
             # so nothing is being captured. It used to be written as status="recording"
             # anyway, which had three consequences, all of them wrong:
@@ -1060,23 +1139,21 @@ async def _recording_start(ctx, payload):
             #     "A recording is already running" and they could never retry;
             #   * the console showed a running timer for a file that did not exist;
             #   * it sat in the org's history as a recording that was never made.
-            # Terminal from the start, with the provider's own message attached. The attempt
-            # is still persisted — the diagnostics are the point — it is just not pretending
-            # to be in progress.
+            # The placeholder is terminalized now, with the provider's message attached.
+            # The attempt is still persisted for diagnostics, but is no longer treated as
+            # in-flight or as a captured file.
             captured_path = bool(egress_id)
-            r = LiveRecording(
-                event_id=ctx.event_id, org_id=ctx.org_id,
-                status="recording" if captured_path else "failed", quality=quality,
-                role=role, egress_id=egress_id, started_at=now,
-                stopped_at=None if captured_path else now,
-                enforced=captured_path, error=error,
-                auto_upload=bool(settings.get("auto_upload", True)),
-                file_url=filepath if egress_id else None, created_by=ctx.user_id,
-            )
+            r = db.get(LiveRecording, uuid.UUID(recording_id))
+            if r is None:
+                raise RuntimeError("Recording quota reservation disappeared before finalization")
+            r.status = "recording" if captured_path else "failed"
+            r.egress_id = egress_id
+            r.stopped_at = None if captured_path else now
+            r.enforced = captured_path
+            r.error = error
+            r.file_url = filepath if egress_id else None
             if session:
                 r.session_id = session.id
-            db.add(r)
-            db.flush()
             rows.append(r)
         captured = sum(1 for r in rows if r.enforced)
         note = (
@@ -1095,7 +1172,7 @@ async def _recording_start(ctx, payload):
         recording_comms_notify_started(db, rows[0])
         return out, act, captured
 
-    recs, act, captured = await mod.tx(work)
+    recs, act, captured = await mod.tx(finalize_start)
     envelopes = [("recording", "recording.update", r) for r in recs] + [("activity", "activity.new", act)]
     if not captured:
         # Nothing was captured on any path. The host must learn that NOW, on the click that
@@ -1106,7 +1183,7 @@ async def _recording_start(ctx, payload):
         # An envelope rather than a returned error string on purpose: a string short-circuits
         # mod.dispatch and would suppress the recording.update above, leaving the console with
         # no row to reconcile against and its own state untouched.
-        first_error = next((e for (_role, _fp, _eid, e) in started if e), None)
+        first_error = next((e for (_rid, _fp, _eid, e) in started if e), None)
         envelopes.append(("recording", "recording.error", {
             "message": f"Recording could not start — {first_error}" if first_error
                        else "Recording could not start — LiveKit egress did not accept the job.",

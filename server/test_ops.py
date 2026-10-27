@@ -312,6 +312,8 @@ def test_console_state_shape():
         assert set(out) == {"health", "badges", "elevation", "user"}
         assert set(out["badges"]) == {"live_operations", "event_readiness", "system_status"}
         assert out["health"]["overall"] in ("ok", "warn", "down")
+        assert out["health"]["integrated"] + out["health"]["not_configured"] == out["health"]["total"]
+        assert out["health"]["not_configured"] >= 2
         assert all(isinstance(v, int) for v in out["badges"].values())
     finally:
         db.rollback()

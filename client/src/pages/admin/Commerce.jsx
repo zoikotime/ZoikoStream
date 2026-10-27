@@ -146,7 +146,7 @@ function ProfilesTab() {
                     <p className="font-medium text-slate-800 dark:text-slate-100">{p.name}</p>
                   </div>
                   <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                    {[
+                    Version {p.version_label} · {[
                       p.requires_backup_contribution && "backup contribution",
                       p.requires_dual_recording && "dual recording",
                       p.requires_command_owner && "command owner",
@@ -210,7 +210,7 @@ function PoliciesTab() {
                     {p.vertical} · {p.risk_tier ? p.risk_tier.toUpperCase() : "All tiers"}
                   </p>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    {p.lead_time_min_hours}h{p.lead_time_max_hours ? `–${p.lead_time_max_hours}h` : "+"} notice · {p.refund_percentage}% refund
+                    Version {p.version_label} · {p.lead_time_min_hours}h{p.lead_time_max_hours ? `–${p.lead_time_max_hours}h` : "+"} notice · {p.refund_percentage}% refund
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
@@ -229,13 +229,22 @@ function PoliciesTab() {
   );
 }
 
-function ReconList({ title, items, render, empty }) {
+function ReconList({ title, items, render, empty, scrollable = false }) {
   return (
     <Panel title={title} count={items.length}>
       {items.length === 0 ? (
         <p className="text-sm text-slate-500 dark:text-slate-400">{empty}</p>
       ) : (
-        <ul className="space-y-2">{items.map(render)}</ul>
+        <div
+          role={scrollable ? "region" : undefined}
+          aria-label={scrollable ? `${title} list` : undefined}
+          tabIndex={scrollable ? 0 : undefined}
+          className={scrollable
+            ? "zk-scroll-thin max-h-[min(60vh,560px)] overflow-y-auto overflow-x-hidden overscroll-contain pr-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+            : undefined}
+        >
+          <ul className="space-y-2">{items.map(render)}</ul>
+        </div>
       )}
     </Panel>
   );
@@ -307,12 +316,12 @@ function ReconciliationTab() {
           />
           <ReconList
             title="Unmatched payment settlements" items={data.unmatched_settlements}
-            empty="None." render={(s) => (
+            empty="None." scrollable render={(s) => (
               <li key={s.id} className="flex items-start justify-between gap-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
-                <span className="min-w-0">
+                <span className="min-w-0 break-words">
                   {s.provider} · {s.provider_payment_ref || "no reference"}
                   {s.amount != null ? ` · ${s.amount} ${s.currency || ""}` : ""}
-                  <span className="mt-0.5 block text-xs opacity-80">{s.reason}</span>
+                  <span className="mt-0.5 block break-words text-xs opacity-80">{s.reason}</span>
                 </span>
                 {/* Attribution is a deliberate human act (doc P5) — never auto-allocated. */}
                 <Button variant="secondary" size="sm" className="shrink-0"
@@ -322,7 +331,7 @@ function ReconciliationTab() {
           />
           <ReconList
             title="Accepted orders with no invoice" items={data.orders_missing_invoice}
-            empty="None." render={(o) => (
+            empty="None." scrollable render={(o) => (
               <li key={o.id} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
                 Order {o.id.slice(0, 8)} · {o.total_amount} {o.currency}
               </li>

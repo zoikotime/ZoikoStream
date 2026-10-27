@@ -14,7 +14,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 
 vi.mock("../../api", () => ({
   default: { get: vi.fn(() => Promise.resolve({ data: {} })), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -49,7 +49,7 @@ describe("the rail is shorter without being smaller", () => {
       "/admin/dashboard", "/admin/live-events", "/admin/event-readiness",
       "/admin/organizations", "/admin/users", "/admin/security", "/admin/audit",
       "/admin/media", "/admin/subscriptions", "/admin/commerce", "/admin/analytics",
-      "/admin/support", "/admin/status", "/admin/settings",
+      "/admin/support", "/admin/status", "/admin/platform-configuration",
       "/admin/governance", "/admin/feature-flags", "/admin/releases",
     ]) {
       expect(document.querySelector(`a[href="${href}"]`), href).toBeTruthy();
@@ -100,6 +100,110 @@ describe("active highlighting follows the route", () => {
     const current = document.querySelectorAll('aside a[aria-current="page"]');
     expect(current).toHaveLength(1);
     expect(current[0]).toHaveAttribute("href", "/admin/media");
+  });
+});
+
+const StatusTabContent = () => (
+  <ConsoleTabs
+    label="System status"
+    idPrefix="status"
+    tabs={[
+      { key: "status", label: "System Status", render: () => <p>overview content</p> },
+      { key: "infrastructure", label: "Media Infrastructure", render: () => <p>infrastructure content</p> },
+      { key: "traffic", label: "API Traffic", render: () => <p>traffic content</p> },
+    ]}
+  />
+);
+
+function HistoryControls() {
+  const navigate = useNavigate();
+  return (
+    <div>
+      <button onClick={() => navigate(-1)}>Back</button>
+      <button onClick={() => navigate(1)}>Forward</button>
+    </div>
+  );
+}
+
+const statusNavigationAt = (entry) =>
+  render(
+    <MemoryRouter initialEntries={[entry]}>
+      <AdminSidebar open onClose={vi.fn()} state={{}} unknown={false} onChange={vi.fn()} />
+      <HistoryControls />
+      <Routes>
+        <Route path="/admin/status" element={<StatusTabContent />} />
+        <Route path="*" element={<p>other section</p>} />
+      </Routes>
+    </MemoryRouter>
+  );
+
+describe("System Status submenu follows the selected URL tab", () => {
+  it("highlights Overview on the default route and expands the parent", async () => {
+    statusNavigationAt("/admin/status");
+
+    expect(await screen.findByText("overview content")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "System Status" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Media Infrastructure" })).not.toHaveAttribute("aria-current");
+    expect(document.querySelectorAll('aside a[aria-current="page"]')).toHaveLength(1);
+  });
+
+  it("highlights infrastructure on a direct query URL", async () => {
+    statusNavigationAt("/admin/status?tab=infrastructure");
+
+    expect(await screen.findByText("infrastructure content")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "System Status" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("link", { name: "Media Infrastructure" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Overview" })).not.toHaveAttribute("aria-current");
+    expect(document.querySelectorAll('aside a[aria-current="page"]')).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "Media Infrastructure" }).className)
+      .toContain("focus-visible:ring-2");
+  });
+
+  it("falls back to the Overview submenu for a missing or invalid tab", async () => {
+    statusNavigationAt("/admin/status?tab=invalid");
+    expect(await screen.findByText("overview content")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("keeps sidebar selection synchronized through submenu and browser history navigation", async () => {
+    statusNavigationAt("/admin/status");
+
+    await userEvent.click(screen.getByRole("link", { name: "Media Infrastructure" }));
+    expect(await screen.findByText("infrastructure content")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Media Infrastructure" })).toHaveAttribute("aria-current", "page");
+
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(await screen.findByText("overview content")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+
+    await userEvent.click(screen.getByRole("button", { name: "Forward" }));
+    expect(await screen.findByText("infrastructure content")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Media Infrastructure" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("supports keyboard navigation through the submenu", async () => {
+    statusNavigationAt("/admin/status");
+    const infrastructure = screen.getByRole("link", { name: "Media Infrastructure" });
+
+    infrastructure.focus();
+    expect(infrastructure).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+
+    expect(await screen.findByText("infrastructure content")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Media Infrastructure" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("clears the submenu outside System Status and restores it when returning", async () => {
+    statusNavigationAt("/admin/status?tab=infrastructure");
+
+    await userEvent.click(screen.getByRole("link", { name: "Media" }));
+    expect(await screen.findByText("other section")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Media Infrastructure" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("link", { name: "System Status" }));
+    expect(await screen.findByText("overview content")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
   });
 });
 
@@ -174,7 +278,9 @@ describe("merging a page did not retire its route", () => {
     // Read against the router source rather than mounting the whole app, which would drag in
     // auth, the providers and every lazy page. What must not regress is that the <Route>
     // still exists — deleting one is exactly what this catches.
-    for (const path of ["/admin/roles", "/admin/developers", "/admin/infrastructure"]) {
+    for (const path of [
+      "/admin/roles", "/admin/developers", "/admin/infrastructure", "/admin/settings",
+    ]) {
       expect(appSource, path).toContain(`path="${path}"`);
     }
   });

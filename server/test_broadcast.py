@@ -15,7 +15,8 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.models import (
-    AnalyticsSnapshot, BroadcastSession, Event, LiveActivity, LiveRecording, Organization, User,
+    AnalyticsSnapshot, BroadcastSession, Event, LiveActivity, LiveRecording, Organization,
+    Plan, Subscription, User,
 )
 from app.services import broadcast as bc
 from app.services import moderation as m
@@ -501,6 +502,13 @@ def test_concurrent_golive_creates_exactly_one_open_session():
     actually gets hit and actually recovers cleanly."""
     db = SessionLocal()
     org = _db_org(db)
+    plan = Plan(name="Concurrent go-live test", slug=f"concurrent-{uuid.uuid4().hex[:8]}",
+                max_storage_gb=50, max_streaming_hours=20, max_concurrent_streams=5)
+    db.add(plan)
+    db.flush()
+    subscription = Subscription(org_id=org.id, plan_id=plan.id, status="active", seats=1)
+    db.add(subscription)
+    db.flush()
     user = _db_user(db, org)
     ev = _db_event(db, org, user, status="published")
     db.commit()
@@ -529,7 +537,7 @@ def test_concurrent_golive_creates_exactly_one_open_session():
     finally:
         db.expire_all()
         sessions = db.scalars(select(BroadcastSession).where(BroadcastSession.event_id == ev.id)).all()
-        _db_cleanup(db, org, user, ev, extra_rows=sessions)
+        _db_cleanup(db, org, user, ev, extra_rows=[*sessions, subscription, plan])
         db.close()
 
 

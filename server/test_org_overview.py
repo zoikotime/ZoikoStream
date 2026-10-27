@@ -22,6 +22,7 @@ from app.models import (
     Invitation,
     LiveRecording,
     Organization,
+    PlatformSetting,
     Plan,
     Subscription,
     SupportTicket,
@@ -164,10 +165,25 @@ def test_entitlement_percentages_use_real_plan_limits():
 
 
 def test_no_plan_means_no_invented_ceiling():
-    """An org without a subscription must report usage with a null limit — never a
-    made-up denominator, which would render a meaningless progress bar."""
+    """Without a subscription or configured defaults, usage has no denominator."""
     db = SessionLocal()
     try:
+        storage = db.get(PlatformSetting, "storage_limits")
+        if storage is None:
+            db.add(PlatformSetting(key="storage_limits", value={"default_gb": None}))
+        else:
+            storage.value = {**(storage.value or {}), "default_gb": None}
+        streaming = db.get(PlatformSetting, "streaming_limits")
+        if streaming is None:
+            db.add(PlatformSetting(key="streaming_limits", value={
+                "default_hours": None, "default_concurrent_streams": None,
+            }))
+        else:
+            streaming.value = {
+                **(streaming.value or {}),
+                "default_hours": None,
+                "default_concurrent_streams": None,
+            }
         org = _org(db, storage_used_gb=12.0)
         _user(db, org)
         ent = org_svc.entitlements(db, org)

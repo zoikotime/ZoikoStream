@@ -85,6 +85,17 @@ describe("the console header does not overclaim", () => {
     expect(screen.getByText(/Operational · 3 not monitored/)).toBeInTheDocument();
   });
 
+  it("reports unintegrated services as limitations, not outages or full operation", () => {
+    topbar({ overall: "ok", degraded: 0, total: 9, integrated: 7, not_configured: 2, unmonitored: 0 });
+    expect(screen.queryByText("All systems operational")).not.toBeInTheDocument();
+    expect(screen.getByText("Operational with limitations · 2 not integrated")).toBeInTheDocument();
+  });
+
+  it("preserves outage precedence while also explaining integration gaps", () => {
+    topbar({ overall: "down", degraded: 1, total: 9, not_configured: 2, unmonitored: 0 });
+    expect(screen.getByText("Service disruption · 2 not integrated")).toBeInTheDocument();
+  });
+
   it("says 'All systems operational' only when everything was probed", () => {
     topbar({ overall: "ok", degraded: 0, total: 5, unmonitored: 0 });
     expect(screen.getByText("All systems operational")).toBeInTheDocument();

@@ -69,16 +69,9 @@ def _monthly_revenue(db: Session, org_id=None) -> float:
 
 
 def _streaming_hours(db: Session) -> float:
-    """Real total broadcast hours from broadcast-session start/end timestamps (live = up
-    to now). paused_ms is subtracted so time spent paused doesn't count as streamed."""
-    now = datetime.now(timezone.utc)
-    sessions = db.scalars(select(BroadcastSession).where(BroadcastSession.started_at.isnot(None))).all()
-    # ponytail: loads all sessions; add a SQL age() sum if this table gets large.
-    secs = sum(
-        ((s.ended_at or now) - s.started_at).total_seconds() - (s.paused_ms or 0) / 1000
-        for s in sessions if s.started_at
-    )
-    return round(max(secs, 0) / 3600, 1)
+    """Total streamed hours using the same paused-time accounting as organization quotas."""
+    from . import org as org_svc
+    return round(org_svc.streaming_seconds(db) / 3600, 1)
 
 
 def dashboard_summary(db: Session) -> dict:
@@ -796,13 +789,16 @@ def _probe_redis() -> dict:
     return result
 
 
-def platform_health(db: Session) -> dict:
+def platform_health(db: Session, *, auth_latency_ms: float | None = None) -> dict:
     """Health of each dependency, saying for each whether it was PROBED or only configured.
 
     `overall` is computed from probed services only. `unmonitored` counts the services that are
     configured but that nothing here verifies — the console states that number next to the
-    verdict so "operational" is never read as covering something that was not checked.
+    verdict so "operational" is never read as covering something that was not checked. The API
+    latency is this health-check operation's processing time; authentication latency is supplied
+    by the caller that ran the normal token and server-side session verification.
     """
+    started = time.perf_counter()
     services = []
 
     t = time.perf_counter()
@@ -815,13 +811,13 @@ def platform_health(db: Session) -> dict:
         services.append({"id": "database", "name": "Database", "status": "down",
                          "latency_ms": None, "note": "Unreachable"})
 
-    # Evidenced by the request itself: this response could not exist if the API were not
-    # serving, and every caller of this function has already passed JWT verification to get
-    # here. Stated as exactly that, rather than as an independent check.
-    services.append({"id": "api", "name": "API", "status": "ok",
-                     "note": "Serving this request"})
+    # This is the time to process this health-check operation, not a separate network round trip.
+    api_service = {"id": "api", "name": "API", "status": "ok",
+                   "latency_ms": None, "note": "Health-check request processing time"}
+    services.append(api_service)
     services.append({"id": "auth", "name": "Authentication", "status": "ok",
-                     "note": "Verified this request's token"})
+                     "latency_ms": auth_latency_ms,
+                     "note": "Current request token and session verification"})
 
     services.append(_probe_redis())
 
@@ -865,4 +861,12 @@ def platform_health(db: Session) -> dict:
     probed = [s["status"] for s in services if s["status"] in PROBED_STATUSES]
     overall = "down" if "down" in probed else "warn" if "warn" in probed else "ok"
     unmonitored = sum(1 for s in services if s["status"] == "unmonitored")
-    return {"overall": overall, "services": services, "unmonitored": unmonitored}
+    not_configured = sum(1 for s in services if s["status"] == "not_configured")
+    api_service["latency_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    return {
+        "overall": overall,
+        "services": services,
+        "integrated": len(services) - not_configured,
+        "not_configured": not_configured,
+        "unmonitored": unmonitored,
+    }

@@ -24,6 +24,7 @@ import SupportAccessPanel from "./SupportAccessPanel";
 import RetentionPolicyPanel from "./RetentionPolicyPanel";
 import Media from "./Media";
 import Commerce from "./Commerce";
+import { CapacityPoolsTab, SellerEntitiesTab } from "./CommerceFinanceOps";
 
 // Pages that read elevation get it the way the admin shell provides it: Outlet context.
 const ACTIVE_ELEVATION = {
@@ -55,7 +56,7 @@ beforeEach(() => vi.clearAllMocks());
 const quota = (over) => ({
   key: "storage", label: "Storage", used: 4, limit: null, unit: "GB", percent: null, remaining: null,
   unlimited: false, quota_state: "not_applicable", usage_state: "measured", enforced: true,
-  enforced_limit: null, ...over,
+  effective_limit: null, quota_source: "unconfigured", enforced_limit: null, ...over,
 });
 
 const USAGE = {
@@ -65,8 +66,15 @@ const USAGE = {
       org_id: "o1", organization: "Acme", is_test: false, plan: null, plan_slug: null,
       subscription_status: null, entitlement_source: "none", current_period_end: null, trial_ends_at: null,
       quotas: [
-        quota({ enforced_limit: 100 }),
-        quota({ key: "streaming_hours", label: "Streaming hours", unit: "hrs", enforced: false }),
+        quota({
+          effective_limit: 100, enforced_limit: 100, quota_source: "platform_default",
+          quota_state: "within", percent: 4, remaining: 96,
+        }),
+        quota({
+          key: "streaming_hours", label: "Streaming hours", unit: "hrs", limit: null,
+          effective_limit: 20, enforced_limit: 20, quota_source: "platform_default",
+          quota_state: "within", percent: 20, remaining: 16,
+        }),
       ],
       metrics: [
         { key: "events_created", label: "Events", value: 3, unit: "events", period: "lifetime", state: "measured" },
@@ -89,10 +97,13 @@ describe("Usage & Entitlements", () => {
   it("renders the server's quota states without inventing numbers", async () => {
     wrap(<UsageEntitlements plans={[{ id: "p1", slug: "pro", name: "Pro" }]} />);
     const acme = (await screen.findByText("Acme")).closest("li");
-    // No plan is "not applicable", and the platform ceiling that still applies is stated.
-    expect(within(acme).getAllByText("No entitled plan").length).toBeGreaterThan(0);
-    expect(within(acme).getByText(/Enforced ceiling 100 GB/)).toBeInTheDocument();
-    expect(within(acme).getByText(/Not enforced — shown against the plan only/)).toBeInTheDocument();
+    // Platform defaults grant a finite allowance to never-subscribed organizations.
+    const storage = within(acme).getByTestId("quota-storage");
+    const hours = within(acme).getByTestId("quota-streaming_hours");
+    expect(storage).toHaveTextContent("4 / 100 GB");
+    expect(storage).toHaveTextContent("Platform default");
+    expect(hours).toHaveTextContent("4 / 20 hrs");
+    expect(hours).toHaveTextContent("Platform default");
     // Unavailable is said, never rendered as 0.
     expect(within(within(acme).getByTestId("metric-delivery_windowed")).getByText("Not measured")).toBeInTheDocument();
     expect(within(acme).getByText(/\+ 2 with unknown size/)).toBeInTheDocument();
@@ -330,6 +341,44 @@ describe("Media", () => {
 // ── Commerce: the historical catalog anomaly is flagged, not presented as normal ──────
 
 describe("Commerce catalog", () => {
+  it("keeps seller entities with the same legal name distinct by their registered codes", async () => {
+    vi.mocked(api.get).mockImplementation((url) => {
+      if (url === "/commercial/seller-entities") {
+        return Promise.resolve({ data: [
+          { id: "seller1", code: "ent_a1", legal_name: "Zoiko Test Ltd", status: "active",
+            country: "GB", default_currency: null, invoice_number_prefix: null },
+          { id: "seller2", code: "ent_b2", legal_name: "Zoiko Test Ltd", status: "active",
+            country: "IN", default_currency: null, invoice_number_prefix: null },
+        ] });
+      }
+      return Promise.resolve({ data: { mode: "not_configured" } });
+    });
+    wrap(<SellerEntitiesTab />);
+
+    expect(await screen.findAllByText("Zoiko Test Ltd")).toHaveLength(2);
+    expect(screen.getByText(/ent_a1/)).toBeInTheDocument();
+    expect(screen.getByText(/ent_b2/)).toBeInTheDocument();
+  });
+
+  it("keeps capacity pools with different windows distinct", async () => {
+    vi.mocked(api.get).mockImplementation((url) => {
+      if (url === "/commercial/capacity-pools") {
+        return Promise.resolve({ data: [
+          { id: "pool1", resource_type: "operator", region: null, status: "draft",
+            total_capacity: 2, window_start: "2026-10-27T09:00:00Z", window_end: "2026-10-27T12:00:00Z" },
+          { id: "pool2", resource_type: "operator", region: null, status: "draft",
+            total_capacity: 3, window_start: "2026-10-27T13:00:00Z", window_end: "2026-10-27T16:00:00Z" },
+        ] });
+      }
+      return Promise.resolve({ data: { mode: "not_configured" } });
+    });
+    wrap(<CapacityPoolsTab />);
+
+    expect(await screen.findAllByText("operator")).toHaveLength(2);
+    expect(screen.getByText("Pools")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+  });
+
   it("flags a published version with no recorded publisher", async () => {
     vi.mocked(api.get).mockImplementation((url) => {
       if (url === "/commercial/catalog-versions") {
@@ -344,5 +393,49 @@ describe("Commerce catalog", () => {
     wrap(<Commerce />);
     expect(await screen.findByTestId("catalog-integrity-issue")).toHaveTextContent(/not produced by the governed publish path/);
     expect(screen.getByText("Anomaly")).toBeInTheDocument();
+  });
+
+  it("shows service profile versions separately without collapsing same-name records", async () => {
+    vi.mocked(api.get).mockImplementation((url) => {
+      if (url === "/commercial/service-profiles") {
+        return Promise.resolve({ data: [
+          { id: "sp1", version_label: "v1", risk_tier: "r2", name: "R2 Dual recording", status: "published",
+            requires_backup_contribution: false, requires_dual_recording: true, requires_command_owner: false,
+            requires_reserved_capacity: false },
+          { id: "sp2", version_label: "v2", risk_tier: "r2", name: "R2 Dual recording", status: "published",
+            requires_backup_contribution: false, requires_dual_recording: true, requires_command_owner: false,
+            requires_reserved_capacity: false },
+        ] });
+      }
+      if (url === "/commercial/catalog-versions") return Promise.resolve({ data: [] });
+      return Promise.resolve({ data: { mode: "not_configured" } });
+    });
+    wrap(<Commerce />);
+    fireEvent.click(screen.getByRole("tab", { name: "Service Profiles" }));
+
+    expect(await screen.findByText(/Version v1/)).toBeInTheDocument();
+    expect(screen.getByText(/Version v2/)).toBeInTheDocument();
+    expect(screen.getAllByText("R2 Dual recording")).toHaveLength(2);
+  });
+
+  it("shows cancellation policy versions separately without collapsing same-scope records", async () => {
+    vi.mocked(api.get).mockImplementation((url) => {
+      if (url === "/commercial/cancellation-policies") {
+        return Promise.resolve({ data: [
+          { id: "cp1", version_label: "v1", vertical: "memorials", risk_tier: null, status: "published",
+            lead_time_min_hours: 0, lead_time_max_hours: null, refund_percentage: 50 },
+          { id: "cp2", version_label: "v2", vertical: "memorials", risk_tier: null, status: "published",
+            lead_time_min_hours: 0, lead_time_max_hours: null, refund_percentage: 50 },
+        ] });
+      }
+      if (url === "/commercial/catalog-versions") return Promise.resolve({ data: [] });
+      return Promise.resolve({ data: { mode: "not_configured" } });
+    });
+    wrap(<Commerce />);
+    fireEvent.click(screen.getByRole("tab", { name: "Cancellation Policies" }));
+
+    expect(await screen.findByText(/Version v1/)).toBeInTheDocument();
+    expect(screen.getByText(/Version v2/)).toBeInTheDocument();
+    expect(screen.getAllByText("memorials · All tiers")).toHaveLength(2);
   });
 });

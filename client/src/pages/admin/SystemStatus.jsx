@@ -3,6 +3,7 @@ import { Panel, HealthDot } from "../../components/admin";
 import api, { diagnoseLoadError } from "../../api";
 import useApi from "../../hooks/useApi";
 import Skeleton from "../../ui/Skeleton";
+import { qualifyHealthVerdict } from "../../components/admin/platformHealthVerdict";
 
 const VERDICT = {
   ok: { status: "ok", label: "All systems operational" },
@@ -47,9 +48,13 @@ export default function SystemStatus() {
     );
   }
 
-  const verdict = VERDICT[data.overall] || VERDICT.ok;
+  const baseVerdict = VERDICT[data.overall];
+  const verdict = qualifyHealthVerdict(
+    data,
+    baseVerdict || { status: "neutral", label: "Status unavailable" }
+  );
   const services = data.services || [];
-  const configured = services.filter((s) => s.status !== "not_configured");
+  const integrated = data.integrated ?? services.filter((s) => s.status !== "not_configured").length;
   const pending = services.filter((s) => s.status === "not_configured");
 
   return (
@@ -60,9 +65,9 @@ export default function SystemStatus() {
       </div>
 
       <div className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-white px-5 py-3.5 dark:border-slate-800 dark:bg-slate-900/50">
-        <HealthDot status={verdict.status} pulse badge>{verdict.label}</HealthDot>
+        <HealthDot status={verdict.status} pulse={verdict.status === "ok"} badge>{verdict.label}</HealthDot>
         <span className="text-sm text-slate-400">
-          {configured.length} of {services.length} services integrated
+          {integrated} of {services.length} services integrated
         </span>
       </div>
 

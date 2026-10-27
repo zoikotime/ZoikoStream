@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FiSave } from "react-icons/fi";
 import { Panel, Button } from "../../components/admin";
 import { Input, Label, Switch } from "../../ui/forms";
@@ -10,13 +10,12 @@ import RetentionPolicyPanel from "./RetentionPolicyPanel";
 
 const DEFAULTS = {
   brand: { name: "ZoikoStream", primary_color: "#8b5cf6", support_email: "" },
-  // null, not a number. When unset the server enforces NO ceiling
-  // (platform_settings.storage_ceiling_gb / max_bitrate_kbps return None), but this form used
-  // to seed 5000 GB and 8000 kbps — so it displayed limits that were not in force, and saving
-  // the page untouched WROTE them, silently turning a displayed default into an enforced cap.
-  // Same rule as audience_envelope below: unset is a real state, rendered as an empty field.
+  // Null is a real state: default_gb grants no fallback quota, while max_gb grants no hard
+  // ceiling. The previous form seeded 5000 GB / 8000 kbps even when those limits were not in
+  // force, and saving untouched values silently turned displayed defaults into enforced caps.
+  // Render unset values as empty fields rather than implying a configured limit.
   storage_limits: { default_gb: null, max_gb: null },
-  streaming_limits: { default_hours: null, max_bitrate_kbps: null },
+  streaming_limits: { default_hours: null, default_concurrent_streams: null, max_bitrate_kbps: null },
   global: { signups_enabled: true, maintenance_mode: false },
 };
 
@@ -27,6 +26,183 @@ const DEFAULTS = {
 // some numeric default, or saving the page with this field untouched would silently
 // configure a band that Operations never approved.
 const parseEnvelope = (value) => (value === "" || value == null ? null : Number(value));
+
+function hexToHsv(value) {
+  const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value || "");
+  const fallback = { hue: 258.3, saturation: 0.626, brightness: 0.965 };
+  if (!match) return fallback;
+
+  const hex = match[1].length === 3
+    ? [...match[1]].map((digit) => digit + digit).join("")
+    : match[1];
+  const [red, green, blue] = [0, 2, 4].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255);
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const delta = max - min;
+  let hue = 0;
+  if (delta) {
+    if (max === red) hue = 60 * (((green - blue) / delta) % 6);
+    else if (max === green) hue = 60 * ((blue - red) / delta + 2);
+    else hue = 60 * ((red - green) / delta + 4);
+  }
+  return {
+    hue: (hue + 360) % 360,
+    saturation: max ? delta / max : 0,
+    brightness: max,
+  };
+}
+
+function hsvToHex(hue, saturation, brightness) {
+  const chroma = brightness * saturation;
+  const segment = hue / 60;
+  const secondary = chroma * (1 - Math.abs((segment % 2) - 1));
+  const rgb = segment < 1 ? [chroma, secondary, 0]
+    : segment < 2 ? [secondary, chroma, 0]
+      : segment < 3 ? [0, chroma, secondary]
+        : segment < 4 ? [0, secondary, chroma]
+          : segment < 5 ? [secondary, 0, chroma]
+            : [chroma, 0, secondary];
+  const offset = brightness - chroma;
+  return `#${rgb.map((channel) => Math.round((channel + offset) * 255)
+    .toString(16).padStart(2, "0")).join("")}`;
+}
+
+function PrimaryColorField({ value, onChange }) {
+  const containerRef = useRef(null);
+  const triggerRef = useRef(null);
+  const hueRef = useRef(null);
+  const [open, setOpen] = useState(false);
+  const { hue, saturation, brightness } = hexToHsv(value);
+  const color = /^#?(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(value || "")
+    ? (value.startsWith("#") ? value : `#${value}`)
+    : "#8b5cf6";
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOutside = (event) => {
+      if (!containerRef.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    hueRef.current?.focus();
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  const updateSaturationBrightness = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const nextSaturation = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const nextBrightness = 1 - Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+    onChange(hsvToHex(hue, nextSaturation, nextBrightness));
+  };
+
+  const changeSaturationBrightnessByKey = (event) => {
+    const step = event.shiftKey ? 0.1 : 0.02;
+    let nextSaturation = saturation;
+    let nextBrightness = brightness;
+    if (event.key === "ArrowLeft") nextSaturation -= step;
+    else if (event.key === "ArrowRight") nextSaturation += step;
+    else if (event.key === "ArrowDown") nextBrightness -= step;
+    else if (event.key === "ArrowUp") nextBrightness += step;
+    else return;
+    event.preventDefault();
+    onChange(hsvToHex(hue, Math.max(0, Math.min(1, nextSaturation)),
+      Math.max(0, Math.min(1, nextBrightness))));
+  };
+
+  return (
+    <div ref={containerRef} className="min-w-0">
+      <Label>Primary color</Label>
+      <div className="flex items-center gap-2">
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={() => setOpen((current) => !current)}
+          aria-label="Choose primary color"
+          aria-expanded={open}
+          aria-controls={open ? "primary-color-picker" : undefined}
+          className="h-9 w-11 shrink-0 rounded-lg border border-slate-200 shadow-inner outline-none transition focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 dark:border-slate-700 dark:focus-visible:ring-offset-slate-950"
+          style={{ backgroundColor: color }}
+        />
+        <Input
+          variant="console"
+          value={value}
+          aria-label="Primary color hex value"
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </div>
+      {open && (
+        <div
+          id="primary-color-picker"
+          role="group"
+          aria-label="Primary color picker"
+          className="mt-3 w-full max-w-[280px] rounded-xl border border-slate-200 bg-white p-3 shadow-lg dark:border-slate-700 dark:bg-slate-900"
+        >
+          <div
+            role="slider"
+            tabIndex={0}
+            aria-label="Color saturation and brightness"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(saturation * 100)}
+            aria-valuetext={`${Math.round(saturation * 100)}% saturation, ${Math.round(brightness * 100)}% brightness`}
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              updateSaturationBrightness(event);
+            }}
+            onPointerMove={(event) => {
+              if (event.buttons === 1) updateSaturationBrightness(event);
+            }}
+            onKeyDown={changeSaturationBrightnessByKey}
+            className="relative h-32 w-full cursor-crosshair touch-none rounded-md outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+            style={{
+              backgroundColor: `hsl(${hue} 100% 50%)`,
+              backgroundImage: "linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, transparent)",
+            }}
+          >
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_#111]"
+              style={{ left: `${saturation * 100}%`, top: `${(1 - brightness) * 100}%` }}
+            />
+          </div>
+          <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300" htmlFor="primary-color-hue">
+            Hue
+          </label>
+          <input
+            ref={hueRef}
+            id="primary-color-hue"
+            type="range"
+            min="0"
+            max="359"
+            value={Math.round(hue)}
+            onChange={(event) => onChange(hsvToHex(Number(event.target.value), saturation, brightness))}
+            aria-label="Primary color hue"
+            className="mt-1 h-4 w-full cursor-pointer accent-violet-600"
+          />
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span className="font-mono text-xs uppercase text-slate-600 dark:text-slate-300">{color}</span>
+            <Button variant="secondary" size="sm" onClick={() => {
+              setOpen(false);
+              triggerRef.current?.focus();
+            }}>
+              Done
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function useSettingsData() {
   return useApi(() => api.get("/admin/settings").then((r) => r.data));
@@ -96,6 +272,7 @@ function SettingsForm({ settings, onSaved }) {
             // form does not edit (require_media_plane) must ride along or it is silently lost.
             ...(settings.streaming_limits?.value || {}),
             default_hours: parseEnvelope(form.streaming_limits.default_hours),
+            default_concurrent_streams: parseEnvelope(form.streaming_limits.default_concurrent_streams),
             max_bitrate_kbps: parseEnvelope(form.streaming_limits.max_bitrate_kbps),
             // Capacity protection (services/admission.py): blank = no ceiling, the default.
             viewer_admission_ceiling: parseEnvelope(form.streaming_limits.viewer_admission_ceiling),
@@ -137,29 +314,18 @@ function SettingsForm({ settings, onSaved }) {
             <Label>Support email</Label>
             <Input variant="console" type="email" value={form.brand.support_email} onChange={(e) => setField("brand", "support_email", e.target.value)} />
           </div>
-          <div>
-            <Label>Primary color</Label>
-            <div className="flex items-center gap-2">
-              <input
-                type="color"
-                value={form.brand.primary_color}
-                onChange={(e) => setField("brand", "primary_color", e.target.value)}
-                className="h-9 w-11 shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
-                aria-label="Primary color"
-              />
-              <Input variant="console" value={form.brand.primary_color} onChange={(e) => setField("brand", "primary_color", e.target.value)} />
-            </div>
-          </div>
+          <PrimaryColorField
+            value={form.brand.primary_color}
+            onChange={(color) => setField("brand", "primary_color", color)}
+          />
         </div>
       </Panel>
 
-      <Panel eyebrow="Limits" title="Storage & Streaming Limits" description="Max storage and max bitrate are enforced platform-wide as a hard ceiling on top of every organization's own plan. Default storage and default streaming hours are not yet applied anywhere — they don't do anything today.">
+      <Panel eyebrow="Limits" title="Storage & Streaming Limits" description="Server-side quotas control new recording and broadcast starts.">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <Label>Default storage (GB)</Label>
-            {/* Read-only: nothing provisions from this value (see the panel description). An
-                editable field that affects nothing is a control that lies about what it does. */}
-            <Input variant="console" type="number" value={form.storage_limits.default_gb ?? ""} placeholder="Not set" disabled className="opacity-60" />
+            <Input variant="console" type="number" min={0} value={form.storage_limits.default_gb ?? ""} placeholder="Not set" onChange={(e) => setField("storage_limits", "default_gb", e.target.value)} />
           </div>
           <div>
             <Label>Max storage (GB)</Label>
@@ -167,7 +333,11 @@ function SettingsForm({ settings, onSaved }) {
           </div>
           <div>
             <Label>Default streaming hours</Label>
-            <Input variant="console" type="number" value={form.streaming_limits.default_hours ?? ""} placeholder="Not set" disabled className="opacity-60" />
+            <Input variant="console" type="number" min={0} value={form.streaming_limits.default_hours ?? ""} placeholder="Not set" onChange={(e) => setField("streaming_limits", "default_hours", e.target.value)} />
+          </div>
+          <div>
+            <Label>Default concurrent streams</Label>
+            <Input variant="console" type="number" min={0} step={1} value={form.streaming_limits.default_concurrent_streams ?? ""} placeholder="Not set" onChange={(e) => setField("streaming_limits", "default_concurrent_streams", e.target.value)} />
           </div>
           <div>
             <Label>Max bitrate (kbps)</Label>
@@ -210,6 +380,18 @@ function SettingsForm({ settings, onSaved }) {
             </p>
           </div>
         </div>
+        <p className="mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+          Defaults apply only to organizations that have never had a subscription. Finite
+          subscription limits remain in force after a lapse; a lapsed subscription with no
+          finite limit does not grant access. Blank defaults do not grant access.
+          Storage blocks new recording starts at the effective quota, but a LiveKit recording
+          already in progress may finish above it. Only one recording per organization can
+          consume finite storage headroom at a time. Streaming hours are cumulative across the
+          organization&apos;s broadcasts, counting concurrent broadcasts independently; an
+          active broadcast may finish, while new starts are blocked at the hours or concurrent
+          stream limit. Organizations without a plan need a default concurrent-stream limit
+          configured before they can start a broadcast.
+        </p>
       </Panel>
 
       <Panel eyebrow="Access" title="Global Controls">

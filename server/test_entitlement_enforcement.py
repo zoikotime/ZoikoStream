@@ -23,7 +23,9 @@ from sqlalchemy.orm import Session
 
 from _testsupport import code_only
 from app.db import engine
-from app.models import (SUBSCRIPTION_ENTITLED_STATES, Organization, Plan, Subscription, User)
+from app.models import (
+    SUBSCRIPTION_ENTITLED_STATES, Organization, Plan, PlatformSetting, Subscription, User,
+)
 # `org` FIRST, deliberately. services/org.py imports engagement_score from broadcast, while
 # broadcast reaches org again through webhooks -> org_comms. That pre-existing cycle resolves
 # only when org is the module that starts the import, which is the order the app itself uses.
@@ -94,6 +96,22 @@ class TestEnforcementSeparation:
             biz = db.scalar(select(Plan).where(Plan.slug == "business"))
             assert dev is not None and biz is not None
             made = []
+            settings_snapshot = {}
+            for key, fields in (
+                ("storage_limits", {"default_gb": None, "max_gb": None}),
+                ("streaming_limits", {
+                    "default_hours": None, "default_concurrent_streams": None,
+                }),
+            ):
+                row = db.get(PlatformSetting, key)
+                settings_snapshot[key] = (
+                    None if row is None else (dict(row.value or {}), row.category, row.updated_by)
+                )
+                if row is None:
+                    row = PlatformSetting(key=key, value=fields)
+                    db.add(row)
+                else:
+                    row.value = {**(row.value or {}), **fields}
 
             def org(name, *, storage=0.0, members=1, plan=None, state="trialing", sub=True):
                 o = Organization(name=f"{name}-{tag}", storage_used_gb=storage)
@@ -115,6 +133,13 @@ class TestEnforcementSeparation:
                 db.execute(text("DELETE FROM subscriptions WHERE org_id=:o"), {"o": oid})
                 db.execute(text("DELETE FROM users WHERE org_id=:o"), {"o": oid})
                 db.execute(text("DELETE FROM organizations WHERE id=:o"), {"o": oid})
+            for key, snapshot in settings_snapshot.items():
+                row = db.get(PlatformSetting, key)
+                if snapshot is None:
+                    if row is not None:
+                        db.delete(row)
+                elif row is not None:
+                    row.value, row.category, row.updated_by = snapshot
             db.commit()
 
     # 1/2/3 — entitled states are unchanged
@@ -182,17 +207,15 @@ class TestEnforcementSeparation:
         assert org_svc.enforcement_plan(db, o.id).id == biz.id
         assert bc._storage_over_limit(db, o.id) is False, "60 GB is under Business's 500 GB"
 
-    # 8 — no subscription row: unchanged, nothing fabricated
+    # 8 — no subscription and no configured fallback: fail closed, without fabricating a plan
     def test_an_organization_with_no_subscription_gets_no_fabricated_plan(self, ctx):
-        """DOCUMENTS AN OPEN GAP rather than closing it. What governs an organization that has
-        never had a subscription is an unanswered Product question, so behaviour here is
-        deliberately unchanged and no default plan is invented."""
+        """A missing subscription and missing applicable default block new recordings."""
         db, _, _, mk = ctx
         o = mk("nosub", storage=60.0, sub=False)
         db.commit()
         assert org_svc.enforcement_plan(db, o.id) is None, "no plan may be fabricated"
-        assert bc._storage_over_limit(db, o.id) is False, \
-            "unchanged pre-existing behaviour — post-subscription policy is undefined"
+        assert bc._storage_over_limit(db, o.id) is True, \
+            "an unconfigured storage quota must fail closed"
 
     # 9 — display/reporting semantics preserved
     def test_the_overview_payload_still_reports_no_invented_ceiling(self, ctx):
