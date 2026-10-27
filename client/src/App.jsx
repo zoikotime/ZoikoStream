@@ -162,6 +162,13 @@ function LegacyModeratorRedirect() {
   return <Navigate to={`/host/dashboard${search}`} replace />;
 }
 
+// Keep old Platform Configuration bookmarks working while the browser route uses the
+// canonical page name. Preserve filters/deep-link parameters and avoid a Back-history loop.
+function LegacyPlatformSettingsRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`/admin/platform-configuration${search}${hash}`} replace />;
+}
+
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
 // so the console nav never 404s. Everything else in the sidebar is a real page below.
 const adminStubs = [];
@@ -377,7 +384,8 @@ export default function App() {
                   <Route path="/admin/subscriptions" element={<Subscriptions />} />
                   <Route path="/admin/analytics" element={<Analytics />} />
                   <Route path="/admin/audit" element={<AuditLogs />} />
-                  <Route path="/admin/settings" element={<PlatformSettings />} />
+                  <Route path="/admin/platform-configuration" element={<PlatformSettings />} />
+                  <Route path="/admin/settings" element={<LegacyPlatformSettingsRedirect />} />
                   <Route path="/admin/status" element={<SystemStatusConsole />} />
                   <Route path="/admin/feature-flags" element={<FeatureFlags />} />
                   <Route path="/admin/releases" element={<ReleaseCenter />} />

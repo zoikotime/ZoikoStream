@@ -1,6 +1,7 @@
 import hmac
 import ipaddress
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -123,6 +124,7 @@ def get_current_user(
     """
     from .services import auth_sessions
 
+    started = time.perf_counter()
     unauthorized = HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
     try:
         payload = jwt.decode(creds.credentials, settings.SECRET_KEY, algorithms=[ALGORITHM])
@@ -137,6 +139,7 @@ def get_current_user(
     except auth_sessions.SessionInvalid as exc:
         raise auth_sessions.http_error(exc)
     request.state.auth_session = session
+    request.state.auth_latency_ms = round((time.perf_counter() - started) * 1000, 1)
     return user
 
 

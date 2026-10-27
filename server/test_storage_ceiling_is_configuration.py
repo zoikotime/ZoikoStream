@@ -1,4 +1,4 @@
-"""The 5,000 GB storage ceiling is configuration, not a default — pinned so it stays that way.
+"""The storage ceiling is configuration, not an allowance for an unconfigured organization.
 
 A report arrived claiming organizations with no entitled plan were "receiving an unintended
 default storage ceiling of 5,000 GB". They are not. Nothing in this repository contains that
@@ -8,10 +8,10 @@ number as a storage fallback:
     returns None when it is absent. "storage_limits" is in routers.admin.EDITABLE_SETTING_KEYS,
     so 5000 is a value an administrator entered in Settings -> Storage & Streaming Limits.
 
-What the console shows for such an organization is already two separate facts, and says so:
-
-    quota_state = "not_applicable"   <- there is no entitlement
-    enforced_limit = <ceiling>       <- what actually refuses an upload
+The console distinguishes a plan allowance, a configured platform default, and an unconfigured
+quota. The hard ceiling only limits an applicable allowance; it does not grant one by itself.
+Never-subscribed organizations may use an explicit default, while lapsed subscriptions retain
+their stored plan quota.
 
 services.org.enforcement_plan draws that line deliberately, and
 test_entitlement_enforcement.py already covers it — including that no plan is fabricated for
@@ -97,11 +97,11 @@ def test_the_reporting_payload_keeps_them_in_different_fields():
     assert '"quota_state"' in src
 
 
-def test_an_organization_with_no_plan_reports_a_not_applicable_quota():
+def test_an_organization_without_a_quota_can_report_not_applicable():
     from app.services import org as org_svc
     src = inspect.getsource(org_svc)
-    # The three "no number" states are distinct on purpose; not_applicable is the one that
-    # says "nothing is entitled" rather than "unlimited".
+    # The three "no number" states are distinct on purpose; not_applicable means there is no
+    # plan or configured default rather than an unlimited allowance.
     assert '"not_applicable"' in src
     assert '"unlimited"' in src
 

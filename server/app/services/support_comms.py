@@ -28,10 +28,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import email as email_mod
+from ..config import settings
 from ..email import UnsafeLinkError
 from ..models import (
     CASE_CATEGORIES,
@@ -82,17 +84,19 @@ def case_url(ticket: SupportTicket) -> str:
 def next_case_reference(db: Session, *, now: datetime | None = None) -> str:
     """An immutable, customer-safe reference like SUP-2026-001284.
 
-    Sequential within the calendar year and derived from a COUNT of existing references for
-    that year, so it is stable, quotable and contains no database identifier. The uniqueness
-    index on the column is the real guard: a concurrent duplicate loses the insert and the
-    caller retries rather than two cases sharing a reference.
+    Sequential within the calendar year: one past the HIGHEST reference issued that year, so
+    it is stable, quotable and contains no database identifier. Highest, not a COUNT: Super
+    Admin can delete a case, and a count that drops by one re-issues a reference a later case
+    still holds - after which every new case fails the uniqueness index. That index is the
+    real guard: a concurrent duplicate loses the insert and the caller retries rather than two
+    cases sharing a reference. The zero-padding is what lets MAX compare them as text.
     """
     moment = now or _now()
-    year = moment.year
-    prefix = f"SUP-{year}-"
-    used = db.scalar(
-        select(func.count(SupportTicket.id)).where(
-            SupportTicket.case_reference.like(f"{prefix}%"))) or 0
+    prefix = f"SUP-{moment.year}-"
+    last = db.scalar(
+        select(func.max(SupportTicket.case_reference)).where(
+            SupportTicket.case_reference.like(f"{prefix}%")))
+    used = int(last.removeprefix(prefix)) if last else 0
     return f"{prefix}{used + 1:06d}"
 
 
@@ -264,6 +268,15 @@ def open_case(db: Session, *, org: Organization, requester: User, subject: str,
     return ticket
 
 
+def _opened_fields(db: Session, ticket: SupportTicket, org: Organization | None) -> dict:
+    """What SUP-001 says, whichever way the case was opened."""
+    return dict(created_at=email_mod.billing_date(ticket.created_at),
+                requester=ticket.requester_email or "Not recorded",
+                next_action=("Our support team is reviewing your case. "
+                             + next_update_note(ticket, org)),
+                **_shared(db, ticket, org))
+
+
 def notify_case_opened(db: Session, background, ticket: SupportTicket) -> bool:
     """Acknowledge a committed case. Called only after the row exists."""
     if not _claim(db, ticket, "case_opened"):
@@ -276,12 +289,100 @@ def notify_case_opened(db: Session, background, ticket: SupportTicket) -> bool:
         return False
 
     _queue(background, email_mod.send_support_case_opened_email, people,
-           created_at=email_mod.billing_date(ticket.created_at),
-           requester=ticket.requester_email or "Not recorded",
-           next_action=("Our support team is reviewing your case. "
-                        + next_update_note(ticket, org)),
-           **_shared(db, ticket, org))
+           **_opened_fields(db, ticket, org))
     return True
+
+
+# ══ SUP-001 — a case Super Admin logs for an organization ═══════════════════════════════
+#
+# POST /admin/support-tickets used to insert a bare row: no reference, no participant, no
+# notice - so the requester whose address the admin typed in was never told the case existed.
+# log_case gives it what open_case gives a customer's own case; confirm_logged_case then sends
+# SUP-001 NOW rather than queueing it, so the console can say what actually happened:
+#
+#   sent            the email service (Resend) accepted it - accepted, which is not "delivered"
+#   failed          the service refused it or was unreachable, or the case link was unsafe
+#   not_configured  RESEND_API_KEY is not set here, so nothing was attempted
+#   not_requested   no requester address was given
+#   duplicate       a confirmation was already attempted for this case; never sent twice
+#   suppressed      the notification rules declined it (SUP-001 is mandatory today)
+
+def log_case(db: Session, *, org: Organization, subject: str, message: str,
+             priority: str = "normal", requester_email: str | None = None) -> SupportTicket:
+    """Create a case Super Admin logs on `org`'s behalf, shaped like open_case's: a reference,
+    the default owning team, and - when an address was given - the requester as its one
+    participant, which is who SUP-001 goes to. No User is needed: the address is whoever the
+    organization named."""
+    for attempt in range(3):
+        ticket = SupportTicket(
+            org_id=org.id, subject=subject, message=message, status="open",
+            priority=priority or "normal", requester_email=requester_email,
+            assigned_owner=DEFAULT_OWNER_TEAM, lifecycle_cycle=0,
+            case_reference=next_case_reference(db))
+        db.add(ticket)
+        try:
+            db.commit()
+            break
+        except IntegrityError as exc:
+            db.rollback()
+            # The retry next_case_reference expects: a concurrent case took this reference,
+            # so take the next one. Any other violation is a real failure.
+            if attempt == 2 or "case_reference" not in str(exc.orig):
+                raise
+    db.refresh(ticket)
+    if requester_email:
+        add_participant(db, ticket, email=requester_email, role="requester")
+    return ticket
+
+
+def delete_case(db: Session, ticket: SupportTicket) -> None:
+    """Delete a case together with the rows that hang off it.
+
+    Participants, notices and escalations reference the case without ON DELETE CASCADE, so
+    deleting the ticket alone fails once any of them exists - which is every case open_case
+    creates, and every case log_case creates with a requester.
+    """
+    for model in (SupportNotice, SupportEscalation, SupportCaseParticipant):
+        db.execute(delete(model).where(model.ticket_id == ticket.id))
+    db.delete(ticket)
+    db.commit()
+
+
+def confirm_logged_case(db: Session, ticket: SupportTicket) -> str:
+    """Send SUP-001 for a case log_case created, and return what happened (see above).
+
+    Called after the case is committed, and never able to undo it: every failure becomes a
+    status and a log line, not an exception. The claim is taken only when a send is really
+    about to be attempted, so a retry cannot mail the requester twice.
+    """
+    people = recipients(db, ticket)
+    if not people:
+        return "not_requested"
+    org = _org(db, ticket)
+    failure = None
+    if not _may_send("SUP-001", org):
+        outcome = "suppressed"
+    elif not settings.RESEND_API_KEY:
+        outcome = "not_configured"
+    elif not _claim(db, ticket, "case_opened"):
+        outcome = "duplicate"
+    else:
+        try:
+            fields = _opened_fields(db, ticket, org)
+            accepted = [email_mod.send_support_case_opened_email(address, name=name, **fields)
+                        for address, name in people]
+            outcome, failure = ("sent", None) if all(accepted) else ("failed", "provider")
+        except UnsafeLinkError:
+            outcome, failure = "failed", "unsafe_link"
+        except Exception:  # noqa: BLE001 - the case is committed; a broken notice must not undo it
+            log.exception("SUP-001 for case %s raised", ticket.case_reference)
+            outcome, failure = "failed", "error"
+    # Which case, what happened, why. Never the message, and never the address: on a provider
+    # failure app.email has already logged the provider's own reason.
+    log.log(logging.INFO if outcome == "sent" else logging.WARNING,
+            "support_case_confirmation case=%s outcome=%s failure=%s",
+            ticket.case_reference, outcome, failure or "-")
+    return outcome
 
 
 # ══ SUP-002 — update and customer action ════════════════════════════════════════════════

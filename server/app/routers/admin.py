@@ -1113,8 +1113,9 @@ async def end_live_session(
 
 
 @router.get("/platform-health")
-def platform_health(db: Session = Depends(get_db)):
-    return svc.platform_health(db)
+def platform_health(request: Request, db: Session = Depends(get_db)):
+    return svc.platform_health(
+        db, auth_latency_ms=getattr(request.state, "auth_latency_ms", None))
 
 
 @router.get("/payment-provider")
@@ -1523,16 +1524,32 @@ def support_ticket_summary(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/support-tickets", response_model=SupportTicketOut, status_code=status.HTTP_201_CREATED)
+class SupportTicketLoggedOut(SupportTicketOut):
+    """A logged ticket, its case reference, and what happened to the requester's confirmation
+    email - one of support_comms.confirm_logged_case's outcomes."""
+    case_reference: str | None = None
+    confirmation: str | None = None
+
+
+@router.post("/support-tickets", response_model=SupportTicketLoggedOut, status_code=status.HTTP_201_CREATED)
 def create_support_ticket(data: SupportTicketCreate, request: Request,
                           db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
     org = db.get(Organization, data.org_id)
     if not org:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
-    ticket = crud.create_support_ticket(db, data)
+    # Through support_comms, not a bare insert: a bare insert gave the case no reference and
+    # no participant, so the requester was never told it existed (SUP-001).
+    ticket = support_comms.log_case(db, org=org, subject=data.subject, message=data.message,
+                                    priority=data.priority, requester_email=data.requester_email)
+    confirmation = support_comms.confirm_logged_case(db, ticket)
     _audit(db, admin, request, "support_ticket.create", target_type="support_ticket",
-           target_id=ticket.id, org_id=data.org_id, meta={"subject": data.subject})
-    return ticket
+           target_id=ticket.id, org_id=data.org_id,
+           meta={"subject": data.subject, "case_reference": ticket.case_reference,
+                 "confirmation": confirmation})
+    out = SupportTicketLoggedOut.model_validate(ticket)
+    out.organization_name = org.name
+    out.confirmation = confirmation
+    return out
 
 
 @router.patch("/support-tickets/{ticket_id}", response_model=SupportTicketOut)
@@ -1555,7 +1572,9 @@ def delete_support_ticket(ticket_id: uuid.UUID, request: Request,
     if not ticket:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
     org_id = ticket.org_id
-    crud.delete_support_ticket(db, ticket)
+    # With its participants, notices and escalations: deleting the row alone fails once a
+    # case has any, and every case with a requester does.
+    support_comms.delete_case(db, ticket)
     _audit(db, admin, request, "support_ticket.delete", target_type="support_ticket",
            target_id=ticket_id, org_id=org_id)
 

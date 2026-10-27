@@ -50,15 +50,15 @@ from create_tables import ensure_schema
 DEFAULT_PLANS = [
     {"name": "Developer", "slug": "developer", "max_users": 5,
      "price_monthly": 49, "currency": "USD",
-     "max_storage_gb": 50, "max_streaming_hours": 20,
+     "max_storage_gb": 50, "max_streaming_hours": 20, "max_concurrent_streams": 1,
      "features": ["1 concurrent stream", "720p", "Community support"]},
     {"name": "Business", "slug": "business", "max_users": 30,
      "price_monthly": 249, "currency": "USD",
-     "max_storage_gb": 500, "max_streaming_hours": 200,
+     "max_storage_gb": 500, "max_streaming_hours": 200, "max_concurrent_streams": 5,
      "features": ["5 concurrent streams", "1080p", "Recordings", "Email support"]},
     {"name": "Enterprise", "slug": "enterprise", "max_users": None,
      "custom_pricing": True,
-     "max_storage_gb": None, "max_streaming_hours": None,
+     "max_storage_gb": None, "max_streaming_hours": None, "max_concurrent_streams": None,
      "features": ["Unlimited streams", "4K", "SSO", "Dedicated support"]},
 ]
 
@@ -67,7 +67,9 @@ DEFAULT_SETTINGS = {
     "brand": {"category": "brand", "value": {"name": "ZoikoStream", "primary_color": "#8b5cf6",
                                              "support_email": "support@zoikostream.com"}},
     "storage_limits": {"category": "limits", "value": {"default_gb": 50, "max_gb": 5000}},
-    "streaming_limits": {"category": "limits", "value": {"default_hours": 20, "max_bitrate_kbps": 8000}},
+    "streaming_limits": {"category": "limits", "value": {
+        "default_hours": 20, "default_concurrent_streams": None, "max_bitrate_kbps": 8000,
+    }},
     "global": {"category": "config", "value": {"signups_enabled": True, "maintenance_mode": False}},
 }
 

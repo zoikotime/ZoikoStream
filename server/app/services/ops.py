@@ -1086,12 +1086,13 @@ def console_state(db: Session, user: User) -> dict:
     degraded = sum(1 for s in health["services"] if s["status"] in ("warn", "down"))
 
     return {
-        # `unmonitored` travels with the verdict so the header can say what "operational"
-        # actually covers. Without it, "ok" read as "everything is fine" while three of the
-        # dependencies in that count had never been checked.
+        # Monitoring and integration gaps travel with the verdict so the header can qualify
+        # an otherwise healthy result without calling unintegrated services an outage.
         "health": {"overall": health["overall"], "degraded": degraded,
                    "total": len(health["services"]),
-                   "unmonitored": health.get("unmonitored", 0)},
+                   "integrated": health["integrated"],
+                   "not_configured": health["not_configured"],
+                   "unmonitored": health["unmonitored"]},
         "badges": {
             "live_operations": sessions["at_risk"]["total"],
             "event_readiness": sum(1 for e in readiness if e["verdict"] != "passed"),

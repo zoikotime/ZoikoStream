@@ -26,7 +26,7 @@ from app.config import settings
 from app.crud import commercial as commercial_crud
 from app.db import Base, SessionLocal
 from app.models import (AuditLog, BroadcastSession, Event, EventRegistration, MediaAssetEvent, Organization,
-                        User)
+                        Plan, Subscription, User)
 from app.models.event import EVENT_STATUSES
 from app.security import create_access_token, hash_password
 from app.services import broadcast, bus, livekit
@@ -53,6 +53,18 @@ class World:
             self.orgs, self.users = [], []
             self.a = self._org(db, "Lifecycle A")
             self.b = self._org(db, "Lifecycle B")
+            self.plan = Plan(
+                name=f"Lifecycle test {uuid.uuid4().hex[:6]}",
+                slug=f"lifecycle-{uuid.uuid4().hex[:8]}",
+                max_storage_gb=50, max_streaming_hours=20, max_concurrent_streams=5,
+            )
+            db.add(self.plan)
+            db.flush()
+            self.subs = [
+                Subscription(org_id=org_id, plan_id=self.plan.id, status="active", seats=1)
+                for org_id in (self.a, self.b)
+            ]
+            db.add_all(self.subs)
             self.admin_a = self._user(db, self.a, "org_admin")
             self.admin_b = self._user(db, self.b, "org_admin")
             db.commit()
@@ -127,9 +139,11 @@ class World:
                         db.execute(table.delete().where(fk.parent.in_(ids)))
             db.query(MediaAssetEvent).filter(MediaAssetEvent.org_id.in_(self.orgs)).delete(synchronize_session=False)
             db.query(AuditLog).filter(AuditLog.org_id.in_(self.orgs)).delete(synchronize_session=False)
+            db.query(Subscription).filter(Subscription.org_id.in_(self.orgs)).delete(synchronize_session=False)
             db.query(Event).filter(Event.id.in_(ids)).delete(synchronize_session=False)
             db.query(User).filter(User.id.in_(self.users)).delete(synchronize_session=False)
             db.query(Organization).filter(Organization.id.in_(self.orgs)).delete(synchronize_session=False)
+            db.delete(self.plan)
             db.commit()
         finally:
             db.close()
@@ -345,6 +359,67 @@ def test_go_live_twice_opens_one_broadcast(w):
     assert admin.post(f"/api/events/{eid}/end").json()["status"] == "ended"
     second = admin.post(f"/api/events/{eid}/end")
     assert second.status_code == 400 and w.status(eid)[0] == "ended"
+
+
+def test_exhausted_streaming_hours_blocks_a_new_broadcast(w, offline):
+    eid = w.event(w.a, "published")
+    db = SessionLocal()
+    try:
+        db.get(Plan, w.plan.id).max_streaming_hours = 0
+        db.commit()
+    finally:
+        db.close()
+
+    frames = w.go_live(eid)
+    assert frames[0][1] == "broadcast.error"
+    assert frames[0][2]["code"] == "quota_blocked"
+    assert w.status(eid)[0] == "published"
+    db = SessionLocal()
+    try:
+        assert db.query(BroadcastSession).filter(
+            BroadcastSession.event_id == eid,
+        ).count() == 0
+    finally:
+        db.close()
+
+
+def test_concurrent_events_cannot_consume_the_same_last_stream_slot(w, offline):
+    first, second = w.event(w.a, "published"), w.event(w.a, "published")
+    db = SessionLocal()
+    try:
+        db.get(Plan, w.plan.id).max_concurrent_streams = 1
+        db.commit()
+    finally:
+        db.close()
+
+    def context(event_id):
+        return mod.Ctx(
+            event_id=event_id, org_id=w.a, room=livekit.room_for_event(event_id),
+            user_id=w.admin_a, name="Admin", identity=f"host-{w.admin_a}",
+            role="org_admin", can_moderate=True, can_host=True,
+        )
+
+    async def race():
+        return await asyncio.gather(
+            broadcast._golive(context(first), {}),
+            broadcast._golive(context(second), {}),
+        )
+
+    frames = asyncio.run(race())
+    successes = [env for result in frames for env in result
+                 if env[1] == "broadcast.update"]
+    denials = [env for result in frames for env in result
+               if env[1] == "broadcast.error"]
+    assert len(successes) == 1
+    assert len(denials) == 1 and denials[0][2]["code"] == "quota_blocked"
+    db = SessionLocal()
+    try:
+        assert db.query(BroadcastSession).filter(
+            BroadcastSession.org_id == w.a,
+            BroadcastSession.ended_at.is_(None),
+        ).count() == 1
+    finally:
+        db.close()
 
 
 # ── filter and counts: the whole organization, and only it ──────────────────────────────

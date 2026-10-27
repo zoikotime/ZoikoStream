@@ -30,24 +30,25 @@ const STATE_LABEL = { within: "Within quota", exceeded: "Over quota", unlimited:
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : null);
 
 // One quota, exactly as the server evaluated it. The three "no number" states stay distinct:
-//   not_applicable — no entitled plan, so nothing is granted and nothing is measured against
-//   unlimited      — a plan with no cap on this dimension
-//   within/exceeded — a real limit, with remaining and percent
-// `enforced` says whether the platform actually REFUSES anything at this limit; a bar that is
-// only shown against the plan is labelled so it is not read as a control.
+//   not_applicable — no plan/default quota is configured; new activity is blocked
+//   unlimited      — an entitled plan has no cap on this dimension
+//   within/exceeded — a real effective limit, with remaining and percent
 export function QuotaBar({ quota: q }) {
   const pct = q.percent == null ? null : Math.min(100, Math.max(0, q.percent));
+  const limit = q.effective_limit ?? q.limit;
   const reading =
     q.quota_state === "not_applicable" ? `${q.used} ${q.unit}`
       : q.unlimited ? `${q.used} ${q.unit} · no plan cap`
-        : `${q.used} / ${q.limit} ${q.unit}`;
+        : `${q.used} / ${limit} ${q.unit}`;
   const notes = [];
   if (q.quota_state === "within") notes.push(`${q.remaining} ${q.unit} remaining · ${q.percent}%`);
   if (q.quota_state === "exceeded") notes.push(`Over by ${Math.abs(q.remaining)} ${q.unit} · ${q.percent}%`);
-  if (q.quota_state === "not_applicable") notes.push("No entitled plan");
-  if (!q.enforced) notes.push("Not enforced — shown against the plan only");
-  // The ceiling that actually applies can differ from the plan's: a lapsed subscription stays
-  // capped at its old plan, and storage is further bounded by the platform ceiling.
+  if (q.quota_state === "not_applicable") notes.push("No quota configured — new activity is blocked");
+  if (q.quota_source === "platform_default") notes.push("Platform default");
+  if (q.quota_source === "default_and_platform_ceiling") notes.push("Platform default, capped by platform ceiling");
+  if (q.quota_source === "plan_and_platform_ceiling") notes.push("Plan quota, capped by platform ceiling");
+  // The effective ceiling can differ from the displayed plan allowance for a lapsed
+  // subscription, a never-subscribed organization, or a platform-wide storage ceiling.
   if (q.enforced && q.enforced_limit != null && q.enforced_limit !== q.limit) {
     notes.push(`Enforced ceiling ${q.enforced_limit} ${q.unit}`);
   }

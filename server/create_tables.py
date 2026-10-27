@@ -409,6 +409,29 @@ _PLAN_COLUMNS = [
     "ADD COLUMN IF NOT EXISTS custom_pricing BOOLEAN NOT NULL DEFAULT FALSE",
 ]
 
+# Migrate the existing advertised stream counts into structured entitlements exactly once.
+# NULL is reserved for Enterprise's explicitly unlimited tier; unknown plans get zero rather
+# than silently inheriting unlimited access.
+_PLAN_CONCURRENT_STREAMS_MIGRATION = """
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'plans'
+           AND column_name = 'max_concurrent_streams'
+    ) THEN
+        ALTER TABLE plans ADD COLUMN max_concurrent_streams INTEGER DEFAULT 0;
+        UPDATE plans SET max_concurrent_streams = CASE slug
+            WHEN 'developer' THEN 1
+            WHEN 'business' THEN 5
+            WHEN 'enterprise' THEN NULL
+            ELSE 0
+        END;
+    END IF;
+END $$;
+"""
+
 # Phase 2 commercial foundation (ZST-LE-COM-001 C4, L1, L2, Section 27).
 #
 # event_order_lines.unit_basis   — freeze the price's unit basis onto the line so a line is
@@ -1238,6 +1261,7 @@ def ensure_schema():
             conn.execute(text(f"ALTER TABLE invoices {clause}"))
         for clause in _PLAN_COLUMNS:
             conn.execute(text(f"ALTER TABLE plans {clause}"))
+        conn.execute(text(_PLAN_CONCURRENT_STREAMS_MIGRATION))
         for clause in _EVENT_ORDER_TAX_COLUMNS:
             conn.execute(text(f"ALTER TABLE event_orders {clause}"))
         for clause in _INVOICE_TAX_COLUMNS:

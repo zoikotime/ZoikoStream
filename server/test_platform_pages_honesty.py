@@ -114,6 +114,11 @@ def test_overall_is_computed_only_from_probed_services(monkeypatch):
     finally:
         db.close()
     assert h["unmonitored"] >= 1
+    assert h["integrated"] + h["not_configured"] == len(h["services"])
+    by_id = {service["id"]: service for service in h["services"]}
+    assert by_id["cdn"]["status"] == "not_configured"
+    assert by_id["workers"]["status"] == "not_configured"
+    assert h["not_configured"] >= 2
     probed = [s for s in h["services"] if s["status"] in admin_svc.PROBED_STATUSES]
     assert all(s["id"] != "streaming" for s in probed)
 
@@ -128,6 +133,19 @@ def test_redis_is_actually_reported():
     assert "redis" in ids
 
 
+def test_platform_health_reports_measured_api_and_authentication_latency(world):
+    response = client_for(world["admin"]).get("/api/admin/platform-health")
+
+    assert response.status_code == 200
+    services = {service["id"]: service for service in response.json()["services"]}
+    assert isinstance(services["api"]["latency_ms"], (int, float))
+    assert services["api"]["latency_ms"] >= 0
+    assert services["api"]["note"] == "Health-check request processing time"
+    assert isinstance(services["auth"]["latency_ms"], (int, float))
+    assert services["auth"]["latency_ms"] >= 0
+    assert services["auth"]["note"] == "Current request token and session verification"
+
+
 def test_an_unreachable_redis_is_degraded_not_ok(monkeypatch):
     monkeypatch.setattr(settings, "REDIS_URL", "redis://127.0.0.1:1/0")   # nothing listens
     admin_svc._redis_probe_cache.update(at=0.0, result=None)
@@ -136,6 +154,7 @@ def test_an_unreachable_redis_is_degraded_not_ok(monkeypatch):
     finally:
         admin_svc._redis_probe_cache.update(at=0.0, result=None)
     assert r["status"] == "warn"
+    assert r["latency_ms"] is None
     assert "127.0.0.1" not in r["note"], "the probe must never echo the URL"
 
 
