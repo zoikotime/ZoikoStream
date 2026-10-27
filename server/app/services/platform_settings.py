@@ -40,19 +40,13 @@ def _nonnegative_limit(value, setting: str, field: str) -> float | None:
     return float(value)
 
 
-# `max_gb` is a platform-wide hard ceiling that can only tighten an applicable storage
-# allowance. `default_gb` and `default_hours` are fallback quotas for organizations that have
-# never had a subscription; the resolver applies them only when no plan row exists.
+# `max_gb` is a platform-wide hard ceiling that can only tighten an entitled plan's storage
+# allowance; it never grants storage to a non-entitled organization. `default_hours` remains a
+# fallback for organizations without a subscription.
 def storage_ceiling_gb(db: Session) -> float | None:
     row = db.get(PlatformSetting, "storage_limits")
     value = (row.value or {}).get("max_gb") if row else None
     return _nonnegative_limit(value, "storage_limits", "max_gb")
-
-
-def default_storage_gb(db: Session) -> float | None:
-    row = db.get(PlatformSetting, "storage_limits")
-    value = (row.value or {}).get("default_gb") if row else None
-    return _nonnegative_limit(value, "storage_limits", "default_gb")
 
 
 def default_streaming_hours(db: Session) -> float | None:

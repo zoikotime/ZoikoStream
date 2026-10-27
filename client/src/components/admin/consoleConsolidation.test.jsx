@@ -48,7 +48,7 @@ describe("the rail is shorter without being smaller", () => {
     for (const href of [
       "/admin/dashboard", "/admin/live-events", "/admin/event-readiness",
       "/admin/organizations", "/admin/users", "/admin/security", "/admin/audit",
-      "/admin/media", "/admin/subscriptions", "/admin/commerce", "/admin/analytics",
+      "/admin/media", "/admin/usage-entitlements", "/admin/commerce", "/admin/analytics",
       "/admin/support", "/admin/status", "/admin/platform-configuration",
       "/admin/governance", "/admin/feature-flags", "/admin/releases",
     ]) {

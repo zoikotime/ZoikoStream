@@ -383,6 +383,24 @@ def test_exhausted_streaming_hours_blocks_a_new_broadcast(w, offline):
         db.close()
 
 
+def test_exhausted_streaming_hours_does_not_end_an_existing_broadcast(w, offline):
+    eid = w.event(w.a, "published")
+    started = w.go_live(eid)
+    assert any(frame[1] == "broadcast.update" for frame in started)
+
+    db = SessionLocal()
+    try:
+        db.get(Plan, w.plan.id).max_streaming_hours = 0
+        db.commit()
+    finally:
+        db.close()
+
+    resumed = w.go_live(eid)
+    assert any(frame[1] == "broadcast.update" for frame in resumed)
+    assert not any(frame[1] == "broadcast.error" for frame in resumed)
+    assert w.status(eid)[0] == "live"
+
+
 def test_concurrent_events_cannot_consume_the_same_last_stream_slot(w, offline):
     first, second = w.event(w.a, "published"), w.event(w.a, "published")
     db = SessionLocal()

@@ -6,15 +6,15 @@ import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import Skeleton from "../../ui/Skeleton";
+import ElevationNote from "../../components/admin/ElevationNote";
+import useElevation from "../../components/admin/useElevation";
 import RetentionPolicyPanel from "./RetentionPolicyPanel";
 
 const DEFAULTS = {
   brand: { name: "ZoikoStream", primary_color: "#8b5cf6", support_email: "" },
-  // Null is a real state: default_gb grants no fallback quota, while max_gb grants no hard
-  // ceiling. The previous form seeded 5000 GB / 8000 kbps even when those limits were not in
-  // force, and saving untouched values silently turned displayed defaults into enforced caps.
-  // Render unset values as empty fields rather than implying a configured limit.
-  storage_limits: { default_gb: null, max_gb: null },
+  // Null means there is no platform ceiling; non-entitled organizations still have zero
+  // storage allowance, and only an entitled plan grants storage.
+  storage_limits: { max_gb: null },
   streaming_limits: { default_hours: null, default_concurrent_streams: null, max_bitrate_kbps: null },
   global: { signups_enabled: true, maintenance_mode: false },
 };
@@ -246,11 +246,20 @@ export default function Settings() {
 function SettingsForm({ settings, onSaved }) {
   const [form, setForm] = useState(() => ({
     brand: { ...DEFAULTS.brand, ...(settings.brand?.value || {}) },
-    storage_limits: { ...DEFAULTS.storage_limits, ...(settings.storage_limits?.value || {}) },
+    storage_limits: {
+      max_gb: settings.storage_limits?.value?.max_gb ?? DEFAULTS.storage_limits.max_gb,
+    },
     streaming_limits: { ...DEFAULTS.streaming_limits, ...(settings.streaming_limits?.value || {}) },
     global: { ...DEFAULTS.global, ...(settings.global?.value || {}) },
   }));
   const [saving, setSaving] = useState(false);
+  // PATCH /admin/settings needs a platform elevation (security.require_elevation). The form
+  // used to offer Save regardless, so an operator edited, saved, and only then learned they
+  // had to elevate - from a red error, with no way to do it here. It now says so up front and
+  // holds Save while the console KNOWS the server would refuse; when the elevation state is
+  // unknown the server decides. Elevating does not remount this form, so edits survive it.
+  const elevation = useElevation("platform");
+  const refused = ["none", "expired", "wrong_scope"].includes(elevation.status);
 
   const setField = (group, key, value) =>
     setForm((f) => ({ ...f, [group]: { ...f[group], [key]: value } }));
@@ -261,10 +270,9 @@ function SettingsForm({ settings, onSaved }) {
       await api.patch("/admin/settings", {
         values: {
           brand: form.brand,
-          // parseEnvelope, not Number(): Number("") is 0, so clearing a ceiling to mean "no
-          // limit" would have saved a limit of ZERO and refused every upload/stream.
+          // parseEnvelope, not Number(): Number("") is 0, so clearing the ceiling to mean
+          // "no ceiling" would have saved a limit of ZERO.
           storage_limits: {
-            default_gb: parseEnvelope(form.storage_limits.default_gb),
             max_gb: parseEnvelope(form.storage_limits.max_gb),
           },
           streaming_limits: {
@@ -289,6 +297,9 @@ function SettingsForm({ settings, onSaved }) {
       onSaved();
     } catch (e) {
       notify.error(errMsg(e));
+      // Refused anyway - the grant ended in another tab since the console last looked. Re-read
+      // the console state so the note and the held Save reflect that, not the stale grant.
+      if (e?.response?.status === 403) elevation.reload?.();
     } finally {
       setSaving(false);
     }
@@ -301,8 +312,14 @@ function SettingsForm({ settings, onSaved }) {
           <h1 className="text-[24px] font-semibold tracking-tight text-slate-900 dark:text-white">Platform Configuration</h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Platform-wide brand, limits, access and retention governance</p>
         </div>
-        <Button leftIcon={FiSave} onClick={save} loading={saving}>Save changes</Button>
+        <Button leftIcon={FiSave} onClick={save} loading={saving} disabled={refused}>Save changes</Button>
       </div>
+
+      <ElevationNote
+        elevation={elevation}
+        need="Saving these settings needs platform elevation. Your edits are kept while you elevate."
+        reason="Change platform configuration"
+      />
 
       <Panel eyebrow="Brand" title="Platform Identity" description="Shown across emails and the public marketing site.">
         <div className="grid gap-4 sm:grid-cols-2">
@@ -321,12 +338,8 @@ function SettingsForm({ settings, onSaved }) {
         </div>
       </Panel>
 
-      <Panel eyebrow="Limits" title="Storage & Streaming Limits" description="Server-side quotas control new recording and broadcast starts.">
+      <Panel eyebrow="Limits" title="Storage & Streaming Limits" description="Storage requires an entitled plan; the platform ceiling only caps an applicable plan allowance. Streaming defaults apply independently.">
         <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <Label>Default storage (GB)</Label>
-            <Input variant="console" type="number" min={0} value={form.storage_limits.default_gb ?? ""} placeholder="Not set" onChange={(e) => setField("storage_limits", "default_gb", e.target.value)} />
-          </div>
           <div>
             <Label>Max storage (GB)</Label>
             <Input variant="console" type="number" min={0} value={form.storage_limits.max_gb ?? ""} placeholder="No ceiling" onChange={(e) => setField("storage_limits", "max_gb", e.target.value)} />

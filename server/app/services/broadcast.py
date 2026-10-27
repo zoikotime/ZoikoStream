@@ -247,7 +247,7 @@ def record_egress_result(egress_info) -> dict | None:
         info = egress_info.file_results[0] if egress_info.file_results else egress_info.file
         r.status = "failed" if egress_info.error else "stopped"
         r.stopped_at = r.stopped_at or datetime.now(timezone.utc)
-        if info and info.size:
+        if info is not None and info.size is not None and info.size >= 0:
             # Delta, not absolute — this webhook can retry with the same final size, and
             # storage_used_gb is a running total across every recording the org has made.
             delta_bytes = info.size - (r.size_bytes or 0)

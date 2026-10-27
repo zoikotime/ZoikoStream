@@ -32,11 +32,11 @@ import { ThemeProvider } from "../../theme/ThemeContext";
 import Security from "./Security";
 
 const CASE_ROWS = [
-  { id: "1", ref: "SEC-1", title: "Credential stuffing", status: "open", severity: "sev1", organization_name: "Acme", opened_at: "2026-10-23T09:00:00Z" },
-  { id: "2", ref: "SEC-2", title: "Phishing report", status: "investigating", severity: "sev2", organization_name: "Acme", opened_at: "2026-10-23T09:05:00Z" },
-  { id: "3", ref: "SEC-3", title: "Suspicious login", status: "investigating", severity: "sev3", organization_name: "Globex", opened_at: "2026-10-23T09:10:00Z" },
-  { id: "4", ref: "SEC-4", title: "Rate limit abuse", status: "monitoring", severity: "sev3", organization_name: "Globex", opened_at: "2026-10-23T09:15:00Z" },
-  { id: "5", ref: "SEC-5", title: "Resolved incident", status: "resolved", severity: "sev1", organization_name: "Acme", opened_at: "2026-10-23T09:20:00Z" },
+  { id: "1", ref: "SEC-1", title: "Credential stuffing", status: "open", severity: "sev1", org_id: "o1", organization_name: "Acme", opened_at: "2026-10-23T09:00:00Z" },
+  { id: "2", ref: "SEC-2", title: "Phishing report", status: "investigating", severity: "sev2", org_id: "o1", organization_name: "Acme", opened_at: "2026-10-23T09:05:00Z" },
+  { id: "3", ref: "SEC-3", title: "Suspicious login", status: "investigating", severity: "sev3", org_id: "o2", organization_name: "Globex", opened_at: "2026-10-23T09:10:00Z" },
+  { id: "4", ref: "SEC-4", title: "Rate limit abuse", status: "monitoring", severity: "sev3", org_id: "o2", organization_name: "Globex", opened_at: "2026-10-23T09:15:00Z" },
+  { id: "5", ref: "SEC-5", title: "Resolved incident", status: "resolved", severity: "sev1", org_id: "o1", organization_name: "Acme", opened_at: "2026-10-23T09:20:00Z" },
 ];
 
 const ORGS = [{ id: "o1", name: "Acme" }, { id: "o2", name: "Globex" }];
@@ -53,6 +53,7 @@ const show = () =>
 
 const card = (label) => screen.getByText(label, { selector: "p" }).closest("button");
 const statusSelect = () => screen.getByLabelText("Filter by status");
+const organizationSelect = () => screen.getByLabelText("Filter by organization");
 const refs = () => screen.getAllByText(/^SEC-\d$/).map((n) => n.textContent).sort();
 const incidentCalls = () => vi.mocked(api.get).mock.calls.filter(([u]) => u.includes("/admin/incidents"));
 
@@ -231,6 +232,129 @@ describe("the request", () => {
     await ready();
     const orgCall = vi.mocked(api.get).mock.calls.find(([u]) => u.includes("/admin/organizations"));
     expect(orgCall?.[1]?.params?.page_size).toBeLessThanOrEqual(100);
+  });
+});
+
+describe("organization filtering", () => {
+  it("renders organization names with stable IDs and keeps All organizations", async () => {
+    show();
+    await ready();
+    await waitFor(() => expect(within(organizationSelect()).getByRole("option", { name: "Acme" })).toHaveValue("o1"));
+    expect(within(organizationSelect()).getByRole("option", { name: "All organizations" })).toHaveValue("all");
+    expect(within(organizationSelect()).getByRole("option", { name: "Globex" })).toHaveValue("o2");
+  });
+
+  it("retains duplicate-name organizations and distinguishes their options", async () => {
+    const duplicates = [
+      { id: "duplicate-1", name: "Acme", domain: "acme.example" },
+      { id: "duplicate-2", name: "Acme", domain: "acme.example" },
+    ];
+    vi.mocked(api.get).mockImplementation((url) =>
+      url.includes("/admin/incidents")
+        ? Promise.resolve({ data: { items: CASE_ROWS, total: CASE_ROWS.length } })
+        : Promise.resolve({ data: { items: duplicates, total: duplicates.length } })
+    );
+    show();
+    await ready();
+    await waitFor(() => expect(within(organizationSelect()).getAllByRole("option")).toHaveLength(3));
+    const options = within(organizationSelect()).getAllByRole("option");
+    expect(options[1]).toHaveValue("duplicate-1");
+    expect(options[2]).toHaveValue("duplicate-2");
+    expect(options[1].textContent).not.toBe(options[2].textContent);
+  });
+
+  it("loads every organization across the API's 100-item pages", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({ id: `org-${index + 1}`, name: `Org ${index + 1}` }));
+    const lastPage = [{ id: "org-101", name: "Org 101" }];
+    vi.mocked(api.get).mockImplementation((url, config) => {
+      if (url.includes("/admin/incidents")) {
+        return Promise.resolve({ data: { items: CASE_ROWS, total: CASE_ROWS.length } });
+      }
+      return Promise.resolve(config.params.page === 1
+        ? { data: { items: firstPage, total: 101 } }
+        : { data: { items: lastPage, total: 101 } });
+    });
+    show();
+    await ready();
+    await waitFor(() => expect(within(organizationSelect()).getByRole("option", { name: "Org 101" })).toHaveValue("org-101"));
+    expect(vi.mocked(api.get).mock.calls.filter(([url]) => url.includes("/admin/organizations")))
+      .toEqual(expect.arrayContaining([
+        ["/admin/organizations", { params: { page: 1, page_size: 100 } }],
+        ["/admin/organizations", { params: { page: 2, page_size: 100 } }],
+      ]));
+  });
+
+  it("combines organization, status, severity, and search filters without losing their state", async () => {
+    vi.mocked(api.get).mockImplementation((url, config = {}) => {
+      if (url.includes("/admin/incidents")) {
+        const { org_id: orgId, status } = config.params || {};
+        const items = CASE_ROWS.filter((incident) =>
+          (!orgId || incident.org_id === orgId) && (!status || incident.status === status)
+        );
+        return Promise.resolve({ data: { items, total: items.length } });
+      }
+      return Promise.resolve({ data: { items: ORGS, total: ORGS.length } });
+    });
+    show();
+    await ready();
+    fireEvent.change(statusSelect(), { target: { value: "monitoring" } });
+    fireEvent.change(screen.getByLabelText("Filter by severity"), { target: { value: "sev3" } });
+    fireEvent.change(screen.getByLabelText(/search/i), { target: { value: "rate" } });
+    fireEvent.change(organizationSelect(), { target: { value: "o2" } });
+    await waitFor(() => expect(refs()).toEqual(["SEC-4"]));
+    expect(incidentCalls().at(-1)?.[1]?.params).toMatchObject({ org_id: "o2", status: "monitoring" });
+
+    fireEvent.change(organizationSelect(), { target: { value: "all" } });
+    await waitFor(() => expect(incidentCalls().at(-1)?.[1]?.params?.org_id).toBeUndefined());
+    expect(statusSelect()).toHaveValue("monitoring");
+    expect(screen.getByLabelText("Filter by severity")).toHaveValue("sev3");
+    expect(screen.getByLabelText(/search/i)).toHaveValue("rate");
+  });
+
+  it("shows a loading state while the organization list is being fetched", async () => {
+    let finishOrganizationRequest;
+    vi.mocked(api.get).mockImplementation((url) =>
+      url.includes("/admin/incidents")
+        ? Promise.resolve({ data: { items: CASE_ROWS, total: CASE_ROWS.length } })
+        : new Promise((resolve) => { finishOrganizationRequest = resolve; })
+    );
+    show();
+    await ready();
+    expect(await screen.findByText("Loading organizations…")).toBeInTheDocument();
+    finishOrganizationRequest({ data: { items: ORGS, total: ORGS.length } });
+    await waitFor(() => expect(within(organizationSelect()).getByRole("option", { name: "Acme" })).toHaveValue("o1"));
+  });
+
+  it("reports organization loading errors and retries the failed request", async () => {
+    let organizationRequests = 0;
+    vi.mocked(api.get).mockImplementation((url) => {
+      if (url.includes("/admin/incidents")) {
+        return Promise.resolve({ data: { items: CASE_ROWS, total: CASE_ROWS.length } });
+      }
+      organizationRequests += 1;
+      return organizationRequests === 1
+        ? Promise.reject(new Error("request failed"))
+        : Promise.resolve({ data: { items: ORGS, total: ORGS.length } });
+    });
+    show();
+    await ready();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Couldn’t load organizations");
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(within(organizationSelect()).getByRole("option", { name: "Acme" })).toHaveValue("o1"));
+    expect(organizationRequests).toBe(2);
+  });
+
+  it("reports a successful empty organization list distinctly from a failed request", async () => {
+    vi.mocked(api.get).mockImplementation((url) =>
+      url.includes("/admin/incidents")
+        ? Promise.resolve({ data: { items: CASE_ROWS, total: CASE_ROWS.length } })
+        : Promise.resolve({ data: { items: [], total: 0 } })
+    );
+    show();
+    await ready();
+    expect(await screen.findByText("No organizations are available.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 

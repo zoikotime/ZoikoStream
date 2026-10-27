@@ -538,21 +538,13 @@ def enforcement_plan(db: Session, org_id) -> Plan | None:
         plan        = the subscription's stored plan            <- this function
         entitlement = status in SUBSCRIPTION_ENTITLED_STATES    <- unchanged, elsewhere
 
-    Approved Product decision: for an organization that HAS a subscription in a non-entitled
-    state (trial_expired, canceled, closed, suspended), that subscription's existing plan
-    remains the quantitative ceiling for plan-governed entitlements. It does NOT make the
-    organization entitled, and none of those states is added to SUBSCRIPTION_ENTITLED_STATES — paid-feature
-    access is a separate question this function does not answer.
-
-    The defect it fixes: both enforcement points previously resolved the plan through the
-    entitled-only query, so a lapsed subscription resolved to plan=None and `None` was then read
-    as "no ceiling". Losing entitlement therefore INCREASED usable capacity — measured, a tenant
-    60 GB over Developer's 50 GB ceiling was blocked while trialing and unblocked once expired,
-    cancelled or suspended.
+    A stored plan can remain relevant to other enforcement (such as seats) after lapse, but it
+    does not grant storage quota. `_effective_quota` returns a zero storage limit unless the
+    organization is entitled.
 
     Returns None ONLY when the organization has no subscription row at all; this does not
-    fabricate a plan. Storage and streaming fallback quotas for never-subscribed organizations
-    are resolved separately by `_effective_quota` from explicitly configured platform defaults.
+    fabricate a plan. Streaming fallback quotas continue to use explicitly configured platform
+    defaults.
 
     Row selection prefers an ENTITLED subscription when one exists, so an old cancelled row can
     never override a current live one; otherwise it takes the most recent. That is the same
@@ -660,7 +652,7 @@ def _effective_quota(db: Session, org_id, dimension: str) -> dict:
     if dimension == "storage":
         plan_value = plan.max_storage_gb if plan else None
         from . import platform_settings as _ps
-        default = _ps.default_storage_gb(db)
+        default = None
         platform_ceiling = _ps.storage_ceiling_gb(db)
     elif dimension == "streaming_hours":
         plan_value = plan.max_streaming_hours if plan else None
@@ -675,13 +667,20 @@ def _effective_quota(db: Session, org_id, dimension: str) -> dict:
     else:
         raise ValueError(f"Unknown quota dimension: {dimension}")
 
-    resolved = resolve_effective_limit(
-        has_subscription=has_subscription,
-        entitled=entitled,
-        plan_limit=plan_value,
-        fallback_limit=default,
-        hard_ceiling=platform_ceiling,
-    )
+    if dimension == "storage" and not entitled:
+        resolved = {
+            "limit": 0,
+            "configured": True,
+            "source": "no_entitled_plan",
+        }
+    else:
+        resolved = resolve_effective_limit(
+            has_subscription=has_subscription,
+            entitled=entitled,
+            plan_limit=plan_value,
+            fallback_limit=default,
+            hard_ceiling=platform_ceiling,
+        )
     return {
         **resolved,
         "plan_limit": plan_value,
@@ -714,7 +713,8 @@ def entitlements(db: Session, org: Organization) -> dict:
     members = db.scalar(
         select(func.count(User.id)).where(User.org_id == org.id, User.deleted_at.is_(None))
     ) or 0
-    hours = _streaming_hours(db, org.id)
+    streaming_hours_exact = _streaming_seconds(db, org.id) / 3600
+    hours = round(streaming_hours_exact, 1)
     active_streams = active_stream_count(db, org.id)
 
     effective = {
@@ -723,24 +723,33 @@ def entitlements(db: Session, org: Organization) -> dict:
         "concurrent_streams": effective_concurrent_streams_quota(db, org.id),
     }
 
-    def bar(key, label, used, plan_limit, unit, *, enforced: bool):
+    def bar(key, label, used, plan_limit, unit, *, enforced: bool,
+            evaluation_used=None):
         quota = effective.get(key)
         effective_limit = quota["limit"] if quota else plan_limit
         configured = quota["configured"] if quota else plan is not None
         evaluated_limit = effective_limit if enforced else plan_limit
+        evaluated_used = used if evaluation_used is None else evaluation_used
         # Three different "no number" states, kept distinct because they mean different things:
         #   no applicable quota -> NOT APPLICABLE (new quota-consuming activity is blocked)
         #   configured null     -> UNLIMITED
-        #   finite limit        -> WITHIN or EXCEEDED
+        #   finite limit        -> WITHIN, AT_LIMIT, or EXCEEDED
         if not configured:
             quota_state, remaining, pct = "not_applicable", None, None
         elif evaluated_limit is None:
             quota_state, remaining, pct = "unlimited", None, None
         else:
-            exhausted = used >= evaluated_limit if enforced else used > evaluated_limit
-            quota_state = "exceeded" if exhausted else "within"
-            remaining = round(evaluated_limit - used, 1) if isinstance(used, float) else evaluated_limit - used
-            pct = round(100 * used / evaluated_limit, 1) if evaluated_limit else None
+            if enforced and evaluated_used == evaluated_limit:
+                quota_state = "at_limit"
+            elif evaluated_used > evaluated_limit:
+                quota_state = "exceeded"
+            else:
+                quota_state = "within"
+            remaining = (
+                round(evaluated_limit - evaluated_used, 1)
+                if isinstance(used, float) else evaluated_limit - evaluated_used
+            )
+            pct = round(100 * evaluated_used / evaluated_limit, 1) if evaluated_limit else None
         return {"key": key, "label": label, "used": used, "limit": plan_limit,
                 "effective_limit": effective_limit if configured else None,
                 "quota_source": quota["source"] if quota else ("plan" if plan else "unconfigured"),
@@ -757,7 +766,8 @@ def entitlements(db: Session, org: Organization) -> dict:
         bar("members", "Members", members, plan.max_users if plan else None, "seats",
             enforced=True),
         bar("streaming_hours", "Streaming hours", hours,
-            plan.max_streaming_hours if plan else None, "hrs", enforced=True),
+            plan.max_streaming_hours if plan else None, "hrs", enforced=True,
+            evaluation_used=streaming_hours_exact),
         bar("concurrent_streams", "Concurrent streams", active_streams,
             plan.max_concurrent_streams if plan else None, "streams", enforced=True),
     ]

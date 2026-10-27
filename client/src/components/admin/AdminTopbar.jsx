@@ -23,6 +23,7 @@ const CRUMBS = {
   users: "Identity & Access",
   developers: "Developer Platform",
   subscriptions: "Usage & Entitlements",
+  "usage-entitlements": "Usage & Entitlements",
   support: "Support Operations",
   settings: "Platform Configuration",
   governance: "Governance",

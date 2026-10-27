@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Badge, Button, Panel } from "../../components/admin";
 import useElevation from "../../components/admin/useElevation";
+import ElevationNote from "../../components/admin/ElevationNote";
 import { Input, Label, Textarea } from "../../ui/forms";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
@@ -24,38 +25,6 @@ const fmt = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle:
 
 // "" stays "" so an emptied field is a validation error, never silently 0 (Number("") is 0).
 const asInt = (v) => (v === "" || v == null ? null : Number(v));
-
-function ElevationNote({ elevation }) {
-  if (elevation.status === "active") return null;
-  const msg = {
-    unknown: "Your elevation state could not be read, so changes may be refused.",
-    expired: "Your platform elevation has expired.",
-    wrong_scope: "Your current elevation does not cover platform configuration.",
-    none: "Changing the retention policy needs platform elevation.",
-  }[elevation.status];
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
-      <span>{msg}</span>
-      {elevation.status !== "unknown" && (
-        <Button
-          size="sm"
-          variant="secondary"
-          loading={elevation.elevating}
-          onClick={async () => {
-            try {
-              const ok = await elevation.elevate("Govern the media retention policy");
-              if (!ok) notify.error("You hold a different elevation; end it from the rail, then elevate for platform.");
-            } catch (e) {
-              notify.error(errMsg(e));
-            }
-          }}
-        >
-          Elevate for platform
-        </Button>
-      )}
-    </div>
-  );
-}
 
 export default function RetentionPolicyPanel() {
   const { user } = useAuth();
@@ -124,7 +93,11 @@ export default function RetentionPolicyPanel() {
       description="The minimum time a recording is kept before it may be deleted. Changes need a second Super Admin's approval."
     >
       <div className="space-y-4" data-testid="retention-panel">
-        <ElevationNote elevation={elevation} />
+        <ElevationNote
+          elevation={elevation}
+          need="Changing the retention policy needs platform elevation."
+          reason="Govern the media retention policy"
+        />
 
         <dl className="grid gap-3 text-sm sm:grid-cols-4">
           <div><dt className="text-xs text-slate-500">In effect</dt><dd className="font-medium text-slate-800 dark:text-slate-100" data-testid="retention-effective">{effective.retention_days} days</dd></div>

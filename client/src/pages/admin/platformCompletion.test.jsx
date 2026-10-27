@@ -67,8 +67,8 @@ const USAGE = {
       subscription_status: null, entitlement_source: "none", current_period_end: null, trial_ends_at: null,
       quotas: [
         quota({
-          effective_limit: 100, enforced_limit: 100, quota_source: "platform_default",
-          quota_state: "within", percent: 4, remaining: 96,
+          effective_limit: 0, enforced_limit: 0, quota_source: "no_entitled_plan",
+          quota_state: "exceeded", percent: null, remaining: -4,
         }),
         quota({
           key: "streaming_hours", label: "Streaming hours", unit: "hrs", limit: null,
@@ -97,11 +97,12 @@ describe("Usage & Entitlements", () => {
   it("renders the server's quota states without inventing numbers", async () => {
     wrap(<UsageEntitlements plans={[{ id: "p1", slug: "pro", name: "Pro" }]} />);
     const acme = (await screen.findByText("Acme")).closest("li");
-    // Platform defaults grant a finite allowance to never-subscribed organizations.
+    // Storage requires entitlement; streaming defaults remain available independently.
     const storage = within(acme).getByTestId("quota-storage");
     const hours = within(acme).getByTestId("quota-streaming_hours");
-    expect(storage).toHaveTextContent("4 / 100 GB");
-    expect(storage).toHaveTextContent("Platform default");
+    expect(storage).toHaveTextContent("4 / 0 GB");
+    expect(storage).toHaveTextContent("Over by 4 GB");
+    expect(storage).toHaveTextContent("No entitled plan — new recordings are blocked until an entitled plan is in effect");
     expect(hours).toHaveTextContent("4 / 20 hrs");
     expect(hours).toHaveTextContent("Platform default");
     // Unavailable is said, never rendered as 0.

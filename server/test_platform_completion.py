@@ -194,10 +194,13 @@ def test_usage_quota_states_are_distinct_and_report_the_enforced_ceiling(w, monk
 
     a = rows[none.name]
     assert a["entitlement_source"] == "none" and a["plan"] is None
-    assert {q["quota_state"] for q in a["quotas"]} == {"not_applicable"}
+    assert {q["quota_state"] for q in a["quotas"] if q["key"] != "storage"} == {"not_applicable"}
     storage_a = next(q for q in a["quotas"] if q["key"] == "storage")
-    # No plan, yet the platform ceiling still applies: said, not hidden behind "no plan".
-    assert storage_a["enforced_limit"] == 100 and storage_a["limit"] is None
+    assert storage_a["effective_limit"] == 0
+    assert storage_a["enforced_limit"] == 0
+    assert storage_a["quota_source"] == "no_entitled_plan"
+    assert storage_a["limit"] is None
+    assert storage_a["quota_state"] == "at_limit"
 
     b = {q["key"]: q for q in rows[capped.name]["quotas"]}
     assert b["members"]["quota_state"] == "exceeded"
@@ -206,12 +209,38 @@ def test_usage_quota_states_are_distinct_and_report_the_enforced_ceiling(w, monk
     assert b["storage"]["limit"] is None, "unlimited is a null limit, never a number"
     assert b["storage"]["enforced_limit"] == 100
     assert b["streaming_hours"]["quota_state"] == "within"
-    assert b["streaming_hours"]["enforced"] is False and b["streaming_hours"]["enforced_limit"] is None
+    assert b["streaming_hours"]["enforced"] is True
+    assert b["streaming_hours"]["enforced_limit"] == 10
 
     metrics = {x["key"]: x for x in rows[capped.name]["metrics"]}
     assert metrics["events_created"]["value"] == 1 and metrics["events_created"]["state"] == "measured"
     assert metrics["delivery_windowed"]["state"] == "unavailable"
     assert metrics["delivery_windowed"]["value"] is None, "unavailable must not read as 0"
+
+
+@pytest.mark.parametrize(
+    ("used_hours", "expected_state", "expected_remaining"),
+    [(9.9, "within", 0.1), (10, "at_limit", 0), (12, "exceeded", -2)],
+)
+def test_streaming_quota_state_is_independent_of_active_subscription(
+    w, monkeypatch, used_hours, expected_state, expected_remaining,
+):
+    _, capped, _, _ = _usage_world(w, monkeypatch)
+    monkeypatch.setattr(
+        org_svc, "_streaming_seconds", lambda _db, _org_id: used_hours * 3600,
+    )
+
+    response = client_for(w.admin).get("/api/admin/usage", params={"q": capped.name})
+    assert response.status_code == 200, response.text
+    row = response.json()["items"][0]
+    quota = next(item for item in row["quotas"] if item["key"] == "streaming_hours")
+
+    assert row["subscription_status"] == "active"
+    assert quota["used"] == used_hours
+    assert quota["quota_state"] == expected_state
+    assert quota["remaining"] == expected_remaining
+    assert quota["enforced"] is True
+    assert quota["enforced_limit"] == 10
 
 
 def test_usage_rows_come_from_the_same_engine_as_the_tenant_console(w, monkeypatch):
@@ -522,15 +551,19 @@ def test_recording_totals_are_dataset_wide_and_search_is_server_side(w):
         LiveRecording(event_id=ev.id, org_id=org.id, status="stopped", enforced=True,
                       file_url="gs://b/2.mp4", size_bytes=None),
         LiveRecording(event_id=ev.id, org_id=org.id, status="failed", enforced=True),
+        LiveRecording(event_id=ev.id, org_id=org.id, status="failed", enforced=True,
+                      file_url="gs://b/partial.mp4", size_bytes=4096),
     ])
     w.db.commit()
     c = client_for(w.admin)
     s = c.get("/api/admin/recordings/summary", params={"q": "unique-recital"}).json()
-    assert s["total"] == 3
-    assert s["by_state"]["ready"] == 1 and s["by_state"]["unverified"] == 1 and s["by_state"]["failed"] == 1
-    rows = c.get("/api/admin/recordings", params={"q": "unique-recital", "limit": 1}).json()
-    assert len(rows) == 1 and rows[0]["state"] in {"ready", "unverified", "failed"}
-    assert {r["state"] for r in c.get("/api/admin/recordings", params={"q": "unique-recital"}).json()} == {"ready", "unverified", "failed"}
+    assert s["total"] == 4
+    assert s["by_state"]["ready"] == 1 and s["by_state"]["unverified"] == 1 and s["by_state"]["failed"] == 2
+    rows = c.get("/api/admin/recordings", params={"q": "unique-recital"}).json()
+    assert sorted(r["size_bytes"] for r in rows if r["size_bytes"] is not None) == [2048, 4096]
+    assert sum(r["size_bytes"] is None for r in rows) == 2
+    assert len(rows) == 4
+    assert {r["state"] for r in rows} == {"ready", "unverified", "failed"}
 
 
 # ── Commerce ───────────────────────────────────────────────────────────────────────────

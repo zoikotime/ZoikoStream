@@ -210,6 +210,45 @@ def test_organization_deletion_requires_elevation(world):
     assert world["db"].get(Organization, world["org"].id) is not None
 
 
+@pytest.mark.parametrize(
+    ("scope", "expired", "ended"),
+    [
+        ("platform", True, False),
+        ("identity", False, False),
+        ("platform", False, True),
+    ],
+)
+def test_organization_deletion_rejects_expired_wrong_scope_or_revoked_elevation(
+    world, scope, expired, ended
+):
+    row = elevate(world, scope=scope, expired=expired)
+    if ended:
+        row.ended_at = datetime.now(UTC)
+        world["db"].commit()
+
+    c = client_for(world["admin"])
+    response = c.delete(f"/api/admin/organizations/{world['org'].id}")
+
+    assert response.status_code == 403, response.text
+    world["db"].expire_all()
+    assert world["db"].get(Organization, world["org"].id) is not None
+
+
+def test_valid_platform_elevation_allows_an_eligible_organization_deletion(world):
+    target = Organization(name=f"DeleteMe {uuid.uuid4().hex[:6]}", status="active")
+    world["db"].add(target)
+    world["db"].commit()
+    world["made"]["o"].append(target.id)
+    elevate(world, scope="platform")
+    c = client_for(world["admin"])
+
+    response = c.delete(f"/api/admin/organizations/{target.id}")
+
+    assert response.status_code == 204, response.text
+    world["db"].expire_all()
+    assert world["db"].get(Organization, target.id) is None
+
+
 # ── it is DEPTH on top of role, never a replacement ────────────────────────────────────
 
 def test_elevation_does_not_let_a_non_super_admin_in(world):

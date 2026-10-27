@@ -96,6 +96,59 @@ describe("a stopped recording — the only row whose file verdict is its own", (
   });
 });
 
+describe("recording file sizes", () => {
+  it.each([
+    [1, "1.0 B"],
+    [1024, "1.0 KB"],
+    [1024 ** 2, "1.0 MB"],
+    [1024 ** 3, "1.0 GB"],
+  ])("formats the verified size %s bytes", async (size, expected) => {
+    serve([rec({ event_title: "Sized", size_bytes: size })]);
+    show();
+    const tr = await row("Sized");
+    expect(within(tr).getByText(expected)).toBeInTheDocument();
+  });
+
+  it("distinguishes a verified zero-byte file from missing metadata", async () => {
+    serve([rec({ event_title: "Empty file", size_bytes: 0 })]);
+    show();
+    const tr = await row("Empty file");
+    expect(within(tr).getByText("0 B")).toBeInTheDocument();
+  });
+
+  it("shows Unknown when a file reference exists but size metadata does not", async () => {
+    serve([rec({ event_title: "Unknown size", size_bytes: null, has_file_reference: true })]);
+    show();
+    const tr = await row("Unknown size");
+    expect(within(tr).getByText("Unknown")).toBeInTheDocument();
+  });
+
+  it("shows No file when there is no file reference", async () => {
+    serve([rec({ event_title: "No file", size_bytes: null, has_file_reference: false })]);
+    show();
+    const tr = await row("No file");
+    expect(within(tr).getByText("No file")).toBeInTheDocument();
+  });
+
+  it("shows a verified partial-file size without changing the failed status", async () => {
+    serve([rec({
+      event_title: "Partial failure", status: "failed", state: "failed",
+      size_bytes: 4096, has_file_reference: true,
+    })]);
+    show();
+    const tr = await row("Partial failure");
+    expect(within(tr).getByText("failed")).toBeInTheDocument();
+    expect(within(tr).getByText("4.0 KB")).toBeInTheDocument();
+  });
+
+  it.each([-1, 1.5, "2048", Number.NaN])("does not display invalid size metadata (%s)", async (size) => {
+    serve([rec({ event_title: "Invalid size", size_bytes: size, has_file_reference: true })]);
+    show();
+    const tr = await row("Invalid size");
+    expect(within(tr).getByText("Unknown")).toBeInTheDocument();
+  });
+});
+
 describe("the duplicated badge is gone", () => {
   it("does not print Failed twice for a failed capture — the reported bug", async () => {
     serve([rec({ event_title: "Crash", status: "failed", state: "failed", size_bytes: null })]);

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { FiCreditCard, FiEdit2, FiSearch } from "react-icons/fi";
+import { useSearchParams } from "react-router-dom";
 import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, TabStrip, money } from "../../components/admin";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
@@ -55,13 +56,21 @@ function useSubscriptionSummary() {
   return useApi(() => api.get("/admin/subscriptions/summary").then((r) => r.data));
 }
 
-// Usage & Entitlements (sidebar name; route /admin/subscriptions). Two views over one source:
+// Usage & Entitlements (route /admin/usage-entitlements). Two views over one source:
 // per-organization entitlements and measured usage (GET /admin/usage), and the plan
 // subscriptions those entitlements come from (GET/PATCH /admin/subscriptions).
 export default function Subscriptions() {
-  const [tab, setTab] = useState("usage");
+  const [params, setParams] = useSearchParams();
+  const requestedTab = params.get("tab");
+  const tab = TABS.some(({ key }) => key === requestedTab) ? requestedTab : "usage";
   // Plans feed both the usage plan filter and the subscription editor.
   const { data: plans } = useApi(() => api.get("/admin/plans").then((r) => r.data));
+  const selectTab = (key) => {
+    const next = new URLSearchParams(params);
+    if (key === "usage") next.delete("tab");
+    else next.set("tab", key);
+    setParams(next, { replace: true });
+  };
 
   return (
     <div className="mx-auto max-w-[1440px] space-y-6">
@@ -75,7 +84,7 @@ export default function Subscriptions() {
           the plan subscriptions behind them.
         </p>
       </div>
-      <TabStrip tabs={TABS} active={tab} onChange={setTab} label="Usage and entitlements sections" idPrefix="usage" />
+      <TabStrip tabs={TABS} active={tab} onChange={selectTab} label="Usage and entitlements sections" idPrefix="usage" />
       <div role="tabpanel" id={`usagepanel-${tab}`} aria-labelledby={`usage-${tab}`}>
         {tab === "usage" ? <UsageEntitlements plans={plans || NONE} /> : <SubscriptionsList />}
       </div>

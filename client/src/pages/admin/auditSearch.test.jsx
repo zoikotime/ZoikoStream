@@ -149,6 +149,29 @@ describe("the searches that already worked still do", () => {
     await waitFor(() => expect(visible()).toEqual(["2"]));
   });
 
+  it("finds target types even when a metadata label is present", async () => {
+    show();
+    await ready();
+    search("organization");
+    await waitFor(() => expect(visible()).toEqual(["1", "3"]));
+  });
+
+  it("searches the full target identifier, not only the displayed prefix", async () => {
+    show();
+    await ready();
+    search("33333333-cccc");
+    await waitFor(() => expect(visible()).toEqual(["3"]));
+  });
+
+  it("matches action and actor email without regard to case", async () => {
+    show();
+    await ready();
+    search("RADHA@ZOIKOGROUP.COM");
+    await waitFor(() => expect(visible()).toEqual(["3"]));
+    search("LIVE.BROADCAST.HOST");
+    await waitFor(() => expect(visible()).toEqual(["2"]));
+  });
+
   it("does not sweep every row in just because some are system", async () => {
     // The lazy fix — treating a null actor as matching anything — would show all four.
     show();
