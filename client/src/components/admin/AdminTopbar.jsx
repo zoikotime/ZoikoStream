@@ -19,7 +19,7 @@ const CRUMBS = {
   "event-readiness": "Event Readiness",
   organizations: "Organizations",
   media: "Media",
-  security: "Trust & Safety",
+  "trust-safety": "Trust & Safety",
   users: "Identity & Access",
   developers: "Developer Platform",
   subscriptions: "Usage & Entitlements",
