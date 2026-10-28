@@ -11,8 +11,8 @@
 //   * an old ?tab= link lands on the section that now holds that content
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -31,6 +31,7 @@ import EventOverview from "./EventOverview";
 import EventLiveControl from "./EventLiveControl";
 import EventInsights from "./EventInsights";
 import EventActivity from "./EventActivity";
+import { useHashScroll } from "./workspace";
 
 const NOW = new Date().toISOString();
 const EVENT = {
@@ -81,8 +82,14 @@ const LEDGER = (items = [entry({}), entry({
 });
 
 let handlers;
+let scrollIntoView;
 beforeEach(() => {
   vi.clearAllMocks();
+  scrollIntoView = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: scrollIntoView,
+  });
   handlers = {
     "/organization/console-state": () => ({ organization: { name: "Northwind" }, user: { role: "org_admin" }, badges: {}, health: { status: "ok", label: "Healthy" } }),
     "/events/e1": () => EVENT,
@@ -96,17 +103,23 @@ beforeEach(() => {
     return out instanceof Promise ? out : Promise.resolve({ data: out });
   });
 });
+afterEach(() => {
+  vi.useRealTimers();
+  delete HTMLElement.prototype.scrollIntoView;
+});
 
 function renderAt(path) {
   return render(
     <ThemeProvider>
       <MemoryRouter initialEntries={[path]}>
+        <RouteProbe />
         <Routes>
           <Route path="/organization/events/:id" element={<EventWorkspaceLayout />}>
             <Route index element={<EventOverview />} />
             <Route path="live/*" element={<EventLiveControl />} />
             <Route path="insights" element={<EventInsights />} />
             <Route path="activity" element={<EventActivity />} />
+            <Route path="access" element={<h1>access section</h1>} />
             <Route path="replay" element={<h1>replay section</h1>} />
             <Route path="preparation" element={<h1>preparation section</h1>} />
           </Route>
@@ -116,8 +129,130 @@ function renderAt(path) {
   );
 }
 
+function RouteProbe() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <output data-testid="route-location">{location.pathname + location.search + location.hash}</output>
+      <button onClick={() => navigate(-1)}>Browser back</button>
+      <button onClick={() => navigate(1)}>Browser forward</button>
+    </>
+  );
+}
+
+function HashScrollFallbackProbe() {
+  useHashScroll({ supportedHashes: ["missing"], fallbackHash: "monitor" });
+  return <div id="monitor" />;
+}
+
 
 const activityCalls = () => vi.mocked(api.get).mock.calls.filter(([u]) => u === "/organization/events/e1/activity");
+
+describe("Event lifecycle navigation", () => {
+  const stages = [
+    ["Contribute", "/organization/events/e1/preparation#team", "Preparation"],
+    ["Ingest", "/organization/events/e1/preparation#sources", "Preparation"],
+    ["Produce", "/organization/events/e1/live", "Live Control"],
+    ["Secure", "/organization/events/e1/access#diagnostics", "Audience Access"],
+    ["Deliver", "/organization/events/e1/insights#quality", "Insights"],
+    ["Understand", "/organization/events/e1/insights", "Insights"],
+    ["Preserve", "/organization/events/e1/replay#retention", "Replay & Assets"],
+  ];
+
+  it("renders all seven stages with completed, current, and upcoming states", async () => {
+    renderAt("/organization/events/e1");
+
+    for (const [label] of stages) {
+      expect(await screen.findByRole("link", { name: new RegExp(`^${label},`) })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("link", { name: "Contribute, completed; open contribution setup" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Ingest, completed; open sources and ingest" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Produce, current stage; open Live Control" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Secure, upcoming; open access diagnostics" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { current: "step" })).toHaveTextContent("Produce");
+    expect(screen.getAllByRole("link", { name: /^(Contribute|Ingest|Produce|Secure|Deliver|Understand|Preserve),/ }))
+      .toHaveLength(7);
+  });
+
+  it.each(stages)("navigates %s to its existing event section without changing event state", async (label, destination, activeSection) => {
+    renderAt("/organization/events/e1");
+    const stage = await screen.findByRole("link", { name: new RegExp(`^${label},`) });
+
+    await userEvent.click(stage);
+
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent(destination));
+    const active = within(screen.getByRole("navigation", { name: "Event workspace" }))
+      .getAllByRole("link")
+      .find((link) => link.getAttribute("aria-current") === "page");
+    expect(active).toHaveTextContent(activeSection);
+    expect(api.post).not.toHaveBeenCalled();
+    expect(api.patch).not.toHaveBeenCalled();
+    expect(api.delete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["draft", "Contribute"],
+    ["scheduled", "Produce"],
+    ["live", "Deliver"],
+    ["ended", "Understand"],
+    ["archived", "Preserve"],
+  ])("reflects %s lifecycle status as the %s stage", async (status, currentStage) => {
+    handlers["/events/e1"] = () => ({ ...EVENT, status, display_status: status });
+    renderAt("/organization/events/e1");
+
+    expect(await screen.findByRole("link", { current: "step" })).toHaveTextContent(currentStage);
+  });
+
+  it("uses a single Tab stop and arrow keys to select stages before Enter activation", async () => {
+    renderAt("/organization/events/e1");
+    const contribute = await screen.findByRole("link", { name: /^Contribute,/ });
+    const ingest = screen.getByRole("link", { name: /^Ingest,/ });
+    const stageLinks = screen.getAllByRole("link", { name: /^(Contribute|Ingest|Produce|Secure|Deliver|Understand|Preserve),/ });
+
+    expect(stageLinks.filter((link) => link.tabIndex === 0)).toHaveLength(1);
+    act(() => contribute.focus());
+    await userEvent.keyboard("{ArrowRight}");
+    expect(ingest).toHaveFocus();
+    expect(screen.getByText("Selected stage: Ingest. Press Enter or Space to open.")).toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/events/e1/preparation#sources"));
+  });
+
+  it("supports Home/End focus movement and Space activation", async () => {
+    renderAt("/organization/events/e1");
+    const first = await screen.findByRole("link", { name: /^Contribute,/ });
+    const preserve = screen.getByRole("link", { name: /^Preserve,/ });
+    act(() => first.focus());
+    await userEvent.keyboard("{End}");
+    expect(preserve).toHaveFocus();
+    await userEvent.keyboard("{Home}");
+    expect(first).toHaveFocus();
+    await userEvent.keyboard("{End}");
+    expect(preserve).toHaveFocus();
+    await userEvent.keyboard(" ");
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/events/e1/replay#retention"));
+  });
+
+  it("supports browser back and forward after stage navigation", async () => {
+    renderAt("/organization/events/e1");
+    await userEvent.click(await screen.findByRole("link", { name: /^Secure,/ }));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/events/e1/access#diagnostics"));
+
+    await userEvent.click(screen.getByRole("button", { name: "Browser back" }));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/events/e1"));
+    await userEvent.click(screen.getByRole("button", { name: "Browser forward" }));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/events/e1/access#diagnostics"));
+  });
+
+  it("keeps Viewer Preview and Review Readiness actions unchanged", async () => {
+    renderAt("/organization/events/e1");
+    expect(await screen.findByRole("link", { name: "Viewer Preview" }))
+      .toHaveAttribute("href", "/organization/events/e1/access#viewer-preview");
+    expect(screen.getByRole("link", { name: "Review Readiness" }))
+      .toHaveAttribute("href", "/organization/events/e1/preparation#readiness");
+  });
+});
 
 describe("legacy ?tab= links", () => {
   it.each([
@@ -248,6 +383,84 @@ const LIVE = (over = {}) => ({
 });
 
 describe("Live Control", () => {
+  const liveReady = () => {
+    handlers["/organization/events/e1/live-status"] = () => LIVE();
+  };
+  const sectionLink = (name) => screen.getByRole("link", { name });
+
+  it.each([
+    ["Live monitor", "monitor"],
+    ["Stream health & sessions", "sessions"],
+    ["Alerts & incidents", "incidents"],
+    ["Recovery procedures", "recovery"],
+  ])("clicking %s scrolls to the %s section and selects that sidebar item", async (label, id) => {
+    liveReady();
+    renderAt("/organization/events/e1/live");
+    const link = await screen.findByRole("link", { name: label });
+
+    await userEvent.click(link);
+
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent(`/live#${id}`));
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    expect(scrollIntoView.mock.contexts.some((element) => element.id === id)).toBe(true);
+    expect(link).toHaveAttribute("aria-current", "page");
+  });
+
+  it.each(["sessions", "incidents"])("directly opening #%s scrolls to its section after data mounts", async (id) => {
+    liveReady();
+    renderAt(`/organization/events/e1/live#${id}`);
+
+    await screen.findByRole("heading", { name: id === "sessions" ? "Stream health & sessions" : "Incident & recovery desk" });
+    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === id)).toBe(true));
+    expect(sectionLink(id === "sessions" ? "Stream health & sessions" : "Alerts & incidents"))
+      .toHaveAttribute("aria-current", "page");
+  });
+
+  it("restores section scrolling and sidebar selection on browser back and forward", async () => {
+    liveReady();
+    renderAt("/organization/events/e1/live#sessions");
+    await screen.findByRole("heading", { name: "Stream health & sessions" });
+    scrollIntoView.mockClear();
+
+    await userEvent.click(sectionLink("Alerts & incidents"));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/live#incidents"));
+    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === "incidents")).toBe(true));
+
+    scrollIntoView.mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "Browser back" }));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/live#sessions"));
+    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === "sessions")).toBe(true));
+    expect(sectionLink("Stream health & sessions")).toHaveAttribute("aria-current", "page");
+
+    scrollIntoView.mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "Browser forward" }));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/live#incidents"));
+    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === "incidents")).toBe(true));
+  });
+
+  it("normalizes unknown hashes to the Live monitor fallback", async () => {
+    liveReady();
+    renderAt("/organization/events/e1/live#unknown");
+
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/live#monitor"));
+    expect(await screen.findByRole("link", { name: "Live monitor" })).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === "monitor")).toBe(true));
+  });
+
+  it("normalizes a valid hash whose section cannot mount to Live monitor", async () => {
+    vi.useFakeTimers();
+    render(
+      <MemoryRouter initialEntries={["/organization/events/e1/live#missing"]}>
+        <RouteProbe />
+        <HashScrollFallbackProbe />
+      </MemoryRouter>
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByTestId("route-location")).toHaveTextContent("/live#monitor");
+  });
+
   it("says NOT LIVE in words, links to the Producer Console, and names what blocks go-live", async () => {
     handlers["/organization/events/e1/live-status"] = () => LIVE();
     renderAt("/organization/events/e1/live");
@@ -300,10 +513,86 @@ describe("Insights", () => {
   // A KPI tile (a named group), or a fact row (<dt>label</dt><dd>value</dd>) in the panels.
   const metric = (label) =>
     screen.queryByRole("group", { name: label }) || screen.getByText(label, { selector: "dt" }).parentElement;
+  const serveInsights = (payload = INSIGHTS()) => {
+    handlers["/organization/events/e1/insights"] = () => payload;
+    handlers["/events/e1/feedback"] = () => [];
+  };
+  const tabLink = (name) => within(screen.getByRole("navigation", { name: "Insights sections" }))
+    .getByRole("link", { name });
+  const activeRailItem = (label) => within(screen.getByRole("navigation", { name: "Event workspace" }))
+    .getByRole("link", { name: label });
+  const activeTab = async (label) => {
+    const tabs = await screen.findByRole("navigation", { name: "Insights sections" });
+    const tab = await within(tabs)
+      .findByRole("link", { name: label });
+    expect(tab).toHaveAttribute("aria-current", "true");
+    return tab;
+  };
+
+  it.each([
+    ["Insights overview", "overview"],
+    ["Viewer activity", "viewers"],
+    ["Stream quality", "quality"],
+    ["Event outcomes", "outcomes"],
+  ])("clicking sidebar %s scrolls to its dashboard section and selects the matching tab", async (label, hash) => {
+    serveInsights();
+    renderAt("/organization/events/e1/insights");
+
+    await userEvent.click(await screen.findByRole("link", { name: label }));
+
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent(`/insights#${hash}`));
+    const tab = await activeTab(hash === "overview" ? "Overview" : label);
+    expect(tab).toHaveAttribute("href", `/organization/events/e1/insights#${hash}`);
+    expect(activeRailItem(label)).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === hash)).toBe(true));
+    if (hash === "viewers") {
+      expect(screen.getByText("No live samples were recorded.")).toBeInTheDocument();
+    }
+  });
+
+  it.each(["overview", "viewers", "quality", "outcomes"])("direct navigation to #%s restores selection and section", async (hash) => {
+    serveInsights();
+    renderAt(`/organization/events/e1/insights#${hash}`);
+
+    const label = {
+      overview: "Insights overview",
+      viewers: "Viewer activity",
+      quality: "Stream quality",
+      outcomes: "Event outcomes",
+    }[hash];
+    await activeTab(hash === "overview" ? "Overview" : label);
+    expect(activeRailItem(label)).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === hash)).toBe(true));
+  });
+
+  it("restores Insights tab state on browser back and forward", async () => {
+    serveInsights();
+    renderAt("/organization/events/e1/insights#viewers");
+    await activeTab("Viewer activity");
+
+    await userEvent.click(tabLink("Stream quality"));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/insights#quality"));
+    await activeTab("Stream quality");
+
+    await userEvent.click(screen.getByRole("button", { name: "Browser back" }));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/insights#viewers"));
+    await activeTab("Viewer activity");
+    await userEvent.click(screen.getByRole("button", { name: "Browser forward" }));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/insights#quality"));
+    await activeTab("Stream quality");
+  });
+
+  it("normalizes unknown Insights hashes to #overview", async () => {
+    serveInsights();
+    renderAt("/organization/events/e1/insights#unknown");
+
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/insights#overview"));
+    await activeTab("Overview");
+    expect(activeRailItem("Insights overview")).toHaveAttribute("aria-current", "page");
+  });
 
   it("shows an unmeasured figure as — with its reason, and a measured zero as 0", async () => {
-    handlers["/organization/events/e1/insights"] = () => INSIGHTS();
-    handlers["/events/e1/feedback"] = () => [];
+    serveInsights();
     renderAt("/organization/events/e1/insights");
     await screen.findByText(/has not been broadcast/i);
     expect(metric("Peak viewers")).toHaveTextContent("—");
@@ -315,13 +604,12 @@ describe("Insights", () => {
   });
 
   it("reports measured figures as the server gave them", async () => {
-    handlers["/organization/events/e1/insights"] = () => INSIGHTS({
+    serveInsights(INSIGHTS({
       measured: true,
       broadcast: { sessions: 1, on_air_seconds: 3600, first_started_at: NOW, last_ended_at: NOW },
       audience: { unique_viewers: 2, peak_viewers: 42, avg_watch_seconds: 900, total_watch_seconds: 1800, returning_viewers: 1 },
       feedback: { responses: 2, ratings: 2, average_rating: 4.5 },
-    });
-    handlers["/events/e1/feedback"] = () => [];
+    }));
     renderAt("/organization/events/e1/insights");
     await waitFor(() => expect(metric("Peak viewers")).toHaveTextContent("42"));
     expect(metric("Avg watch time")).toHaveTextContent("15m");

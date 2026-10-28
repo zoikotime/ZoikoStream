@@ -194,7 +194,7 @@ export default function SupportStatus() {
           infrastructure claimed something that does not exist. */}
 
       {/* ── Service health ─────────────────────────────────────────────────── */}
-      <section className="space-y-4">
+      <section id="service-health" className="space-y-4">
         <h2 className={cx("text-[20px] font-semibold tracking-tight", CONSOLE.heading)}>
           Service health
         </h2>

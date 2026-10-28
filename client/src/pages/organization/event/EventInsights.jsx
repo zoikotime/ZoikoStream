@@ -26,11 +26,15 @@ const pct = (part, whole) => (whole ? Math.round((100 * part) / whole) : null);
 const ratio = (r) => (r == null ? null : r < 0.001 && r > 0 ? "<0.1%" : `${(r * 100).toFixed(1)}%`);
 
 const TABS = [
-  ["", "Overview"],
+  ["overview", "Overview"],
   ["viewers", "Viewer activity"],
   ["quality", "Stream quality"],
   ["outcomes", "Event outcomes"],
 ];
+const INSIGHTS_HASH_SCROLL = {
+  supportedHashes: TABS.map(([anchor]) => anchor),
+  fallbackHash: "overview",
+};
 
 function Bars({ rows, empty }) {
   if (!rows?.length) return <p className={cx("text-sm", CONSOLE.muted)}>{empty}</p>;
@@ -91,7 +95,7 @@ function Feedback({ eventId }) {
 export default function EventInsights() {
   const { event, eventId } = useEventWorkspace();
   const { hash } = useLocation();
-  useHashScroll();
+  useHashScroll(INSIGHTS_HASH_SCROLL);
   const ins = useApi(() => api.get(`/organization/events/${eventId}/insights`).then((r) => r.data));
   const d = ins.data;
   const total = d?.playback?.total || {};
@@ -123,33 +127,35 @@ export default function EventInsights() {
         <p className={cx("text-sm", CONSOLE.faint)}>Loading insights…</p>
       ) : (
         <>
-          <Banner tone="info" title={d.measured ? "Measured from this event's own sessions — nothing estimated" : "This event has not been broadcast"}
-            aside={<Tag tone={d.measured ? "green" : "slate"}>{d.measured ? "Measured" : "No live telemetry"}</Tag>}>
-            {d.measured
-              ? "Playback sessions are not unique people. Figures nobody measured show as “—” with the reason."
-              : "Live audience figures have not been measured, so they show as “—”. Nothing below is estimated."}
-          </Banner>
+          <div id="overview" className="scroll-mt-24 space-y-6">
+            <Banner tone="info" title={d.measured ? "Measured from this event's own sessions — nothing estimated" : "This event has not been broadcast"}
+              aside={<Tag tone={d.measured ? "green" : "slate"}>{d.measured ? "Measured" : "No live telemetry"}</Tag>}>
+              {d.measured
+                ? "Playback sessions are not unique people. Figures nobody measured show as “—” with the reason."
+                : "Live audience figures have not been measured, so they show as “—”. Nothing below is estimated."}
+            </Banner>
 
-          <KpiRow>
-            <KpiTile icon={FiPlay} tone="violet" label="Playback start attempts" value={(total.sessions ?? 0).toLocaleString()}
-              caption="Player sessions, live and replay" />
-            <KpiTile icon={FiRadio} tone="sky" label="Peak viewers" value={d.audience.peak_viewers}
-              caption={d.audience.peak_viewers == null ? "Not broadcast yet" : "Highest concurrent audience"} />
-            <KpiTile icon={FiCheck} tone="green" label="Playback start success" value={startRate == null ? null : `${startRate}%`}
-              caption={total.sessions ? `${total.playback_starts} successful / ${total.sessions} attempts` : "No playback attempts yet"} />
-            <KpiTile icon={FiClock} tone="sky" label="Avg watch time"
-              value={d.audience.avg_watch_seconds == null ? null : fmtSeconds(d.audience.avg_watch_seconds)}
-              caption={d.audience.avg_watch_seconds == null ? "No viewers yet" : "Per identified viewer"} />
-          </KpiRow>
+            <KpiRow>
+              <KpiTile icon={FiPlay} tone="violet" label="Playback start attempts" value={(total.sessions ?? 0).toLocaleString()}
+                caption="Player sessions, live and replay" />
+              <KpiTile icon={FiRadio} tone="sky" label="Peak viewers" value={d.audience.peak_viewers}
+                caption={d.audience.peak_viewers == null ? "Not broadcast yet" : "Highest concurrent audience"} />
+              <KpiTile icon={FiCheck} tone="green" label="Playback start success" value={startRate == null ? null : `${startRate}%`}
+                caption={total.sessions ? `${total.playback_starts} successful / ${total.sessions} attempts` : "No playback attempts yet"} />
+              <KpiTile icon={FiClock} tone="sky" label="Avg watch time"
+                value={d.audience.avg_watch_seconds == null ? null : fmtSeconds(d.audience.avg_watch_seconds)}
+                caption={d.audience.avg_watch_seconds == null ? "No viewers yet" : "Per identified viewer"} />
+            </KpiRow>
+          </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <nav aria-label="Insights sections" className={cx("inline-flex rounded-xl border p-1", CONSOLE.divider)}>
               {TABS.map(([anchor, label]) => {
-                const on = anchor ? hash === `#${anchor}` : !hash;
+                const on = hash === `#${anchor}` || (!hash && anchor === "overview");
                 return (
                   <Link
                     key={label}
-                    to={anchor ? `#${anchor}` : sectionPath(eventId, "insights")}
+                    to={`${sectionPath(eventId, "insights")}#${anchor}`}
                     aria-current={on ? "true" : undefined}
                     className={cx(
                       "rounded-lg px-3.5 py-1.5 text-[13px] font-medium",

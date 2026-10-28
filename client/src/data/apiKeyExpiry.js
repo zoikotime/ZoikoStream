@@ -2,9 +2,8 @@
 //
 // The server decides a key's state (crud.admin.key_lifecycle): usable while now < expires_at,
 // expired from that instant on — no grace period, nothing ever extends a key — and "expiring
-// soon" inside its last 30 days. Each key arrives with `status`, `usable`,
-// `seconds_until_expiry` (signed, as of the response's `generated_at`) and `expiry_warning`
-// (notice <= 30 days, urgent <= 7 days, imminent <= 24 hours), and the page renders those.
+// soon" inside its last 30 days. Its status and expiry countdown are snapshots at generated_at.
+// The page advances those snapshots from the exact expires_at instant while it remains open.
 //
 // `lifecycleOf` re-derives the same rule only for a payload without them (an older API), with
 // exact millisecond arithmetic. It used to be Math.ceil of a day count, which read a key that
@@ -20,10 +19,25 @@ const warningFor = (seconds) =>
 /** { status, usable, seconds, warning } for one key, `seconds` measured at `nowMs`. */
 export function lifecycleOf(key, nowMs = Date.now(), generatedAtMs = null) {
   if (key?.status) {
-    // The server's verdict, with its countdown moved on by the time since it was computed.
     const drift = generatedAtMs != null ? Math.round((nowMs - generatedAtMs) / 1000) : 0;
-    const seconds = key.seconds_until_expiry == null ? null : key.seconds_until_expiry - drift;
-    return { status: key.status, usable: !!key.usable, seconds, warning: key.expiry_warning || null };
+    const expiresMs = key.expires_at ? new Date(key.expires_at).getTime() : null;
+    const seconds = expiresMs != null && !Number.isNaN(expiresMs)
+      ? Math.floor((expiresMs - nowMs) / 1000)
+      : key.seconds_until_expiry == null ? null : key.seconds_until_expiry - drift;
+    if (key.status === "revoked" || key.revoked) return { status: "revoked", usable: false, seconds, warning: null };
+    if (key.status === "expired" || (seconds != null && seconds <= 0)) {
+      return { status: "expired", usable: false, seconds, warning: null };
+    }
+    if (seconds == null) {
+      return { status: key.status, usable: !!key.usable, seconds, warning: key.expiry_warning || null };
+    }
+    if (key.status !== "active" && key.status !== "expiring_soon") {
+      return { status: key.status, usable: !!key.usable, seconds, warning: key.expiry_warning || null };
+    }
+    if (seconds <= EXPIRING_SOON_DAYS * DAY) {
+      return { status: "expiring_soon", usable: true, seconds, warning: warningFor(seconds) };
+    }
+    return { status: "active", usable: true, seconds, warning: null };
   }
   const expiresMs = key?.expires_at ? new Date(key.expires_at).getTime() : null;
   const seconds = expiresMs == null || Number.isNaN(expiresMs) ? null : Math.floor((expiresMs - nowMs) / 1000);
@@ -51,6 +65,7 @@ const dayNumber = (ms) => {
 export function expiryText(life, expiresAt, nowMs = Date.now()) {
   // A revoked key's expiry no longer means anything: it is unusable either way.
   if (life.status === "revoked") return "No longer usable";
+  if (life.status === "expired" && life.seconds == null) return "Expired (date unavailable)";
   if (life.seconds == null) return "Never expires";
   const s = life.seconds;
   if (s <= 0) {

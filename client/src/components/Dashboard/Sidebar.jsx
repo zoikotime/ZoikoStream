@@ -420,29 +420,33 @@ export default function Sidebar({ open, onClose, state, collapsed = false, nav =
         {nav || <OrgNav state={state} role={role} collapsed={collapsed} onNavigate={onClose} />}
 
         <div className="shrink-0 border-t border-white/[0.07] pt-2">
-          {/* An external health signal, not a substitute for incident handling (§3.1). It
-              links to Support, where the verdict, its cause and its history live. */}
-          <Link
-            to="/organization/support"
-            onClick={onClose}
-            aria-label={`Service status: ${health.label || "unknown"}`}
-            title={`Service status: ${health.label || "unknown"}`}
+          {/* Both controls open the service-health section on Support; neither wraps the other. */}
+          <div
             className={cx(
-              "group relative mx-3 mb-2 flex items-center justify-between gap-2 rounded-lg px-2 py-2 text-[12.5px] text-white/70 hover:bg-white/[0.06] hover:text-white",
-              focusRing,
+              "mx-3 mb-2 flex items-center justify-between gap-2 rounded-lg px-2 py-2 text-[12.5px] text-white/70 hover:bg-white/[0.06] hover:text-white",
               collapsed && "lg:mx-2 lg:justify-center"
             )}
           >
-            <span className="inline-flex items-center gap-2">
-              <span aria-hidden="true" className={cx("h-2 w-2 rounded-full ring-2 ring-white/10", DOT[health.status] || "bg-slate-400")} />
-              <span className={cx(collapsed && "lg:hidden")}>Service status</span>
-            </span>
-            <span className={cx("inline-flex items-center gap-1 text-white/60", collapsed && "lg:hidden")}>
+            <Link
+              to="/organization/support#service-health"
+              onClick={onClose}
+              aria-label={`Service status: ${health.label || "unknown"}`}
+              title={`Service status: ${health.label || "unknown"}`}
+              className={cx("group relative inline-flex min-w-0 items-center gap-2 rounded-md", focusRing)}
+            >
+              <span aria-hidden="true" className={cx("h-2 w-2 shrink-0 rounded-full ring-2 ring-white/10", DOT[health.status] || "bg-slate-400")} />
+              <span className={cx("truncate", collapsed && "lg:hidden")}>Service status</span>
+              <Tip show={collapsed}>Service status · {health.label || "Unknown"}</Tip>
+            </Link>
+            <Link
+              to="/organization/support#service-health"
+              onClick={onClose}
+              aria-label="View service status details"
+              className={cx("inline-flex shrink-0 items-center gap-1 rounded-md text-white/60", focusRing, collapsed && "lg:hidden")}
+            >
               View status <FiArrowRight aria-hidden="true" />
-            </span>
-            <span className="sr-only">{health.label}</span>
-            <Tip show={collapsed}>Service status · {health.label || "Unknown"}</Tip>
-          </Link>
+            </Link>
+          </div>
           <AccountCard person={person} collapsed={collapsed} onNavigate={onClose} />
         </div>
       </aside>

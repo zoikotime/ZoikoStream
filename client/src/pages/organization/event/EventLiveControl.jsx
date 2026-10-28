@@ -32,6 +32,10 @@ import { ageOf, fmtSeconds, fmtUtc, fmtZoned, fmtZonedShort, secondsSince } from
 
 const POLL_ON_AIR_MS = 10_000;
 const POLL_OFF_AIR_MS = 60_000;
+const LIVE_HASH_SCROLL = {
+  supportedHashes: ["monitor", "sessions", "incidents", "recovery"],
+  fallbackHash: "monitor",
+};
 
 const HEALTH = {
   ok: { tone: "green", label: "Healthy" },
@@ -80,7 +84,7 @@ function GovernedAction({ icon: Icon, label, note, to, danger }) {
 
 export default function EventLiveControl() {
   const { event, eventId, reload, readiness } = useEventWorkspace();
-  useHashScroll();
+  useHashScroll(LIVE_HASH_SCROLL);
   const onAir = ON_AIR_STATUSES.includes(event.status);
   const live = useApi(() => api.get(`/organization/events/${eventId}/live-status`).then((r) => r.data));
   const [now, setNow] = useState(() => Date.now());
@@ -101,7 +105,7 @@ export default function EventLiveControl() {
   const refresh = () => { reload(); live.reload(); };
 
   return (
-    <div className="space-y-6">
+    <div id="monitor" className="scroll-mt-24 space-y-6">
       <EventSectionHeader
         icon={FiActivity}
         eyebrow="Event workspace / 04"
