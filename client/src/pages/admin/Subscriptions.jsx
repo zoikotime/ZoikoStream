@@ -127,10 +127,26 @@ function SubscriptionsList() {
   const openEdit = (s) => { setEditingSub(s); setModalOpen(true); };
 
   const columns = [
-    { key: "organization_name", header: "Organization", sortable: true, render: (s) => <span className="font-medium text-slate-800 dark:text-slate-100">{s.organization_name || "—"}</span> },
+    { key: "organization_name", header: "Organization", sortable: true, render: (s) => (
+      <div>
+        <span className="font-medium text-slate-800 dark:text-slate-100">{s.organization_name || "—"}</span>
+        <div className="mt-1 font-mono text-[10px] text-slate-500 dark:text-slate-400">
+          Org {String(s.org_id || "").slice(0, 8) || "—"} · Sub {String(s.id || "").slice(0, 8) || "—"}
+        </div>
+      </div>
+    ) },
     { key: "plan", header: "Plan", sortable: true, render: (s) => s.plan || "—" },
     { key: "price_monthly", header: "Price", align: "right", mono: true, sortable: true, render: (s) => (s.price_monthly != null ? money(s.price_monthly) + "/mo" : "—") },
-    { key: "status", header: "Status", render: (s) => <Badge tone={STATUS_TONE[s.status] || "neutral"} dot>{statusLabel(s.status)}</Badge> },
+    { key: "status", header: "Status", render: (s) => (
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={STATUS_TONE[s.status] || "neutral"} dot>{statusLabel(s.status)}</Badge>
+        {s.is_current != null && (
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">
+            {s.is_current ? "Current record" : "Historical record"}
+          </span>
+        )}
+      </div>
+    ) },
     { key: "seats", header: "Seats", align: "right", sortable: true },
     { key: "started_at", header: "Started", align: "right", render: (s) => fmtDate(s.started_at) },
     { key: "current_period_end", header: "Renews", align: "right", render: (s) => fmtDate(s.current_period_end) },

@@ -170,6 +170,7 @@ class SubscriptionOut(BaseModel):
 
     id: uuid.UUID
     org_id: uuid.UUID
+    is_current: bool | None = None
     organization_name: str | None = None
     plan: str | None = None
     price_monthly: float | None = None
