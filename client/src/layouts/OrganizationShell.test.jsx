@@ -12,7 +12,7 @@
 //   * the collapse / drawer controls and the Guide's safe area, unchanged
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api", () => ({
@@ -98,6 +98,7 @@ function renderShell(at = "/organization/dashboard") {
   return render(
     <ThemeProvider>
       <MemoryRouter initialEntries={[at]}>
+        <RouteProbe />
         <Routes>
           <Route element={<OrganizationLayout />}>
             {PAGES.map(([path, label]) => (
@@ -112,6 +113,18 @@ function renderShell(at = "/organization/dashboard") {
         </Routes>
       </MemoryRouter>
     </ThemeProvider>
+  );
+}
+
+function RouteProbe() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <output data-testid="route-location">{location.pathname + location.search + location.hash}</output>
+      <button onClick={() => navigate(-1)}>Browser back</button>
+      <button onClick={() => navigate(1)}>Browser forward</button>
+    </>
   );
 }
 
@@ -253,16 +266,56 @@ describe("role-aware rail", () => {
 });
 
 describe("utility footer", () => {
-  it("shows the service status, linked to Support", async () => {
-    renderShell();
-    const status = await screen.findByRole("link", { name: "Service status: Healthy" });
-    expect(status).toHaveAttribute("href", "/organization/support");
+  it.each([
+    ["/organization/support", "Service status: Healthy"],
+    ["/organization/support", "View service status details"],
+    ["/organization/developers", "Service status: Healthy"],
+    ["/organization/developers", "View service status details"],
+    ["/organization/events", "Service status: Healthy"],
+    ["/organization/events", "View service status details"],
+  ])("opens the Support service-health section from %s", async (path, linkName) => {
+    renderShell(path);
+    await screen.findByRole("heading", { level: 1 });
+    const user = userEvent.setup();
+    const status = await screen.findByRole("link", { name: linkName });
+    expect(status).toHaveAttribute("href", "/organization/support#service-health");
+
+    await user.click(status);
+    await waitFor(() => {
+      expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/support#service-health");
+    });
+    expect(screen.getByText("Support page")).toBeInTheDocument();
+    expect(within(rail()).getByRole("link", { name: "Support" })).toHaveAttribute("aria-current", "page");
+
+    await user.click(screen.getByRole("button", { name: "Browser back" }));
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent(path));
+    await user.click(screen.getByRole("button", { name: "Browser forward" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/support#service-health");
+    });
   });
 
-  it("says the status is unavailable rather than healthy when it cannot be read", async () => {
+  it("provides two separate links to the same status section when already on Support", async () => {
+    renderShell("/organization/support");
+    await screen.findByText("Support page");
+    const status = await screen.findByRole("link", { name: "Service status: Healthy" });
+    const viewStatus = screen.getByRole("link", { name: "View service status details" });
+    expect(status).toHaveAttribute("href", "/organization/support#service-health");
+    expect(viewStatus).toHaveAttribute("href", "/organization/support#service-health");
+  });
+
+  it("keeps the status link unavailable message when health cannot be read", async () => {
     vi.mocked(api.get).mockImplementation(() => Promise.reject(new Error("down")));
     renderShell();
     expect(await screen.findByRole("link", { name: "Service status: Status unavailable" })).toBeInTheDocument();
+  });
+
+  it("keeps both links distinct and does not nest anchors", async () => {
+    renderShell();
+    await screen.findByRole("heading", { level: 1 });
+    const status = await screen.findByRole("link", { name: "Service status: Healthy" });
+    const viewStatus = screen.getByRole("link", { name: "View service status details" });
+    expect(status).not.toContainElement(viewStatus);
   });
 });
 

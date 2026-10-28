@@ -1,4 +1,5 @@
 import { Link, Navigate, useSearchParams } from "react-router-dom";
+import { useRef, useState } from "react";
 import {
   FiActivity, FiAlertTriangle, FiCheck, FiCheckCircle, FiClock, FiEye, FiInfo, FiPlay, FiRadio, FiZap,
 } from "react-icons/fi";
@@ -7,7 +8,7 @@ import useApi from "../../../hooks/useApi";
 import useInterval from "../../../hooks/useInterval";
 import Badge from "../../../ui/Badge";
 import { ConsoleButton as Button } from "../../../ui/Button";
-import { CONSOLE, cx } from "../../../ui/tokens";
+import { CONSOLE, cx, focusRing } from "../../../ui/tokens";
 import { ON_AIR_STATUSES, displayStatusOf, statusMeta } from "../../../data/events";
 import { DarkCard, Footnote, Panel, PanelLink } from "../../../components/organization/console/ConsoleUI";
 import { CARD } from "../../../components/organization/console/consoleStyles";
@@ -38,45 +39,89 @@ const LIVE_POLL_MS = 15_000;
 // The seven-stage lifecycle (ZST-UX-NAV-001 §7.1) as a strip. Where the event IS comes from
 // its status alone — never inferred from a schedule or a guess about progress — and the stages
 // before it are shown as passed, the ones after as still to come.
-const STAGES = ["Contribute", "Ingest", "Produce", "Secure", "Deliver", "Understand", "Preserve"];
+const STAGES = [
+  { label: "Contribute", section: "preparation", hash: "team", destination: "contribution setup" },
+  { label: "Ingest", section: "preparation", hash: "sources", destination: "sources and ingest" },
+  { label: "Produce", section: "live", destination: "Live Control" },
+  { label: "Secure", section: "access", hash: "diagnostics", destination: "access diagnostics" },
+  { label: "Deliver", section: "insights", hash: "quality", destination: "playback quality and delivery" },
+  { label: "Understand", section: "insights", destination: "Insights" },
+  { label: "Preserve", section: "replay", hash: "retention", destination: "replay preservation" },
+];
 const STAGE_OF = {
   draft: 0, published: 2, scheduled: 2, ready_to_arm: 3, armed: 3, live: 4, degraded: 4,
   ended: 5, cancelled: 5, archived: 6,
 };
 
-function StageStrip({ status }) {
+function StageStrip({ status, eventId }) {
   const current = STAGE_OF[status] ?? 0;
+  const [selected, setSelected] = useState(current);
+  const links = useRef([]);
+
+  const moveFocus = (event, index) => {
+    let next;
+    if (event.key === "ArrowRight") next = (index + 1) % STAGES.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + STAGES.length) % STAGES.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = STAGES.length - 1;
+    else if (event.key === " ") {
+      event.preventDefault();
+      links.current[index]?.click();
+      return;
+    } else return;
+
+    event.preventDefault();
+    setSelected(next);
+    links.current[next]?.focus();
+  };
+
+  const selectedStage = STAGES[selected]?.label;
   return (
-    <ol aria-label="Lifecycle stage" className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
-      {STAGES.map((stage, i) => {
-        const state = i < current ? "done" : i === current ? "current" : "next";
-        return (
-          <li
-            key={stage}
-            aria-current={state === "current" ? "step" : undefined}
-            className={cx(
-              CARD,
-              "flex flex-col items-center gap-1.5 px-2 py-3 text-center",
-              state === "current" && "border-violet-300 bg-violet-50/80 ring-1 ring-violet-200 dark:border-violet-400/40 dark:bg-violet-500/10 dark:ring-violet-400/20"
-            )}
-          >
-            <span
-              aria-hidden="true"
+    <nav aria-label="Event lifecycle">
+      <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
+        {STAGES.map((stage, i) => {
+          const state = i < current ? "done" : i === current ? "current" : "next";
+          const to = `${sectionPath(eventId, stage.section)}${stage.hash ? `#${stage.hash}` : ""}`;
+          return (
+            <li key={stage.label}>
+              <Link
+              ref={(node) => { links.current[i] = node; }}
+              to={to}
+              tabIndex={i === selected ? 0 : -1}
+              aria-current={state === "current" ? "step" : undefined}
+              aria-label={`${stage.label}, ${state === "done" ? "completed" : state === "current" ? "current stage" : "upcoming"}; open ${stage.destination}`}
               className={cx(
-                "grid h-7 w-7 place-items-center rounded-full text-[13px]",
-                state === "done" && "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300",
-                state === "current" && "bg-violet-100 text-violet-700 dark:bg-violet-500/25 dark:text-violet-200",
-                state === "next" && "bg-slate-100 text-slate-400 dark:bg-white/[0.08] dark:text-neutral-400"
+                CARD,
+                "flex min-h-full w-full cursor-pointer flex-col items-center gap-1.5 px-2 py-3 text-center transition-colors",
+                "hover:border-violet-300 hover:bg-violet-50/50 dark:hover:border-violet-400/40 dark:hover:bg-violet-500/5",
+                state === "current" && "border-violet-300 bg-violet-50/80 ring-1 ring-violet-200 dark:border-violet-400/40 dark:bg-violet-500/10 dark:ring-violet-400/20",
+                focusRing
               )}
-            >
-              {state === "done" ? <FiCheck /> : state === "current" ? <FiZap /> : <FiClock />}
-            </span>
-            <span className={cx("text-[12.5px] font-semibold", CONSOLE.heading)}>{stage}</span>
-            <span className="sr-only">{state === "done" ? "passed" : state === "current" ? "current stage" : "to come"}</span>
-          </li>
-        );
-      })}
-    </ol>
+              onFocus={() => setSelected(i)}
+              onKeyDown={(event) => moveFocus(event, i)}
+              >
+              <span
+                aria-hidden="true"
+                className={cx(
+                    "grid h-7 w-7 place-items-center rounded-full text-[13px]",
+                    state === "done" && "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300",
+                    state === "current" && "bg-violet-100 text-violet-700 dark:bg-violet-500/25 dark:text-violet-200",
+                    state === "next" && "bg-slate-100 text-slate-400 dark:bg-white/[0.08] dark:text-neutral-400"
+                  )}
+                >
+                  {state === "done" ? <FiCheck /> : state === "current" ? <FiZap /> : <FiClock />}
+                </span>
+                <span className={cx("text-[12.5px] font-semibold", CONSOLE.heading)}>{stage.label}</span>
+                <span className="sr-only">{state === "done" ? "Completed" : state === "current" ? "Current lifecycle stage" : "Upcoming"}</span>
+              </Link>
+            </li>
+          );
+        })}
+      </ol>
+      <span className="sr-only" aria-live="polite">
+        Selected stage: {selectedStage}. Press Enter or Space to open.
+      </span>
+    </nav>
   );
 }
 
@@ -157,7 +202,7 @@ function Overview() {
         }
       />
 
-      <StageStrip status={event.status} />
+      <StageStrip status={event.status} eventId={eventId} />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
         <div className="space-y-6">

@@ -5,7 +5,7 @@
 // read "Expires in 0d" and counted as Active. The server now states each key's lifecycle
 // (crud.admin.key_lifecycle) and the counts (key_summary); the page says how long is left,
 // warns ahead of expiry, and offers an overlapping replacement — never an extension.
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -86,6 +86,34 @@ describe("each key says how long it has left", () => {
     await screen.findByText("testing");
     const cell = within(rowOf("testing")).getByText("Expired 21 days ago").parentElement;
     expect(cell).toHaveAttribute("title", `${exactExpiry(KEYS[0].expires_at)} · 2026-09-25T12:00:00Z (UTC)`);
+  });
+
+  it("advances the relative date and status from the same expiry instant while the page is open", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse(NOW));
+    const expiring = key("edge", "boundary", "active", 30);
+    vi.mocked(api.get).mockResolvedValue({
+      data: payload([expiring], { total: 1, active: 1, expiring_30d: 0, expiring_7d: 0, expired: 0, revoked: 0, non_expiring: 0 }),
+    });
+    try {
+      show();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const row = rowOf("boundary");
+      expect(within(row).getByText("Expires within the hour")).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      expect(within(row).getByText("Expired less than an hour ago")).toBeInTheDocument();
+      expect(within(row).getByText("Expired")).toBeInTheDocument();
+      expect(within(row).getByText(expiryDate(expiring.expires_at))).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

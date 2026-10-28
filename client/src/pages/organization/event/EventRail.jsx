@@ -124,7 +124,7 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
           const children = on && !collapsed && s.children ? s.children : null;
           // Which part of the open section the URL points at: a hash, a filter, or the top.
           const childCurrent = (c) => {
-            if (c.hash) return hash === `#${c.hash}`;
+            if (c.hash) return hash === `#${c.hash}` || (!hash && c.hash === "overview");
             if (c.query) {
               const [k, v] = c.query.split("=");
               return params.get(k) === v;

@@ -118,6 +118,14 @@ describe("Contact Support", () => {
 // ── the service table ──────────────────────────────────────────────────────────────────
 
 describe("the service table", () => {
+  it("exposes the service-health section as the sidebar status destination", async () => {
+    show();
+    await heading();
+
+    expect(screen.getByRole("heading", { name: "Service health" }).closest("section"))
+      .toHaveAttribute("id", "service-health");
+  });
+
   it("lists the customer services the server can check — never the internal stages", async () => {
     show();
     await heading();
