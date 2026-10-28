@@ -215,6 +215,34 @@ describe("clearing and combining", () => {
   });
 });
 
+describe("searching across table pages", () => {
+  it("searches all loaded rows before pagination and returns results on page one", async () => {
+    const rows = Array.from({ length: 20 }, (_, index) => ({
+      id: String(index + 1),
+      actor_email: index === 19 ? null : `actor${index}@zoikogroup.com`,
+      action: index === 19 ? "system.cleanup" : `organization.update.${index}`,
+      target_type: "organization",
+      target_id: `${index}-target`,
+      meta: null,
+      ip: null,
+      created_at: new Date(Date.now() - index * 1000).toISOString(),
+    }));
+    serve(rows);
+    show();
+    await waitFor(() => expect(bodyText()).toHaveLength(15));
+
+    fireEvent.click(screen.getByRole("button", { name: /next page/i }));
+    await waitFor(() => expect(bodyText().some((text) => text.includes("system.cleanup"))).toBe(true));
+
+    search("sys");
+    await waitFor(() => {
+      expect(bodyText()).toHaveLength(1);
+      expect(bodyText()[0]).toContain("system.cleanup");
+    });
+    expect(screen.getByText(/Showing 1–1 of 1/)).toBeInTheDocument();
+  });
+});
+
 describe("rows with missing fields", () => {
   it("does not throw when optional fields are absent", async () => {
     serve([{ id: "9", actor_email: null, action: "system.sweep", target_type: null, target_id: null, meta: null, ip: null, created_at: null }]);
