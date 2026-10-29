@@ -693,3 +693,20 @@ class AbuseReportCreate(BaseModel):
     description: str | None = Field(None, max_length=4000)
     # The organization the report is ABOUT, not the reporter's own.
     org_id: uuid.UUID | None = None
+
+
+# -- Organization feedback (developer platform & console) --------------------------------
+
+FEEDBACK_CATEGORIES = ("developer_platform", "documentation", "webhooks_ingest", "general")
+FEEDBACK_MESSAGE_MAX = 4000
+
+
+class OrgFeedbackIn(BaseModel):
+    # Whitespace is stripped BEFORE the length checks, so "     " is empty and fails min_length.
+    # extra="forbid": the organization comes from the caller's token, never from the body.
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    # The four topics the console offers, and nothing else — the value is also logged, so a
+    # free-form string would let a caller write arbitrary text into the log.
+    category: Literal["developer_platform", "documentation", "webhooks_ingest", "general"] = "general"
+    message: str = Field(..., min_length=5, max_length=FEEDBACK_MESSAGE_MAX)

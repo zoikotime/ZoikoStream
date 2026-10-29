@@ -115,7 +115,7 @@ describe("when it loads", () => {
 // ── the header's shortcuts to the two forms ──────────────────────────────────────────────
 // They used to be plain #evidence / #report anchors at all times, so during a load or after a
 // failure they jumped to sections that were not on the page.
-const SHORTCUTS = [["Request documents", "#evidence", "evidence"], ["Report an issue", "#report", "report"]];
+const SHORTCUTS = [["Request documents", "#compliance", "compliance"], ["Report an issue", "#report", "report"]];
 const shortcut = (name) => screen.getByRole("link", { name });
 const expectUnavailable = () => {
   for (const [name, , section] of SHORTCUTS) {

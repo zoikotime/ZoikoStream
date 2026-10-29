@@ -1023,6 +1023,25 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
     measured = [i for i in per_event.values() if i["measurement_state"] != "unmeasured"]
     ranked = sorted(per_event.items(), key=lambda kv: -kv[1]["peak_viewers"])
 
+    # Audience reach: real coarse device classes and voluntary country / GeoIP locations
+    # aggregated over the selected window (services/audience.py).
+    from . import audience as audience_svc
+    aud = audience_svc.insights(db, org, range_key=range_key)
+    aud_viewers = aud.get("viewers", 0)
+    devices = aud.get("device_mix") or []
+    locations = aud.get("geography") or []
+    locations_known = aud.get("geography_known", 0)
+    locations_unknown = aud.get("geography_unknown", 0)
+
+    if aud_viewers == 0:
+        breakdowns_note = "No audience telemetry recorded in this window."
+    else:
+        breakdowns_note = (
+            "Device classes are detected from viewer requests. Geographic distribution reflects "
+            "registered viewer locations (GeoIP pipeline not configured). Traffic sources are not "
+            "tracked to protect viewer privacy."
+        )
+
     return {
         "range": range_key,
         "since": since,
@@ -1067,9 +1086,13 @@ def analytics(db: Session, org: Organization, range_key: str = "30d") -> dict:
         # The same metrics over the whole range. The median is deliberately per event only
         # (see viewing_sessions.combine).
         "session_summary": combine_sessions(list(session_metrics_by_event.values())),
-        "devices": None, "locations": None, "traffic_sources": None,
-        "breakdowns_note": "Device, location and traffic-source breakdowns need a metering/"
-                            "GeoIP pipeline that isn't integrated yet.",
+        "devices": devices if aud_viewers > 0 else [],
+        "locations": locations if locations_known > 0 else [],
+        "locations_known": locations_known,
+        "locations_unknown": locations_unknown,
+        "traffic_sources": None,
+        "audience_viewers": aud_viewers,
+        "breakdowns_note": breakdowns_note,
     }
 
 

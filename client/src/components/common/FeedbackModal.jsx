@@ -8,7 +8,12 @@
 // skipped — so it never blocks the exit flow it's attached to. `onSubmit` is expected
 // to be fire-and-forget (a socket `send`, not an awaited network call) since the
 // underlying connection is about to be torn down anyway.
-import { useState } from "react";
+//
+// Or `onSubmit` may return a Promise<boolean> — the viewer's prompt when an event ENDS, where
+// the page stays and the person can be told the truth: the dialog then waits for the real
+// outcome (the server's acknowledgement), says "saved" only on true, and on false keeps the
+// rating and comment and offers to try again. Fire-and-forget callers claim nothing either way.
+import { useRef, useState } from "react";
 import { FiStar } from "react-icons/fi";
 import Modal from "../../ui/Modal";
 import { cx } from "../../ui/tokens";
@@ -17,6 +22,9 @@ export default function FeedbackModal({ open, role = "viewer", onSubmit, onDone 
   const [rating, setRating] = useState(0);
   const [hover, setHover] = useState(0);
   const [comment, setComment] = useState("");
+  const [status, setStatus] = useState("idle");   // idle | saving | saved | failed
+  // Closing voids an outstanding answer, so a late one cannot reopen as "saved".
+  const attempt = useRef(0);
 
   const title = role === "host" ? "How did the event go?" : "Thanks for watching!";
   const subtitle =
@@ -25,9 +33,11 @@ export default function FeedbackModal({ open, role = "viewer", onSubmit, onDone 
       : "Let us know what you thought of this event.";
 
   const reset = () => {
+    attempt.current += 1;
     setRating(0);
     setHover(0);
     setComment("");
+    setStatus("idle");
   };
 
   const finish = () => {
@@ -35,17 +45,48 @@ export default function FeedbackModal({ open, role = "viewer", onSubmit, onDone 
     onDone?.();
   };
 
-  const handleSubmit = () => {
-    if (rating > 0 || comment.trim()) {
-      onSubmit?.({ rating: rating || null, comment: comment.trim() || null });
+  const handleSubmit = async () => {
+    if (status === "saving") return;
+    if (!(rating > 0 || comment.trim())) {
+      finish();
+      return;
     }
-    finish();
+    const result = onSubmit?.({ rating: rating || null, comment: comment.trim() || null });
+    if (!result || typeof result.then !== "function") {
+      finish();
+      return;
+    }
+    const ticket = ++attempt.current;
+    setStatus("saving");
+    const ok = await Promise.resolve(result).catch(() => false);
+    if (ticket === attempt.current) setStatus(ok ? "saved" : "failed");
   };
 
   return (
     <Modal open={open} onClose={finish} title={title} size="sm">
+      {status === "saved" ? (
+        <div className="space-y-4">
+          <p role="status" className="text-sm text-slate-700 dark:text-slate-200">
+            Thanks — your feedback was saved.
+          </p>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={finish}
+              className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-emerald-600/20 transition hover:bg-emerald-500"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      ) : (
       <div className="space-y-4">
         <p className="text-sm text-slate-500 dark:text-slate-400">{subtitle}</p>
+        {status === "failed" && (
+          <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
+            Your feedback couldn&rsquo;t be sent. Check your connection and try again.
+          </p>
+        )}
 
         <div className="flex items-center justify-center gap-1.5 py-2">
           {[1, 2, 3, 4, 5].map((n) => (
@@ -89,12 +130,14 @@ export default function FeedbackModal({ open, role = "viewer", onSubmit, onDone 
           <button
             type="button"
             onClick={handleSubmit}
-            className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-emerald-600/20 transition hover:bg-emerald-500"
+            disabled={status === "saving"}
+            className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-emerald-600/20 transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Submit
+            {status === "saving" ? "Saving…" : status === "failed" ? "Try again" : "Submit"}
           </button>
         </div>
       </div>
+      )}
     </Modal>
   );
 }

@@ -5,11 +5,11 @@
 // Event + BroadcastSession + AnalyticsSnapshot. Device/location/traffic-source breakdowns
 // aren't shown here: nothing in this stack persists them historically (see the endpoint's
 // own `breakdowns_note`), so a bar chart for them would be invented, not measured.
-import { useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   FiCalendar, FiCheck, FiChevronDown, FiDownload, FiUsers, FiClock, FiTrendingUp, FiActivity, FiGlobe,
-  FiInfo, FiLock, FiPlay,
+  FiLock, FiPlay,
 } from "react-icons/fi";
 import { CONSOLE, cx, focusRing } from "../../ui/tokens";
 import api from "../../api";
@@ -216,7 +216,7 @@ function StreamQuality({ total, available }) {
       id="quality"
       title="Stream quality"
       subtitle="Reported by viewers' own players"
-      action={<PanelLink to="/organization/playback">Playback detail</PanelLink>}
+      action={<PanelLink to="/organization/audience/access">Playback detail</PanelLink>}
     >
       <p className={cx("text-[10.5px] font-bold uppercase tracking-[0.14em]", CONSOLE.faint)}>Playback start success</p>
       <p className={cx("mt-1 text-[32px] font-bold leading-10 tabular-nums", rate == null ? CONSOLE.faint : CONSOLE.heading)}>
@@ -248,15 +248,192 @@ function StreamQuality({ total, available }) {
   );
 }
 
-// Regions, devices and traffic sources are not persisted anywhere (see the endpoint's
-// breakdowns_note), so this says so instead of drawing bars for figures nobody measured.
-function AudienceReach({ note }) {
+// Audience reach: measured breakdown of device classes (desktop/mobile/tablet),
+// voluntary registered geographic locations, and traffic source status across the date window.
+function ReachBarList({ rows, label }) {
   return (
-    <Panel title="Audience reach" subtitle="Regions, devices and traffic sources" tag="Not measured" tagTone="slate">
-      <div className={cx("flex items-start gap-3 rounded-xl border border-dashed p-4 text-[12.5px]", CONSOLE.divider, CONSOLE.muted)}>
-        <FiGlobe aria-hidden="true" className="mt-0.5 shrink-0 text-[16px]" />
-        <p>{note || "Device, location and traffic-source breakdowns are not measured yet."}</p>
+    <ul className="space-y-2.5" aria-label={label}>
+      {rows.map((r) => (
+        <li key={r.key}>
+          <div className="flex items-baseline justify-between gap-3 text-[12.5px]">
+            <span className={cx("truncate font-medium", CONSOLE.heading)}>{r.label}</span>
+            <span className={cx("shrink-0 tabular-nums", CONSOLE.muted)}>
+              {r.viewers} {r.viewers === 1 ? "viewer" : "viewers"} · {r.percentage}%
+            </span>
+          </div>
+          <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/[0.08]" aria-hidden="true">
+            <span
+              className="block h-full rounded-full bg-gradient-to-r from-violet-500 to-sky-500"
+              style={{ width: `${Math.min(100, Math.max(0, r.percentage))}%` }}
+            />
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function AudienceReach({
+  devices,
+  locations,
+  locationsKnown = 0,
+  locationsUnknown = 0,
+  trafficSources,
+  audienceViewers,
+  note,
+  rangeLabel,
+  error,
+}) {
+  const hasDevices = Array.isArray(devices) && devices.length > 0;
+  const hasLocations = Array.isArray(locations) && locations.length > 0;
+  const hasTrafficSources = Array.isArray(trafficSources) && trafficSources.length > 0;
+  const hasAnyMeasured = hasDevices || hasLocations || hasTrafficSources;
+
+  // 1. Data unavailable (error state)
+  if (error && !hasAnyMeasured) {
+    return (
+      <Panel
+        id="audience-reach"
+        title="Audience reach"
+        subtitle="Regions, devices and traffic sources"
+        tag="Unavailable"
+        tagTone="rose"
+        action={<PanelLink to="/organization/audience">Audience detail</PanelLink>}
+      >
+        <div className={cx("flex items-start gap-3 rounded-xl border border-dashed p-4 text-[12.5px]", CONSOLE.divider, CONSOLE.muted)}>
+          <FiGlobe aria-hidden="true" className="mt-0.5 shrink-0 text-[16px] text-rose-500" />
+          <p>Audience reach telemetry is temporarily unavailable. Try refreshing the page.</p>
+        </div>
+      </Panel>
+    );
+  }
+
+  // 2. Not configured (legacy null state or explicitly unconfigured pipelines)
+  if (devices == null && locations == null && trafficSources == null && (audienceViewers == null || audienceViewers === undefined)) {
+    return (
+      <Panel
+        id="audience-reach"
+        title="Audience reach"
+        subtitle="Regions, devices and traffic sources"
+        tag="Not measured"
+        tagTone="slate"
+        action={<PanelLink to="/organization/audience">Audience detail</PanelLink>}
+      >
+        <div className={cx("flex items-start gap-3 rounded-xl border border-dashed p-4 text-[12.5px]", CONSOLE.divider, CONSOLE.muted)}>
+          <FiGlobe aria-hidden="true" className="mt-0.5 shrink-0 text-[16px]" />
+          <p>{note || "Device, location and traffic-source breakdowns are not measured yet."}</p>
+        </div>
+      </Panel>
+    );
+  }
+
+  // 3. No activity in selected window
+  if (!hasAnyMeasured && (audienceViewers === 0 || (devices?.length === 0 && locations?.length === 0))) {
+    return (
+      <Panel
+        id="audience-reach"
+        title="Audience reach"
+        subtitle="Regions, devices and traffic sources"
+        tag="No activity"
+        tagTone="slate"
+        action={<PanelLink to="/organization/audience">Audience detail</PanelLink>}
+      >
+        <div className={cx("flex items-start gap-3 rounded-xl border border-dashed p-4 text-[12.5px]", CONSOLE.divider, CONSOLE.muted)}>
+          <FiGlobe aria-hidden="true" className="mt-0.5 shrink-0 text-[16px]" />
+          <p>{note || `No eligible audience telemetry was recorded in this window (${rangeLabel || "selected window"}).`}</p>
+        </div>
+      </Panel>
+    );
+  }
+
+  // 4 vs 5. Partially measured vs Fully measured
+  const isFullyMeasured = hasDevices && hasLocations && hasTrafficSources;
+  const tag = isFullyMeasured ? "Measured" : "Partially measured";
+  const tagTone = isFullyMeasured ? "green" : "amber";
+
+  const deviceRows = (devices || []).map((d) => ({
+    key: d.device_type,
+    label: d.label || d.device_type,
+    viewers: d.viewers,
+    percentage: d.percentage ?? 0,
+  }));
+
+  const locationRows = (locations || []).slice(0, 4).map((l) => ({
+    key: l.country_code,
+    label: l.country_name || l.country_code,
+    viewers: l.viewers,
+    percentage: l.percentage ?? 0,
+  }));
+  const remainingLocations = (locations || []).slice(4);
+  if (remainingLocations.length > 0) {
+    const otherViewers = remainingLocations.reduce((sum, l) => sum + l.viewers, 0);
+    locationRows.push({
+      key: 'other',
+      label: `Other regions (${remainingLocations.length})`,
+      viewers: otherViewers,
+      percentage: locationsKnown > 0 ? Math.round((100 * otherViewers) / locationsKnown) : 0,
+    });
+  }
+
+  return (
+    <Panel
+      id="audience-reach"
+      title="Audience reach"
+      subtitle="Regions, devices and traffic sources"
+      tag={tag}
+      tagTone={tagTone}
+      action={<PanelLink to="/organization/audience">Audience detail</PanelLink>}
+    >
+      <div className="space-y-4">
+        {/* Device breakdown */}
+        {hasDevices ? (
+          <div>
+            <p className={cx("mb-2 text-[10.5px] font-bold uppercase tracking-[0.14em]", CONSOLE.faint)}>
+              Device mix
+            </p>
+            <ReachBarList rows={deviceRows} label="Viewers by device" />
+          </div>
+        ) : (
+          <p className={cx("text-[12px]", CONSOLE.faint)}>No device telemetry recorded.</p>
+        )}
+
+        {/* Region / Geographic breakdown */}
+        <div className="border-t border-slate-100 pt-3 dark:border-white/[0.08]">
+          <p className={cx("mb-2 text-[10.5px] font-bold uppercase tracking-[0.14em]", CONSOLE.faint)}>
+            Top regions
+          </p>
+          {hasLocations ? (
+            <>
+              <ReachBarList rows={locationRows} label="Viewers by region" />
+              {locationsUnknown > 0 && (
+                <p className={cx("mt-2 text-[11.5px]", CONSOLE.faint)}>
+                  {locationsUnknown} {locationsUnknown === 1 ? "viewer" : "viewers"} did not share a country.
+                </p>
+              )}
+            </>
+          ) : (
+            <p className={cx("text-[12px]", CONSOLE.faint)}>
+              {locationsUnknown > 0
+                ? `${locationsUnknown} ${locationsUnknown === 1 ? "viewer" : "viewers"} joined without country data.`
+                : "No geographic data collected yet."}
+            </p>
+          )}
+        </div>
+
+        {/* Traffic sources / privacy note */}
+        <div className={cx("rounded-lg border border-dashed p-3 text-[11.5px]", CONSOLE.divider, CONSOLE.muted)}>
+          {hasTrafficSources ? (
+            <ReachBarList rows={trafficSources} label="Traffic sources" />
+          ) : (
+            <p>
+              <strong className="font-semibold text-slate-700 dark:text-slate-300">Traffic sources:</strong> Not tracked to protect viewer link tokens and privacy.
+            </p>
+          )}
+        </div>
       </div>
+      <Footnote>
+        Identified live viewers admitted in this window ({rangeLabel || "selected range"}). Reconnects do not inflate count.
+      </Footnote>
     </Panel>
   );
 }
@@ -347,6 +524,8 @@ function PlaybackStarts({ series, available, failed, rangeLabel }) {
 
 export default function OrganizationAnalytics() {
   useHashScroll();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [range, setRange] = useState("30d");
   const { data, loading, error, reload } = useApi(() =>
     api.get("/organization/analytics", { params: { range } }).then((r) => r.data)
@@ -358,6 +537,7 @@ export default function OrganizationAnalytics() {
       ? api.get("/organization/playback/qoe", { params: { window: qoeWindow } }).then((r) => r.data).catch(() => null)
       : Promise.resolve(null)
   );
+  const { reload: reloadQoe } = qoe;
 
   // useApi fetches on mount and on reload() only — it has no deps array. Without this the
   // range <select> changed the SUBTITLES and nothing else: the request was never re-sent, so
@@ -366,7 +546,7 @@ export default function OrganizationAnalytics() {
   if (range !== lastRange) {
     setLastRange(range);
     reload();
-    qoe.reload();
+    reloadQoe();
   }
 
   const rangeLabel = RANGES.find((r) => r.key === range)?.label ?? "";
@@ -375,6 +555,52 @@ export default function OrganizationAnalytics() {
   // already on the client — switching them costs no request.
   const [metric, setMetric] = useState("viewers");
   const [chartType, setChartType] = useState("area");
+  const [tableKey, setTableKey] = useState(0);
+
+  const resetView = useCallback(() => {
+    setMetric("viewers");
+    setChartType("area");
+    setTableKey((k) => k + 1);
+
+    if (location.hash || location.search) {
+      navigate("/organization/analytics");
+    }
+
+    // Only invoke manual reload when range is already 30d; if range changed from another
+    // value to 30d, the range state change effect will reload once to avoid duplicate requests.
+    if (range === "30d") {
+      reload();
+      reloadQoe();
+    } else {
+      setRange("30d");
+    }
+
+    const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
+    if (main && typeof main.scrollTo === "function") {
+      try {
+        main.scrollTo({ top: 0, behavior: "smooth" });
+      } catch {
+        // Unsupported in test environments
+      }
+    }
+    if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+      try {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } catch {
+        // Unsupported in test environments
+      }
+    }
+  }, [location.hash, location.search, navigate, range, reload, reloadQoe]);
+
+  useEffect(() => {
+    const onReset = (e) => {
+      if (!e.detail?.path || e.detail.path === "/organization/analytics") {
+        resetView();
+      }
+    };
+    window.addEventListener("zoiko:route-reset", onReset);
+    return () => window.removeEventListener("zoiko:route-reset", onReset);
+  }, [resetView]);
 
   const kpis = useMemo(() => {
     // No `|| {0,0,0,0}` fallback: an absent payload must not manufacture measured zeros.
@@ -559,7 +785,7 @@ export default function OrganizationAnalytics() {
   return (
     <div className="space-y-6">
       <OrganizationPageHeader
-        breadcrumbs={[["Organization", "/organization/manage"], ["Analytics", "/organization/analytics"], ["Overview"]]}
+        breadcrumbs={[["Organization", "/organization/manage"], ["Analytics", "/organization/analytics", { onNavigate: resetView }], ["Overview"]]}
         eyebrow="Organization console / Cross-event intelligence"
         title="Analytics"
         subtitle="Understand audience activity, playback quality and event outcomes — without losing data context."
@@ -686,6 +912,7 @@ export default function OrganizationAnalytics() {
                 ) : (
                   <div className="border-t border-slate-100 dark:border-white/[0.08]">
                     <DataTable
+                      key={tableKey}
                       columns={reportColumns}
                       rows={reports}
                       rowKey={(r) => r.id}
@@ -703,7 +930,17 @@ export default function OrganizationAnalytics() {
 
             <aside className="min-w-0 space-y-6" aria-label="Quality and coverage">
               <StreamQuality total={qoeTotal} available={Boolean(qoeWindow)} />
-              <AudienceReach note={data.breakdowns_note} />
+              <AudienceReach
+                devices={data.devices}
+                locations={data.locations}
+                locationsKnown={data.locations_known}
+                locationsUnknown={data.locations_unknown}
+                trafficSources={data.traffic_sources}
+                audienceViewers={data.audience_viewers}
+                note={data.breakdowns_note}
+                rangeLabel={rangeLabel}
+                error={Boolean(error && !data)}
+              />
               <DataQuality counts={coverage} total={reports.length} />
             </aside>
           </div>

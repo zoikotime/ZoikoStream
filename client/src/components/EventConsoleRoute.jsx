@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Navigate, Outlet, useLocation, useSearchParams } from "react-router-dom";
+import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { accountHome, fetchConsoleAccess } from "../auth/destination";
 import { PageSpinner } from "../ui/Spinner";
 import { notify } from "../ui/Toast";
 import SessionUnreachable from "./SessionUnreachable";
+import useConsoleEventId from "../hooks/useConsoleEventId";
 
 // Gate an event console on a REAL, server-confirmed assignment.
 //
@@ -34,8 +35,7 @@ export default function EventConsoleRoute({ capability }) {
   const required = Array.isArray(capability) ? capability : [capability];
   const { user, loading, unreachable } = useAuth();
   const location = useLocation();
-  const [params] = useSearchParams();
-  const eventId = params.get("event");
+  const eventId = useConsoleEventId();     // /host/live/:eventId or ?event=<id>
   // "checking" until the server answers. Never optimistic: the console must not mount for
   // even one frame on an event this user may not run.
   const [access, setAccess] = useState("checking");

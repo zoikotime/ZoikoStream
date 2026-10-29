@@ -70,6 +70,25 @@ export const statusMeta = (s) =>
 // What the console shows for an event: the API's display status when it sent one, else the
 // canonical status. Never re-derived here — one definition, on the server.
 export const displayStatusOf = (ev) => ev?.display_status || ev?.status;
+// Pre-live non-draft statuses eligible for Upcoming.
+export const UPCOMING_STATUSES = ["published", "scheduled", "ready_to_arm", "armed"];
+
+// Shared Upcoming business rule (mirrors server/app/crud/event.py):
+// An event is Upcoming if it is in UPCOMING_STATUSES, not missed, not marked start_overdue,
+// and its scheduled start time (if set) has not passed.
+export const isUpcomingEvent = (ev, now = Date.now()) => {
+  if (!ev) return false;
+  const canonical = ev.status;
+  if (!UPCOMING_STATUSES.includes(canonical)) return false;
+  if (displayStatusOf(ev) === "missed" || ev.start_overdue) return false;
+  if (ev.start_time) {
+    const t = new Date(ev.start_time).getTime();
+    const threshold = typeof now === "number" ? now : new Date(now).getTime();
+    if (!Number.isNaN(t) && t < threshold) return false;
+  }
+  return true;
+};
+
 // The Events page's status filter: every canonical status, with Missed right after Scheduled
 // (which then means still upcoming).
 export const STATUS_FILTER_OPTIONS = Object.entries(EVENT_STATUS).flatMap(([key, meta]) =>

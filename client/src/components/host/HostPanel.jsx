@@ -30,7 +30,7 @@ import { ChatTab, QATab } from "../moderation/ChatQAPanel";
 import { PollManagement, Announcements, ActivityFeed } from "../moderation/ModeratorSidebar";
 import { STUDIO, focus, t150 } from "./studio";
 import { ALERT, ALERT_DOT } from "../moderation/panelTokens";
-import { initials, accentFor } from "../../data/host";
+import { initials, accentFor, fmtWatchDuration } from "../../data/host";
 
 const TABS = [
   { key: "participants", label: "People", icon: FiUsers },
@@ -123,11 +123,8 @@ function WaitingRoom({ waiting, canModerate, send }) {
 
 // ── analytics ─────────────────────────────────────────────────────────────────
 
-const fmtDuration = (s) => {
-  if (s == null) return "—";
-  const m = Math.floor(s / 60);
-  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : m >= 1 ? `${m}m ${s % 60}s` : `${s}s`;
-};
+// Durations: data/host.js fmtWatchDuration (rounds before splitting minutes and seconds).
+const fmtDuration = fmtWatchDuration;
 
 // One analytics tile: uppercase label, the value as the loudest thing in the tile, then a
 // supporting line that says what the number is OF. `hint` stays the tooltip — it carries the
@@ -270,7 +267,7 @@ function AnalyticsTab({ analytics, health }) {
         <Stat label="Live viewers" value={(a.viewers ?? 0).toLocaleString()} sub="Watching now" icon={FiEye} />
         <Stat label="Peak viewers" value={(a.peak_viewers ?? 0).toLocaleString()} sub="This broadcast" icon={FiTrendingUp} />
         <Stat label="Connected" value={(a.participants ?? 0).toLocaleString()} sub="Incl. staff" icon={FiUsers} hint="Everyone connected, including staff" />
-        <Stat label="Avg watch" value={fmtDuration(a.avg_watch_seconds)} sub="Mean in room" icon={FiClock} hint="Mean time in room of everyone currently connected" />
+        <Stat label="Avg watch" value={fmtDuration(a.avg_watch_seconds)} sub="Mean in room" icon={FiClock} hint="Mean time in the room of the viewers connected now — staff and anyone on stage are not counted" />
         <Stat label="Engagement" value={`${a.engagement ?? 0}/100`} sub="Weighted index" icon={FiActivity} hint="Weighted interactions per viewer — a heuristic, see services/broadcast.engagement_score" />
         <Stat label="Chat rate" value={`${a.chat_per_minute ?? 0}/min`} sub="Last minute" icon={FiMessageSquare} hint="Messages in the last minute" />
         <Stat label="Questions" value={(a.questions_asked ?? 0).toLocaleString()} sub="Asked so far" icon={FiHelpCircle} />

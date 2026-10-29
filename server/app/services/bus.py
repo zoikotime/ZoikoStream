@@ -818,6 +818,71 @@ async def presence_all(event_id) -> list[dict]:
     return sorted(rows, key=lambda p: p.get("joined_at") or 0)
 
 
+# ── live connections per identity ─────────────────────────────────────────────────────────
+#
+# Presence is ONE record per identity, but one identity can hold several live sockets: a
+# second tab, a host with the console open beside the watch page (both are the same user), or
+# a reconnect whose new socket registers before the old one's close handler runs. Closing ANY
+# of them used to delete the identity's record outright, so a viewer who was still connected
+# vanished from the count — "Watching now 0", the console's LIVE VIEWERS 0 and CONNECTED 0 —
+# until they reconnected. Each socket now registers a connection id here; presence is removed
+# only when the identity's LAST live connection closes.
+#
+# A socket refreshes its entry on every ping (15s, hooks/useEventStream.js). An entry not
+# refreshed for CONN_STALE_SECONDS belongs to a worker that died without running its close
+# handler, so it does not keep anyone present. It must exceed routers/live.IDLE_TIMEOUT (90s):
+# a socket the server has not reaped is live, and a hidden tab's throttled timers can ping as
+# rarely as once a minute.
+CONN_STALE_SECONDS = 120.0
+_conns_memory: dict[tuple[str, str], dict[str, float]] = {}   # no-Redis fallback
+
+
+def _ckey(event_id, identity: str) -> str:
+    return f"live:{eid(event_id)}:conns:{identity}"
+
+
+async def connection_open(event_id, identity: str, conn_id: str) -> None:
+    """Register (or refresh) one live socket for `identity`."""
+    now = time.time()
+    r = await redis()
+    if r is None:
+        _conns_memory.setdefault((eid(event_id), identity), {})[conn_id] = now
+        return
+    key = _ckey(event_id, identity)
+    await r.zadd(key, {conn_id: now})
+    # The key outlives its connections only briefly: a crashed worker's entries go with it.
+    await r.expire(key, int(CONN_STALE_SECONDS * 2))
+
+
+connection_touch = connection_open   # a heartbeat is a re-registration
+
+
+async def connection_close(event_id, identity: str, conn_id: str | None) -> int:
+    """Drop one socket (`conn_id`, or none to only prune) and return how many of
+    `identity`'s connections are still live."""
+    floor = time.time() - CONN_STALE_SECONDS
+    r = await redis()
+    if r is None:
+        conns = _conns_memory.get((eid(event_id), identity), {})
+        if conn_id:
+            conns.pop(conn_id, None)
+        for cid in [c for c, seen in conns.items() if seen < floor]:
+            conns.pop(cid)
+        if not conns:
+            _conns_memory.pop((eid(event_id), identity), None)
+        return len(conns)
+    key = _ckey(event_id, identity)
+    if conn_id:
+        await r.zrem(key, conn_id)
+    await r.zremrangebyscore(key, "-inf", floor)
+    return int(await r.zcard(key))
+
+
+async def connection_count(event_id, identity: str) -> int:
+    """How many of `identity`'s connections are live now (stale ones pruned)."""
+    return await connection_close(event_id, identity, None)
+
+
 async def presence_clear(event_id) -> None:
     """Called when the room ends — presence is per-broadcast, not history."""
     event_id = eid(event_id)

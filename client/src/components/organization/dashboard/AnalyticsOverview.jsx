@@ -105,7 +105,11 @@ export default function AnalyticsOverview({ data, loading, error, range, onRange
               <p className={cx("mb-1 text-[11px] font-medium uppercase tracking-wide", CONSOLE.faint)}>
                 Viewers over time
               </p>
-              <AreaTrend data={series} height={200} showX />
+              {/* "Peak viewers": each bucket is the sum of its events' peak concurrent
+                  audiences (services/org.py), the same series the Analytics page draws under
+                  that name. Buckets are days, or months for a 12-month range. */}
+              <AreaTrend data={series} height={200} showX name="Peak viewers"
+                labelName={range === "12m" ? "Month" : "Date"} />
             </div>
           ) : (
             // Never draw a flat line across an empty chart: a straight purple stroke at zero

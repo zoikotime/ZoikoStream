@@ -218,9 +218,46 @@ export function RadialChart({ title, percent, label, footer, color = "#7c3aed" }
   );
 }
 
+const formatCount = (v) => Number(v).toLocaleString();
+
+// AreaTrend's tooltip: the point's label (its date, month or time — `labelName` says which)
+// and every series drawn there, by name, with its formatted value.
+//
+// It replaces recharts' default content, which AreaTrend was handing an empty series name and
+// an empty label: the default renders `${name} : ${value}`, so every point read as a bare
+// ": 0" with no date and no metric. A series whose value is missing at a point is left out; a
+// measured 0 is a real reading and is always shown as "0".
+export function TrendTooltip({ active, payload, label, labelName, valueFormatter = formatCount }) {
+  const rows = (payload || []).filter((p) => p && p.value !== null && p.value !== undefined);
+  if (!active || rows.length === 0) return null;
+  return (
+    <div className="min-w-[9rem] rounded-lg border border-slate-200 bg-white px-3 py-2 text-[12px] leading-5 text-slate-900 shadow-lg shadow-slate-900/10 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:shadow-black/50">
+      {label !== undefined && label !== null && label !== "" && (
+        <p className="font-medium">
+          {labelName && <span className="font-normal text-slate-500 dark:text-slate-400">{labelName}: </span>}
+          {label}
+        </p>
+      )}
+      <ul>
+        {rows.map((p) => (
+          <li key={p.dataKey ?? p.name} className="flex items-center gap-2">
+            <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: p.color || p.stroke }} />
+            <span className="text-slate-600 dark:text-slate-300">{p.name}:</span>
+            <span className="ml-auto pl-3 font-semibold tabular-nums">{valueFormatter(p.value)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // Minimal single-series area chart for the ops center — muted, axis-light, no grid, flush
-// (lives inside a Panel). Keeps its own quiet tooltip. data: [{ label, value }].
-export function AreaTrend({ data, color = "#8b5cf6", height = 220, showX = false, valueFormatter = (v) => Number(v).toLocaleString() }) {
+// (lives inside a Panel). data: [{ label, value }]. `name` is the series' name and `labelName`
+// what each label is ("Date", "Month", "Time"); the tooltip shows both with the value.
+export function AreaTrend({
+  data, color = "#8b5cf6", height = 220, showX = false, valueFormatter = formatCount,
+  name = "Value", labelName,
+}) {
   const { dark } = useChartTheme();
   const id = `at-${color.replace("#", "")}`;
   return (
@@ -237,20 +274,14 @@ export function AreaTrend({ data, color = "#8b5cf6", height = 220, showX = false
           {showX && (
             <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={11} minTickGap={28} stroke={dark ? "#475569" : "#94a3b8"} />
           )}
+          {/* Kept inside the chart's box (recharts' default allowEscapeViewBox), so it flips to
+              the other side of the cursor at the edges rather than being cut off by the panel. */}
           <Tooltip
             cursor={{ stroke: dark ? "#334155" : "#cbd5e1", strokeWidth: 1 }}
-            contentStyle={{
-              borderRadius: 8,
-              border: `1px solid ${dark ? "#1e293b" : "#e2e8f0"}`,
-              background: dark ? "#0f172a" : "#fff",
-              color: dark ? "#e2e8f0" : "#0f172a",
-              fontSize: 12,
-              boxShadow: "none",
-            }}
-            formatter={(v) => [valueFormatter(v), ""]}
-            labelFormatter={() => ""}
+            content={<TrendTooltip labelName={labelName} valueFormatter={valueFormatter} />}
+            wrapperStyle={{ outline: "none", zIndex: 10 }}
           />
-          <Area type="monotone" dataKey="value" stroke={color} strokeWidth={2} fill={`url(#${id})`} isAnimationActive={false} />
+          <Area type="monotone" dataKey="value" name={name} stroke={color} strokeWidth={2} fill={`url(#${id})`} isAnimationActive={false} />
         </RAreaChart>
       </ResponsiveContainer>
     </div>

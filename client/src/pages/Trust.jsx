@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import api, { errMsg } from "../api";
 import {
   AlertTriangle, BadgeCheck, Bug, ChevronDown, FileText, History, Loader2, Lock,
@@ -286,7 +286,8 @@ function EvidenceRequest({ documents, purposes, scopes }) {
   };
 
   return (
-    <section id="evidence" className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
+    <section id="compliance" className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
+      <span id="evidence" className="sr-only" aria-hidden="true" />
       <div className="flex items-start gap-3">
         <span aria-hidden="true" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-900 text-white">
           <FileText className="h-4 w-4" />
@@ -616,19 +617,39 @@ export default function Trust() {
     load();
   };
 
-  // Arriving at /trust#evidence or /trust#report (the Support & Status cards link straight to
+  // Arriving at /trust#compliance or /trust#report (the Support & Status cards link straight to
   // a form): both sections render only once GET /trust has answered, after the browser's own
   // fragment scroll has looked for them and found nothing. So go to the section, and move
-  // focus to it, once it exists. The header's in-page links need none of this.
+  // focus to it, once it exists.
   const { hash } = useLocation();
-  useEffect(() => {
-    if (!data || !hash) return;
-    const target = document.getElementById(hash.slice(1));
+  const navigate = useNavigate();
+
+  const scrollToHash = useCallback((rawHash) => {
+    if (!rawHash) return;
+    const raw = rawHash.replace(/^#/, "");
+    const targetId = raw === "evidence" ? "compliance" : raw;
+    const target = document.getElementById(targetId) || document.getElementById(raw);
     if (!target) return;
     target.scrollIntoView?.({ block: "start" });
     if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
     target.focus({ preventScroll: true });
-  }, [data, hash]);
+  }, []);
+
+  useEffect(() => {
+    if (!data || !hash) return;
+    scrollToHash(hash);
+    if (hash === "#evidence" && window.history?.replaceState) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#compliance`);
+    }
+  }, [data, hash, scrollToHash]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      scrollToHash(window.location.hash);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [scrollToHash]);
 
   // Whether the two forms (and so the header's shortcuts to them) are on the page.
   const formsShown = !loading && !!data;
@@ -646,9 +667,19 @@ export default function Trust() {
                 failed, each stays in place, dimmed and announced as an unavailable link with no
                 href, rather than jumping to a section that is not on the page. Try again
                 restores them. Kept in place so the header does not shift when they appear. */}
-            {[["#evidence", FileText, "Request documents"], ["#report", Bug, "Report an issue"]].map(([href, Icon, label]) =>
+            {[["#compliance", FileText, "Request documents"], ["#report", Bug, "Report an issue"]].map(([href, Icon, label]) =>
               formsShown ? (
-                <a key={href} href={href} className={`${SHORTCUT} transition hover:border-white/30 hover:bg-white/[0.08]`}>
+                <a
+                  key={href}
+                  href={href}
+                  onClick={(e) => {
+                    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                    e.preventDefault();
+                    navigate(href);
+                    scrollToHash(href);
+                  }}
+                  className={`${SHORTCUT} transition hover:border-white/30 hover:bg-white/[0.08]`}
+                >
                   <Icon className="h-4 w-4" aria-hidden="true" />
                   {label}
                 </a>

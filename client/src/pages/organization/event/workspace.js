@@ -103,6 +103,21 @@ export const useEventWorkspace = () => useOutletContext();
 export function useHashScroll({ supportedHashes, fallbackHash } = {}) {
   const { pathname, search, hash } = useLocation();
   const navigate = useNavigate();
+
+  // No hash (a section or parent link): back to the top of the page. Keyed on the hash alone,
+  // so a query-string change does not move the page.
+  useEffect(() => {
+    if (!hash) {
+      const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
+      if (main && typeof main.scrollTo === "function") {
+        main.scrollTo({ top: 0, behavior: "smooth" });
+      }
+      if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+    }
+  }, [hash]);
+
   useEffect(() => {
     if (!hash) return undefined;
 

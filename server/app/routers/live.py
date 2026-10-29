@@ -41,6 +41,24 @@ from ..services import broadcast  # noqa: F401
 from ..services import contributor  # noqa: F401
 
 log = logging.getLogger(__name__)
+
+# Delayed presence re-checks (see _drop_if_abandoned); held so they are not garbage-collected.
+_rechecks: set[asyncio.Task] = set()
+
+
+async def _drop_if_abandoned(event_id, identity: str) -> None:
+    """When a socket closes while its identity still lists other connections, those may
+    belong to a worker that died without running its close handler. Look again once they
+    would have gone stale: if nothing live is left, remove the presence then, rather than
+    leaving the person counted for the rest of the event."""
+    await asyncio.sleep(bus.CONN_STALE_SECONDS + 1)
+    try:
+        if await bus.connection_count(event_id, identity) == 0:
+            gone = await bus.presence_remove(event_id, identity)
+            if gone:
+                await bus.publish(event_id, "participants", "participant.leave", gone)
+    except Exception:  # noqa: BLE001 - a missed re-check must not raise into the loop
+        log.exception("presence re-check failed for event %s", event_id)
 router = APIRouter(prefix="/live", tags=["live"])
 
 # Rate limit per CONNECTION (not per user): an operator with two tabs gets two budgets,
@@ -357,6 +375,7 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
         # roster badge and a waiting-room bypass, not an authorization. Its actual authority
         # is still ctx.can_host, which stays False, so it cannot reach any HOST_ONLY action.
         role = "host" if ctx.can_moderate else "speaker" if ctx.can_contribute else "viewer"
+        conn_id = uuid.uuid4().hex   # this socket, among the identity's live connections
         # Watch time for the Audience page: when a viewer's connection closes, the part of it
         # spent admitted to the live stream is credited to their audience row (services/
         # audience.record_leave). Only a row GET /watch created when admitting them is ever
@@ -377,6 +396,10 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
                 await asyncio.to_thread(contributor.mark_connected, ctx.event_id, ctx.user_id)
             # Waiting room holds plain attendees for the host to admit; staff never wait.
             waiting = bool(state.get("waiting_room")) and role == "viewer"
+            # Registered BEFORE the presence upsert: an older socket of this identity closing
+            # concurrently must already see this one, or it would remove the presence just
+            # written (services/bus.py, "live connections per identity").
+            await bus.connection_open(ctx.event_id, ctx.identity, conn_id)
             rec = await bus.presence_upsert(ctx.event_id, ctx.identity, {
                 "name": ctx.name, "role": role, "waiting": waiting,
                 "muted": False, "speaking": False, "hand": False, "quality": "excellent",
@@ -469,6 +492,7 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
                     # Round-trip latency + liveness. Answered on THIS socket only and
                     # exempt from the rate limit, so a heartbeat can't be throttled out.
                     await bus.session_record_heartbeat(ctx.event_id, ctx.identity)
+                    await bus.connection_touch(ctx.event_id, ctx.identity, conn_id)
                     # Keeps an admitted viewer counted as present for capacity protection
                     # (services/admission.py). Refreshes only; it never admits anyone.
                     await bus.admission_touch(ctx.event_id, ctx.identity)
@@ -492,9 +516,18 @@ async def live_socket(websocket: WebSocket, event_id: uuid.UUID, token: str | No
             pump.cancel()
             if guard is not None:
                 guard.cancel()
-            gone = await bus.presence_remove(ctx.event_id, ctx.identity)
-            if gone:
-                await bus.publish(ctx.event_id, "participants", "participant.leave", gone)
+            # Presence is per identity; this was one of its sockets. Only the last one to close
+            # takes the person out of the room (and the counts) — another tab, the console
+            # beside the watch page, or a reconnect that is already back keeps them present.
+            remaining = await bus.connection_close(ctx.event_id, ctx.identity, conn_id)
+            if remaining == 0:
+                gone = await bus.presence_remove(ctx.event_id, ctx.identity)
+                if gone:
+                    await bus.publish(ctx.event_id, "participants", "participant.leave", gone)
+            else:
+                task = asyncio.create_task(_drop_if_abandoned(ctx.event_id, ctx.identity))
+                _rechecks.add(task)
+                task.add_done_callback(_rechecks.discard)
             if role == "viewer":
                 await asyncio.to_thread(audience_svc.record_leave_by_id, ctx.event_id, ctx.identity,
                                         connected_since)

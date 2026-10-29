@@ -12,7 +12,7 @@
 // with its own validation and responses, unchanged here.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../api", () => ({
@@ -55,7 +55,14 @@ afterEach(() => {
 
 function Where() {
   const { pathname, hash } = useLocation();
-  return <output data-testid="location">{pathname + hash}</output>;
+  const navigate = useNavigate();
+  return (
+    <>
+      <output data-testid="location">{pathname + hash}</output>
+      <button type="button" onClick={() => navigate(-1)}>Browser back</button>
+      <button type="button" onClick={() => navigate(1)}>Browser forward</button>
+    </>
+  );
 }
 const open = () =>
   render(
@@ -73,7 +80,7 @@ const supportReady = () => screen.findByRole("heading", { name: /trust & evidenc
 const location = () => screen.getByTestId("location").textContent;
 
 describe.each([
-  ["Compliance documents", /^Compliance documents:/, "/trust#evidence", "evidence", "Request trust documentation"],
+  ["Compliance documents", /^Compliance documents:/, "/trust#compliance", "compliance", "Request trust documentation"],
   ["Report a vulnerability", /^Report a vulnerability:/, "/trust#report", "report", "Report a security issue"],
 ])("%s", (_, name, destination, sectionId, sectionHeading) => {
   it("opens the Trust Center at its form, and puts the reader there", async () => {
@@ -144,5 +151,115 @@ describe("the Trust Center opened without a section", () => {
     await screen.findByRole("heading", { name: "Report a security issue" });
     expect(scrolled).toEqual([]);
     expect(document.activeElement).toBe(document.body);
+  });
+});
+
+describe("directly opening the Trust Center with each supported hash", () => {
+  it.each([
+    ["compliance", "/trust#compliance", "compliance", "Request trust documentation"],
+    ["report", "/trust#report", "report", "Report a security issue"],
+    ["evidence (legacy alias)", "/trust#evidence", "compliance", "Request trust documentation"],
+  ])("%s lands at the correct section and focuses it", async (_, path, sectionId, heading) => {
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes><Route path="/trust" element={<Trust />} /></Routes>
+        </MemoryRouter>
+      </ThemeProvider>
+    );
+    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+    const section = document.getElementById(sectionId);
+    await waitFor(() => expect(document.activeElement).toBe(section));
+    expect(scrolled).toContain(sectionId);
+  });
+});
+
+describe("directly opening Support Status with supported card hashes", () => {
+  it.each([
+    ["security", `${SUPPORT}#security`, "security"],
+    ["residency", `${SUPPORT}#residency`, "residency"],
+    ["compliance", `${SUPPORT}#compliance`, "compliance"],
+    ["report", `${SUPPORT}#report`, "report"],
+  ])("%s scrolls to and focuses the card", async (_, path, cardId) => {
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes><Route path={SUPPORT} element={<SupportStatus />} /></Routes>
+        </MemoryRouter>
+      </ThemeProvider>
+    );
+    await supportReady();
+    const card = document.getElementById(cardId);
+    expect(card).not.toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(card));
+    expect(scrolled).toContain(cardId);
+  });
+});
+
+describe("browser history navigation", () => {
+  it("restores the hash and moves focus back and forward between support and trust", async () => {
+    const user = userEvent.setup();
+    open();
+    await supportReady();
+
+    await user.click(screen.getByRole("link", { name: /^Compliance documents:/ }));
+    expect(await screen.findByRole("heading", { name: "Request trust documentation" })).toBeInTheDocument();
+    expect(location()).toBe("/trust#compliance");
+
+    await user.click(screen.getByRole("button", { name: "Browser back" }));
+    await supportReady();
+    expect(location()).toBe(SUPPORT);
+
+    await user.click(screen.getByRole("button", { name: "Browser forward" }));
+    expect(await screen.findByRole("heading", { name: "Request trust documentation" })).toBeInTheDocument();
+    expect(location()).toBe("/trust#compliance");
+  });
+
+  it("navigates between sections within the Trust Center via shortcuts with history and focus", async () => {
+    const user = userEvent.setup();
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={["/trust#compliance"]}>
+          <Where />
+          <Routes><Route path="/trust" element={<Trust />} /></Routes>
+        </MemoryRouter>
+      </ThemeProvider>
+    );
+    await screen.findByRole("heading", { name: "Request trust documentation" });
+    const reportShortcut = screen.getByRole("link", { name: "Report an issue" });
+    await user.click(reportShortcut);
+
+    expect(await screen.findByRole("heading", { name: "Report a security issue" })).toBeInTheDocument();
+    expect(location()).toBe("/trust#report");
+    expect(document.activeElement).toBe(document.getElementById("report"));
+
+    await user.click(screen.getByRole("button", { name: "Browser back" }));
+    expect(await screen.findByRole("heading", { name: "Request trust documentation" })).toBeInTheDocument();
+    expect(location()).toBe("/trust#compliance");
+    expect(document.activeElement).toBe(document.getElementById("compliance"));
+  });
+});
+
+describe("no duplicate IDs", () => {
+  it("has no duplicate IDs for trust destinations on Support Status", async () => {
+    open();
+    await supportReady();
+    for (const id of ["security", "residency", "compliance", "report"]) {
+      expect(document.querySelectorAll(`[id="${id}"]`).length).toBe(1);
+    }
+  });
+
+  it("has no duplicate IDs for trust destinations on Trust Center", async () => {
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={["/trust"]}>
+          <Routes><Route path="/trust" element={<Trust />} /></Routes>
+        </MemoryRouter>
+      </ThemeProvider>
+    );
+    await screen.findByRole("heading", { name: "Report a security issue" });
+    for (const id of ["compliance", "report"]) {
+      expect(document.querySelectorAll(`[id="${id}"]`).length).toBe(1);
+    }
   });
 });

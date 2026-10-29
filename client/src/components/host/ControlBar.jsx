@@ -166,16 +166,20 @@ export default function ControlBar({
             ? "Stop the local camera preview"
             : "Preview your camera and mic before going live"}
         />
+        {/* No microphone in the preview (useMediaPreview.micMissing): say so on the button
+            itself rather than offering a mute toggle for a track that does not exist. */}
         <DeckButton
-          icon={mic ? FiMic : FiMicOff}
-          label={mic ? "Mic" : "Muted"}
+          icon={mic && !media?.micMissing ? FiMic : FiMicOff}
+          label={media?.micMissing ? "No mic" : mic ? "Mic" : "Muted"}
           tone="danger"
-          active={!mic}
-          disabled={!previewOn}
+          active={!mic || !!media?.micMissing}
+          disabled={!previewOn || !!media?.micMissing}
           onClick={onToggleMic}
-          title={previewOn
-            ? (mic ? "Mute your microphone" : "Unmute your microphone")
-            : "Start the preview first"}
+          title={!previewOn
+            ? "Start the preview first"
+            : media?.micMissing
+              ? "No microphone available — allow microphone access for this site and check the device, then restart the preview"
+              : (mic ? "Mute your microphone" : "Unmute your microphone")}
         />
         <DeckButton
           icon={camera ? FiVideo : FiVideoOff}

@@ -251,3 +251,35 @@ def test_an_unknown_sort_field_falls_back_without_reaching_sql(world):
                                          sort_by="registered); DROP TABLE events;--",
                                          page=1, page_size=5)
     assert total >= 4 and rows
+
+
+# ── registrations and playback sessions independence ──────────────────────────────────
+
+def test_registrations_exist_while_playback_sessions_are_zero(world):
+    """Registering for events does not invent playback sessions. An org with registrations
+    but no player activity has non-zero registrations and zero playback sessions."""
+    from app.services import playback_qoe as playback_svc
+    db, org = world["db"], world["org"]
+    summary = org_svc.audience_summary(db, org, range_key="30d")
+    qoe = playback_svc.summarize(db, org.id, window="30d")
+
+    assert summary["registrations"] > 0
+    assert qoe["total"]["sessions"] == 0
+    assert qoe["total"]["playback_starts"] == 0
+
+
+def test_duplicate_registration_for_same_event_rejected(world):
+    """EventRegistration has a unique constraint on (event_id, email) so duplicate signups
+    for the same event cannot inflate registration counts."""
+    from sqlalchemy.exc import IntegrityError
+    db, ev = world["db"], world["empty"]
+    email = f"dupe-{uuid.uuid4().hex[:8]}@example.com"
+    r1 = EventRegistration(event_id=ev.id, name="Person", email=email)
+    db.add(r1)
+    db.commit()
+
+    r2 = EventRegistration(event_id=ev.id, name="Person Copy", email=email)
+    db.add(r2)
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()

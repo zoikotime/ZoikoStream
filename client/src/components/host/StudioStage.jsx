@@ -521,6 +521,18 @@ export default function StudioStage({
       </div>
       </div>
 
+      {/* The preview has no microphone (camera granted, mic blocked/missing/busy): viewers
+          would hear nothing. An action, not a status — what to check, and how to recover. */}
+      {media?.active && media?.micMissing && (
+        <div role="alert" className="flex shrink-0 items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs dark:border-amber-500/30 dark:bg-amber-500/10">
+          <FiAlertTriangle aria-hidden="true" className="shrink-0 text-amber-600 dark:text-amber-400" />
+          <span className="font-medium text-amber-900 dark:text-amber-300">
+            No microphone — viewers can&rsquo;t hear you. Allow microphone access for this site,
+            check the device is connected and not in use by another app, then restart the preview.
+          </span>
+        </div>
+      )}
+
       {/* Waiting room is an action prompt, not decoration: it names the count twice (badge
           and sentence) so it isn't a colour-only signal. */}
       {analytics?.waiting > 0 && (
