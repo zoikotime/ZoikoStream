@@ -84,16 +84,18 @@ CAPABILITIES_LIST = (
 )
 
 COPY: dict[str, list[str]] = {
+    # Calm, short and direct (Conversation Flow §28.1, Engineering Wireframe §8.1): no social
+    # filler or exclamations before the answer, no exaggerated AI personality.
     "GREETING": [
-        "Hi there! I'm Guide, ZoikoStream's AI assistant. I can answer questions about "
+        "Hello. I'm Guide, ZoikoStream's AI assistant. I can answer questions about "
         "ZoikoStream, help you request a demo, or help you get into and watch an event. "
-        "What can I help you with today?",
-        "Hello! I'm Guide, the AI assistant for ZoikoStream. Ask me anything about ZoikoStream, "
-        "or pick a topic below to get started.",
+        "What would you like to know?",
+        "Hello. I'm Guide, the AI assistant for ZoikoStream. Ask a question about ZoikoStream, "
+        "or choose a topic below.",
     ],
     "GREETING_AGAIN": [
-        "Hi again! What else can I help you with?",
-        "Hello! What would you like to know next?",
+        "Hello again. What else would you like to know?",
+        "What would you like to know next?",
     ],
     "IDENTITY": [
         "I'm Guide, the AI assistant on the ZoikoStream website. I answer questions using "
@@ -107,20 +109,20 @@ COPY: dict[str, list[str]] = {
         "ZoikoStream team, I can point you to the right place.",
     ],
     "CAPABILITIES": [
-        "Happy to help! Here's what I can do:\n\n" + CAPABILITIES_LIST + "\n\n"
-        "Just ask in your own words, or choose a topic below.",
+        "Here's what I can help with:\n\n" + CAPABILITIES_LIST + "\n\n"
+        "Ask in your own words, or choose a topic below.",
     ],
     "HOW_ARE_YOU": [
-        "I'm doing well, thanks for asking! How can I help you with ZoikoStream today?",
-        "All good here, thank you! What can I help you with?",
+        "I'm ready to help. What would you like to know about ZoikoStream?",
+        "What can I help you with?",
     ],
     "THANKS": [
-        "You're welcome! Is there anything else I can help you with?",
-        "Happy to help! Let me know if you have any other questions.",
+        "You're welcome. Is there anything else I can help with?",
+        "You're welcome. Let me know if you have another question.",
     ],
     "GOODBYE": [
-        "Thanks for stopping by! If you need anything later, I'm right here.",
-        "Take care! You can open Guide again anytime you have a question.",
+        "Thanks for visiting. You can open Guide again anytime you have a question.",
+        "You can open Guide again anytime you have a question.",
     ],
     "NEGATIVE": [
         "I'm sorry I wasn't more helpful. I can only answer from ZoikoStream's public "
@@ -128,16 +130,14 @@ COPY: dict[str, list[str]] = {
         "contact them below, or try asking your question a different way.",
     ],
     "POSITIVE": [
-        "Glad that helped! Anything else I can help you with?",
-        "Great! Let me know if there's anything else you'd like to know.",
+        "Good to hear. Is there anything else you'd like to know?",
+        "Let me know if there's anything else you'd like to know.",
     ],
     "CONFUSED": [
-        "No problem, let's figure it out together. You can ask me a question in your own words, "
-        "or choose one of the topics below.",
+        "You can ask a question in your own words, or choose one of the topics below.",
     ],
     "ACK": [
-        "Okay! What would you like to do next? You can ask me anything about ZoikoStream or "
-        "pick a topic below.",
+        "What would you like to do next? You can ask about ZoikoStream or choose a topic below.",
     ],
 }
 

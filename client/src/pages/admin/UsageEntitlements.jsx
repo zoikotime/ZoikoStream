@@ -24,31 +24,45 @@ const STATUS_OPTIONS = [
 ];
 const SORT_OPTIONS = [["name", "Name A–Z"], ["-name", "Name Z–A"], ["storage", "Most storage used"]];
 
-const STATE_TONE = { within: "success", exceeded: "danger", unlimited: "info", not_applicable: "neutral" };
-const STATE_LABEL = { within: "Within quota", exceeded: "Over quota", unlimited: "Unlimited", not_applicable: "Not applicable" };
+const STATE_TONE = { within: "success", at_limit: "warning", exceeded: "danger", unlimited: "info", not_applicable: "neutral" };
+const STATE_LABEL = { within: "Within quota", at_limit: "Limit reached", exceeded: "Over quota", unlimited: "Unlimited", not_applicable: "Not applicable" };
 
 const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : null);
 
 // One quota, exactly as the server evaluated it. The three "no number" states stay distinct:
-//   not_applicable — no entitled plan, so nothing is granted and nothing is measured against
-//   unlimited      — a plan with no cap on this dimension
-//   within/exceeded — a real limit, with remaining and percent
-// `enforced` says whether the platform actually REFUSES anything at this limit; a bar that is
-// only shown against the plan is labelled so it is not read as a control.
-export function QuotaBar({ quota: q }) {
+//   not_applicable — no plan/default quota is configured; new activity is blocked
+//   unlimited      — an entitled plan has no cap on this dimension
+//   within/at_limit/exceeded — a real effective limit, with remaining and percent
+export function QuotaBar({ quota: q, hasEntitledPlan = true }) {
   const pct = q.percent == null ? null : Math.min(100, Math.max(0, q.percent));
+  const limit = q.effective_limit ?? q.limit;
   const reading =
     q.quota_state === "not_applicable" ? `${q.used} ${q.unit}`
       : q.unlimited ? `${q.used} ${q.unit} · no plan cap`
-        : `${q.used} / ${q.limit} ${q.unit}`;
+        : `${q.used} / ${limit} ${q.unit}`;
   const notes = [];
   if (q.quota_state === "within") notes.push(`${q.remaining} ${q.unit} remaining · ${q.percent}%`);
-  if (q.quota_state === "exceeded") notes.push(`Over by ${Math.abs(q.remaining)} ${q.unit} · ${q.percent}%`);
-  if (q.quota_state === "not_applicable") notes.push("No entitled plan");
-  if (!q.enforced) notes.push("Not enforced — shown against the plan only");
-  // The ceiling that actually applies can differ from the plan's: a lapsed subscription stays
-  // capped at its old plan, and storage is further bounded by the platform ceiling.
-  if (q.enforced && q.enforced_limit != null && q.enforced_limit !== q.limit) {
+  if (q.quota_state === "at_limit") notes.push("Limit reached");
+  if (q.quota_state === "exceeded") {
+    notes.push(`Over by ${Math.abs(q.remaining)} ${q.unit}${q.percent == null ? "" : ` · ${q.percent}%`}`);
+  }
+  if (q.key === "streaming_hours" && !hasEntitledPlan) {
+    notes.push("No entitled plan — Standard usage limits apply");
+  } else if (q.key === "storage" && q.quota_source === "no_entitled_plan") {
+    notes.push("No entitled plan — new recordings are blocked until an entitled plan is in effect");
+  } else if (q.quota_state === "not_applicable") {
+    notes.push("No quota configured — new activity is blocked");
+  }
+  if (q.key === "streaming_hours" && hasEntitledPlan && q.quota_state !== "not_applicable" && !q.unlimited) {
+    notes.push(q.enforced
+      ? "Lifetime quota: new broadcasts are blocked at the limit; active broadcasts may continue"
+      : "Not enforced — shown against the plan only");
+  }
+  if (q.quota_source === "platform_default") notes.push("Platform default");
+  if (q.quota_source === "default_and_platform_ceiling") notes.push("Platform default, capped by platform ceiling");
+  if (q.quota_source === "plan_and_platform_ceiling") notes.push("Plan quota, capped by platform ceiling");
+  // An applicable platform ceiling can differ from the displayed plan allowance.
+  if (q.quota_source !== "no_entitled_plan" && q.enforced && q.enforced_limit != null && q.enforced_limit !== q.limit) {
     notes.push(`Enforced ceiling ${q.enforced_limit} ${q.unit}`);
   }
   return (
@@ -110,7 +124,9 @@ function OrgUsage({ row }) {
         </span>
       </div>
       <div className="mt-3 grid gap-4 sm:grid-cols-3">
-        {row.quotas.map((q) => <QuotaBar key={q.key || q.label} quota={q} />)}
+        {row.quotas.map((q) => (
+          <QuotaBar key={q.key || q.label} quota={q} hasEntitledPlan={row.entitlement_source === "subscription"} />
+        ))}
       </div>
       <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
         {row.metrics.map((m) => <Metric key={m.key} m={m} />)}

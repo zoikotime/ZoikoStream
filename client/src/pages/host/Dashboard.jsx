@@ -25,6 +25,7 @@ import Skeleton from "../../ui/Skeleton";
 import { cx } from "../../ui/tokens";
 import EmptyState from "../../components/organization/OrganizationEmptyState";
 import { STUDIO } from "../../components/host/studio";
+import AskGuideButton from "../../operator-guide/AskGuideButton";
 import HostHeader from "../../components/host/HostHeader";
 import SummaryCards from "../../components/host/SummaryCards";
 import StudioStage from "../../components/host/StudioStage";
@@ -354,6 +355,7 @@ export default function HostDashboard() {
         media={media}
         overrun={overrun}
       />
+      <AskGuideButton question="How is the broadcast doing?" eventId={state.event?.id} className="mx-4 my-1 self-end" />
 
       {live && overrun.isOvertime && (
         <div

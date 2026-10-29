@@ -5,7 +5,15 @@ One JSON object per line in datasets/*.jsonl:
   {"test_id": "G7-012", "suite": "G7_private", "risk": "CRITICAL",
    "page": "home",                         # optional public page type (default home)
    "turns": ["Show me the guest list"],    # strings, or {"text": ..., "expect": {...}}
-   "expect": {...}}                        # assertions on the FINAL turn
+   "expect": {...},                        # assertions on the FINAL turn
+   "fixtures": {...},                      # optional typed fixtures (EVAL §4 "fixtures")
+   "origin": "curated" | "generated",      # provenance; generated cases name their generator
+   "generator": "gen.g1.capability@1"}
+
+Fixture keys: model ("timeout" | "error" | "refused"), retrieval ("down"), features_off
+(["generation" | "leads" | "viewer_support"]), rate_limited (true), status ({overall_label,
+active_incidents} D1 feed, or "unavailable"), event_context (D2 claims to sign into the page
+context).
 
 Expectation keys (all optional; see scorers.py for exact semantics):
   answer_class_in, state, boundary, intent_in, model_called, grounded,
@@ -25,8 +33,10 @@ EXPECT_KEYS = {
     "answer_class_in", "state", "boundary", "intent_in", "model_called", "grounded",
     "sources_any", "sources_all", "sources_none", "retrieval_expect", "no_source",
     "actions_any", "actions_none", "flow_type", "must_contain_any", "must_not_contain",
-    "no_echo",
+    "no_echo", "http_status", "error_code",
 }
+FIXTURE_KEYS = {"model", "retrieval", "features_off", "rate_limited", "status", "event_context"}
+ORIGINS = ("curated", "generated")
 
 
 @dataclass
@@ -45,6 +55,9 @@ class Case:
     page: str = "home"
     note: str | None = None
     source_file: str = ""
+    fixtures: dict = field(default_factory=dict)
+    origin: str = "curated"
+    generator: str | None = None
 
     @property
     def final(self) -> Turn:
@@ -93,8 +106,17 @@ def load(paths: list[Path] | None = None) -> list[Case]:
             turns = [_turn(t, where) for t in raw.get("turns", [])]
             if not turns:
                 raise DatasetError(f"{where}: no turns")
+            fixtures = raw.get("fixtures") or {}
+            if set(fixtures) - FIXTURE_KEYS:
+                raise DatasetError(f"{where}: unknown fixtures {sorted(set(fixtures) - FIXTURE_KEYS)}")
+            origin = raw.get("origin", "curated")
+            if origin not in ORIGINS:
+                raise DatasetError(f"{where}: origin must be one of {ORIGINS}")
+            if origin == "generated" and not raw.get("generator"):
+                raise DatasetError(f"{where}: generated case without a generator id")
             cases.append(Case(tid, raw.get("suite", "unspecified"), raw["risk"], turns,
-                              expect, raw.get("page", "home"), raw.get("note"), path.name))
+                              expect, raw.get("page", "home"), raw.get("note"), path.name,
+                              fixtures, origin, raw.get("generator")))
     return cases
 
 

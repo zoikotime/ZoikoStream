@@ -13,7 +13,7 @@
 // counters above it reload from the same request.
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -39,6 +39,13 @@ const org = (over = {}) => ({
   subscription_status: "active", created_at: "2026-10-01T00:00:00Z", ...over,
 });
 
+const activeElevation = {
+  id: "elevation-1",
+  scope: "platform",
+  granted_scopes: ["platform"],
+  seconds_remaining: 600,
+};
+
 const serve = (rows) =>
   vi.mocked(api.get).mockImplementation((url) =>
     url.includes("/admin/organizations")
@@ -46,9 +53,27 @@ const serve = (rows) =>
       : Promise.resolve({ data: [] })        // /admin/plans is a plain array
   );
 
-const show = () =>
+const show = (elevation = activeElevation, { unknown = false } = {}) =>
   render(
-    <ThemeProvider><MemoryRouter><Organizations /></MemoryRouter></ThemeProvider>
+    <ThemeProvider>
+      <MemoryRouter>
+        <Routes>
+          <Route
+            element={
+              <Outlet
+                context={{
+                  state: unknown ? null : { elevation },
+                  unknown,
+                  reload: vi.fn(),
+                }}
+              />
+            }
+          >
+            <Route path="/" element={<Organizations />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    </ThemeProvider>
   );
 
 // Open the confirmation for the first row.
@@ -67,6 +92,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   serve([org()]);
   vi.mocked(api.delete).mockResolvedValue({ status: 204 });
+  vi.mocked(api.post).mockResolvedValue({ data: { granted_scopes: ["platform"] } });
 });
 
 describe("the confirmation", () => {
@@ -95,6 +121,47 @@ describe("the confirmation", () => {
     expect(dialog.textContent).toMatch(/3 user\(s\)/);
     expect(dialog.textContent).toMatch(/2 event\(s\)/);
     expect(dialog.textContent).toMatch(/refuses to delete/i);
+  });
+
+  it("requires platform elevation before showing the final confirmation", async () => {
+    show(null);
+    const dialog = await openDelete();
+
+    expect(dialog).toHaveTextContent(/requires platform elevation/i);
+    expect(dialog).toHaveTextContent(/No deletion request has been sent/i);
+    expect(screen.queryByRole("button", { name: "Delete organization" })).not.toBeInTheDocument();
+    expect(api.delete).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Elevate access" }));
+
+    await screen.findByText(/Delete e2e-org-10800c1f\?/);
+    expect(api.post).toHaveBeenCalledWith(
+      "/admin/elevation",
+      expect.objectContaining({ scope: "platform" })
+    );
+    expect(api.delete).not.toHaveBeenCalled();
+  });
+
+  it("does not offer elevation when the access state cannot be checked", async () => {
+    show(null, { unknown: true });
+    const dialog = await openDelete();
+
+    expect(dialog).toHaveTextContent(/Access state is unknown/i);
+    expect(screen.queryByRole("button", { name: "Elevate access" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry access check" })).toBeInTheDocument();
+    expect(api.delete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ ...activeElevation, seconds_remaining: 0 }, /elevation has expired/i],
+    [{ ...activeElevation, granted_scopes: ["identity"] }, /does not cover platform operations/i],
+  ])("requires the correct active scope before final confirmation", async (elevation, message) => {
+    show(elevation);
+    const dialog = await openDelete();
+
+    expect(dialog).toHaveTextContent(message);
+    expect(screen.queryByRole("button", { name: "Delete organization" })).not.toBeInTheDocument();
+    expect(api.delete).not.toHaveBeenCalled();
   });
 
   it("sends nothing until it is confirmed", async () => {
@@ -166,7 +233,7 @@ describe("a delete the server refuses", () => {
   it.each([
     [409, "Organization still owns 2 event(s), 1 invitation(s). Remove or reassign them first, or suspend the organization instead of deleting it."],
     [409, "Organization has 3 user(s); remove them before deleting"],
-    [403, "This action needs elevated access. Start an elevation session and try again."],
+    [403, "You do not have permission to delete this organization."],
     [404, "Organization not found"],
     [400, "Cannot delete your own organization"],
   ])("shows the server's own explanation (%i)", async (code, detail) => {
@@ -175,6 +242,20 @@ describe("a delete the server refuses", () => {
     const dialog = await openDelete();
     fireEvent.click(confirmButton(dialog));
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(detail));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("returns to elevation after a late server rejection without retrying deletion", async () => {
+    const detail = "This action needs elevated access. Start an elevation session and try again.";
+    vi.mocked(api.delete).mockRejectedValue(rejection(403, detail));
+    show();
+    const dialog = await openDelete();
+    fireEvent.click(confirmButton(dialog));
+
+    const accessDialog = await screen.findByRole("dialog", { name: "Elevated access required" });
+    expect(accessDialog).toHaveTextContent(/server did not accept the previous elevation/i);
+    expect(accessDialog).toHaveTextContent(detail);
+    expect(api.delete).toHaveBeenCalledTimes(1);
     expect(toast.success).not.toHaveBeenCalled();
   });
 

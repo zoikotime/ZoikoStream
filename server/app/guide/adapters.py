@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from . import breaker
 from .settings import get_settings
 
 log = logging.getLogger(__name__)
@@ -69,15 +70,28 @@ class ContactFlowAdapter:
         # that a per-visitor limit instead of one budget shared by every Guide lead.
         if visitor_ip:
             headers["X-Forwarded-For"] = visitor_ip
+        # Architecture §17.1: an open breaker means nothing is sent, so the outcome is a
+        # positive "failed" (never "unknown") and the visitor gets the direct contact route.
+        b = breaker.get("contact")
+        if not b.allow():
+            log.warning("guide lead adapter: contact breaker open; not sending")
+            return AdapterOutcome("failed", "circuit_open")
         try:
             res = httpx.post(endpoint, json=payload, headers=headers,
                              timeout=httpx.Timeout(s.GUIDE_CONTACT_TIMEOUT_SECONDS, connect=3.0))
         except httpx.ConnectError:
             log.error("guide lead adapter: contact endpoint unreachable")
+            b.failure()
             return AdapterOutcome("failed", "unreachable")
         except (httpx.TimeoutException, httpx.RemoteProtocolError, httpx.ReadError):
             log.error("guide lead adapter: outcome unknown (timeout after send)")
+            b.failure()
             return AdapterOutcome("unknown", "timeout")
+        # A 4xx is the endpoint working and declining; only 5xx counts against the breaker.
+        if res.status_code >= 500:
+            b.failure()
+        else:
+            b.success()
         if res.status_code == 202:
             return AdapterOutcome("confirmed")
         log.warning("guide lead adapter: contact endpoint answered %s", res.status_code)

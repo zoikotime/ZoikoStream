@@ -26,8 +26,24 @@ function countLast24h(rows) {
 function targetLabel(a) {
   const metaName = a.meta?.name || a.meta?.email;
   if (metaName) return metaName;
-  if (a.target_type && a.target_id) return `${a.target_type} · ${a.target_id.slice(0, 8)}`;
+  if (a.target_type && a.target_id) return `${a.target_type} · ${String(a.target_id).slice(0, 8)}`;
   return a.target_type || "—";
+}
+
+function actorLabel(a) {
+  return a.actor_email || "system";
+}
+
+function matchesSearch(a, query) {
+  if (!query) return true;
+  return [
+    actorLabel(a),
+    a.actor_email,
+    a.action,
+    targetLabel(a),
+    a.target_type,
+    a.target_id,
+  ].some((value) => String(value || "").toLowerCase().includes(query));
 }
 
 function useAuditLogsData() {
@@ -59,10 +75,7 @@ export default function AuditLogs() {
     const query = q.trim().toLowerCase();
     return rows.filter(
       (a) =>
-        (!query ||
-          (a.actor_email || "").toLowerCase().includes(query) ||
-          a.action.toLowerCase().includes(query) ||
-          targetLabel(a).toLowerCase().includes(query)) &&
+        matchesSearch(a, query) &&
         (action === "all" || a.action === action) &&
         (targetType === "all" || a.target_type === targetType)
     );
@@ -74,7 +87,7 @@ export default function AuditLogs() {
         {a.created_at ? timeAgo(a.created_at) : "—"}
       </span>
     ) },
-    { key: "actor_email", header: "Actor", sortable: true, render: (a) => a.actor_email || "system" },
+    { key: "actor_email", header: "Actor", sortable: true, render: actorLabel },
     { key: "action", header: "Action", sortable: true, render: (a) => (
       <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12px] text-slate-700 dark:bg-slate-800 dark:text-slate-200">
         {a.action}

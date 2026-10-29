@@ -54,17 +54,54 @@ def get_engine() -> Engine:
 
 def reset_engine() -> None:
     """Drop the cached engine (tests switch GUIDE_DATABASE_URL)."""
-    global _engine, _sessionmaker
+    global _engine, _sessionmaker, _maint_engine, _maint_sessionmaker
     with _lock:
         if _engine is not None:
             _engine.dispose()
+        if _maint_engine is not None:
+            _maint_engine.dispose()
         _engine, _sessionmaker = None, None
+        _maint_engine, _maint_sessionmaker = None, None
 
 
 def new_session() -> Session:
     get_engine()
     assert _sessionmaker is not None
     return _sessionmaker()
+
+
+# ── Least-privilege principals (ERD §19, RBAC §20) ─────────────────────────────────────────
+# The runtime API uses GUIDE_DATABASE_URL (role guide_runtime). Purge/reconcile may run as a
+# separate guide_maintenance login (GUIDE_MAINTENANCE_DATABASE_URL); migrations and knowledge
+# ingestion use their own URLs in deploy.py. Blank = fall back to the runtime engine, so a
+# single-credential development setup keeps working.
+
+_maint_engine: Engine | None = None
+_maint_sessionmaker: sessionmaker | None = None
+
+
+def get_maintenance_engine() -> Engine:
+    global _maint_engine, _maint_sessionmaker
+    url = get_settings().GUIDE_MAINTENANCE_DATABASE_URL
+    if not url:
+        return get_engine()
+    if _maint_engine is None:
+        with _lock:
+            if _maint_engine is None:
+                _maint_engine = create_engine(
+                    engine_url(url), pool_pre_ping=True, pool_size=2, max_overflow=0,
+                    pool_recycle=1800, pool_timeout=10)
+                _maint_sessionmaker = sessionmaker(bind=_maint_engine, autoflush=False,
+                                                   expire_on_commit=False)
+    return _maint_engine
+
+
+def new_maintenance_session() -> Session:
+    if not get_settings().GUIDE_MAINTENANCE_DATABASE_URL:
+        return new_session()
+    get_maintenance_engine()
+    assert _maint_sessionmaker is not None
+    return _maint_sessionmaker()
 
 
 def get_guide_db():

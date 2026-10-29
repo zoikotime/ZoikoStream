@@ -1,28 +1,9 @@
-"""The 5,000 GB storage ceiling is configuration, not a default — pinned so it stays that way.
+"""Storage ceilings cap entitled plan allowances; they do not grant storage.
 
-A report arrived claiming organizations with no entitled plan were "receiving an unintended
-default storage ceiling of 5,000 GB". They are not. Nothing in this repository contains that
-number as a storage fallback:
-
-    platform_settings.storage_ceiling_gb() reads the "storage_limits" PlatformSetting row and
-    returns None when it is absent. "storage_limits" is in routers.admin.EDITABLE_SETTING_KEYS,
-    so 5000 is a value an administrator entered in Settings -> Storage & Streaming Limits.
-
-What the console shows for such an organization is already two separate facts, and says so:
-
-    quota_state = "not_applicable"   <- there is no entitlement
-    enforced_limit = <ceiling>       <- what actually refuses an upload
-
-services.org.enforcement_plan draws that line deliberately, and
-test_entitlement_enforcement.py already covers it — including that no plan is fabricated for
-an organization with no subscription row, that a lapsed subscription keeps its own plan as the
-ceiling, and that one tenant's plan never governs another's.
-
-These tests cover the part that suite does not: that the ceiling remains CONFIGURATION, and
-that the reporting payload keeps entitlement and ceiling in separate fields. The failure they
-are written against is someone "fixing" an absent ceiling by giving it a default — which is
-precisely the bug the report believed was already here, and which would grant an allowance to
-organizations entitled to none.
+Non-entitled organizations now have a zero storage allowance regardless of stored platform
+defaults or a configured platform ceiling. An entitled plan's finite allowance may be tightened
+by the configured ceiling; an entitled unlimited plan may be capped by it. The API continues to
+report plan and effective enforcement values separately.
 
 No database: storage_ceiling_gb takes a session only to read one row, and the rest is source.
 """
@@ -97,11 +78,12 @@ def test_the_reporting_payload_keeps_them_in_different_fields():
     assert '"quota_state"' in src
 
 
-def test_an_organization_with_no_plan_reports_a_not_applicable_quota():
+def test_non_storage_quotas_without_a_quota_can_report_not_applicable():
     from app.services import org as org_svc
     src = inspect.getsource(org_svc)
-    # The three "no number" states are distinct on purpose; not_applicable is the one that
-    # says "nothing is entitled" rather than "unlimited".
+    # The three "no number" states are distinct on purpose; not_applicable means there is no
+    # plan or configured default rather than an unlimited allowance. Storage without
+    # entitlement is separately represented as an explicit zero quota.
     assert '"not_applicable"' in src
     assert '"unlimited"' in src
 

@@ -207,3 +207,122 @@ def test_flow_of_another_session_is_not_found(client):
                  {"client_step_id": str(uuid.uuid4()), "step_id": "issue_type",
                   "option_id": "buffering"})
     assert res.status_code == 404
+
+
+# ── Flow switching needs confirmation once there is progress (C3; CF §11) ─────────────────
+
+def test_switching_away_from_a_flow_with_progress_requires_confirmation(guide, db):
+    first = walk(guide, start(guide, "playback"), "buffering")
+    res = guide.post("/support-flows", {"flow_type": "audio"})
+    assert res.status_code == 409
+    body = res.json()
+    assert body["code"] == "GUIDE_STATE_CONFLICT" and body["confirm_required"] is True
+    assert body["active_flow_type"] == "playback"
+    assert body["current"]["step"]["step_id"] == first["step"]["step_id"]
+    # Nothing was lost: the playback flow still accepts its next step.
+    assert step(guide, first, "yes").status_code == 200
+
+    confirmed = guide.post("/support-flows", {"flow_type": "audio", "confirm_replace": True})
+    assert confirmed.status_code == 201 and confirmed.json()["flow_type"] == "audio"
+    assert step(guide, first, "yes", step_id="refresh").status_code == 409  # replaced
+
+
+def test_switching_from_an_untouched_flow_needs_no_confirmation(guide):
+    start(guide, "playback")
+    assert guide.post("/support-flows", {"flow_type": "audio"}).status_code == 201
+
+
+# ── Idempotent start (API §16) ────────────────────────────────────────────────────────────
+
+def test_start_with_same_client_request_id_returns_same_flow(guide, db):
+    rid = str(uuid.uuid4())
+    a = guide.post("/support-flows", {"flow_type": "playback", "client_request_id": rid})
+    walk(guide, a.json(), "buffering")
+    b = guide.post("/support-flows", {"flow_type": "playback", "client_request_id": rid})
+    assert a.status_code == b.status_code == 201
+    assert b.json()["flow_id"] == a.json()["flow_id"] and b.json()["replayed"] is True
+    assert b.json()["step"]["step_id"] == "player_open"  # current state, not restarted
+    from app.guide.models import GuideSupportFlow
+    assert db.scalar(select(func.count()).select_from(GuideSupportFlow)) == 1
+
+
+def test_client_request_id_reused_for_other_flow_type_conflicts(guide):
+    rid = str(uuid.uuid4())
+    guide.post("/support-flows", {"flow_type": "playback", "client_request_id": rid})
+    res = guide.post("/support-flows", {"flow_type": "audio", "client_request_id": rid})
+    assert res.status_code == 409
+
+
+def test_client_request_id_is_scoped_to_the_session(client):
+    rid = str(uuid.uuid4())
+    a = create_session(client)  # one cookie jar: use each session before creating the next
+    fa = a.post("/support-flows", {"flow_type": "replay", "client_request_id": rid}).json()
+    b = create_session(client)
+    fb = b.post("/support-flows", {"flow_type": "replay", "client_request_id": rid}).json()
+    assert fa["flow_id"] != fb["flow_id"]
+
+
+# ── Audio end to end (CF §13) ─────────────────────────────────────────────────────────────
+
+def test_audio_flow_resolves_at_device_volume(guide, db):
+    flow = start(guide, "audio")
+    assert flow["step"]["step_id"] == "video_playing"
+    flow = walk(guide, flow, "yes", "no")
+    assert flow["step"]["step_id"] == "device_volume"
+    done = walk(guide, flow, "yes")
+    assert done["status"] == "resolved" and done["message"] == F.RESOLVED_MESSAGE
+    assert session_state(db, guide) == "ACTIVE"
+
+
+def test_audio_flow_escalates_after_all_steps(guide, db):
+    done = walk(guide, start(guide, "audio"), "yes", "no", "no", "no")
+    assert done["status"] == "escalated" and done["resolution_code"] == "audio_not_resolved"
+    assert {a["action_id"] for a in done["actions"]} >= {"viewer-support"}
+    assert session_state(db, guide) == "SUPPORT_HANDOFF"
+
+
+# ── Playback: early resolution and the PB-06 status card (CF §12; C5) ─────────────────────
+
+def test_playback_resolves_early_after_refresh(guide, db):
+    done = walk(guide, start(guide, "playback"), "not_loading", "yes", "yes")
+    assert done["status"] == "resolved" and done["step"] is None
+    assert session_state(db, guide) == "ACTIVE"
+
+
+def test_status_card_unknown_when_d1_unverifiable(guide):
+    flow = walk(guide, start(guide, "playback"), "buffering", "yes", "no", "no")
+    assert "status_card" not in flow  # only at PB-06
+    flow = walk(guide, flow, "no")
+    card = flow["status_card"]
+    assert card["state"] == "unknown" and card["status_url"] == "/status"
+    assert "can't verify" in card["summary"]
+
+
+def test_status_card_reports_d1_outage_only_when_d1_says_so(guide, monkeypatch):
+    from datetime import datetime, timezone
+    from app.guide import status as public_status
+    checked = datetime(2026, 10, 23, 14, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(public_status, "current", lambda: public_status.PublicStatus(
+        "Major outage", [("Playback errors", "investigating")], 0, checked))
+    flow = walk(guide, start(guide, "playback"), "buffering", "yes", "no", "no", "no")
+    card = flow["status_card"]
+    assert card["state"] == "outage" and card["checked_at"] == "2026-10-23T14:05:00Z"
+    assert "Playback errors" in card["summary"]
+    monkeypatch.setattr(public_status, "current", lambda: public_status.PublicStatus(
+        "No customer impact", [], 0, checked))
+    replay = step(guide, flow, command="back").json()
+    again = walk(guide, replay, "no")
+    assert again["status_card"]["state"] == "operational"
+
+
+# ── Replay with D2 (CF §15) ───────────────────────────────────────────────────────────────
+
+def test_replay_available_and_pending_with_public_context(client):
+    for state, phrase in (("available", "a replay is available"),
+                          ("pending", "being prepared but isn't available yet"),
+                          ("unavailable", "doesn't show a replay")):
+        token = event_context.issue({"replay_public_state": state})
+        g = create_session(client, page_id="viewer", page_type="viewer", path="/watch",
+                           public_event_context_token=token)
+        prompt = start(g, "replay")["step"]["prompt"]
+        assert phrase in prompt, (state, prompt)

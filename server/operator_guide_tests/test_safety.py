@@ -22,10 +22,11 @@ class ScriptedProvider:
 
     def __init__(self, explanation=None, draft=None):
         self.explanation, self.draft = explanation, draft
-        self.seen = []
+        self.seen, self.histories = [], []
 
-    def generate(self, task, request, facts):
+    def generate(self, task, request, facts, history=None):
         self.seen.append((task, facts))
+        self.histories.append(history or [])
         if task == "explain":
             return llm.ModelResult("ok", {"explanation": self.explanation}, self.release)
         return llm.ModelResult("ok", self.draft, self.release)
@@ -197,7 +198,7 @@ def test_model_chain_uses_next_provider_on_error_but_not_on_refusal():
         def __init__(self, name, status):
             self.release, self.status, self.calls = name, status, 0
 
-        def generate(self, task, request, facts):
+        def generate(self, task, request, facts, history=None):
             self.calls += 1
             return llm.ModelResult(self.status, {"explanation": self.release}
                                    if self.status == "ok" else None, self.release, 5)

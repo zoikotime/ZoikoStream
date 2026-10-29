@@ -92,13 +92,16 @@ def selectable_events(db: Session, actor: Actor, *, q: str = "", limit: int = 20
 
 def event_named_in(db: Session, actor: Actor, text: str) -> Event | None:
     """An event whose full title appears in the message ("is Spring Gala ready?"). Exact
-    title containment only — never a fuzzy guess at which event the user meant."""
+    title containment on word boundaries only ("Test" is not named in "latest") — never a
+    fuzzy guess at which event the user meant. A named event can switch the context, so the
+    match has to be exact."""
     lowered = f" {text.lower()} "
     best = None
     for ev in db.scalars(select(Event).where(
             Event.org_id == actor.org_id, Event.deleted_at.is_(None),
             Event.status != "archived").order_by(Event.created_at.desc()).limit(200)).all():
         title = (ev.title or "").strip().lower()
-        if len(title) >= 4 and title in lowered and (best is None or len(title) > len(best[0])):
+        if len(title) >= 4 and re.search(rf"(?<![a-z0-9]){re.escape(title)}(?![a-z0-9])", lowered) \
+                and (best is None or len(title) > len(best[0])):
             best = (title, ev)
     return best[1] if best else None

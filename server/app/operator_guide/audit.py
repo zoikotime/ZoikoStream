@@ -34,9 +34,27 @@ def record(db: Session, actor: Actor, *, kind: str, outcome: str, interaction_id
            authorization: str | None = None, receipts: list[dict] | None = None,
            confirmation_actor=None, correlation_id: str | None = None,
            response_ref: str | None = None, latency_ms: int | None = None) -> AuditEvent:
+    return write(db, org_id=actor.org_id, actor_id=actor.user.id, role=actor.role, kind=kind,
+                 outcome=outcome, interaction_id=interaction_id, context=context,
+                 request_text=request_text, intent=intent, model_release=model_release,
+                 source_refs=source_refs, tool_plan=tool_plan, authorization=authorization,
+                 receipts=receipts, confirmation_actor=confirmation_actor,
+                 correlation_id=correlation_id, response_ref=response_ref, latency_ms=latency_ms)
+
+
+def write(db: Session, *, org_id, actor_id, role: str, kind: str, outcome: str,
+          interaction_id: str | None = None, context: dict | None = None,
+          request_text: str | None = None, intent: str | None = None,
+          model_release: str | None = None, source_refs: list[str] | None = None,
+          tool_plan: list[dict] | None = None, authorization: str | None = None,
+          receipts: list[dict] | None = None, confirmation_actor=None,
+          correlation_id: str | None = None, response_ref: str | None = None,
+          latency_ms: int | None = None) -> AuditEvent:
+    """The row itself. ``record`` is the usual entry point; this one also serves events with
+    no request behind them (a proposal expiring by TTL), attributed to the original actor."""
     row = AuditEvent(
         interaction_id=interaction_id or new_id("int"),
-        org_id=actor.org_id, actor_id=actor.user.id, role_context=actor.role,
+        org_id=org_id, actor_id=actor_id, role_context=role,
         context={k: v for k, v in (context or {}).items() if k in ("workspace", "route", "event",
                                                                      "environment")},
         kind=kind,

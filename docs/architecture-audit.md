@@ -521,7 +521,7 @@ Ordered by how much they block a shippable product.
 7. Anonymous viewer access — no way to issue a scoped token to an unauthenticated attendee for a `public` event. `Event.visibility` is stored and never enforced anywhere.
 8. Org analytics API — `pages/organization/Analytics.jsx` is mocks; `analytics_snapshots` exists but has no per-org read endpoint.
 9. Billing — `plans` + `subscriptions` tables exist and super admin can patch them, but there is no payment provider, no invoices, no checkout, no usage metering. `storage_used_gb` / `bandwidth_gb` are never written.
-10. Plan-limit enforcement — `max_users`, `max_storage_gb`, `max_streaming_hours` are stored and enforced nowhere.
+10. Plan-limit enforcement — Historical finding, partially superseded: `max_streaming_hours` is enforced at new-broadcast admission against cumulative usage; existing broadcasts may finish. Re-audit `max_users` and `max_storage_gb` separately.
 11. Asset/image upload — `logo_url`, `banner_image`, `thumbnail`, `avatar_url`, `banner_url` are all `String(500)` with no upload endpoint.
 12. Org-scoped API keys are super-admin-only to create (`/admin/organizations/{id}/api-keys`); `GET /organization/developer` is read-only, and **no endpoint authenticates using an API key** — they are decorative.
 13. Feature flags have full CRUD but **nothing reads them** at request time.

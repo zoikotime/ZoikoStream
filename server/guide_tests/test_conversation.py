@@ -71,7 +71,7 @@ def test_who_are_you_is_friendly_honest_and_model_free(guide, no_model):
 
 def test_capabilities_lists_what_guide_does(guide, no_model):
     msg = ask(guide, "How can you help me?")["assistant_message"]
-    assert "Here's what I can do" in msg["text"]
+    assert "Here's what I can help with" in msg["text"]
     assert "demo" in msg["text"] and "captions" in msg["text"]
 
 

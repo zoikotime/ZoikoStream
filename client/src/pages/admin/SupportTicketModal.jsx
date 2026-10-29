@@ -7,6 +7,24 @@ import api, { errMsg } from "../../api";
 
 const EMPTY = { org_id: "", subject: "", message: "", priority: "normal", requester_email: "" };
 
+// What to say once a ticket is logged, from the server's own account of the requester's
+// confirmation email (support_comms.confirm_logged_case). "sent" means the email service
+// accepted it, so nothing here says "delivered"; an outcome it does not recognise claims nothing.
+function loggedNotice(ticket, email) {
+  const logged = ticket?.case_reference ? `Ticket ${ticket.case_reference} logged` : "Ticket logged";
+  switch (email ? ticket?.confirmation : "not_requested") {
+    case "sent":
+      return ["success", `${logged}. Confirmation email sent to ${email}.`];
+    case "failed":
+    case "suppressed":
+      return ["warning", `${logged}, but the confirmation email to ${email} could not be sent.`];
+    case "not_configured":
+      return ["warning", `${logged}. No confirmation email was sent: email delivery is not configured on this server.`];
+    default:
+      return ["success", `${logged}.`];
+  }
+}
+
 // Log a new support ticket against an organization. Create-only — status/priority are
 // edited inline from the queue.
 export default function SupportTicketModal({ open, onClose, organizations = [], onSaved }) {
@@ -22,19 +40,22 @@ export default function SupportTicketModal({ open, onClose, organizations = [], 
 
   const submit = async (e) => {
     e.preventDefault();
+    if (saving) return;
     if (!form.org_id) return notify.error("Choose an organization");
     if (!form.subject.trim()) return notify.error("Subject is required");
     if (!form.message.trim()) return notify.error("Message is required");
     setSaving(true);
+    const requesterEmail = form.requester_email.trim() || null;
     try {
-      await api.post("/admin/support-tickets", {
+      const { data } = await api.post("/admin/support-tickets", {
         org_id: form.org_id,
         subject: form.subject.trim(),
         message: form.message.trim(),
         priority: form.priority,
-        requester_email: form.requester_email.trim() || null,
+        requester_email: requesterEmail,
       });
-      notify.success("Ticket logged");
+      const [tone, text] = loggedNotice(data, requesterEmail);
+      notify[tone](text);
       onSaved?.();
       onClose();
     } catch (e2) {

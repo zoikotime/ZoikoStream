@@ -7,6 +7,10 @@ The direct answer and the cards are deterministic — produced by tools from aut
 state. The model may add a short "why" explanation over the same facts; that text is
 validated (numbers must come from the facts, no claims of having acted, no credentials, no
 links) and dropped on any doubt. Live Mode (§6.9) is terse: no model text, no suggestions.
+
+Facts and interpretation stay separate (§6.3, §10 R1): an R1 tool result flagged as inference,
+and any model explanation, add an ``inference`` source and the payload's ``inference`` flag,
+so the UI labels that part "Guide interpretation" and never presents it as platform state.
 """
 from __future__ import annotations
 
@@ -21,13 +25,16 @@ from sqlalchemy.orm import Session
 from app.guide.secrets_detect import detect as detect_secrets
 from app.models.event import EventAccessLink
 
-from . import actions, attention, context as context_svc, errors, knowledge, llm, policy
+from . import (
+    actions, attention, context as context_svc, errors, governance, knowledge, llm, policy,
+)
 from .intents import EVENT_TOOLS, Intent
 from .policy import Actor
 from .sources import Source, now
 from .tools import REGISTRY, ToolContext, run as run_tool
-from .tools.base import nav, notice
+from .tools.base import escalation_card, nav, notice
 from .tools.events import _fmt_when, event_href
+from .tools.org import technical_context
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +65,9 @@ class Composed:
     model_release: str | None = None
     authorization: str = "allowed"
     outcome: str = "answered"
+    inference: bool = False           # §6.3/§10 R1: the answer includes Guide interpretation
+    technical: dict | None = None     # §6.15: API version + environment on technical answers
+    correlation_id: str | None = None  # links the message audit row to a proposal it created
 
     def payload(self) -> dict:
         seen, sources = set(), []
@@ -69,26 +79,32 @@ class Composed:
                 "mode": self.mode, "blocks": self.blocks, "sources": sources,
                 "actions": self.actions,
                 "suggestions": [] if self.mode == "live" else self.suggestions[:4],
-                "stale": any(s["stale"] for s in sources)}
+                "stale": any(s["stale"] for s in sources),
+                "inference": self.inference or any(s["class"] == "inference" for s in sources),
+                "technical": self.technical}
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────────────
 
 def compose(db: Session, actor: Actor, ctx: dict, text: str, intent: Intent, *,
-            conversation_id=None) -> Composed:
+            conversation_id=None, history: list[dict] | None = None) -> Composed:
+    """``history``: the last few turns of this conversation (memory.history), used only to
+    phrase the model's explanation of a follow-up — never as a source of facts."""
     event = ctx.get("_event")
     try:
         if intent.kind == "chat":
-            return _chat(intent, event)
+            return _chat(intent, event, ctx, actor)
         if intent.kind == "blocked":
             return _blocked(db, actor, ctx, intent, event)
         if intent.kind == "action":
             return _action(db, actor, ctx, intent, event, conversation_id)
         if intent.kind == "draft":
             return _draft(db, actor, intent, event, text)
+        if intent.kind == "escalate":
+            return _escalate(db, actor, event)
         if intent.kind == "read":
-            return _read(db, actor, ctx, intent, event, text)
-        return _docs(db, actor, text, event)
+            return _read(db, actor, ctx, intent, event, text, history)
+        return _docs(db, actor, ctx, text, event, intent)
     except errors.EntitlementBlocked as exc:
         return Composed(exc.message, intent.name, [notice("blocker", exc.message,
                                                           rule="Guide settings")],
@@ -97,24 +113,62 @@ def compose(db: Session, actor: Actor, ctx: dict, text: str, intent: Intent, *,
         return Composed(exc.message, intent.name, [notice("blocker", exc.message,
                                                           rule="Platform permissions")],
                         authorization="denied", outcome="denied")
+    except errors.Timeout as exc:
+        return Composed(exc.message, intent.name, [notice("warning", exc.message,
+                                                          rule="Tool timeout")],
+                        outcome="timeout")
     except (errors.ValidationFailed, errors.NotFound, errors.Conflict) as exc:
         return Composed(exc.message, intent.name, outcome="needs_input")
 
 
 # ── Conversation ─────────────────────────────────────────────────────────────────────
 
-def suggestions_for(event, *, live: bool = False) -> list[str]:
+# Home prompts by console workspace (§6.1: "Prompt suggestions derive from page, role, event
+# state, and outstanding work"). Every prompt routes deterministically (test_intents).
+PAGE_SUGGESTIONS = {
+    "Analytics": ["How did our events perform?", "How many viewers did we have?",
+                  "What does watch time mean?", "What needs attention?"],
+    "Developers": ["Show our API keys and webhooks", "How do API keys work?",
+                   "How do webhooks work?", "What needs attention?"],
+    "Recordings": ["Where is the replay?", "What does retention mean?",
+                   "What does legal hold mean?", "What needs attention?"],
+    "Support": ["Show open support cases", "Is ZoikoStream down?", "What needs attention?",
+                "I need to talk to a human"],
+}
+EVENT_PAGE_FIRST = {"Recordings": "Where is the replay?", "Analytics": "How many viewers did we have?"}
+
+
+def suggestions_for(event, *, live: bool = False, workspace: str = "",
+                    admin: bool | None = None) -> list[str]:
+    """Suggested questions for the current context. ``admin`` None = role not considered."""
     if event is not None:
         if live:
             return ["How is the broadcast doing?", "Why are viewers dropping?",
                     "Who can access this event?"]
-        return ["Is this event ready?", "Who can access this event?", "Where is the replay?",
-                "Draft a reminder email"]
-    return ["What needs attention?", "Show upcoming events", "How did our events perform?",
-            "What does Conditional readiness mean?"]
+        out = ["Is this event ready?", "Who can access this event?", "Where is the replay?",
+               "Draft a reminder email"]
+        first = EVENT_PAGE_FIRST.get(workspace)
+        return [first] + [s for s in out if s != first][:3] if first else out
+    if workspace in PAGE_SUGGESTIONS:
+        return list(PAGE_SUGGESTIONS[workspace])
+    if admin is False:  # hosts: their own events first; org-wide reports are for admins
+        return ["What needs attention?", "Show my upcoming events",
+                "What does Conditional readiness mean?", "How do access links work?"]
+    out = ["What needs attention?", "Show upcoming events", "How did our events perform?",
+           "What does Conditional readiness mean?"]
+    if admin:
+        out[3:] = ["Show open support cases"]
+    return out
 
 
-def _chat(intent: Intent, event) -> Composed:
+def suggestions_for_ctx(ctx: dict, actor: Actor) -> list[str]:
+    event = ctx.get("_event")
+    return suggestions_for(event, live=_mode(event) == "live",
+                           workspace=ctx.get("workspace", ""),
+                           admin=policy.is_org_admin(actor.user))
+
+
+def _chat(intent: Intent, event, ctx: dict, actor: Actor) -> Composed:
     text = {
         "greeting": "Hello. " + ("What would you like to know about "
                                  f"{event.title}?" if event is not None else
@@ -124,7 +178,7 @@ def _chat(intent: Intent, event) -> Composed:
         "thanks": "You're welcome. Anything else to check?",
         "empty": "Ask me about an event, your audience, recordings or how a feature works.",
     }[intent.name]
-    return Composed(text, intent.name, suggestions=suggestions_for(event))
+    return Composed(text, intent.name, suggestions=suggestions_for_ctx(ctx, actor))
 
 
 # ── R5 / R6 ──────────────────────────────────────────────────────────────────────────
@@ -175,7 +229,7 @@ def _action(db, actor, ctx, intent: Intent, event, conversation_id) -> Composed:
                  "when you confirm." if spec.risk == "R4" else "")
     return Composed(("Review this change. Nothing happens until you confirm. " + risk_note).strip(),
                     intent.name, [proposal], mode=_mode(event), outcome="proposed",
-                    tools=[intent.action])
+                    tools=[intent.action], correlation_id=proposal.get("correlation_id"))
 
 
 def _choose_event(db, actor, intent_name: str, prompt: str) -> Composed:
@@ -207,6 +261,47 @@ def _choose_link(db, actor, event) -> Composed:
     return Composed("Which access link should I revoke?", "access_link.revoke",
                     [{"type": "choices", "kind": "proposal", "title": "Active access links",
                       "options": options, "resend": False}], outcome="needs_input")
+
+
+# ── Escalation (§8 Escalation Card) ─────────────────────────────────────────────────
+
+def escalation(db, actor: Actor, event, problem: str | None = None) -> dict:
+    """The human routes this user is permitted. Nothing is contacted or created here: an org
+    admin gets an R3 support-case PROPOSAL to review and confirm; a host is pointed to their
+    organization admin (the support workflow is admin-only on the platform)."""
+    admin = policy.is_org_admin(actor.user)
+    routes: list[dict] = []
+    if admin:
+        if governance.settings_for(db, actor.org_id)["capabilities"].get("actions", True):
+            detail = problem or "I need help from ZoikoStream support."
+            routes.append({"kind": "proposal", "label": "Prepare a support case",
+                           "action_id": "support.open_case", "params": {"text": detail},
+                           "note": "You review the case before anything is sent."})
+        routes.append({"kind": "navigate", **nav("Open Support & Status", "/organization/support")})
+        text = ("I can prepare a support case for you to review, with this context attached. "
+                "Nothing is sent until you confirm it.")
+    else:
+        routes.append({"kind": "contact", "label": "Contact your organization admin",
+                       "text": "Organization admins open support cases, from Guide or from "
+                               "Support & Status."})
+        routes.append({"kind": "navigate", **nav("Check ZoikoStream status", "/status")})
+        text = ("Support cases are opened by your organization admin. Share this context with "
+                "them; Guide does not contact anyone on your behalf.")
+    if event is not None and event.status in ("live", "degraded"):
+        routes.append({"kind": "navigate", **nav("Open live console",
+                                                 f"/host/dashboard?event={event.id}")})
+    return escalation_card("Get human help", text, routes,
+                           context={"event": event.title if event is not None else None,
+                                    "summary": problem})
+
+
+def _escalate(db, actor: Actor, event) -> Composed:
+    card = escalation(db, actor, event,
+                      f"Help needed with {event.title}." if event is not None else None)
+    answer = ("I can't contact anyone myself. " +
+              ("Here is how to reach ZoikoStream support." if policy.is_org_admin(actor.user)
+               else "Your organization admin can open a support case for you."))
+    return Composed(answer, "escalate", [card], mode=_mode(event), outcome="escalation_offered")
 
 
 # ── R2 drafts ────────────────────────────────────────────────────────────────────────
@@ -255,7 +350,8 @@ def _clean_draft(text: str) -> str:
 
 # ── R0 / R1 reads ────────────────────────────────────────────────────────────────────
 
-def _read(db, actor, ctx, intent: Intent, event, text: str) -> Composed:
+def _read(db, actor, ctx, intent: Intent, event, text: str,
+          history: list[dict] | None = None) -> Composed:
     tool_ids = [t for t in intent.tools if t in REGISTRY]
     if event is None and tool_ids and all(t in EVENT_TOOLS for t in tool_ids):
         return _choose_event(db, actor, intent.name, "Which event do you mean?")
@@ -282,12 +378,30 @@ def _read(db, actor, ctx, intent: Intent, event, text: str) -> Composed:
         facts[tool_id] = result.facts
         if result.mode == "live":
             out.mode = "live"
+        if result.inference:
+            # R1: interpretation is disclosed as its own source class, never as state.
+            out.inference = True
+            out.sources.append(Source(id=f"inference:{tool_id}", label="Guide interpretation",
+                                      source_class="inference", owner="ZoikoStream Guide",
+                                      updated_at=now(), detail={"tool": tool_id}))
+        if tool_id == "org.developer" and not result.facts.get("restricted"):
+            out.technical = technical_context(actor)
     if intent.docs:
-        _attach_docs(out, text)
+        _attach_docs(out, text, actor)
     out.answer = " ".join(summaries[:2]) or (out.answer or GAP)
+    triage = facts.get("event.incidents") or {}
+    if event is not None and (triage.get("confirmed_incidents") or triage.get("detected")):
+        out.blocks.append(escalation(db, actor, event, f"{event.title}: {summaries[0]}"
+                                     if summaries else None))
     if out.mode != "live" and facts:
-        out.explanation, out.model_release = _explain(text, out.answer, facts)
-    out.suggestions = [s for s in suggestions_for(event, live=out.mode == "live")
+        out.explanation, out.model_release = _explain(text, out.answer, facts, history)
+        if out.explanation:
+            out.inference = True
+            out.sources.append(Source(id="inference:explanation",
+                                      label="Guide interpretation · model explanation",
+                                      source_class="inference", owner="ZoikoStream Guide",
+                                      updated_at=now(), version=out.model_release))
+    out.suggestions = [s for s in suggestions_for_ctx(ctx, actor)
                        if s.rstrip("?").lower() not in text.lower()]
     return out
 
@@ -298,26 +412,42 @@ def _mode(event) -> str:
 
 # ── Documentation ────────────────────────────────────────────────────────────────────
 
-def _docs(db, actor, text: str, event) -> Composed:
+def _docs(db, actor, ctx: dict, text: str, event, intent: Intent | None = None) -> Composed:
     policy.require_capability(db, actor, "docs_qa")
-    out = Composed("", "docs", mode=_mode(event))
-    if not _attach_docs(out, text):
-        out.answer, out.outcome = GAP, "gap"
-        out.suggestions = suggestions_for(event)
+    name = intent.name if intent is not None else "docs"
+    out = Composed("", name, mode=_mode(event))
+    out.suggestions = suggestions_for_ctx(ctx, actor)
+    blocked = actions.BLOCKED.get((intent.params if intent is not None else {}).get("blocked"))
+    found = _attach_docs(out, text, actor)
+    if blocked is not None:
+        # §25: a how-to question about an operation Guide may not perform gets the docs AND
+        # an honest note — it is never refused as if it were the operation itself.
+        note = f"Guide can't do this for you. {blocked.what} is done in {blocked.where}."
+        out.blocks.insert(0, notice("info", note, rule=f"{blocked.risk} · Guide boundary"))
+        out.answer = f"{blocked.what} is done in {blocked.where}. Guide can't do it for you."
         return out
-    first = out.blocks[0]["items"][0]
+    if not found:
+        out.answer, out.outcome = GAP, "gap"
+        return out
+    first = next(b for b in out.blocks if b["type"] == "docs")["items"][0]
     out.answer = _first_sentences(first["text"], 2)
-    out.suggestions = suggestions_for(event)
     return out
 
 
-def _attach_docs(out: Composed, text: str) -> bool:
+def _attach_docs(out: Composed, text: str, actor: Actor | None = None) -> bool:
     sections = knowledge.search(text, k=3)
     if not sections:
         return False
-    out.blocks.append({"type": "docs", "title": "From ZoikoStream documentation",
-                       "items": [{"heading": s.heading, "doc": s.doc_title, "text": s.text,
-                                  "source_id": s.id, "path": s.path} for s in sections]})
+    block = {"type": "docs", "title": "From ZoikoStream documentation",
+             "items": [{"heading": s.heading, "doc": s.doc_title, "text": s.text,
+                        "source_id": s.id, "path": s.path, "version": s.version,
+                        **({"api": s.api} if s.api else {})} for s in sections]}
+    if actor is not None and sections[0].api:
+        # §6.15: technical answers carry the API version and environment.
+        out.technical = block["technical"] = technical_context(actor)
+        if policy.is_org_admin(actor.user):
+            out.actions.append(nav("Open developer platform", "/organization/developers"))
+    out.blocks.append(block)
     out.sources += [s.source() for s in sections]
     out.tools.append("docs.search")
     return True
@@ -369,8 +499,9 @@ def _restates(text: str, answer: str) -> bool:
     return not words or sum(w in known for w in words) / len(words) >= 0.8
 
 
-def _explain(text: str, answer: str, facts: dict) -> tuple[str | None, str | None]:
-    result = llm.generate("explain", text, {"direct_answer": answer, **facts})
+def _explain(text: str, answer: str, facts: dict,
+             history: list[dict] | None = None) -> tuple[str | None, str | None]:
+    result = llm.generate("explain", text, {"direct_answer": answer, **facts}, history=history)
     if result.status != "ok" or not result.data:
         return None, result.release or None
     return validate_explanation(result.data.get("explanation"), facts, answer), result.release

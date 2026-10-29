@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Integer, JSON, Numeric, String, func
+from sqlalchemy import Boolean, DateTime, Integer, JSON, Numeric, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,6 +60,10 @@ class Plan(Base):
     max_users: Mapped[int | None] = mapped_column(Integer)
     max_storage_gb: Mapped[int | None] = mapped_column(Integer)
     max_streaming_hours: Mapped[int | None] = mapped_column(Integer)
+    # NULL means unlimited for a configured entitled plan; zero explicitly permits none.
+    # New plans default to zero so an omitted value never grants unlimited concurrency.
+    max_concurrent_streams: Mapped[int | None] = mapped_column(
+        Integer, default=0, server_default=text("0"))
     features: Mapped[list | None] = mapped_column(JSON, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -16,6 +16,7 @@ email-validator
 httpx
 livekit-api
 google-cloud-storage
+google-cloud-kms>=3,<4
 stripe>=15.3,<16
 
 # IANA timezone database. This is the file the Dockerfile installs from ("COPY

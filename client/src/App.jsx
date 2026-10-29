@@ -1,4 +1,4 @@
-import { lazy } from "react";
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
@@ -56,6 +56,8 @@ import PrivacyPolicy from "./pages/PrivacyPolicy";
 import PrivacyCenter from "./pages/organization/PrivacyCenter";
 import GuideMount from "./guide/GuideMount";
 import OperatorGuideMount from "./operator-guide/OperatorGuideMount";
+// The full-page public Guide (/guide). Split so the homepage never downloads it.
+const GuidePage = /* @__PURE__ */ lazy(() => import("./guide/GuidePage"));
 
 // ── /* @__PURE__ */ on every lazy() below ───────────────────────────────────────────────
 // Without it these 29 declarations are top-level FUNCTION CALLS, which Rollup must assume
@@ -160,6 +162,27 @@ function LegacyModeratorRedirect() {
   return <Navigate to={`/host/dashboard${search}`} replace />;
 }
 
+// Keep old Platform Configuration bookmarks working while the browser route uses the
+// canonical page name. Preserve filters/deep-link parameters and avoid a Back-history loop.
+function LegacyPlatformSettingsRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`/admin/platform-configuration${search}${hash}`} replace />;
+}
+
+// Keep existing Usage & Entitlements bookmarks working while using the feature's canonical
+// browser route. `/admin/subscriptions` remains the unchanged API path; preserve tab links
+// and other URL state when forwarding old page URLs.
+function LegacyUsageEntitlementsRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`/admin/usage-entitlements${search}${hash}`} replace />;
+}
+
+// Keep existing Trust & Safety links working while using the feature's canonical route.
+function LegacyTrustSafetyRedirect() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`/admin/trust-safety${search}${hash}`} replace />;
+}
+
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
 // so the console nav never 404s. Everything else in the sidebar is a real page below.
 // The legacy standalone /organization/playback URL. Forwards to the canonical Audience & Access
@@ -258,6 +281,12 @@ export default function App() {
                 a privacy policy reachable without a login for every app that ships
                 (RELEASE.md §5), and a policy behind a sign-in is not one. */}
             <Route path="/privacy" element={<PrivacyPolicy />} />
+
+            {/* ZoikoStream Guide as a full page — public, NOT behind LandingOrDashboard, and
+                not shipped in the native app (same as the popup Guide). */}
+            {!IS_NATIVE && (
+              <Route path="/guide" element={<Suspense fallback={<PageSpinner />}><GuidePage /></Suspense>} />
+            )}
 
             {/* The customer Privacy Center (PRV-001 -> PRV-004). Every privacy email
                 links here — the verify link, the status lookup, the export download and
@@ -385,10 +414,12 @@ export default function App() {
                   <Route path="/admin/live-events" element={<LiveEvents />} />
                   <Route path="/admin/live-events/:eventId" element={<AdminEventDetail />} />
                   <Route path="/admin/users" element={<IdentityAccess />} />
-                  <Route path="/admin/subscriptions" element={<Subscriptions />} />
+                  <Route path="/admin/usage-entitlements" element={<Subscriptions />} />
+                  <Route path="/admin/subscriptions" element={<LegacyUsageEntitlementsRedirect />} />
                   <Route path="/admin/analytics" element={<Analytics />} />
                   <Route path="/admin/audit" element={<AuditLogs />} />
-                  <Route path="/admin/settings" element={<PlatformSettings />} />
+                  <Route path="/admin/platform-configuration" element={<PlatformSettings />} />
+                  <Route path="/admin/settings" element={<LegacyPlatformSettingsRedirect />} />
                   <Route path="/admin/status" element={<SystemStatusConsole />} />
                   <Route path="/admin/feature-flags" element={<FeatureFlags />} />
                   <Route path="/admin/releases" element={<ReleaseCenter />} />
@@ -402,7 +433,8 @@ export default function App() {
                   <Route path="/admin/developers" element={<Developers />} />
                   <Route path="/admin/event-readiness" element={<EventReadiness />} />
                   <Route path="/admin/media" element={<AdminMedia />} />
-                  <Route path="/admin/security" element={<TrustSafety />} />
+                  <Route path="/admin/trust-safety" element={<TrustSafety />} />
+                  <Route path="/admin/security" element={<LegacyTrustSafetyRedirect />} />
                   <Route path="/admin/governance" element={<AdminGovernance />} />
                   <Route path="/admin/commerce" element={<Commerce />} />
                   <Route path="/admin/infrastructure" element={<Infrastructure />} />

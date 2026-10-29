@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import GuideDestination, GuideRuntimeConfig
+from .settings import get_settings
 
 CONFIG_TTL = 30.0
 
@@ -132,10 +133,29 @@ def resolve(db: Session, destination_id: str) -> Destination | None:
     return destinations(db).get(destination_id)
 
 
+# Independently switchable capabilities (Engineering Wireframe FE-10; ARCH §19 G1–G3).
+FEATURES = ("leads", "viewer_support", "generation")
+# Actions that belong to a capability disappear while it is off.
+_ACTION_FEATURE = {"start_lead_flow": "leads", "start_support_flow": "viewer_support"}
+
+
+def feature_enabled(db: Session, feature: str) -> bool:
+    """On unless switched off — by GUIDE_DISABLED_FEATURES (deploy-time) or by the runtime
+    config row `guide.feature.<name>` = {"enabled": false} (takes effect within CONFIG_TTL,
+    no deploy)."""
+    if feature in get_settings().disabled_features():
+        return False
+    value = runtime_config(db).get(f"guide.feature.{feature}")
+    return not (isinstance(value, dict) and value.get("enabled") is False)
+
+
 def action_for(db: Session, destination_id: str, *, label: str | None = None) -> dict | None:
     """Public action payload for a registered destination, or None (caller omits it)."""
     d = resolve(db, destination_id)
     if d is None:
+        return None
+    feature = _ACTION_FEATURE.get(d.action_type)
+    if feature and not feature_enabled(db, feature):
         return None
     action = {"action_id": d.destination_id, "type": d.action_type, "label": label or d.label}
     if d.href:

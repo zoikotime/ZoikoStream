@@ -273,6 +273,36 @@ def test_egress_completion_marks_the_row_stopped_and_writes_the_real_size(world)
     assert fresh.id in {x.id for x in event_crud.list_event_recordings(db, ev.org_id, ev.id)}
 
 
+def test_egress_completion_persists_a_confirmed_zero_byte_size(world):
+    from app.services import broadcast
+
+    db, ev = world["db"], world["event"]
+    r = _rec(db, ev, status="recording", stopped_at=None, size_bytes=None)
+    db.commit()
+
+    out = broadcast.record_egress_result(_EgressInfo(r.egress_id, size=0))
+
+    assert out is not None
+    assert out["size_bytes"] == 0
+    db.expire_all()
+    assert db.get(LiveRecording, r.id).size_bytes == 0
+
+
+def test_egress_completion_ignores_invalid_negative_size_metadata(world):
+    from app.services import broadcast
+
+    db, ev = world["db"], world["event"]
+    r = _rec(db, ev, status="recording", stopped_at=None, size_bytes=None)
+    db.commit()
+
+    out = broadcast.record_egress_result(_EgressInfo(r.egress_id, size=-1))
+
+    assert out is not None
+    assert out["size_bytes"] is None
+    db.expire_all()
+    assert db.get(LiveRecording, r.id).size_bytes is None
+
+
 def test_egress_failure_is_written_as_failed_with_its_reason(world):
     """The path that produced the report. LiveKit says it went wrong, so the row says so —
     and because the event view does not filter on enforced/status, the operator reads the

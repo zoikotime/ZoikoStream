@@ -12,6 +12,7 @@ import Panel from "../../components/admin/Panel";
 import StatRow from "../../components/admin/StatRow";
 import LifecycleRail from "../../components/admin/sections/LifecycleRail";
 import StageMatrix from "../../components/admin/sections/StageMatrix";
+import { qualifyHealthVerdict } from "../../components/admin/platformHealthVerdict";
 
 // Media Infrastructure — the estate the platform runs on, stage by stage and region by region.
 //
@@ -54,6 +55,16 @@ export default function Infrastructure() {
   const operating = services.filter((s) => !isPending(s));
   const pending = services.filter(isPending);
   const degraded = operating.filter((s) => s.status !== "ok");
+  const healthVerdict = qualifyHealthVerdict(
+    health.data,
+    health.data?.overall === "ok"
+      ? { status: "ok", label: "All systems operational" }
+      : health.data?.overall === "warn"
+        ? { status: "warn", label: "Minor degradation" }
+        : health.data?.overall === "down"
+          ? { status: "down", label: "Service disruption" }
+          : { status: "neutral", label: "Status unavailable" }
+  );
 
   return (
     <ConsoleScreen
@@ -68,10 +79,10 @@ export default function Infrastructure() {
       actions={
         <>
           <HealthDot
-            status={health.data?.overall || "neutral"}
+            status={healthVerdict.status}
             badge
-            pulse={health.data?.overall === "ok"}
-          />
+            pulse={healthVerdict.status === "ok"}
+          >{healthVerdict.label}</HealthDot>
           <ConsoleButton
             variant="secondary"
             leftIcon={FiRefreshCw}
@@ -167,13 +178,11 @@ export default function Infrastructure() {
             />
             <StatRow
               label="Edge PoP utilisation"
-              value={null}
-              reason="No CDN is integrated, so there is nothing to measure"
+              value="Not integrated"
             />
             <StatRow
               label="Transcode queue depth"
-              value={null}
-              reason="Background workers are not integrated"
+              value="Not integrated"
             />
           </Panel>
 

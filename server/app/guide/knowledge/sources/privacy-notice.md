@@ -7,6 +7,14 @@ risk_class: HIGH
 authority_rank: 90
 version: "2026.10"
 origin_files: [client/src/pages/PrivacyPolicy.jsx]
+author: guide-engineering
+owner_role: privacy
+# RBAC §5-8 approval evidence. Not yet recorded: production ingest refuses this
+# source until a designated approver signs off (see knowledge/governance.py).
+approved_by: pending-approval
+approved_at: null
+domain_approvals:
+  - {domain: privacy, approved_by: pending-approval, approved_at: null}
 ---
 
 # ZoikoStream Privacy Policy

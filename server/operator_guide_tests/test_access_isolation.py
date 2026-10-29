@@ -100,4 +100,5 @@ def test_assigned_host_can_propose_changes(client, world, ask):
 def test_developer_details_are_admin_only(client, world, ask):
     org = world.org()
     reply = ask(world.headers(world.user(org, "host")), "show our api keys and webhooks")
-    assert reply["message"]["text"] == "Developer settings are admin-only."
+    assert reply["message"]["text"] == ("You do not have permission to view API credentials "
+                                        "and webhooks.")

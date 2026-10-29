@@ -43,6 +43,8 @@ from app.models import (
     LiveActivity,
     LiveRecording,
     Organization,
+    Plan,
+    Subscription,
     User,
 )
 from app.security import create_access_token
@@ -70,6 +72,15 @@ def host_event():
         org = Organization(name=f"gl-org-{uuid.uuid4().hex[:8]}", status=ORG_STATE_ACTIVE)
         db.add(org)
         db.flush()
+        plan = Plan(
+            name="Go Live test plan", slug=f"golive-test-{uuid.uuid4().hex[:8]}",
+            max_storage_gb=50, max_streaming_hours=20, max_concurrent_streams=5,
+        )
+        db.add(plan)
+        db.flush()
+        subscription = Subscription(org_id=org.id, plan_id=plan.id, status="active", seats=1)
+        db.add(subscription)
+        db.flush()
         host = User(org_id=org.id, full_name="GL Host", role="host", is_active=True,
                     email=f"gl-host-{uuid.uuid4().hex[:10]}@example.com",
                     username=f"glhost{uuid.uuid4().hex[:10]}", password_hash="x",
@@ -87,7 +98,8 @@ def host_event():
         db.flush()
         db.add(EventAssignment(event_id=ev.id, user_id=host.id, role="host"))
         db.commit()
-        made = {"org_id": org.id, "event_id": ev.id,
+        made = {"org_id": org.id, "event_id": ev.id, "plan_id": plan.id,
+                "subscription_id": subscription.id,
                 "host_token": create_access_token(host, True),
                 "viewer_token": create_access_token(viewer, True)}
         yield made
@@ -100,7 +112,9 @@ def host_event():
             db.execute(delete(LiveActivity).where(LiveActivity.event_id == eid))
             db.execute(delete(Event).where(Event.id == eid))
             db.execute(delete(User).where(User.org_id == oid))
+            db.execute(delete(Subscription).where(Subscription.id == made["subscription_id"]))
             db.execute(delete(Organization).where(Organization.id == oid))
+            db.execute(delete(Plan).where(Plan.id == made["plan_id"]))
             db.commit()
         db.close()
 

@@ -10,6 +10,7 @@ Permissions:
   edit (PATCH)                                     -> org admin, or a host who owns/hosts it
   read (list / get / view assignees)               -> any org member
 """
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -132,6 +133,8 @@ def claim_cookie_policy(request: Request) -> tuple[bool, str]:
     secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
     return secure, ("none" if secure else "lax")
 
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -1169,6 +1172,13 @@ def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
 
     org_name = admin.organization.name if admin.organization else None
     event_url = _console_url(role, ev.id)
+    # Sent HERE, inside the request, not as BackgroundTasks (BUG-009). Queued after the
+    # response, a failure was invisible: _send swallows it into a log line, the UI had already
+    # said "created", and on Cloud Run work after the response runs with CPU throttled. Now
+    # each newly-added assignee's outcome is returned as `email_sent`, so the console can say
+    # which emails did not go out. Bounded: one Resend call per NEWLY added person (10s
+    # timeout each), and an unexpected error in one send never stops the others.
+    email_sent: dict = {}
     for u in assignees:
         if u.id in previous_ids:
             continue  # already held this role — don't re-notify on every save
@@ -1181,11 +1191,16 @@ def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
         # pending/accepted state on EventAssignment and no acceptance step for anyone, so
         # there is no second code path here to build or to bypass. The dedup guard above
         # covers both branches equally, which is what keeps it to exactly one mail each.
-        if role == "host" and u.id == admin.id:
-            background.add_task(send_self_host_confirmation_email, u.email, u.full_name,
-                                ev.title, org_name, ev.start_time, event_url)
-        else:
-            background.add_task(send_assignment_email, u.email, u.full_name, ev.title, role, org_name, event_url)
+        try:
+            if role == "host" and u.id == admin.id:
+                email_sent[u.id] = send_self_host_confirmation_email(
+                    u.email, u.full_name, ev.title, org_name, ev.start_time, event_url)
+            else:
+                email_sent[u.id] = send_assignment_email(
+                    u.email, u.full_name, ev.title, role, org_name, event_url)
+        except Exception:  # noqa: BLE001 - one bad send must not lose the rest, or the save
+            log.exception("assignment email to user %s for event %s failed", u.id, ev.id)
+            email_sent[u.id] = False
 
     # ZST-EC-001 LVE-003. Safe to call after ANY assignment save: notify_team compares a
     # signature of (role, user_id) pairs, so a save that changes nobody - or a staff display
@@ -1193,7 +1208,12 @@ def _set_role(db, admin, event_id, role, user_ids, background: BackgroundTasks):
     # is the customer-facing team notice; the per-assignee console mail above is a different
     # audience and stays as it was.
     event_comms.notify_team(db, background, ev)
-    return [_user_out(u) for u in assignees]
+    out = []
+    for u in assignees:
+        row = _user_out(u)
+        row.email_sent = email_sent.get(u.id)  # None: already assigned, nothing was sent
+        out.append(row)
+    return out
 
 
 @router.get("/{event_id}/hosts", response_model=list[AdminUserOut])

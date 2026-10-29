@@ -1,6 +1,7 @@
 """Request/response models for the Super Admin platform API (/admin/*)."""
 
 import uuid
+import math
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -106,6 +107,10 @@ class AdminUserOut(BaseModel):
     staff_commercial_role: str | None = None
     # The member's own profile photo, or null (initials). Set only by its owner.
     avatar_url: str | None = None
+    # Only on an event-assignment save (PATCH /events/{id}/hosts|speakers): whether the
+    # assignment email to this person was accepted by the mail provider. None when nothing was
+    # sent (they already held the role) and on every other endpoint.
+    email_sent: bool | None = None
 
 
 class UserUpdate(BaseModel):
@@ -143,6 +148,7 @@ class PlanOut(BaseModel):
     max_users: int | None = None
     max_storage_gb: int | None = None
     max_streaming_hours: int | None = None
+    max_concurrent_streams: int | None = None
     features: list | None = None
     is_active: bool
 
@@ -164,6 +170,7 @@ class SubscriptionOut(BaseModel):
 
     id: uuid.UUID
     org_id: uuid.UUID
+    is_current: bool | None = None
     organization_name: str | None = None
     plan: str | None = None
     price_monthly: float | None = None
@@ -213,6 +220,34 @@ class AuditLogOut(BaseModel):
 class SettingsUpdate(BaseModel):
     """Partial patch of platform settings, keyed by setting name -> arbitrary JSON blob."""
     values: dict[str, Any]
+
+    @field_validator("values")
+    @classmethod
+    def validate_quota_limits(cls, values):
+        numeric_fields = {
+            "storage_limits": ("default_gb", "max_gb"),
+            "streaming_limits": ("default_hours",),
+        }
+        for setting, fields in numeric_fields.items():
+            blob = values.get(setting)
+            if not isinstance(blob, dict):
+                continue
+            for field in fields:
+                value = blob.get(field)
+                if value is None:
+                    continue
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value < 0):
+                    raise ValueError(f"{setting}.{field} must be a finite non-negative number or null")
+
+        blob = values.get("streaming_limits")
+        if isinstance(blob, dict):
+            value = blob.get("default_concurrent_streams")
+            if value is not None and (
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(
+                    "streaming_limits.default_concurrent_streams must be a non-negative integer or null")
+        return values
 
 
 # ── Feature flags ────────────────────────────────────────────────────────────

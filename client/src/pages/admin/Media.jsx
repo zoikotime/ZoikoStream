@@ -40,7 +40,7 @@ const FILE_PENDING = {
   recording: "Still recording — no finished file yet.",
   paused: "Paused — no finished file yet.",
   processing: "Still processing — no finished file yet.",
-  failed: "The capture failed, so no file was produced.",
+  failed: "The capture failed. A partial file may still have been produced.",
 };
 
 const VERDICT_HINT = {
@@ -68,6 +68,15 @@ const WATERMARK_LABEL = {
 };
 
 const fmtBytes = bytes;
+
+function recordingSize(recording) {
+  const size = recording.size_bytes;
+  if (typeof size === "number" && Number.isFinite(size) && Number.isInteger(size) && size >= 0) {
+    return fmtBytes(size);
+  }
+  if (recording.has_file_reference) return "Unknown";
+  return ["recording", "paused", "processing"].includes(recording.status) ? "Pending" : "No file";
+}
 
 function fmtDuration(startedAt, stoppedAt) {
   if (!startedAt) return "—";
@@ -322,7 +331,7 @@ function RecordingDrawer({ recording, open, onClose }) {
           />
         )}
         <DetailField label="Quality" value={recording.quality || "—"} />
-        <DetailField label="Size" value={fmtBytes(recording.size_bytes)} />
+        <DetailField label="Size" value={recordingSize(recording)} />
         <DetailField label="Started" value={recording.started_at ? new Date(recording.started_at).toLocaleString() : "—"} />
         <DetailField label="Duration" value={fmtDuration(recording.started_at, recording.stopped_at)} />
         <DetailField
@@ -428,7 +437,7 @@ export default function Media() {
     { key: "quality", header: "Quality", render: (r) => r.quality || "—" },
     { key: "started_at", header: "Started", align: "right", render: (r) => (r.started_at ? new Date(r.started_at).toLocaleString() : "—") },
     { key: "duration", header: "Duration", align: "right", render: (r) => fmtDuration(r.started_at, r.stopped_at) },
-    { key: "size", header: "Size", align: "right", render: (r) => <span className={type.mono}>{fmtBytes(r.size_bytes)}</span> },
+    { key: "size", header: "Size", align: "right", render: (r) => <span className={type.mono}>{recordingSize(r)}</span> },
     { key: "action", header: "Action", align: "right", render: (r) => (
       <Button variant="secondary" size="sm" onClick={() => setSelected(r)} aria-label="Open recording">Open</Button>
     ) },

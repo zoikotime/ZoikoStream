@@ -3,10 +3,18 @@
 Deletes rows whose purge_after has passed, sensitive children first, in bounded batches with
 SKIP LOCKED so concurrent runs never contend. Emits a non-content audit record per run.
 
-How it runs: `run_if_due()` is called opportunistically from session creation and executes at
-most once per PURGE_INTERVAL per process (mounted sub-apps get no lifespan of their own, and the
-Guide must not depend on the platform's ticker leadership). For a guaranteed schedule, also run
-`python -m app.guide.purge` from cron/Cloud Scheduler hourly.
+How it runs: scheduler.py runs it hourly in a background thread (one process at a time via
+an advisory lock), with stale-operation reconciliation and a backlog alert. `run_if_due()` is
+still called opportunistically from session creation as a second trigger, and
+`python -m app.guide.purge` runs it once by hand.
+
+Every table is purged by ITS OWN purge_after. Rows whose retention outlives the session —
+consent receipts (24 months), structured feedback (12 months), external operations under
+reconciliation and audit metadata — reference the session with ON DELETE SET NULL (ERD §3.1,
+migration 0005), so neither the normal nor the accelerated session purge removes them early.
+
+Runs on the maintenance principal (db.new_maintenance_session: GUIDE_MAINTENANCE_DATABASE_URL
+when set) and emits guide_purge_rows_total{table} / guide_purge_runs_total{outcome}.
 """
 from __future__ import annotations
 
@@ -16,7 +24,8 @@ import time
 
 from sqlalchemy import text
 
-from .db import new_session
+from . import metrics
+from .db import new_maintenance_session
 from .sessions import audit
 
 log = logging.getLogger(__name__)
@@ -72,23 +81,30 @@ _lock = threading.Lock()
 
 def purge_once(batch: int = BATCH) -> dict[str, int]:
     counts: dict[str, int] = {}
-    db = new_session()
+    db = new_maintenance_session()
     try:
-        for name, sql in _STEPS:
-            total = 0
-            while True:
-                n = db.execute(text(sql), {"n": batch}).rowcount or 0
-                db.commit()
-                total += n
-                if n < batch:
-                    break
-            if total:
-                counts[name] = total
+        with metrics.timer("guide_purge_duration_seconds"):
+            for name, sql in _STEPS:
+                total = 0
+                while True:
+                    n = db.execute(text(sql), {"n": batch}).rowcount or 0
+                    db.commit()
+                    total += n
+                    if n < batch:
+                        break
+                if total:
+                    counts[name] = total
+                    metrics.incr("guide_purge_rows_total", total, table=name)
         if counts:
             audit(db, None, "retention_purge", **counts)
             db.commit()
+    except Exception:
+        metrics.incr("guide_purge_runs_total", outcome="failed")
+        db.rollback()
+        raise
     finally:
         db.close()
+    metrics.incr("guide_purge_runs_total", outcome="ok")
     return counts
 
 

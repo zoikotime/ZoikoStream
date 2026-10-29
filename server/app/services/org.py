@@ -60,6 +60,7 @@ from ..models import (
 from ..models.event import ON_AIR_STATUSES
 from . import admin as admin_svc
 from . import ops as ops_svc
+from .quota import resolve_effective_limit
 # `engagement_score` is imported lazily inside analytics() rather than here. There is a real
 # module cycle - org -> broadcast -> webhooks -> webhook_lifecycle -> org_comms -> org - and
 # a module-level `from .broadcast import <name>` is the one form of it that cannot survive:
@@ -537,22 +538,13 @@ def enforcement_plan(db: Session, org_id) -> Plan | None:
         plan        = the subscription's stored plan            <- this function
         entitlement = status in SUBSCRIPTION_ENTITLED_STATES    <- unchanged, elsewhere
 
-    Approved Product decision: for an organization that HAS a subscription in a non-entitled
-    state (trial_expired, canceled, closed, suspended), that subscription's existing plan
-    remains the quantitative ceiling for storage and seats. It does NOT make the organization
-    entitled, and none of those states is added to SUBSCRIPTION_ENTITLED_STATES — paid-feature
-    access is a separate question this function does not answer.
+    A stored plan can remain relevant to other enforcement (such as seats) after lapse, but it
+    does not grant storage quota. `_effective_quota` returns a zero storage limit unless the
+    organization is entitled.
 
-    The defect it fixes: both enforcement points previously resolved the plan through the
-    entitled-only query, so a lapsed subscription resolved to plan=None and `None` was then read
-    as "no ceiling". Losing entitlement therefore INCREASED usable capacity — measured, a tenant
-    60 GB over Developer's 50 GB ceiling was blocked while trialing and unblocked once expired,
-    cancelled or suspended.
-
-    Returns None ONLY when the organization has no subscription row at all. Nothing is
-    fabricated for that case: what governs an organization that never had a subscription is an
-    open Product question, so this preserves the existing behaviour rather than inventing a
-    default plan.
+    Returns None ONLY when the organization has no subscription row at all; this does not
+    fabricate a plan. Streaming fallback quotas continue to use explicitly configured platform
+    defaults.
 
     Row selection prefers an ENTITLED subscription when one exists, so an old cancelled row can
     never override a current live one; otherwise it takes the most recent. That is the same
@@ -597,27 +589,120 @@ def _subscription_row(db: Session, org_id) -> Subscription | None:
     )
 
 
-def _streaming_hours(db: Session, org_id) -> float:
-    """Broadcast hours this org has run, from real session timestamps (live sessions count
-    up to now)."""
+def streaming_seconds(db: Session, org_id=None) -> float:
+    """Exact streamed seconds, counting each concurrent session independently."""
     now = _now()
-    rows = db.scalars(
-        select(BroadcastSession).where(
-            BroadcastSession.org_id == org_id, BroadcastSession.started_at.isnot(None))
-    ).all()
+    stmt = select(BroadcastSession).where(BroadcastSession.started_at.isnot(None))
+    if org_id is not None:
+        stmt = stmt.where(BroadcastSession.org_id == org_id)
+    rows = db.scalars(stmt).all()
     secs = 0.0
     for s in rows:
         start = _aware(s.started_at)
         end = _aware(s.ended_at) or now
         if start and end > start:
-            secs += (end - start).total_seconds() - (s.paused_ms or 0) / 1000
-    return round(max(secs, 0) / 3600, 1)
+            paused_ms = s.paused_ms or 0
+            if s.paused_at:
+                paused_at = _aware(s.paused_at)
+                if paused_at and paused_at < end:
+                    paused_ms += int((end - paused_at).total_seconds() * 1000)
+            secs += max(0.0, (end - start).total_seconds() - paused_ms / 1000)
+    return max(secs, 0.0)
+
+
+def _streaming_seconds(db: Session, org_id) -> float:
+    return streaming_seconds(db, org_id)
+
+
+def _streaming_hours(db: Session, org_id) -> float:
+    return round(_streaming_seconds(db, org_id) / 3600, 1)
+
+
+def active_stream_count(db: Session, org_id) -> int:
+    """Number of open live or paused broadcasts owned by this organization."""
+    return int(db.scalar(
+        select(func.count(BroadcastSession.id)).where(
+            BroadcastSession.org_id == org_id,
+            BroadcastSession.ended_at.is_(None),
+            BroadcastSession.started_at.isnot(None),
+            BroadcastSession.status.in_(("live", "paused")),
+        )
+    ) or 0)
+
+
+def _quota_plan(db: Session, org_id) -> tuple[Plan | None, bool, bool]:
+    """Return (plan, entitled, has_subscription), keeping missing distinct from unlimited."""
+    entitled = db.scalar(
+        select(Subscription).where(
+            Subscription.org_id == org_id,
+            Subscription.status.in_(SUBSCRIPTION_ENTITLED_STATES),
+        ).order_by(Subscription.started_at.desc())
+    )
+    if entitled is not None:
+        return entitled.plan, True, True
+    latest = db.scalar(
+        select(Subscription).where(Subscription.org_id == org_id)
+        .order_by(Subscription.started_at.desc())
+    )
+    return (latest.plan if latest else None), False, latest is not None
+
+
+def _effective_quota(db: Session, org_id, dimension: str) -> dict:
+    plan, entitled, has_subscription = _quota_plan(db, org_id)
+    if dimension == "storage":
+        plan_value = plan.max_storage_gb if plan else None
+        from . import platform_settings as _ps
+        default = None
+        platform_ceiling = _ps.storage_ceiling_gb(db)
+    elif dimension == "streaming_hours":
+        plan_value = plan.max_streaming_hours if plan else None
+        from . import platform_settings as _ps
+        default = _ps.default_streaming_hours(db)
+        platform_ceiling = None
+    elif dimension == "concurrent_streams":
+        plan_value = plan.max_concurrent_streams if plan else None
+        from . import platform_settings as _ps
+        default = _ps.default_concurrent_streams(db)
+        platform_ceiling = None
+    else:
+        raise ValueError(f"Unknown quota dimension: {dimension}")
+
+    if dimension == "storage" and not entitled:
+        resolved = {
+            "limit": 0,
+            "configured": True,
+            "source": "no_entitled_plan",
+        }
+    else:
+        resolved = resolve_effective_limit(
+            has_subscription=has_subscription,
+            entitled=entitled,
+            plan_limit=plan_value,
+            fallback_limit=default,
+            hard_ceiling=platform_ceiling,
+        )
+    return {
+        **resolved,
+        "plan_limit": plan_value,
+        "entitled": entitled,
+        "has_subscription": has_subscription,
+    }
+
+
+def effective_storage_quota(db: Session, org_id) -> dict:
+    return _effective_quota(db, org_id, "storage")
+
+
+def effective_streaming_hours_quota(db: Session, org_id) -> dict:
+    return _effective_quota(db, org_id, "streaming_hours")
+
+
+def effective_concurrent_streams_quota(db: Session, org_id) -> dict:
+    return _effective_quota(db, org_id, "concurrent_streams")
 
 
 def entitlements(db: Session, org: Organization) -> dict:
-    """Usage against the subscribed plan's real limits. Only the three limits the Plan
-    model actually carries are reported — a bar with an invented ceiling would be worse
-    than no bar."""
+    """Usage and the authoritative server-enforced quota for this organization."""
     sub, plan = _plan(db, org.id)
     # The row the CHECKOUT GUARD will judge — not always the row above. A subscription that has
     # completed Stripe checkout but has not yet been activated sits in `conversion_pending`: it
@@ -628,49 +713,52 @@ def entitlements(db: Session, org: Organization) -> dict:
     members = db.scalar(
         select(func.count(User.id)).where(User.org_id == org.id, User.deleted_at.is_(None))
     ) or 0
-    hours = _streaming_hours(db, org.id)
+    streaming_hours_exact = _streaming_seconds(db, org.id) / 3600
+    hours = round(streaming_hours_exact, 1)
+    active_streams = active_stream_count(db, org.id)
 
-    # The ceiling ACTUALLY applied, which can differ from the displayed plan: a lapsed
-    # subscription reports no entitled plan (see _plan) yet stays capped at its old plan's
-    # limits (see enforcement_plan), and storage is further bounded by the platform ceiling.
-    # Reporting only the displayed limit would tell an operator a tenant is uncapped while the
-    # platform is in fact refusing their uploads.
-    enf = enforcement_plan(db, org.id)
-    from . import platform_settings as _ps
-    _storage_caps = [c for c in ((enf.max_storage_gb if enf else None),
-                                 _ps.storage_ceiling_gb(db)) if c is not None]
-    enforced_limits = {
-        "storage": min(_storage_caps) if _storage_caps else None,
-        "members": enf.max_users if enf else None,
-        "streaming_hours": None,           # nothing enforces this - see `enforced` below
+    effective = {
+        "storage": effective_storage_quota(db, org.id),
+        "streaming_hours": effective_streaming_hours_quota(db, org.id),
+        "concurrent_streams": effective_concurrent_streams_quota(db, org.id),
     }
 
-    def bar(key, label, used, limit, unit, *, enforced: bool):
+    def bar(key, label, used, plan_limit, unit, *, enforced: bool,
+            evaluation_used=None):
+        quota = effective.get(key)
+        effective_limit = quota["limit"] if quota else plan_limit
+        configured = quota["configured"] if quota else plan is not None
+        evaluated_limit = effective_limit if enforced else plan_limit
+        evaluated_used = used if evaluation_used is None else evaluation_used
         # Three different "no number" states, kept distinct because they mean different things:
-        #   no plan at all        -> the quota is NOT APPLICABLE (nothing is entitled)
-        #   plan, limit None      -> UNLIMITED (Enterprise: services/broadcast falls through to
-        #                            the platform ceiling rather than a plan cap)
-        #   plan, limit set       -> a real quota, with remaining and percent
-        # `used` is always MEASURED here - each figure below is counted from rows - so a 0 is a
-        # measured zero, never a stand-in for unknown.
-        if plan is None:
+        #   no applicable quota -> NOT APPLICABLE (new quota-consuming activity is blocked)
+        #   configured null     -> UNLIMITED
+        #   finite limit        -> WITHIN, AT_LIMIT, or EXCEEDED
+        if not configured:
             quota_state, remaining, pct = "not_applicable", None, None
-        elif limit is None:
+        elif evaluated_limit is None:
             quota_state, remaining, pct = "unlimited", None, None
         else:
-            quota_state = "exceeded" if used > limit else "within"
-            remaining = round(limit - used, 1) if isinstance(used, float) else limit - used
-            pct = round(100 * used / limit, 1) if limit else None
-        return {"key": key, "label": label, "used": used, "limit": limit, "unit": unit,
+            if enforced and evaluated_used == evaluated_limit:
+                quota_state = "at_limit"
+            elif evaluated_used > evaluated_limit:
+                quota_state = "exceeded"
+            else:
+                quota_state = "within"
+            remaining = (
+                round(evaluated_limit - evaluated_used, 1)
+                if isinstance(used, float) else evaluated_limit - evaluated_used
+            )
+            pct = round(100 * evaluated_used / evaluated_limit, 1) if evaluated_limit else None
+        return {"key": key, "label": label, "used": used, "limit": plan_limit,
+                "effective_limit": effective_limit if configured else None,
+                "quota_source": quota["source"] if quota else ("plan" if plan else "unconfigured"),
+                "unit": unit,
                 "percent": pct, "remaining": remaining,
-                "unlimited": plan is not None and limit is None,
+                "unlimited": configured and evaluated_limit is None,
                 "quota_state": quota_state, "usage_state": "measured",
-                # Whether the platform actually REFUSES something at this limit. Storage and
-                # seats are enforced (broadcast recording gate; member invitations). Streaming
-                # hours is shown against the plan but nothing enforces it - stated rather
-                # than implied, so an operator does not read a bar as a control.
                 "enforced": enforced,
-                "enforced_limit": enforced_limits.get(key) if enforced else None}
+                "enforced_limit": effective_limit if enforced and configured else None}
 
     items = [
         bar("storage", "Storage", round(float(org.storage_used_gb or 0), 1),
@@ -678,7 +766,10 @@ def entitlements(db: Session, org: Organization) -> dict:
         bar("members", "Members", members, plan.max_users if plan else None, "seats",
             enforced=True),
         bar("streaming_hours", "Streaming hours", hours,
-            plan.max_streaming_hours if plan else None, "hrs", enforced=False),
+            plan.max_streaming_hours if plan else None, "hrs", enforced=True,
+            evaluation_used=streaming_hours_exact),
+        bar("concurrent_streams", "Concurrent streams", active_streams,
+            plan.max_concurrent_streams if plan else None, "streams", enforced=True),
     ]
     highest = max((i["percent"] for i in items if i["percent"] is not None), default=None)
     return {

@@ -1,0 +1,57 @@
+{
+  "version": "pub-policy-1.0.0",
+  "description": "Public Guide response policy: canonical copy (Prompt Appendix A; Conversation Flow §28), per-profile guidance and response limits (Prompt §15).",
+  "limits": {
+    "max_actions": 2,
+    "max_clarifying_questions": 1
+  },
+  "profile_guidance": {
+    "P-QA": "Answer the public product/help question directly and concisely.",
+    "P-DISCOVERY": "Describe the best-fit public capability for the visitor's goal. Ask at most one clarifying question, and only if the answer materially changes the route. Do not ask for contact details.",
+    "P-PRICING": "HIGH-RISK. State only pricing facts present in the evidence. If the evidence says prices are not published, say so plainly and offer the sales route. Never estimate, calculate or imply an amount, discount or term.",
+    "P-TRUST": "HIGH-RISK. Conservatively paraphrase the evidence. No guarantees, no certifications or compliance claims unless the evidence states them exactly, no internal security detail, no legal conclusions.",
+    "P-VIEWER": "Explain viewer help practically. Never ask for a PIN, password or link."
+  },
+  "templates": {
+    "gap": "I don't have an approved ZoikoStream source that confirms that information.",
+    "conflict": "The approved public sources don't currently agree, so I can't confirm that detail.",
+    "status_unknown": "I can't verify the current service status right now. You can check the public status page for any reported issue.",
+    "degraded": "I can't answer questions right now. Viewer help still works, and you can use the Help Center, status page, or contact support directly.",
+    "discount": "I can explain published pricing, but I can't negotiate or offer discounts. I can route you to sales.",
+    "prompt_extraction": "I can explain how Guide works at a high level: it is limited to approved public ZoikoStream information and public support flows, and it does not have private operator or account access.",
+    "pricing_quote": "That option is quote-based rather than publicly priced. I can help you request a demo or contact sales.",
+    "clarification": "Which matters most for your event: live viewing, replay, or both?",
+    "budget_exceeded": "Guide has reached its answer limit for this conversation. Viewer help still works, and you can use the Help Center or contact the ZoikoStream team directly.",
+    "unsupported_locale": "Guide currently answers in English only, so I can't answer that reliably in another language. Please ask in English, or use the Help Center or contact the ZoikoStream team directly.",
+    "viewer_flow_started": "I can walk you through this one step at a time."
+  },
+  "restricted": {
+    "account_private": "I can help with public ZoikoStream information, but that request requires authenticated or private support access. You can sign in to manage your account, or contact support.",
+    "event_private": "Event guest lists, access details and settings are managed by the event organizer, so Guide can't look them up or confirm them. The organizer or ZoikoStream viewer support can help.",
+    "operator": "The public Guide can't check or control live events. Event teams manage their events after signing in to ZoikoStream.",
+    "credential_request": "I can't share credentials, keys or other secrets. If you need help with access, contact ZoikoStream support.",
+    "internal": "That's outside what the public ZoikoStream Guide can help with. I can answer questions about ZoikoStream's public product, pricing, and viewer support.",
+    "customer_private": "Guide can't share information about ZoikoStream customers, their events or their users. I can help with public product, pricing and viewer questions."
+  },
+  "secret_warnings": {
+    "event_pin": "Please don't share your PIN, password, or secret event link here. I can still help with the access steps.",
+    "password": "Please don't share your PIN, password, or secret event link here. I can still help with the access steps.",
+    "secret_link": "Please don't share your PIN, password, or secret event link here. I can still help with the access steps.",
+    "payment_card": "Please don't share payment card details here. Guide can't process payments. For billing questions, contact ZoikoStream support.",
+    "access_token": "Please don't share API keys or access tokens here. If a key may have been exposed, rotate it after signing in, or contact support."
+  },
+  "clarification_options": [
+    {
+      "id": "live",
+      "label": "Live viewing"
+    },
+    {
+      "id": "replay",
+      "label": "Replay"
+    },
+    {
+      "id": "both",
+      "label": "Both"
+    }
+  ]
+}

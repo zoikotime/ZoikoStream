@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import String, cast, func, or_, select, text
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
@@ -613,21 +613,26 @@ def list_subscriptions(db, status=None, page=1, page_size=20, q=None):
         from ..models.subscription import stored_spellings
         stmt = stmt.where(Subscription.status.in_(stored_spellings(status)))
     if q:
-        # Search by organization name in SQL, over the whole set. The page used to fetch the
-        # first 100 subscriptions and filter those in the browser, so an organization past
-        # row 100 could not be found by name at all.
+        like = f"%{q.strip().lower()}%"
         stmt = stmt.join(Organization, Subscription.org_id == Organization.id).where(
-            func.lower(Organization.name).like(f"%{q.lower()}%"))
+            or_(
+                func.lower(Organization.name).like(like),
+                func.lower(cast(Organization.id, String)).like(like),
+                func.lower(cast(Subscription.id, String)).like(like),
+            ))
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     subs = db.scalars(
         stmt.order_by(Subscription.started_at.desc()).offset((page - 1) * page_size).limit(page_size)
     ).all()
-    return [_sub_out(s) for s in subs], total
+    current_ids = {
+        s.id for s in _current_subs(db, list({sub.org_id for sub in subs})).values()
+    }
+    return [_sub_out(s, is_current=s.id in current_ids) for s in subs], total
 
 
-def _sub_out(s: Subscription) -> SubscriptionOut:
+def _sub_out(s: Subscription, *, is_current: bool | None = None) -> SubscriptionOut:
     return SubscriptionOut(
-        id=s.id, org_id=s.org_id,
+        id=s.id, org_id=s.org_id, is_current=is_current,
         organization_name=s.organization.name if s.organization else None,
         plan=s.plan.name if s.plan else None,
         # Guard the price separately from the plan: price_monthly is nullable now, and

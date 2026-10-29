@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useLocation, useOutletContext } from "react-router-dom";
+import { useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import {
   FiActivity, FiBarChart2, FiClipboard, FiFilm, FiHome, FiRadio, FiShield,
 } from "react-icons/fi";
@@ -37,7 +37,7 @@ export const SECTIONS = [
   {
     id: "event.live", slug: "live", label: "Live Control", icon: FiRadio,
     children: [
-      { key: "monitor", label: "Live monitor" },
+      { key: "monitor", label: "Live monitor", hash: "monitor" },
       { key: "sessions", label: "Stream health & sessions", hash: "sessions" },
       { key: "incidents", label: "Alerts & incidents", hash: "incidents" },
       { key: "recovery", label: "Recovery procedures", hash: "recovery" },
@@ -55,7 +55,7 @@ export const SECTIONS = [
   {
     id: "event.insights", slug: "insights", label: "Insights", icon: FiBarChart2,
     children: [
-      { key: "overview", label: "Insights overview" },
+      { key: "overview", label: "Insights overview", hash: "overview" },
       { key: "viewers", label: "Viewer activity", hash: "viewers" },
       { key: "quality", label: "Stream quality", hash: "quality" },
       { key: "outcomes", label: "Event outcomes", hash: "outcomes" },
@@ -98,10 +98,14 @@ export const LEGACY_TABS = {
 export const useEventWorkspace = () => useOutletContext();
 
 // A sub-item link (#details) moves to that part of the page. React Router changes the URL but
-// does not scroll, and the target may render a moment later (after its data), so this retries
-// briefly. Read-only: scrolling never triggers anything.
-export function useHashScroll() {
-  const { hash } = useLocation();
+// does not scroll. A target may render after its data, so observe the page until it appears.
+// Read-only: scrolling never triggers an event action.
+export function useHashScroll({ supportedHashes, fallbackHash } = {}) {
+  const { pathname, search, hash } = useLocation();
+  const navigate = useNavigate();
+
+  // No hash (a section or parent link): back to the top of the page. Keyed on the hash alone,
+  // so a query-string change does not move the page.
   useEffect(() => {
     if (!hash) {
       const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
@@ -111,20 +115,53 @@ export function useHashScroll() {
       if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
+    }
+  }, [hash]);
+
+  useEffect(() => {
+    if (!hash) return undefined;
+
+    let id;
+    try {
+      id = decodeURIComponent(hash.slice(1));
+    } catch {
+      id = "";
+    }
+
+    const normalizeToFallback = () => {
+      if (!fallbackHash || hash === `#${fallbackHash}`) return;
+      navigate({ pathname, search, hash: `#${fallbackHash}` }, { replace: true });
+    };
+
+    if (!id || (supportedHashes && !supportedHashes.includes(id))) {
+      normalizeToFallback();
       return undefined;
     }
-    const id = decodeURIComponent(hash.slice(1));
-    let tries = 0;
-    const timer = setInterval(() => {
+
+    const observer = new MutationObserver(() => {
       const el = document.getElementById(id);
-      tries += 1;
-      if (el) {
-        el.scrollIntoView?.({ block: "start", behavior: "smooth" });
-        clearInterval(timer);
-      } else if (tries > 20) {
-        clearInterval(timer);
-      }
-    }, 100);
-    return () => clearInterval(timer);
-  }, [hash]);
+      if (!el) return;
+      el.scrollIntoView?.({ block: "start", behavior: "smooth" });
+      observer.disconnect();
+      clearTimeout(timeout);
+    });
+    const timeout = setTimeout(() => {
+      observer.disconnect();
+      normalizeToFallback();
+    }, 10_000);
+
+    const target = document.getElementById(id);
+    if (target) {
+      target.scrollIntoView?.({ block: "start", behavior: "smooth" });
+      observer.disconnect();
+      clearTimeout(timeout);
+    } else {
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    return () => {
+      observer.disconnect();
+      clearTimeout(timeout);
+    };
+  }, [fallbackHash, hash, navigate, pathname, search, supportedHashes]);
 }

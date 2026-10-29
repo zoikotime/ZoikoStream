@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 // Feather has no "infinity" glyph, so a non-expiring key uses FiSlash — read as "no
 // lifetime set", which is exactly what the metric counts.
@@ -213,21 +213,30 @@ export default function ApiCredentials({ embedded = false }) {
     // carries no server timestamp to measure against.
     api.get("/organization/developer").then((r) => ({ ...r.data, fetchedAt: Date.now() }))
   );
+  const [clockMs, setClockMs] = useState(null);
   const [status, setStatus] = useState("all");
   const [creating, setCreating] = useState(false);
   const [replacing, setReplacing] = useState(null);
   const [created, setCreated] = useState(null);
   const [revoking, setRevoking] = useState(null);
 
-  // Every row, the counts and the banner measure against ONE instant: the server's.
-  const nowMs = data?.generated_at ? Date.parse(data.generated_at) : data?.fetchedAt;
+  useEffect(() => {
+    const timer = setInterval(() => setClockMs(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+  // Advance from the server's snapshot time using elapsed local time, so clock skew does not
+  // affect expiry decisions and a long-open page does not keep showing stale lifecycle labels.
+  const generatedAtMs = data?.generated_at ? Date.parse(data.generated_at) : null;
+  const nowMs = Number.isFinite(generatedAtMs) && data?.fetchedAt != null
+    ? generatedAtMs + Math.max(0, (clockMs ?? data.fetchedAt) - data.fetchedAt)
+    : clockMs ?? data?.fetchedAt ?? 0;
   const keys = useMemo(
-    () => (data?.api_keys || []).map((k) => ({ ...k, life: lifecycleOf(k, nowMs) })),
-    [data, nowMs]
+    () => (data?.api_keys || []).map((k) => ({ ...k, life: lifecycleOf(k, nowMs, generatedAtMs) })),
+    [data, nowMs, generatedAtMs]
   );
   const summary = useMemo(
-    () => summaryOf(keys, data?.key_summary, keys.map((k) => k.life)),
-    [keys, data]
+    () => summaryOf(keys, null, keys.map((k) => k.life)),
+    [keys]
   );
   const banner = expiryBanner(summary);
   // The most urgent usable key, for the banner's "Create replacement key".
@@ -331,8 +340,8 @@ export default function ApiCredentials({ embedded = false }) {
       render: (k) => {
         if (!k.expires_at) {
           return (
-            <span className={cx("text-[13px]", CONSOLE.faint)} title="Minted without a lifetime">
-              Never expires
+            <span className={cx("text-[13px]", CONSOLE.faint)}>
+              {expiryText(k.life, null, nowMs)}
             </span>
           );
         }

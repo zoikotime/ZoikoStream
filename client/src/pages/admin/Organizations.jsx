@@ -1,13 +1,16 @@
 import { useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import {
-  FiCheckCircle, FiDownload, FiEdit2, FiGrid, FiPlus, FiSearch, FiSlash, FiTrash2,
+  FiCheckCircle, FiDownload, FiEdit2, FiGrid, FiLock, FiPlus, FiSearch, FiSlash, FiTrash2,
 } from "react-icons/fi";
 import { Badge, Button, CONSOLE, DataTable, Panel, StatCard, initials } from "../../components/admin";
+import useElevation from "../../components/admin/useElevation";
 import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import OrgModal from "./OrgModal";
 import ConfirmDialog from "../../ui/ConfirmDialog";
+import { ConsoleButton } from "../../ui/Button";
+import Modal from "../../ui/Modal";
 
 // Stable identity for the "nothing loaded yet" case. The useMemo hooks below take this list
 // as a dependency, and a fresh `[]` literal on every render would defeat every one of them
@@ -19,16 +22,17 @@ const NONE = [];
 // refuses a delete over — so the dialog can warn before the operator commits instead of
 // confirming a destructive action the backend was always going to reject.
 function deleteBody(o) {
+  const identity = `${o.name} (${o.id})`;
   const holds = [
     o.users_count ? `${o.users_count} user(s)` : null,
     o.events_count ? `${o.events_count} event(s)` : null,
   ].filter(Boolean);
   if (holds.length) {
-    return `${o.name} still has ${holds.join(" and ")}. The platform refuses to delete an `
+    return `${identity} still has ${holds.join(" and ")}. The platform refuses to delete an `
       + `organization that still owns records — remove or reassign them first, or suspend the `
       + `organization instead. Deleting is permanent and cannot be undone.`;
   }
-  return `${o.name} will be permanently deleted. This cannot be undone. If it still owns `
+  return `${identity} will be permanently deleted. This cannot be undone. If it still owns `
     + `events, tickets, invitations or commercial records, the delete will be refused and `
     + `nothing will change.`;
 }
@@ -57,6 +61,7 @@ function useOrgsData() {
 // create/edit through OrgModal, suspend/activate + delete wired straight to the API.
 export default function Organizations() {
   const { data, loading, error, reload } = useOrgsData();
+  const elevation = useElevation("platform");
   const [q, setQ] = useState("");
   const [plan, setPlan] = useState("all");
   const [status, setStatus] = useState("all");
@@ -116,13 +121,56 @@ export default function Organizations() {
 
   // The row whose delete is being confirmed, and the one whose request is in flight.
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [elevationTarget, setElevationTarget] = useState(null);
+  const [elevationReady, setElevationReady] = useState(false);
+  const [elevationError, setElevationError] = useState(null);
   const [deleting, setDeleting] = useState(false);
 
-  // window.confirm was the wrong control in two ways: it is not this console's dialog, and
-  // it cannot say anything useful. Deletion is refused by the server whenever the
-  // organization still owns users, events, tickets, invitations or commercial records — so
-  // the dialog now states the preconditions from the row's OWN counts before the operator
-  // commits to a destructive action, instead of confirming and then failing.
+  const hasPlatformElevation = elevation.status === "active"
+    || (elevationReady && elevation.status === "none");
+
+  const requestDelete = (organization) => {
+    setElevationError(null);
+    setElevationReady(false);
+    if (elevation.status === "active") {
+      setConfirmDelete(organization);
+    } else {
+      setElevationTarget(organization);
+    }
+  };
+
+  const startElevation = async () => {
+    const organization = elevationTarget;
+    if (!organization || elevation.elevating) return;
+    setElevationError(null);
+    try {
+      const granted = await elevation.elevate(
+        `Delete organization ${organization.name} (${organization.id})`
+      );
+      if (!granted) {
+        setElevationError(
+          "You already hold a different elevation. End it from the rail, then elevate for platform operations."
+        );
+        return;
+      }
+      setElevationReady(true);
+      setElevationTarget(null);
+      setConfirmDelete(organization);
+    } catch (e) {
+      setElevationError(errMsg(e));
+    }
+  };
+
+  const cancelDeleteFlow = () => {
+    if (deleting) return;
+    setConfirmDelete(null);
+    setElevationTarget(null);
+    setElevationReady(false);
+    setElevationError(null);
+  };
+
+  // The dialog states the row's known deletion preconditions. Elevation is checked BEFORE
+  // this final confirmation; the server still revalidates it on every DELETE request.
   const remove = async () => {
     const o = confirmDelete;
     // Guard rather than rely on the disabled button: a second Enter on the confirm button
@@ -137,10 +185,19 @@ export default function Organizations() {
       // Both the table and the counters above it come from the same request.
       reload();
     } catch (e) {
-      // The server's own explanation — which now names the records holding the
-      // organization — rather than a generic failure.
-      toast.error(errMsg(e));
-      setConfirmDelete(null);
+      const message = errMsg(e);
+      if (e?.response?.status === 403 && /elevat/i.test(message)) {
+        // The grant may expire or be revoked after the UI check. Do not retry deletion:
+        // refresh the mirrored state and require an explicit elevation and confirmation.
+        setConfirmDelete(null);
+        setElevationTarget(o);
+        setElevationReady(false);
+        setElevationError(message);
+        elevation.reload();
+      } else {
+        toast.error(message);
+        setConfirmDelete(null);
+      }
     } finally {
       setDeleting(false);
     }
@@ -190,7 +247,7 @@ export default function Organizations() {
         leftIcon={o.status === "suspended" ? FiCheckCircle : FiSlash}
         onClick={() => toggleSuspend(o)}
       />
-      <Button variant="ghost" size="sm" iconOnly title={`Delete ${o.name}`} leftIcon={FiTrash2} className="hover:text-rose-600 dark:hover:text-rose-400" onClick={() => setConfirmDelete(o)} />
+      <Button variant="ghost" size="sm" iconOnly title={`Delete ${o.name}`} leftIcon={FiTrash2} className="hover:text-rose-600 dark:hover:text-rose-400" onClick={() => requestDelete(o)} />
     </>
   );
 
@@ -284,14 +341,77 @@ export default function Organizations() {
       )}
 
       <ConfirmDialog
-        open={Boolean(confirmDelete)}
+        open={Boolean(confirmDelete) && hasPlatformElevation}
         busy={deleting}
-        onClose={() => (deleting ? null : setConfirmDelete(null))}
+        onClose={cancelDeleteFlow}
         onConfirm={remove}
         title={confirmDelete ? `Delete ${confirmDelete.name}?` : "Delete organization?"}
         body={confirmDelete ? deleteBody(confirmDelete) : null}
         confirmLabel="Delete organization"
       />
+
+      <Modal
+        open={Boolean(elevationTarget) || (Boolean(confirmDelete) && !hasPlatformElevation)}
+        onClose={cancelDeleteFlow}
+        title="Elevated access required"
+        size="sm"
+        footer={
+          <>
+            <ConsoleButton variant="secondary" size="sm" onClick={cancelDeleteFlow}>
+              Cancel
+            </ConsoleButton>
+            {elevation.status === "unknown" ? (
+              <ConsoleButton
+                variant="primary"
+                size="sm"
+                onClick={elevation.reload}
+              >
+                Retry access check
+              </ConsoleButton>
+            ) : (
+              <ConsoleButton
+                variant="primary"
+                size="sm"
+                loading={elevation.elevating}
+                disabled={elevation.elevating}
+                onClick={startElevation}
+              >
+                Elevate access
+              </ConsoleButton>
+            )}
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <div className="flex gap-3">
+            <FiLock aria-hidden="true" className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div>
+              <p className="font-medium text-slate-900 dark:text-white">
+                {elevationTarget?.name || confirmDelete?.name}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Organization ID: {elevationTarget?.id || confirmDelete?.id}
+              </p>
+            </div>
+          </div>
+          <p>
+            {elevation.status === "unknown"
+              ? "Access state is unknown because the console API is unreachable. No deletion request has been sent."
+              : elevationError
+                ? "The server did not accept the previous elevation for this action. Re-elevate before confirming deletion."
+                : elevation.status === "expired"
+                  ? "Your elevation has expired. Start a new platform elevation before confirming deletion."
+                  : elevation.status === "wrong_scope"
+                    ? "Your current elevation does not cover platform operations. Elevate for platform access before confirming deletion."
+                    : "Deleting an organization requires platform elevation. Start an elevation session before confirming deletion. No deletion request has been sent."}
+          </p>
+          {elevationError && (
+            <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2.5 text-xs text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
+              {elevationError}
+            </p>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }

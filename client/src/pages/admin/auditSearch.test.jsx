@@ -149,6 +149,29 @@ describe("the searches that already worked still do", () => {
     await waitFor(() => expect(visible()).toEqual(["2"]));
   });
 
+  it("finds target types even when a metadata label is present", async () => {
+    show();
+    await ready();
+    search("organization");
+    await waitFor(() => expect(visible()).toEqual(["1", "3"]));
+  });
+
+  it("searches the full target identifier, not only the displayed prefix", async () => {
+    show();
+    await ready();
+    search("33333333-cccc");
+    await waitFor(() => expect(visible()).toEqual(["3"]));
+  });
+
+  it("matches action and actor email without regard to case", async () => {
+    show();
+    await ready();
+    search("RADHA@ZOIKOGROUP.COM");
+    await waitFor(() => expect(visible()).toEqual(["3"]));
+    search("LIVE.BROADCAST.HOST");
+    await waitFor(() => expect(visible()).toEqual(["2"]));
+  });
+
   it("does not sweep every row in just because some are system", async () => {
     // The lazy fix — treating a null actor as matching anything — would show all four.
     show();
@@ -189,6 +212,34 @@ describe("clearing and combining", () => {
 
     search("zzz-nothing-matches-this");
     expect(await screen.findByText(/No audit entries match your filters/i)).toBeInTheDocument();
+  });
+});
+
+describe("searching across table pages", () => {
+  it("searches all loaded rows before pagination and returns results on page one", async () => {
+    const rows = Array.from({ length: 20 }, (_, index) => ({
+      id: String(index + 1),
+      actor_email: index === 19 ? null : `actor${index}@zoikogroup.com`,
+      action: index === 19 ? "system.cleanup" : `organization.update.${index}`,
+      target_type: "organization",
+      target_id: `${index}-target`,
+      meta: null,
+      ip: null,
+      created_at: new Date(Date.now() - index * 1000).toISOString(),
+    }));
+    serve(rows);
+    show();
+    await waitFor(() => expect(bodyText()).toHaveLength(15));
+
+    fireEvent.click(screen.getByRole("button", { name: /next page/i }));
+    await waitFor(() => expect(bodyText().some((text) => text.includes("system.cleanup"))).toBe(true));
+
+    search("sys");
+    await waitFor(() => {
+      expect(bodyText()).toHaveLength(1);
+      expect(bodyText()[0]).toContain("system.cleanup");
+    });
+    expect(screen.getByText(/Showing 1–1 of 1/)).toBeInTheDocument();
   });
 });
 

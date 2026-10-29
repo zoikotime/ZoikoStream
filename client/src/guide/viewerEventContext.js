@@ -33,7 +33,8 @@ export function watchViewerEventContext(eventId, onToken) {
     const reg = stored(`zk_reg_${eventId}`);
     const link = stored(`zk_link_${eventId}`);
     api
-      .get(`/guide/event-context/${eventId}`, { params: { ...(reg ? { reg } : {}), ...(link ? { link } : {}) } })
+      // POST body, not the query string: the credential must never reach a URL (access logs).
+      .post(`/guide/event-context/${eventId}`, { ...(reg ? { reg } : {}), ...(link ? { link } : {}) })
       .then(({ data }) => {
         if (cancelled || !data?.token) return;
         setGuideEventContextToken(data.token);

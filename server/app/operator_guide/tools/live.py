@@ -22,10 +22,14 @@ from app.models.live import (
 )
 from app.models.status_page import PublicStatusIncident
 
+from .. import errors
 from ..config import get_settings
 from ..policy import Actor
 from ..sources import Source, age_text, aware, iso, now
-from .base import ToolContext, ToolResult, diagnostic_card, nav, notice, register, row, status_card
+from .base import (
+    ToolContext, ToolResult, diagnostic_card, nav, notice, register, row, status_card,
+    timeline_card, timeline_item,
+)
 from .events import event_href
 
 HEALTH_STATE = {"ok": "stable", "warn": "degraded", "down": "down"}
@@ -117,7 +121,7 @@ def event_live(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
         rows.append(row("Audience", "unknown", value="No current sample",
                         detail=(f"The latest audience sample is {age_text(tele_src.age_seconds)}. "
                                 "I will not describe it as current.") if snaps else
-                        "No audience telemetry for this session."))
+                        errors.no_data("audience telemetry", "session")))
     elapsed = _elapsed(session)
     title = f"{session.status.upper()} {elapsed or ''} · {ev.title}".strip()
     issues = [r for r in rows if r["state"] in ("degraded", "down")]
@@ -203,6 +207,7 @@ def event_incidents(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
     else:
         assessment = "No issue is detected in the signals available to Guide."
     blocks = [diagnostic_card(f"Triage · {ev.title}", assessment, rows, sources)]
+    summary = assessment
     if open_incidents:
         i = open_incidents[0]
         blocks.append(status_card("Open incident", [
@@ -210,13 +215,57 @@ def event_incidents(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
             row("State", "info", value=(i.operational_state or "open").replace("_", " ")),
             row("Customer summary", "info", value=i.customer_summary or "Not yet written"),
             row("Next update", "info", value=iso(i.next_update_at) or "Not scheduled"),
-        ], [inc_src]))
+        ], [inc_src], subtitle=f"Incident {str(i.id)[:8]} · opened "
+                               f"{age_text((now() - aware(i.opened_at)).total_seconds())}"
+                               if i.opened_at else f"Incident {str(i.id)[:8]}"))
+        summary = incident_summary(i, more=len(open_incidents) - 1)
+    timeline = incident_timeline(session, open_incidents)
+    if timeline:
+        blocks.append(timeline_card(f"Timeline · {ev.title}", timeline, [tele_src, inc_src]))
     blocks.append(notice("info", "Guide labels each signal as confirmed, detected, suspected or "
                                  "unknown. Recovery actions stay in the live console."))
-    return ToolResult("event.incidents", blocks, sources, summary=assessment, mode="live"
+    return ToolResult("event.incidents", blocks, sources, summary=summary, mode="live"
                       if session and session.status in ("live", "paused") else "standard",
                       inference=bool(suspected),
                       actions=[nav("Open live console", f"/host/dashboard?event={ev.id}")],
                       facts={"confirmed_incidents": len(open_incidents) + len(public),
                              "detected": [r["label"] for r in detected],
-                             "suspected": suspected})
+                             "suspected": suspected,
+                             "open_incident": {"severity": open_incidents[0].severity,
+                                               "state": open_incidents[0].operational_state}
+                             if open_incidents else None})
+
+
+def incident_summary(i: EventIncident, *, more: int = 0) -> str:
+    """The incident record in one deterministic sentence (§6.11: the conversation supports
+    the record, it does not replace it). Only recorded fields — nothing is estimated."""
+    state = (i.operational_state or "open").replace("_", " ")
+    text = f"Incident {(i.severity or '').upper()} is open ({state})."
+    if i.customer_summary:
+        text += f" Customer summary: {i.customer_summary.rstrip('.')}."
+    text += (f" Next update is due {iso(i.next_update_at)}." if i.next_update_at else
+             " No next update has been scheduled.")
+    if more:
+        text += f" {more} more incident(s) are open."
+    return text
+
+
+def incident_timeline(session: BroadcastSession | None, incidents: list) -> list[dict]:
+    """Authoritative timestamps only: each item is a recorded field, never a derived time."""
+    items = []
+    if session is not None:
+        items.append(timeline_item(session.started_at, "Broadcast started", "active"))
+        if session.health_changed_at and session.health_level:
+            items.append(timeline_item(
+                session.health_changed_at,
+                f"Program health changed to {HEALTH_STATE.get(session.health_level, 'unknown')}",
+                HEALTH_STATE.get(session.health_level, "unknown")))
+        items.append(timeline_item(session.ended_at, "Broadcast ended", "inactive"))
+    for i in incidents[:3]:
+        sev = (i.severity or "").upper()
+        items += [timeline_item(i.opened_at, f"Incident {sev} opened", "confirmed"),
+                  timeline_item(i.delay_started_at, "Start delayed", "review"),
+                  timeline_item(i.hold_started_at, "Event placed on hold", "review"),
+                  timeline_item(i.resumed_at, "Event resumed", "stable"),
+                  timeline_item(i.next_update_at, f"Next update due ({sev})", "info")]
+    return [it for it in items if it["at"]]

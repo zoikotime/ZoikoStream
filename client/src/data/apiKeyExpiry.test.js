@@ -19,6 +19,26 @@ describe("lifecycleOf", () => {
     expect(lifecycleOf(server("expired", -21 * DAY), NOW).usable).toBe(false);
   });
 
+  it("uses the absolute expiry instant to advance a response snapshot", () => {
+    const key = {
+      ...server("active", 30, null),
+      expires_at: at(30),
+    };
+    const now = NOW + 60_000;
+    const life = lifecycleOf(key, now, NOW);
+    expect(life).toEqual({ status: "expired", usable: false, seconds: -30, warning: null });
+    expect(expiryText(life, key.expires_at, now)).toBe("Expired less than an hour ago");
+    expect(badgeFor(life)).toEqual({ tone: "danger", label: "Expired" });
+    expect(expiryDate(key.expires_at, { timeZone: "UTC", locale: "en-US" })).toBe("Oct 16, 2026");
+  });
+
+  it("recalculates the warning boundary from the timestamp, not stale countdown fields", () => {
+    const key = { ...server("active", 60 * DAY), expires_at: at(20 * DAY) };
+    expect(lifecycleOf(key, NOW, NOW)).toMatchObject({
+      status: "expiring_soon", usable: true, seconds: 20 * DAY, warning: "notice",
+    });
+  });
+
   it.each([
     [30 * DAY + 1, "active", null],
     [30 * DAY, "expiring_soon", "notice"],
@@ -61,11 +81,35 @@ describe("expiryText", () => {
     expect(expiryText({ status: "revoked", seconds: 40 * DAY }, at(40 * DAY), NOW)).toBe("No longer usable");
   });
 
+  it("distinguishes non-expiring, revoked, and expired keys without an expiry timestamp", () => {
+    expect(expiryText({ status: "active", seconds: null }, null, NOW)).toBe("Never expires");
+    expect(expiryText({ status: "revoked", seconds: null }, null, NOW)).toBe("No longer usable");
+    expect(expiryText({ status: "expired", seconds: null }, null, NOW)).toBe("Expired (date unavailable)");
+  });
+
   it("says tomorrow when the expiry falls on the next local calendar day", () => {
     const now = new Date(2026, 9, 16, 9, 0).getTime();             // local 09:00
     const tomorrow = new Date(2026, 9, 17, 18, 0).getTime();       // local 18:00 next day
     expect(expiryText({ seconds: (tomorrow - now) / 1000 }, new Date(tomorrow).toISOString(), now))
       .toBe("Expires tomorrow");
+  });
+
+  it("handles UTC instants across midnight without changing the displayed UTC date", () => {
+    const expiresAt = "2026-10-17T00:15:00Z";
+    const now = Date.parse("2026-10-16T23:45:00Z");
+    const life = lifecycleOf({
+      status: "expiring_soon", usable: true, seconds_until_expiry: 1800,
+      expiry_warning: "imminent", expires_at: expiresAt,
+    }, now, now);
+    expect(expiryDate(expiresAt, { timeZone: "UTC", locale: "en-US" })).toBe("Oct 17, 2026");
+    expect(expiryText(life, expiresAt, now)).toBe("Expires in less than an hour");
+    expect(badgeFor(life).label).toBe("Expires within the hour");
+  });
+
+  it("keeps day pluralization and whole-day boundaries exact", () => {
+    expect(expiryText({ seconds: -DAY }, at(-DAY), NOW)).toBe("Expired 1 day ago");
+    expect(expiryText({ seconds: -2 * DAY }, at(-2 * DAY), NOW)).toBe("Expired 2 days ago");
+    expect(expiryText({ seconds: DAY }, at(DAY), NOW)).toBe("Expires tomorrow");
   });
 });
 

@@ -92,7 +92,13 @@ export default function LiveEvents() {
   const kpis = [
     { title: "Live Now", value: live.length, icon: FiRadio, accent: "violet", live: live.length > 0 },
     { title: "Organizations Streaming", value: orgCount, icon: FiGrid, accent: "blue" },
-    { title: "Recently Ended", value: recent.length, icon: FiClock, accent: "amber" },
+    {
+      title: "Recently Ended",
+      value: recent.length,
+      icon: FiClock,
+      accent: "amber",
+      hint: "Latest 50 ended sessions",
+    },
   ];
 
   const columns = [

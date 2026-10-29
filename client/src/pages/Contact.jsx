@@ -7,6 +7,7 @@ import {
   AudioLines,
 } from "lucide-react";
 import { Logo, Dropdown } from "../ui";
+import AskGuideCta from "../guide/AskGuideCta";
 
 // Contact — where "Talk to an expert" lands. Public and unauthenticated, like the landing
 // page it comes from, and it carries the same dark hero over a light body.
@@ -500,6 +501,14 @@ export default function Contact() {
               ))}
             </ul>
           </div>
+
+          {/* Inline "Ask Guide" entry point (Guide Engineering Wireframe §2.1): renders only
+              when the public Guide is available on this page. */}
+          <AskGuideCta
+            quickAction="talk-to-sales"
+            label="Ask Guide about a demo or sales question"
+            className="w-full rounded-xl border border-teal-600 px-4 py-3 text-[14px] font-semibold text-teal-700 hover:bg-teal-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal-700"
+          />
 
           {/* Existing customers reach the console from here — this page has no nav bar. */}
           <p className="text-center text-[13px] text-slate-500">

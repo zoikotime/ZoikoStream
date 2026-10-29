@@ -4,6 +4,8 @@ crud/admin.py because callers outside the admin API (the maintenance-mode middle
 main.py, the signup gate in routers/auth.py) need to read a setting without importing the
 admin CRUD module."""
 
+import math
+
 from sqlalchemy.orm import Session
 
 from ..models import PlatformSetting
@@ -29,16 +31,38 @@ def maintenance_mode(db: Session) -> bool:
     return bool(get_global_settings(db)["maintenance_mode"])
 
 
-# The two unambiguous ceilings in the "Storage & Streaming Limits" panel — platform-wide
-# hard caps on top of whatever an org's own Subscription/Plan allows (services/org.py's
-# plan-based max_storage_gb). Only tightens: an org already within its plan's own limit is
-# never blocked by these unless the platform ceiling is set lower than the plan.
-# (default_gb/default_hours are new-organization provisioning defaults, not enforcement —
-# left alone this pass; see the Settings.jsx panel copy.)
+def _nonnegative_limit(value, setting: str, field: str) -> float | None:
+    if value is None:
+        return None
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        raise ValueError(f"Invalid platform limit: {setting}.{field}")
+    return float(value)
+
+
+# `max_gb` is a platform-wide hard ceiling that can only tighten an entitled plan's storage
+# allowance; it never grants storage to a non-entitled organization. `default_hours` remains a
+# fallback for organizations without a subscription.
 def storage_ceiling_gb(db: Session) -> float | None:
     row = db.get(PlatformSetting, "storage_limits")
     value = (row.value or {}).get("max_gb") if row else None
-    return float(value) if value is not None else None
+    return _nonnegative_limit(value, "storage_limits", "max_gb")
+
+
+def default_streaming_hours(db: Session) -> float | None:
+    row = db.get(PlatformSetting, "streaming_limits")
+    value = (row.value or {}).get("default_hours") if row else None
+    return _nonnegative_limit(value, "streaming_limits", "default_hours")
+
+
+def default_concurrent_streams(db: Session) -> int | None:
+    row = db.get(PlatformSetting, "streaming_limits")
+    value = (row.value or {}).get("default_concurrent_streams") if row else None
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("Invalid platform limit: streaming_limits.default_concurrent_streams")
+    return value
 
 
 def max_bitrate_kbps(db: Session) -> int | None:
