@@ -337,7 +337,7 @@ function EvidenceRequest({ documents, purposes, scopes }) {
               required
               value={documentId}
               onChange={(e) => { setDocumentId(e.target.value); setPurpose(""); setScope(""); }}
-              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
             >
               <option value="">Select a document</option>
               {documents.map((d) => (
@@ -352,7 +352,7 @@ function EvidenceRequest({ documents, purposes, scopes }) {
               required
               value={purpose}
               onChange={(e) => setPurpose(e.target.value)}
-              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
             >
               <option value="">Select a purpose</option>
               {allowedPurposes.map((p) => (
@@ -367,7 +367,7 @@ function EvidenceRequest({ documents, purposes, scopes }) {
               required
               value={scope}
               onChange={(e) => setScope(e.target.value)}
-              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
             >
               <option value="">Select a scope</option>
               {allowedScopes.map((s) => (
@@ -381,7 +381,7 @@ function EvidenceRequest({ documents, purposes, scopes }) {
             <input
               type="email" required value={form.requester_email} onChange={set("requester_email")}
               placeholder="you@company.com"
-              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
             />
           </label>
 
@@ -389,7 +389,7 @@ function EvidenceRequest({ documents, purposes, scopes }) {
             <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Company</span>
             <input
               type="text" value={form.company_name} onChange={set("company_name")}
-              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
             />
           </label>
 
@@ -399,7 +399,7 @@ function EvidenceRequest({ documents, purposes, scopes }) {
             </span>
             <textarea
               rows={3} value={form.purpose_note} onChange={set("purpose_note")}
-              className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
             />
           </label>
 
@@ -504,14 +504,14 @@ function ReportVulnerability({ categories, policy }) {
           <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Your email</span>
           <input
             type="email" required value={form.reporter_email} onChange={set("reporter_email")}
-            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
           />
         </label>
         <label className="block">
           <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Your name (optional)</span>
           <input
             type="text" value={form.reporter_name} onChange={set("reporter_name")}
-            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
           />
         </label>
         <label className="block sm:col-span-2">
@@ -519,14 +519,14 @@ function ReportVulnerability({ categories, policy }) {
           <input
             type="text" required minLength={4} value={form.title} onChange={set("title")}
             placeholder="One line: what is the issue?"
-            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
           />
         </label>
         <label className="block">
           <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Category</span>
           <select
             required value={form.category} onChange={set("category")}
-            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
           >
             <option value="">Select a category</option>
             {(categories || []).map((c) => (
@@ -538,7 +538,7 @@ function ReportVulnerability({ categories, policy }) {
           <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Affected service (optional)</span>
           <input
             type="text" value={form.affected_service} onChange={set("affected_service")}
-            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
           />
         </label>
         <label className="block sm:col-span-2">
@@ -546,14 +546,14 @@ function ReportVulnerability({ categories, policy }) {
           <textarea
             rows={5} required minLength={20} value={form.description} onChange={set("description")}
             placeholder="What happens, what you expected, and why it matters."
-            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
           />
         </label>
         <label className="block sm:col-span-2">
           <span className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Steps to reproduce (optional)</span>
           <textarea
             rows={4} value={form.reproduction} onChange={set("reproduction")}
-            className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
+            className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-slate-400"
           />
         </label>
         <div className="sm:col-span-2">
