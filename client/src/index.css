@@ -111,6 +111,70 @@ body {
   border-radius: 0.5rem;
 }
 
+/* Chrome/WebKit autofill background & text contrast fix:
+   Chromium injects internal UA styles with `background-color: ... !important`
+   on :-internal-autofill-selected. We apply an inset box-shadow to paint an opaque,
+   theme-appropriate surface over the browser wash without disturbing outline focus rings,
+   borders, validation states, or native autofill behaviour. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus,
+textarea:-webkit-autofill:active,
+select:-webkit-autofill,
+select:-webkit-autofill:hover,
+select:-webkit-autofill:focus,
+select:-webkit-autofill:active,
+input:autofill,
+textarea:autofill,
+select:autofill {
+  -webkit-box-shadow: 0 0 0 1000px #ffffff inset;
+  box-shadow: 0 0 0 1000px #ffffff inset;
+  -webkit-text-fill-color: #0f172a;
+  color: #0f172a;
+  caret-color: #0f172a;
+}
+
+.dark input:-webkit-autofill,
+.dark input:-webkit-autofill:hover,
+.dark input:-webkit-autofill:focus,
+.dark input:-webkit-autofill:active,
+.dark textarea:-webkit-autofill,
+.dark textarea:-webkit-autofill:hover,
+.dark textarea:-webkit-autofill:focus,
+.dark textarea:-webkit-autofill:active,
+.dark select:-webkit-autofill,
+.dark select:-webkit-autofill:hover,
+.dark select:-webkit-autofill:focus,
+.dark select:-webkit-autofill:active,
+.dark input:autofill,
+.dark textarea:autofill,
+.dark select:autofill,
+:root.dark input:-webkit-autofill,
+:root.dark input:-webkit-autofill:hover,
+:root.dark input:-webkit-autofill:focus,
+:root.dark input:-webkit-autofill:active,
+:root.dark textarea:-webkit-autofill,
+:root.dark textarea:-webkit-autofill:hover,
+:root.dark textarea:-webkit-autofill:focus,
+:root.dark textarea:-webkit-autofill:active,
+:root.dark select:-webkit-autofill,
+:root.dark select:-webkit-autofill:hover,
+:root.dark select:-webkit-autofill:focus,
+:root.dark select:-webkit-autofill:active,
+:root.dark input:autofill,
+:root.dark textarea:autofill,
+:root.dark select:autofill {
+  -webkit-box-shadow: 0 0 0 1000px #0f172a inset;
+  box-shadow: 0 0 0 1000px #0f172a inset;
+  -webkit-text-fill-color: #f8fafc;
+  color: #f8fafc;
+  caret-color: #f8fafc;
+}
+
 /* Text selection tint. */
 ::selection { background: color-mix(in srgb, #8b5cf6 30%, transparent); }
 

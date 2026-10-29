@@ -127,8 +127,11 @@ const SORTS = {
   "name-asc": (a, b) => (a.title || "").localeCompare(b.title || ""),
 };
 
+const optionCls = "bg-white text-slate-800 dark:bg-slate-900 dark:text-slate-100";
+
 const control = cx(
   "h-9 rounded-lg border px-3 text-[13px] outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20",
+  "[&>option]:bg-white [&>option]:text-slate-800 dark:[&>option]:bg-slate-900 dark:[&>option]:text-slate-100",
   CONSOLE.control
 );
 
@@ -860,7 +863,11 @@ export default function OrganizationRecordings() {
                 aria-label="Filter by state"
                 className={control}
               >
-                {STATE_FILTERS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                {STATE_FILTERS.map(([value, label]) => (
+                  <option key={value} value={value} className={optionCls}>
+                    {label}
+                  </option>
+                ))}
               </select>
               {/* Filter by category — only when the recordings listed have at least one. */}
               {categories.length > 0 && (
@@ -870,8 +877,12 @@ export default function OrganizationRecordings() {
                   aria-label="Filter by category"
                   className={control}
                 >
-                  <option value={ALL_CATEGORIES}>All categories</option>
-                  {categories.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                  <option value={ALL_CATEGORIES} className={optionCls}>All categories</option>
+                  {categories.map((c) => (
+                    <option key={c.value} value={c.value} className={optionCls}>
+                      {c.label}
+                    </option>
+                  ))}
                 </select>
               )}
               <select
@@ -880,10 +891,10 @@ export default function OrganizationRecordings() {
                 aria-label="Sort recordings"
                 className={control}
               >
-                <option value="date-desc">Newest first</option>
-                <option value="date-asc">Oldest first</option>
-                <option value="size-desc">Largest size</option>
-                <option value="name-asc">Name (A–Z)</option>
+                <option value="date-desc" className={optionCls}>Newest first</option>
+                <option value="date-asc" className={optionCls}>Oldest first</option>
+                <option value="size-desc" className={optionCls}>Largest size</option>
+                <option value="name-asc" className={optionCls}>Name (A–Z)</option>
               </select>
             </div>
 
