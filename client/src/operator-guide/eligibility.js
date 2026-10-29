@@ -8,6 +8,7 @@ export function isConsolePath(pathname) {
 }
 
 export function eventIdFrom(pathname, search) {
-  const fromPath = pathname.match(/\/events\/([0-9a-f-]{36})/i);
+  // /organization/events/<id>/… and the live Producer Console, /host/live/<id>.
+  const fromPath = pathname.match(/\/(?:events|host\/live)\/([0-9a-f-]{36})/i);
   return fromPath ? fromPath[1] : new URLSearchParams(search).get("event");
 }

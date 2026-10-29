@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import { FiCheck, FiEye, FiEyeOff, FiChevronDown } from "react-icons/fi";
 import { cx } from "../tokens";
 import Button from "../Button";
+import { CONSOLE_FIELD } from "./consoleField";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared form system. One home for every input/label/validation so pages stop
@@ -16,7 +17,7 @@ import Button from "../Button";
 // already focused. Hover is a border lift only — it must never look focused or filled.
 const CONTROL = {
   form: "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:border-slate-600",
-  console: "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-violet-400 focus:ring-2 focus:ring-violet-500/20 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:border-slate-600",
+  console: CONSOLE_FIELD,
   // Auth fields carry the roomiest geometry (px-4 py-3.5, rounded-xl) and a wide, soft
   // focus halo rather than a hard 2px ring — the sign-in card is the one screen where the
   // control IS the interface.
@@ -39,9 +40,10 @@ const controlCls = (variant, error) =>
     ? cx(CONTROL.auth, error ? AUTH_BAD : AUTH_OK)
     : cx(CONTROL[variant] || CONTROL.form, error && ERROR_RING);
 
-export function Label({ variant = "form", htmlFor, className = "", children }) {
+// `id` lets a custom control name itself after the visible label (aria-labelledby).
+export function Label({ variant = "form", htmlFor, id, className = "", children }) {
   return (
-    <label htmlFor={htmlFor} className={cx(LABEL[variant] || LABEL.form, className)}>
+    <label id={id} htmlFor={htmlFor} className={cx(LABEL[variant] || LABEL.form, className)}>
       {children}
     </label>
   );

@@ -322,7 +322,7 @@ export default function StreamingSessions() {
         <ul className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
           {[
             ["Live Events", "/organization/events", "Schedule, staff and run a broadcast."],
-            ["Playback & Access", "/organization/playback", "Who may watch, and on what link."],
+            ["Playback & Access", "/organization/audience/access", "Who may watch, and on what link."],
             ["Media & Replay", "/organization/recordings", "What each session left behind."],
           ].map(([label, to, desc]) => (
             <li key={to}>

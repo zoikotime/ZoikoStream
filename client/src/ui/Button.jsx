@@ -66,6 +66,7 @@ export default function Button({
   variant = "primary",
   size = "md",
   href,
+  to,
   onClick,
   className = "",
   children,
@@ -77,6 +78,7 @@ export default function Button({
   iconOnly = false,
   ...rest
 }) {
+  const target = to || href;
   if (appearance === "console") {
     const cls = cx(
       C_BASE,
@@ -91,8 +93,8 @@ export default function Button({
         {!loading && Right && <Right className="text-base" aria-hidden="true" />}
       </>
     );
-    if (href && !disabled && href.startsWith("/")) return <Link to={href} onClick={onClick} className={cls} {...rest}>{inner}</Link>;
-    if (href && !disabled) return <a href={href} onClick={onClick} className={cls} {...rest}>{inner}</a>;
+    if (target && !disabled && (typeof target === "object" || target.startsWith("/") || target.startsWith("#") || target.startsWith("?"))) return <Link to={target} onClick={onClick} className={cls} {...rest}>{inner}</Link>;
+    if (target && !disabled) return <a href={target} onClick={onClick} className={cls} {...rest}>{inner}</a>;
     return (
       <button type="button" onClick={onClick} className={cls} disabled={disabled || loading} aria-busy={loading || undefined} {...rest}>
         {inner}
@@ -101,8 +103,8 @@ export default function Button({
   }
 
   const cls = cx(M_BASE, M_SIZES[size], M_VARIANTS[variant], className);
-  if (href && href.startsWith("/")) return <Link to={href} className={cls} {...rest}>{children}</Link>;
-  if (href) return <a href={href} className={cls} {...rest}>{children}</a>;
+  if (target && (typeof target === "object" || target.startsWith("/") || target.startsWith("#") || target.startsWith("?"))) return <Link to={target} className={cls} {...rest}>{children}</Link>;
+  if (target) return <a href={target} className={cls} {...rest}>{children}</a>;
   // `disabled` has to reach the element: M_BASE already styles disabled: state, and callers
   // pass disabled={loading} to stop a double submit. Swallowing it here left every marketing
   // button clickable while it looked (and was meant to be) inert.

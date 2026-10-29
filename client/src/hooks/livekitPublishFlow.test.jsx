@@ -558,3 +558,86 @@ describe("viewer subscription", () => {
     expect(rooms).toHaveLength(1);   // never retried into a room that is gone
   });
 });
+
+// ── the host microphone survives a re-acquire ─────────────────────────────────
+//
+// Production report: the host's microphone stopped reaching viewers mid-session while the
+// console still read "Mic". useMediaPreview re-acquires a whole new stream — new audio track,
+// old one stopped — on a mic switch, a camera flip, or a restart after a device dropped. The
+// camera had a swap effect for exactly this; the microphone had none, and republishMissing
+// could not help because a Microphone publication (pointing at the stopped track) still
+// existed. useLiveKitPublish now swaps the published mic when `audioTrack` changes.
+describe("producer microphone", () => {
+  const micPubs = (room) => [...room.localParticipant.audioTrackPublications.values()]
+    .filter((p) => p.source === Track.Source.Microphone);
+
+  const hostWith = (stream) => {
+    const streamRef = { current: stream };
+    const hook = renderHook((props) => useLiveKitPublish({
+      enabled: true, url: URL_, token: TOKEN, streamRef,
+      screenTrack: null, screenAudioTrack: null, ...props,
+    }), {
+      initialProps: { videoTrack: stream.getVideoTracks()[0] ?? null, audioTrack: stream.getAudioTracks()[0] ?? null },
+    });
+    return { ...hook, streamRef };
+  };
+
+  it("publishes the NEW audio track after a re-acquire, and only that one", async () => {
+    const first = fakeStream();
+    const { result, rerender, streamRef } = hostWith(first);
+    await waitFor(() => expect(result.current.publishing).toBe(true));
+    const [room] = rooms;
+    expect(micPubs(room).map((p) => p.track.mediaStreamTrack)).toEqual([first.getAudioTracks()[0]]);
+
+    // useMediaPreview after selectMic: a new stream, the old tracks stopped.
+    const second = fakeStream();
+    streamRef.current = second;
+    first.getAudioTracks()[0].readyState = "ended";
+    rerender({ videoTrack: first.getVideoTracks()[0], audioTrack: second.getAudioTracks()[0] });
+
+    await waitFor(() =>
+      expect(micPubs(room).map((p) => p.track.mediaStreamTrack)).toEqual([second.getAudioTracks()[0]]));
+    expect(result.current.publishedAudio).toBe(true);
+    expect(rooms).toHaveLength(1);                         // a swap, not a reconnect
+  });
+
+  it("does not unpublish and republish a mic track that has not changed", async () => {
+    const stream = fakeStream();
+    const { result, rerender } = hostWith(stream);
+    await waitFor(() => expect(result.current.publishing).toBe(true));
+    const [room] = rooms;
+    const publish = vi.spyOn(room.localParticipant, "publishTrack");
+    const unpublish = vi.spyOn(room.localParticipant, "unpublishTrack");
+    rerender({ videoTrack: stream.getVideoTracks()[0], audioTrack: stream.getAudioTracks()[0] });
+    await act(async () => {});
+    expect(publish).not.toHaveBeenCalled();
+    expect(unpublish).not.toHaveBeenCalled();
+  });
+
+  it("muting is not a swap: the same track stays published, now disabled", async () => {
+    const stream = fakeStream();
+    const { result, rerender } = hostWith(stream);
+    await waitFor(() => expect(result.current.publishing).toBe(true));
+    const [room] = rooms;
+    const unpublish = vi.spyOn(room.localParticipant, "unpublishTrack");
+    stream.getAudioTracks()[0].enabled = false;           // useMediaPreview's mute
+    rerender({ videoTrack: stream.getVideoTracks()[0], audioTrack: stream.getAudioTracks()[0] });
+    await act(async () => {});
+    expect(unpublish).not.toHaveBeenCalled();
+    expect(micPubs(room)[0].track.mediaStreamTrack.enabled).toBe(false);
+  });
+
+  it("a camera flip that re-acquires the stream keeps the host audible", async () => {
+    const first = fakeStream();
+    const { result, rerender, streamRef } = hostWith(first);
+    await waitFor(() => expect(result.current.publishing).toBe(true));
+    const [room] = rooms;
+    const flipped = fakeStream();                          // flipCamera: video AND audio are new
+    streamRef.current = flipped;
+    rerender({ videoTrack: flipped.getVideoTracks()[0], audioTrack: flipped.getAudioTracks()[0] });
+    await waitFor(() =>
+      expect(micPubs(room).map((p) => p.track.mediaStreamTrack)).toEqual([flipped.getAudioTracks()[0]]));
+    const cams = [...room.localParticipant.videoTrackPublications.values()];
+    expect(cams.map((p) => p.track.mediaStreamTrack)).toEqual([flipped.getVideoTracks()[0]]);
+  });
+});

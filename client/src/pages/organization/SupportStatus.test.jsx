@@ -434,7 +434,7 @@ describe("Trust & evidence", () => {
     show();
     await heading();
 
-    expect(screen.getByRole("link", { name: /compliance documents/i })).toHaveAttribute("href", "/trust#evidence");
+    expect(screen.getByRole("link", { name: /compliance documents/i })).toHaveAttribute("href", "/trust#compliance");
     expect(screen.getByRole("link", { name: /report a vulnerability/i })).toHaveAttribute("href", "/trust#report");
     expect(screen.queryByText(/on request/i)).toBeNull();
   });

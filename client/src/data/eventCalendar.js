@@ -28,10 +28,19 @@ export function overlapping(events) {
     .sort((a, b) => a.start - b.start);
   const clash = new Set();
   for (let i = 0; i < spans.length; i += 1) {
-    for (let j = i + 1; j < spans.length && spans[j].start < spans[i].end; j += 1) {
-      clash.add(spans[i].id);
-      clash.add(spans[j].id);
+    const a = spans[i];
+    for (let j = i + 1; j < spans.length; j += 1) {
+      const b = spans[j];
+      // Since spans is sorted by start, if b.start >= a.end, no subsequent event can overlap with a
+      if (b.start >= a.end) {
+        break;
+      }
+      if (a.start < b.end && b.start < a.end) {
+        clash.add(a.id);
+        clash.add(b.id);
+      }
     }
   }
+
   return clash;
 }

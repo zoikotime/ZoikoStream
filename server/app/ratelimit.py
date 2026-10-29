@@ -84,30 +84,40 @@ def rate_limit(scope: str, limit: int, window: float = 60.0):
     """
 
     def _dep(request: Request) -> None:
-        _sweep()
-        key = f"{scope}:{client_ip(request)}"
-        bucket = _HITS.get(key)
-        if bucket is None:
-            bucket = _HITS[key] = SlidingWindow(limit, window)
-        if not bucket.allow():
-            # ZST-EC-001 DEV-010. The refusal is ALSO counted in a shared, durable counter
-            # so a governed threshold can be evidenced across workers and across restarts.
-            # The in-memory window above stays the hot-path enforcement; this is the
-            # accounting a notification may legitimately be driven from, because an email
-            # must never describe one process's private opinion.
-            try:
-                from .services import api_usage
-
-                api_usage.record_refusal(client_ip(request), scope)
-            except Exception:  # noqa: BLE001 — accounting must never break enforcement
-                pass
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                "Too many attempts. Please wait a moment and try again.",
-                headers={"Retry-After": str(int(window))},
-            )
+        enforce(request, scope, client_ip(request), limit, window)
 
     return Depends(_dep)
+
+
+def enforce(request: Request, scope: str, subject: str, limit: int, window: float) -> None:
+    """Count one hit against `<scope>:<subject>` and raise 429 past `limit` per `window`.
+
+    rate_limit() uses the client IP as the subject. An authenticated endpoint can pass the
+    caller's user id instead, so one person cannot spread attempts across addresses and
+    colleagues behind one office NAT do not share a budget. Same in-memory, per-process
+    window either way."""
+    _sweep()
+    key = f"{scope}:{subject}"
+    bucket = _HITS.get(key)
+    if bucket is None:
+        bucket = _HITS[key] = SlidingWindow(limit, window)
+    if not bucket.allow():
+        # ZST-EC-001 DEV-010. The refusal is ALSO counted in a shared, durable counter
+        # so a governed threshold can be evidenced across workers and across restarts.
+        # The in-memory window above stays the hot-path enforcement; this is the
+        # accounting a notification may legitimately be driven from, because an email
+        # must never describe one process's private opinion.
+        try:
+            from .services import api_usage
+
+            api_usage.record_refusal(client_ip(request), scope)
+        except Exception:  # noqa: BLE001 — accounting must never break enforcement
+            pass
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many attempts. Please wait a moment and try again.",
+            headers={"Retry-After": str(int(window))},
+        )
 
 
 if __name__ == "__main__":

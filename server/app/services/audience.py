@@ -117,18 +117,21 @@ def identified(identity: str | None) -> bool:
 # ── recording ─────────────────────────────────────────────────────────────────────────────
 
 def record_join(db: Session, event: Event, identity: str, *, registration_id: uuid.UUID | None = None,
-                user_agent: str | None = None, client_hint: str | None = None) -> None:
+                user_agent: str | None = None, client_hint: str | None = None,
+                client_ip: str | None = None, request_headers: dict | None = None) -> None:
     """An identified, non-staff viewer was admitted to the live stream. Best-effort."""
     if not identified(identity):
         return
     try:
-        _upsert_join(db, event, identity, registration_id, normalize_agent(user_agent, client_hint))
+        _upsert_join(db, event, identity, registration_id, normalize_agent(user_agent, client_hint),
+                     client_ip=client_ip, request_headers=request_headers)
     except Exception:  # noqa: BLE001 - analytics must never break the viewer's request
         db.rollback()
         log.warning("audience join not recorded for event %s", event.id, exc_info=True)
 
 
-def _upsert_join(db: Session, event: Event, identity: str, registration_id, agent: dict) -> None:
+def _upsert_join(db: Session, event: Event, identity: str, registration_id, agent: dict,
+                 client_ip: str | None = None, request_headers: dict | None = None) -> None:
     now = _now()
     key = viewer_key(identity)
     country = None
@@ -138,6 +141,9 @@ def _upsert_join(db: Session, event: Event, identity: str, registration_id, agen
             registration_id = None   # a token for a registration since removed
         else:
             country = reg.country_code
+    if not country:
+        from . import geoip
+        country = geoip.resolve_country(client_ip, request_headers)
     row = db.scalar(select(AudienceSession).where(
         AudienceSession.event_id == event.id, AudienceSession.viewer_key == key))
     if row is None:

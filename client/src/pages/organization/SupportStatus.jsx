@@ -1,10 +1,11 @@
+import { useEffect } from "react";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { FiShield, FiGlobe, FiFileText, FiAlertOctagon, FiHeadphones, FiRefreshCw } from "react-icons/fi";
 import api from "../../api";
 import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
-import { CONSOLE, cx, focusRing, type } from "../../ui/tokens";
+import { CONSOLE, cx, focusRing, t150, type } from "../../ui/tokens";
 import { ConsoleButton } from "../../ui/Button";
 import Skeleton from "../../ui/Skeleton";
 import Panel from "../../components/admin/Panel";
@@ -29,18 +30,39 @@ const REFRESH_MS = 60_000;
 const TRUST = [
   // Each opens its own detail page (pages/organization/TrustEvidence). Both used to land on
   // Settings → Security, which is the change-password form and answers neither question.
-  { icon: FiShield, title: "Security overview", desc: "Practices, certifications, and reporting.", to: "/organization/support/security" },
-  { icon: FiGlobe, title: "Data residency", desc: "Where data is processed and stored.", to: "/organization/support/data-residency" },
+  { id: "security", icon: FiShield, title: "Security overview", desc: "Practices, certifications, and reporting.", to: "/organization/support/security" },
+  { id: "residency", icon: FiGlobe, title: "Data residency", desc: "Where data is processed and stored.", to: "/organization/support/data-residency" },
   // These two open the Trust Center's own forms (pages/Trust.jsx: POST /trust/evidence/requests
   // and POST /trust/security/reports). They used to render inert, marked "On request", which
   // read as broken buttons although both flows exist. The second promised a security.txt that
   // this deployment does not serve.
-  { icon: FiFileText, title: "Compliance documents", desc: "Request access under NDA.", to: "/trust#evidence" },
-  { icon: FiAlertOctagon, title: "Report a vulnerability", desc: "Coordinated disclosure through a protected channel.", to: "/trust#report" },
+  { id: "compliance", icon: FiFileText, title: "Compliance documents", desc: "Request access under NDA.", to: "/trust#compliance" },
+  { id: "report", icon: FiAlertOctagon, title: "Report a vulnerability", desc: "Coordinated disclosure through a protected channel.", to: "/trust#report" },
 ];
 
 const th = "px-5 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.1em]";
 const td = "px-5 py-3 text-[13px]";
+
+// A footer link reads as one at rest (a faint underline, which plain footer text does not
+// have) and answers the pointer: the text brightens and the underline takes its colour.
+// Keyboard focus gets the console's focus ring.
+const FOOTER_LINK = cx(
+  "inline-flex cursor-pointer items-center rounded text-[12px] underline decoration-slate-300 underline-offset-4",
+  CONSOLE.faint,
+  "hover:text-slate-900 hover:decoration-current active:text-violet-700",
+  "dark:decoration-white/25 dark:hover:text-white dark:active:text-violet-300",
+  t150,
+  focusRing
+);
+// A trust card that navigates lifts on hover (surface and border) and its title takes the link
+// colour; pressing it deepens the surface. A border change alone was too faint to notice.
+const TRUST_CARD_INTERACTIVE = cx(
+  "group cursor-pointer",
+  CONSOLE.panelHover,
+  "hover:bg-slate-50 active:bg-slate-100 dark:hover:bg-white/[0.08] dark:active:bg-white/[0.11]",
+  t150
+);
+const TRUST_TITLE_HOVER = "group-hover:text-violet-700 dark:group-hover:text-violet-200";
 
 function StatTile({ label, value, tone, title }) {
   return (
@@ -81,6 +103,16 @@ export default function SupportStatus() {
     api.get("/organization/overview", { params: { range: "24h" } }).then((r) => r.data)
   );
   useInterval(reload, REFRESH_MS);
+
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (!hash) return;
+    const target = document.getElementById(hash.slice(1));
+    if (!target) return;
+    target.scrollIntoView?.({ block: "start" });
+    if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    target.focus({ preventScroll: true });
+  }, [hash, data]);
 
   if (loading && !data) return <StatusSkeleton />;
 
@@ -243,8 +275,19 @@ export default function SupportStatus() {
                         <td className={td}>
                           <HealthDot status={STATUS_DOT[s.status]} label={STATUS_LABEL[s.status]} />
                         </td>
-                        <td className={cx(td, "text-right", type.mono, CONSOLE.body)} title={cell.title}>
-                          {cell.text}
+                        {/* The table's own face with tabular figures, the number in the heading
+                            colour. It was the one system-monospace cell in the row: at 13px
+                            (Consolas on Windows) its thin strokes read dimmer and smaller than
+                            the text around it, although its colour measured 15:1. */}
+                        <td className={cx(td, "whitespace-nowrap text-right tabular-nums")} title={cell.title}>
+                          {cell.count === null ? (
+                            <span className={CONSOLE.muted}>{cell.text}</span>
+                          ) : (
+                            <>
+                              <span className={cx("font-semibold", CONSOLE.heading)}>{cell.count}</span>{" "}
+                              <span className={CONSOLE.body}>{cell.noun}</span>
+                            </>
+                          )}
                         </td>
                       </tr>
                     );
@@ -347,7 +390,7 @@ export default function SupportStatus() {
       <section className="space-y-4">
         <h2 className={cx("text-[20px] font-semibold tracking-tight", CONSOLE.heading)}>Trust &amp; evidence</h2>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {TRUST.map(({ icon: Icon, title, desc, to }) => {
+          {TRUST.map(({ id, icon: Icon, title, desc, to }) => {
             const body = (
               <>
                 <span
@@ -357,7 +400,7 @@ export default function SupportStatus() {
                   <Icon className="text-[15px]" />
                 </span>
                 <div className="min-w-0">
-                  <p className={cx("text-[13px] font-semibold", CONSOLE.heading)}>{title}</p>
+                  <p className={cx("text-[13px] font-semibold", CONSOLE.heading, to && TRUST_TITLE_HOVER)}>{title}</p>
                   <p className={cx("mt-0.5 text-[12px] leading-[17px]", CONSOLE.faint)}>{desc}</p>
                 </div>
               </>
@@ -368,10 +411,11 @@ export default function SupportStatus() {
               // pushing a second copy of this page.
               <Link
                 key={title}
+                id={id}
                 to={to}
                 state={{ from: "/organization/support" }}
                 aria-label={`${title}: ${desc}`}
-                className={cx(cls, "cursor-pointer", CONSOLE.panelHover, "transition-colors duration-150 motion-reduce:transition-none", focusRing)}
+                className={cx(cls, TRUST_CARD_INTERACTIVE, focusRing)}
               >
                 {body}
               </Link>
@@ -379,7 +423,7 @@ export default function SupportStatus() {
               // A card with no destination (none today) renders inert, dimmed and labelled, so
               // the difference from the cards that DO navigate is visible rather than
               // discovered by clicking.
-              <div key={title} className={cx(cls, "opacity-60")}>
+              <div key={title} id={id} className={cx(cls, "opacity-60")}>
                 {body}
                 <span className={cx("ml-auto shrink-0 self-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider", CONSOLE.inset, CONSOLE.faint)}>
                   On request
@@ -399,24 +443,22 @@ export default function SupportStatus() {
             touch-target floor (index.css) makes each one 44px tall with its text pinned to the
             top, 13px above the plain-text items beside it. Centering keeps the full target and
             puts the text back on the row. No effect on web, where links are text-height. */}
-        <nav className="flex flex-wrap items-center gap-x-6 gap-y-2">
-          {/* Only destinations that exist are links; the rest render as text, not 404s. */}
-          {["Privacy", "Terms"].map((label) => (
-            <span key={label} className={cx("text-[12px]", CONSOLE.faint)}>{label}</span>
-          ))}
+        <nav aria-label="Footer" className="flex flex-wrap items-center gap-x-6 gap-y-2">
+          {/* Only destinations that exist are links; the rest render as text, not 404s. The
+              public privacy policy (pages/PrivacyPolicy.jsx, /privacy) exists now; Terms still
+              has no page, so it stays text — and, unlike the links, it has no underline,
+              pointer or hover, so it does not look clickable. */}
+          <Link to="/privacy" className={FOOTER_LINK}>Privacy</Link>
+          <span className={cx("text-[12px]", CONSOLE.faint)}>Terms</span>
           {/* The public Trust Center (pages/Trust.jsx), not Settings → Security — that is the
               change-password form, the same wrong destination the trust cards had. */}
-          <Link to="/trust" className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
-            Trust Center
-          </Link>
-          <Link to="/organization/dashboard" className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
-            Incident History
-          </Link>
+          <Link to="/trust" className={FOOTER_LINK}>Trust Center</Link>
+          {/* The published incident history (pages/Status.jsx, "Past incidents"). It pointed at
+              the organization dashboard, which shows no incidents at all. */}
+          <Link to="/status" className={FOOTER_LINK}>Incident History</Link>
           {/* The real contact form, not the settings page — this footer link has pointed at
               Settings since before /contact existed. */}
-          <Link to="/contact" className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}>
-            Contact
-          </Link>
+          <Link to="/contact" className={FOOTER_LINK}>Contact</Link>
         </nav>
       </footer>
     </div>

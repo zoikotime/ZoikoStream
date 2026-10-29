@@ -38,7 +38,7 @@ export const ORG_NAV = [
     roles: ADMIN_ROLES, match: ["/organization/audience", "/organization/playback"],
     children: [
       { id: "audience.overview", label: "Audience overview", to: "/organization/audience" },
-      { id: "audience.access", label: "Event access", to: "/organization/playback" },
+      { id: "audience.access", label: "Event access", to: "/organization/audience/access", aliases: ["/organization/playback"] },
     ],
   },
   {
@@ -115,7 +115,7 @@ export function activeChildId(item, pathname, search, hash = "") {
   let bestScore = -1;
   for (const child of item.children || []) {
     const { pathname: p, params, hash: childHash } = split(child.to);
-    if (p !== pathname) continue;
+    if (p !== pathname && !(child.aliases || []).includes(pathname)) continue;
     if (childHash && childHash !== section) continue;
     let ok = true;
     let score = childHash ? 1 : 0;

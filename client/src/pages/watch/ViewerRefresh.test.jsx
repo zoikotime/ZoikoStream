@@ -230,6 +230,21 @@ describe("Total viewers after a refresh", () => {
     await waitFor(() => expect(watchingCount()).toBe(1));
   });
 
+  it("reads as unknown, not 0, until the live snapshot has said who is here", async () => {
+    // The "Total viewers" card renders a string as-is (ui/StatsCard), so "—" is checkable here
+    // even though a NUMBER on that card tweens through ui/Counter (see watchingCount above).
+    const totalCard = async () => (await screen.findByText("Total viewers")).closest("div").parentElement;
+    afterRefresh();
+    await waitFor(() => expect(sockets.length).toBe(1));
+    expect(await totalCard()).toHaveTextContent("—");      // socket not open yet
+    const ws = sockets[0];
+    ws.open();
+    expect(await totalCard()).toHaveTextContent("—");      // open, but no snapshot yet
+    ws.deliver(snapshot([viewer("a")]));
+    await waitFor(async () => expect(await totalCard()).not.toHaveTextContent("—"));
+    await waitFor(() => expect(watchingCount()).toBe(1));
+  });
+
   it("does not double-count the same viewer rejoining", async () => {
     // 8: presence is keyed on identity server-side (bus.presence_upsert), and the reducer
     // keys on it too — a rejoin is an upsert, never a second row.

@@ -3,6 +3,10 @@ import { Link } from "react-router-dom";
 import { FiChevronRight } from "react-icons/fi";
 import { cx, focusRing } from "../../ui/tokens";
 
+// The clicks the router itself handles: primary button, no modifier (those open a tab/window).
+const isPlainClick = (e) =>
+  !e.defaultPrevented && e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+
 // Page-level header for every Organization Admin screen (ZST-ENG-DASH-001 ORG-01..08):
 //
 //   Organization › Section › Page            (optional breadcrumb)
@@ -12,6 +16,11 @@ import { cx, focusRing } from "../../ui/tokens";
 //
 //   <OrganizationPageHeader eyebrow="Organization console / Overview" title="Organization overview"
 //     breadcrumbs={[["Organization", "/organization/manage"], ["Overview"]]} actions={…} />
+//
+// A crumb is [label, to?, { onNavigate }?]. `onNavigate` runs on an ordinary click, before the
+// router navigates — for a crumb that can name the page you are already on (Events, from All
+// Events): a same-URL navigation changes nothing a page holds in its own state, so the crumb
+// would otherwise do nothing at all. Modified clicks (new tab/window) are left to the browser.
 //
 // `sticky` pins the header (with the actions) to the top on scroll. Off by default.
 export default function OrganizationPageHeader({
@@ -35,13 +44,15 @@ export default function OrganizationPageHeader({
       {breadcrumbs?.length > 0 && (
         <nav aria-label="Breadcrumb">
           <ol className="flex flex-wrap items-center gap-1.5 text-[12.5px] text-slate-500 dark:text-neutral-400">
-            {breadcrumbs.map(([label, to], i) => (
+            {breadcrumbs.map(([label, to, link], i) => (
               <Fragment key={label}>
                 {i > 0 && <li aria-hidden="true"><FiChevronRight /></li>}
                 <li aria-current={i === breadcrumbs.length - 1 ? "page" : undefined}
                   className={i === breadcrumbs.length - 1 ? "font-medium text-violet-600 dark:text-violet-300" : undefined}>
                   {to ? (
-                    <Link to={to} className={cx("rounded hover:text-slate-700 hover:underline dark:hover:text-neutral-200", focusRing)}>{label}</Link>
+                    <Link to={to}
+                      onClick={link?.onNavigate && ((e) => isPlainClick(e) && link.onNavigate())}
+                      className={cx("rounded hover:text-slate-700 hover:underline dark:hover:text-neutral-200", focusRing)}>{label}</Link>
                   ) : label}
                 </li>
               </Fragment>

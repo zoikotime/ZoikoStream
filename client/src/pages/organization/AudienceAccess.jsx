@@ -55,6 +55,8 @@ const RANGES = [
   ["90d", "90 days"],
 ];
 
+const RANGE_LABEL = { "7d": "7 days", "30d": "30 days", "90d": "90 days" };
+
 const fillTone = (pct) => {
   if (pct == null) return "neutral";
   if (pct >= 95) return "danger";
@@ -246,9 +248,12 @@ function PlaybackActivity({ qoe }) {
         <span className={cx("font-semibold tabular-nums", CONSOLE.heading)}>{total.toLocaleString()} total sessions</span>
       </div>
       {!series || total === 0 ? (
-        <p className={cx("rounded-xl border border-dashed px-4 py-10 text-center text-[12.5px]", CONSOLE.divider, CONSOLE.faint)}>
-          No playback sessions were reported in this window.
-        </p>
+        <div className={cx("rounded-xl border border-dashed px-4 py-8 text-center text-[12.5px]", CONSOLE.divider)}>
+          <p className={CONSOLE.faint}>No playback sessions were reported in this window.</p>
+          <p className={cx("mt-1.5 text-[11.5px]", CONSOLE.muted)}>
+            Player telemetry is recorded only when viewers start video playback. Event registrations represent sign-ups and do not indicate attendance or started sessions.
+          </p>
+        </div>
       ) : (
         <div
           role="img"
@@ -333,6 +338,7 @@ export default function AudienceAccess() {
   // reported, live and replay, over the same window as the rest of the page — the summary also
   // carries the per-day series and each event's session count.
   const qoeWindow = range;
+  const rangeLabel = RANGE_LABEL[range] || `${range} days`;
   const qoe = useApi(() =>
     api.get("/organization/playback/qoe", { params: { window: qoeWindow } }).then((r) => r.data)
   );
@@ -565,12 +571,12 @@ export default function AudienceAccess() {
         {/* Counted in SQL across the selected window — not summed from the page of rows
             below, which would describe the page instead of the organization. */}
         <KpiTile icon={FiCalendar} tone="violet" label="Events in scope" value={summary.loading ? "…" : kpi(totals.events)}
-          caption="Events in the selected window" />
+          caption={`Events in the selected ${rangeLabel}`} />
         <KpiTile icon={FiEye} tone="sky" label="Playback sessions"
           value={qoe.loading && !qoe.data ? "…" : qoe.data ? (qoe.data.total?.sessions ?? 0).toLocaleString() : UNKNOWN}
-          caption={qoe.error ? "Playback telemetry unavailable" : `Not unique people · last ${qoeWindow}`} />
+          caption={qoe.error ? "Playback telemetry unavailable" : `Reported in the last ${rangeLabel} · not unique people`} />
         <KpiTile icon={FiUsers} tone="amber" label="Registrations" value={summary.loading ? "…" : kpi(totals.registrations)}
-          caption="Across events in the window" />
+          caption="Across events in window · does not imply attendance" />
         <KpiTile icon={FiRadio} tone="pink" label="Live events" value={shell?.badges ? shell.badges.live_events ?? 0 : UNKNOWN}
           caption="Viewer conditions monitored" />
       </KpiRow>
@@ -580,8 +586,8 @@ export default function AudienceAccess() {
         <div>
           <p className="text-[14px] font-semibold text-violet-900 dark:text-violet-100">Viewer-access policy decisions remain open</p>
           <p className={CONSOLE.body}>
-            Authentication, authorization and registration are separate. Access is set per event from its visibility and
-            registration rules, and changing that policy is approval-gated.
+            Authentication, authorization, registration and playback are separate. Access is set per event from its visibility and
+            registration rules, while playback telemetry measures media delivered to viewers who actually attended.
           </p>
         </div>
       </div>
@@ -590,7 +596,7 @@ export default function AudienceAccess() {
         <div className="min-w-0 space-y-6">
           <ConsolePanel
             title="Playback activity"
-            subtitle="Playback sessions in the window — not a count of identified viewers"
+            subtitle={`Playback sessions reported in the last ${rangeLabel} — not a count of identified viewers or registrants`}
             tag="Player-reported"
             tagTone="violet"
           >
@@ -603,7 +609,7 @@ export default function AudienceAccess() {
             )}
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
               <p className={cx("text-[11.5px]", CONSOLE.faint)}>
-                A session can be anonymous or signed in; repeat views can create several sessions.
+                Playback sessions require a viewer to start media in a player. Registrations do not automatically start playback sessions.
               </p>
               <PanelLink to="/organization/analytics">Open analytics</PanelLink>
             </div>
