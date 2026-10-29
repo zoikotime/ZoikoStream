@@ -113,7 +113,7 @@ const liveAudioPublications = (room) =>
   );
 
 export default function useLiveKitPublish({
-  enabled, url, token, streamRef, screenTrack, screenAudioTrack, videoTrack,
+  enabled, url, token, streamRef, screenTrack, screenAudioTrack, videoTrack, audioTrack,
 }) {
   const roomRef = useRef(null);
   // The published video track's publication, so screen share can unpublish/republish it
@@ -496,6 +496,39 @@ export default function useLiveKitPublish({
     });
     return undefined;
   }, [videoTrack, connected]);
+
+  // The same for the MICROPHONE, which had no equivalent. Every re-acquire in
+  // useMediaPreview — switching mic, flipping the camera (it reacquires the whole stream,
+  // audio included), restarting after a device dropped — yields a new audio track and stops
+  // the old one. The publication went on pointing at the stopped track, and republishMissing
+  // could not repair it because a Microphone publication still existed: the host kept
+  // talking, the console still read "Mic", and viewers heard silence.
+  //
+  // Compared on .track.mediaStreamTrack for the reason given above, so an unchanged track is
+  // never unpublished and republished. Mute is not a swap: it flips .enabled on the SAME
+  // track (useMediaPreview), which LiveKit carries to viewers as-is.
+  useEffect(() => {
+    const room = roomRef.current;
+    if (!room || !connected) return undefined;
+    if (!audioTrack) return undefined;
+    if (micPubRef.current?.track?.mediaStreamTrack === audioTrack) return undefined;
+
+    const myGen = genRef.current;
+    const current = () => genRef.current === myGen && roomRef.current === room;
+
+    (async () => {
+      const prevPub = micPubRef.current;
+      micPubRef.current = null;
+      if (prevPub) await room.localParticipant.unpublishTrack(prevPub.track, false);
+      if (current()) {
+        micPubRef.current = await room.localParticipant.publishTrack(audioTrack, { source: Track.Source.Microphone });
+      }
+    })().catch(() => {
+      // As above: LocalTrackPublished/LocalTrackUnpublished re-derive `publishedAudio`, which
+      // is what the console reports — a failed swap is not shown as a working mic.
+    });
+    return undefined;
+  }, [audioTrack, connected]);
 
   return {
     connected, reconnecting, publishError,

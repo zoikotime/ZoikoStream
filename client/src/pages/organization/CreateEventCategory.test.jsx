@@ -34,13 +34,20 @@ const renderModal = () => {
   return { onCreated };
 };
 
-const categorySelect = () => screen.getByDisplayValue(/webinar|funeral/i);
+// Category is a listbox (ui/Dropdown, variant "field"), not a native <select>, so it is driven
+// the way a person drives it: open the field, then choose the option.
+const categoryField = () => screen.getByRole("combobox", { name: "Category" });
+const categoryList = () => screen.getByRole("listbox", { name: "Category" });
+const chooseCategory = async (u, name) => {
+  await u.click(categoryField());
+  await u.click(within(categoryList()).getByRole("option", { name }));
+};
 const visibilityButton = (name) => screen.getByRole("button", { name: new RegExp(name, "i") });
 // ui/forms Switch renders a role="switch" button whose label is its text content, with state
 // on aria-checked — there is no <label for>, so getByLabelText cannot see it.
 const featureSwitch = (label) => screen.getByRole("switch", { name: new RegExp(label, "i") });
 
-const pickMemorial = async (u) => u.selectOptions(categorySelect(), MEMORIAL);
+const pickMemorial = (u) => chooseCategory(u, MEMORIAL);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -142,9 +149,11 @@ describe("Funeral / Memorial features", () => {
 // ── the category is still offered, and behaves like any other ──────────────────────────
 
 describe("the category itself", () => {
-  it("is still selectable — removing the restriction is not removing the category", () => {
+  it("is still selectable — removing the restriction is not removing the category", async () => {
+    const u = userEvent.setup();
     renderModal();
-    expect(within(categorySelect()).getByRole("option", { name: MEMORIAL })).toBeInTheDocument();
+    await u.click(categoryField());
+    expect(within(categoryList()).getByRole("option", { name: MEMORIAL })).toBeInTheDocument();
   });
 
   it("is submitted verbatim, so the server can still classify and price it", async () => {
@@ -170,7 +179,7 @@ describe("the category itself", () => {
     const u = userEvent.setup();
     renderModal();
 
-    await u.selectOptions(categorySelect(), "Webinar");
+    await chooseCategory(u, "Webinar");
     const webinar = {
       public: visibilityButton("Public").disabled,
       chat: featureSwitch("Enable Chat").disabled,

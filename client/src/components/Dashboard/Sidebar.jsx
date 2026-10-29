@@ -198,7 +198,19 @@ function OrgNav({ state, role, collapsed, onNavigate }) {
                   countSuffix={item.badge ? "live" : undefined}
                   collapsed={collapsed}
                   reserveEnd={hasChildren}
-                  onClick={onNavigate}
+                  onClick={(e) => {
+                    if (e && (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || (e.button && e.button !== 0))) {
+                      return;
+                    }
+                    onNavigate?.(e);
+                    if (hasChildren) {
+                      setManual((m) => ({ ...m, [item.id]: true }));
+                    }
+                    const itemPath = item.to.split("?")[0];
+                    if (pathname === itemPath && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+                      window.dispatchEvent(new CustomEvent("zoiko:route-reset", { detail: { path: itemPath } }));
+                    }
+                  }}
                 />
                 {hasChildren && (
                   <button
@@ -231,7 +243,16 @@ function OrgNav({ state, role, collapsed, onNavigate }) {
                     to: child.to,
                     current: child.id === childId,
                     count: badges[child.badge] || 0,
-                    onClick: onNavigate,
+                    onClick: (e) => {
+                      if (e && (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || (e.button && e.button !== 0))) {
+                        return;
+                      }
+                      onNavigate?.(e);
+                      const childPath = child.to.split("?")[0];
+                      if (pathname === childPath && child.to === item.to && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+                        window.dispatchEvent(new CustomEvent("zoiko:route-reset", { detail: { path: childPath } }));
+                      }
+                    },
                   }))}
                 />
               )}

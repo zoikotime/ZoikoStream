@@ -70,16 +70,24 @@ export const accountHome = (role) =>
 // must confirm before the route may be entered.
 export const EVENT_CONSOLES = [
   { path: "/host/dashboard", capability: "can_host" },
+  { path: "/host/live", capability: "can_host", eventInPath: true },
   { path: "/moderator/dashboard", capability: "can_moderate" },
   { path: "/speaker/backstage", capability: "can_contribute" },
 ];
 
+// The Producer Console's live URL carries its event in the path: /host/live/<id>.
+const HOST_LIVE = /^\/host\/live\/([^/]+)\/?$/;
+
 /** The console entry a path describes, or null if it is not an event console. */
 export const consoleFor = (pathname) =>
-  EVENT_CONSOLES.find((entry) => entry.path === pathname) || null;
+  HOST_LIVE.test(pathname || "")
+    ? EVENT_CONSOLES.find((entry) => entry.path === "/host/live")
+    : EVENT_CONSOLES.find((entry) => !entry.eventInPath && entry.path === pathname) || null;
 
-/** The ?event=<id> a saved location carries, or null. */
-export const eventIdFrom = (search) => {
+/** The event a saved location names — /host/live/<id>, else its ?event=<id> — or null. */
+export const eventIdFrom = (search, pathname) => {
+  const live = HOST_LIVE.exec(pathname || "");
+  if (live) return decodeURIComponent(live[1]);
   try {
     return new URLSearchParams(search || "").get("event");
   } catch {
@@ -133,7 +141,7 @@ export async function resolvePostLogin(user, saved) {
     return { to: target, reason: null };
   }
 
-  const eventId = eventIdFrom(search);
+  const eventId = eventIdFrom(search, saved.pathname);
   if (!eventId) {
     // A console with no event is not a destination. This is the case that used to render
     // an arbitrary event's Producer Console.

@@ -18,6 +18,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from .. import email as email_mod
+from .. import ratelimit
 from ..config import settings
 from ..crud import admin as admin_crud
 from ..crud import delivery as delivery_crud
@@ -75,6 +76,7 @@ from ..schemas.admin import (
 from ..schemas.auth import TokenOut, UserOut
 from ..schemas.organization import (
     AbuseReportCreate,
+    OrgFeedbackIn,
     AccessReviewAssignmentOut,
     SecurityContactCreate,
     SecurityContactVerify,
@@ -2746,3 +2748,48 @@ def reports_about_this_organization(user: User = Depends(get_current_user),
         select(AbuseReport).where(AbuseReport.org_id == org.id)
         .order_by(AbuseReport.created_at.desc())).all()
     return [security_comms.reported_party_view(r) for r in rows]
+
+
+# ── Feedback (Developer Platform footer) ──────────────────────────────────────
+#
+# NOT YET DELIVERED ANYWHERE. Nothing stores console feedback and nothing forwards it to a
+# person, so this endpoint must not answer as if it had: it validates the submission, records
+# that an attempt was made (metadata only — never the message text) and refuses with 503
+# FEEDBACK_DELIVERY_UNAVAILABLE, which the console shows as "not sent" with a route to Contact
+# support. Wiring delivery (the contact flow's support inbox, or a stored table) is a separate,
+# approved change; until then a 2xx here would be a false receipt.
+#
+# Protections, each verified by test_org_feedback.py:
+#   * a signed-in member of an organization (get_current_user, get_my_org), whose org comes
+#     from the token only — OrgFeedbackIn forbids extra fields, so a body cannot name one;
+#   * the router-level organization-state gate (main.py) refuses restricted/suspended orgs;
+#   * a body cap enforced before the body is read (main.py, body_limit.BodySizeLimit);
+#   * FEEDBACK_LIMIT submissions per FEEDBACK_WINDOW seconds per user (in-memory, per process,
+#     like every other limit in ratelimit.py).
+FEEDBACK_MAX_BODY_BYTES = 32 * 1024     # 4,000 chars of UTF-8 + JSON escaping, with room
+FEEDBACK_LIMIT = 5
+FEEDBACK_WINDOW = 600.0
+
+
+def _feedback_rate_limit(request: Request, user: User = Depends(get_current_user)) -> None:
+    ratelimit.enforce(request, "org_feedback", str(user.id), FEEDBACK_LIMIT, FEEDBACK_WINDOW)
+
+
+@router.post("/feedback", responses={503: {"description": "Feedback delivery is not available"}})
+def submit_organization_feedback(data: OrgFeedbackIn,
+                                 user: User = Depends(get_current_user),
+                                 org: Organization = Depends(get_my_org),
+                                 _limit: None = Depends(_feedback_rate_limit)):
+    """Developer Platform feedback. Validated, then refused: there is no delivery yet."""
+    # Category is one of four fixed values (OrgFeedbackIn), ids are UUIDs and the length is an
+    # int, so nothing a caller typed reaches the log.
+    log.info("org feedback not delivered (no delivery configured): org_id=%s user_id=%s "
+             "category=%s chars=%d", org.id, user.id, data.category, len(data.message))
+    raise HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        {
+            "code": "FEEDBACK_DELIVERY_UNAVAILABLE",
+            "message": ("Feedback from the console can't be sent to our team yet, so this "
+                        "message was not sent. Please use Contact support instead."),
+        },
+    )

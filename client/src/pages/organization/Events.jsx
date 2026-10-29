@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   FiAlertTriangle, FiCalendar, FiCheck, FiChevronDown, FiChevronRight, FiClock, FiLink, FiList,
@@ -36,6 +36,7 @@ const PAGE_SIZE = 10;
 const REFRESH_MS = 15000;
 // Columns the API can sort by (crud.event._EVENT_SORTS). Duration is derived, so it is not one.
 const SORT_FIELD = { title: "title", status: "status", start_time: "start_time" };
+const DEFAULT_SORT = { key: "start_time", dir: "desc" };
 // "on_air" is Live now (live AND degraded: crud/event.DISPLAY_ON_AIR); "upcoming" is every
 // pre-live, non-draft status, Missed excluded (DISPLAY_UPCOMING).
 const ON_AIR_FILTER = "on_air";
@@ -125,7 +126,7 @@ function useSideData(tick) {
     const from = new Date(now.getFullYear(), now.getMonth(), 1);
     const to = new Date(now.getFullYear(), now.getMonth() + 1, 1);
     Promise.allSettled([
-      api.get("/events", { params: { date_from: now.toISOString(), date_to: new Date(now.getTime() + 30 * 86400000).toISOString(), sort_by: "start_time", order: "asc", page_size: 3 } }),
+      api.get("/events", { params: { display_status: UPCOMING_FILTER, date_from: now.toISOString(), date_to: new Date(now.getTime() + 30 * 86400000).toISOString(), sort_by: "start_time", order: "asc", page_size: 3 } }),
       api.get("/events", { params: { date_from: from.toISOString(), date_to: to.toISOString(), sort_by: "start_time", order: "asc", page_size: 100 } }),
     ]).then(([up, month]) => {
       if (!alive) return;
@@ -304,7 +305,7 @@ export default function OrganizationEvents() {
   const view = searchParams.get("view") === "calendar" ? "calendar" : "list";
   const range = RANGES[searchParams.get("range") || ""] ? searchParams.get("range") || "" : "";
   const [page, setPage] = useState(1);
-  const [sort, setSort] = useState({ key: "start_time", dir: "desc" });
+  const [sort, setSort] = useState(DEFAULT_SORT);
   // One writer for the page's URL state. Functional, so it never drops a parameter another
   // control set in the same tick (create=true from the topbar, the month of the calendar).
   const setUrl = (patch) => {
@@ -348,10 +349,32 @@ export default function OrganizationEvents() {
   useInterval(() => {
     if (!document.hidden) reload();
   }, REFRESH_MS);
-  const reloadAll = () => {
+  const reloadAll = useCallback(() => {
     reload();
     setSideTick((t) => t + 1);
-  };
+  }, [reload]);
+  // The breadcrumb's "Events": the canonical listing, /organization/events with nothing
+  // narrowed. Its link clears what the URL holds (status, view, range, month, q); this clears
+  // what the page holds itself — the search box, the page and the sort — which a navigation to
+  // the URL already open would leave exactly as they were, so the crumb did nothing. Then the
+  // list is fetched fresh, as arriving at the page would.
+  const showAllEvents = useCallback(() => {
+    setQuery("");
+    setQ("");
+    setPage(1);
+    setSort(DEFAULT_SORT);
+    reloadAll();
+  }, [reloadAll]);
+
+  useEffect(() => {
+    const onReset = (e) => {
+      if (!e.detail?.path || e.detail.path === "/organization/events") {
+        showAllEvents();
+      }
+    };
+    window.addEventListener("zoiko:route-reset", onReset);
+    return () => window.removeEventListener("zoiko:route-reset", onReset);
+  }, [showAllEvents]);
 
   const rows = data?.items || [];
   const total = data?.total ?? 0;
@@ -359,7 +382,7 @@ export default function OrganizationEvents() {
   const count = (...keys) => (data ? keys.reduce((n, k) => n + (counts[k] || 0), 0) : null);
   const tabCount = {
     all: count(...Object.keys(counts).filter((k) => k !== "archived")),
-    [UPCOMING_FILTER]: count("published", "scheduled", "ready_to_arm", "armed"),
+    [UPCOMING_FILTER]: counts.upcoming !== undefined ? counts.upcoming : count("published", "scheduled", "ready_to_arm", "armed"),
     [ON_AIR_FILTER]: count("live", "degraded"),
     ended: count("ended"),
     draft: count("draft"),
@@ -450,7 +473,11 @@ export default function OrganizationEvents() {
   return (
     <div className="space-y-6">
       <OrganizationPageHeader
-        breadcrumbs={[["Organization", "/organization/manage"], ["Events", "/organization/events"], [view === "calendar" ? "Calendar" : "All Events"]]}
+        breadcrumbs={[
+          ["Organization", "/organization/manage"],
+          ["Events", "/organization/events", { onNavigate: showAllEvents }],
+          [view === "calendar" ? "Calendar" : "All Events"],
+        ]}
         eyebrow="Event portfolio"
         title="Events"
         subtitle="Plan, oversee and manage your events from a single portfolio."
@@ -473,8 +500,8 @@ export default function OrganizationEvents() {
       <KpiRow>
         <KpiTile icon={FiCalendar} tone="violet" label="All events" value={tabCount.all} caption="Including drafts and completed" />
         <KpiTile icon={FiRadio} tone="pink" label="Live now" value={tabCount[ON_AIR_FILTER]} caption="Requires active monitoring" />
-        <KpiTile icon={FiClock} tone="sky" label="Upcoming" value={side.upcoming ? side.upcoming.total : side.upcoming === undefined ? "…" : null}
-          caption={side.upcoming === null ? "Couldn’t load events" : "Scheduled over the next 30 days"} />
+        <KpiTile icon={FiClock} tone="sky" label="Upcoming" value={tabCount[UPCOMING_FILTER]}
+          caption={tabCount[UPCOMING_FILTER] === null ? "Couldn’t load events" : "Scheduled and published before go-live"} />
         <KpiTile icon={FiAlertTriangle} tone="amber" label="Needs attention" value={attentionTotal}
           caption={attention ? `${attention.blocked} blocked · ${attention.conditional} with checks open` : "Readiness review"} />
       </KpiRow>

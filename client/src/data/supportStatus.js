@@ -94,10 +94,16 @@ export function shownServices(serviceStatus) {
 }
 
 /** The "Incidents (24 h)" cell: a count of recorded incidents, never a percentage. */
+// `count` and `noun` are `text` in two parts, so the cell can set the number apart from the word.
 export function incidentsCell(count) {
-  if (!Number.isInteger(count) || count < 0) return { text: "—", title: "No incident count was returned." };
+  if (!Number.isInteger(count) || count < 0) {
+    return { text: "—", count: null, noun: "", title: "No incident count was returned." };
+  }
+  const noun = count === 1 ? "incident" : "incidents";
   return {
-    text: `${count} ${count === 1 ? "incident" : "incidents"}`,
+    text: `${count} ${noun}`,
+    count,
+    noun,
     title: "Incidents recorded against this service in the last 24 hours.",
   };
 }

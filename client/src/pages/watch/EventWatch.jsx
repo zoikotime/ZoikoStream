@@ -519,7 +519,18 @@ function EventWatchPage() {
   // reducer above doesn't have a case for it (nothing to store), so without this the
   // message just silently vanishes and "chat isn't working" is the only symptom a viewer
   // ever sees. Surfacing the server's actual reason instead.
+  // The post-event feedback prompt's outcome (submitFeedback below): the server acknowledges a
+  // stored submission to this identity, or refuses it with an error naming the action.
+  const feedbackWaiter = useRef(null);
   const onLiveEnvelope = useCallback((env) => {
+    if (env.channel === "moderator" && env.type === "error" && env.data?.action === "feedback.submit") {
+      feedbackWaiter.current?.(false);     // shown inside the feedback dialog, not as a toast
+      return;
+    }
+    if (env.channel === "session" && env.type === "feedback.saved") {
+      if (panel.you && env.data?.identity === panel.you.identity) feedbackWaiter.current?.(true);
+      return;
+    }
     if (env.channel === "moderator" && env.type === "error") {
       notify.error(env.data.message);
       return;
@@ -818,6 +829,47 @@ function EventWatchPage() {
   // event is a page to read, and holding a wake lock over one would just drain the battery.
   useKeepAwake(live);
   const ended = event?.status === "Completed";
+
+  // Feedback when the event ENDS, not only when a viewer clicks "Leave Event". Shown once, to a
+  // viewer this page saw watching it live, at the live -> ended transition (the host ending it,
+  // or it completing on schedule — both arrive as the status change fetchWatch picks up).
+  // Someone who opens an event that has already ended never watched it, so is not asked.
+  // Remembered per tab, so a refresh or a socket reconnect does not ask again.
+  const sawLive = useRef(false);
+  const [showEndedFeedback, setShowEndedFeedback] = useState(false);
+  useEffect(() => {
+    if (live) {
+      sawLive.current = true;
+      return;
+    }
+    if (!ended || !sawLive.current) return;
+    const key = `zk_fb_prompted_${eventId}`;
+    try {
+      if (sessionStorage.getItem(key)) return;
+      sessionStorage.setItem(key, "1");
+    } catch { /* storage unavailable: ask once for this page view */ }
+    sawLive.current = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reacting to a server status change
+    setShowEndedFeedback(true);
+  }, [live, ended, eventId]);
+
+  // Resolves true only on the server's acknowledgement (session/feedback.saved — the row is
+  // committed), false on its refusal, on a socket that is not open, or with no answer in time.
+  const submitFeedback = useCallback((payload) => new Promise((resolve) => {
+    let timer = null;
+    const settle = (ok) => {
+      clearTimeout(timer);
+      if (feedbackWaiter.current === settle) feedbackWaiter.current = null;
+      resolve(ok);
+    };
+    feedbackWaiter.current?.(false);        // a newer attempt supersedes an unanswered one
+    feedbackWaiter.current = settle;
+    if (!sendLive("feedback.submit", payload)) {
+      settle(false);
+      return;
+    }
+    timer = setTimeout(() => settle(false), 10000);
+  }), [sendLive]);
   const identified = !!(user || regToken || linkToken);
   // "Leave Event" opens the feedback modal first (the live socket is still connected at
   // that point, so the modal's onSubmit can ride it) — the actual disconnect/token-clear/
@@ -1216,7 +1268,11 @@ function EventWatchPage() {
           )}
 
           <div className="min-w-0 lg:col-start-1 lg:row-start-2">
-            <EventInfo event={event} endISO={event.endISO} viewers={live ? viewers : null} />
+            {/* The count is presence from the live socket; until that socket is open and its
+                snapshot has arrived it is unknown, not zero — shown as "—" rather than a 0
+                that reads as an empty room. */}
+            <EventInfo event={event} endISO={event.endISO}
+              viewers={live ? (liveOpen && panel.you ? viewers : "—") : null} />
           </div>
         </div>
       </main>
@@ -1230,6 +1286,14 @@ function EventWatchPage() {
         role="viewer"
         onSubmit={(payload) => sendLive("feedback.submit", payload)}
         onDone={finishLeave}
+      />
+      {/* The event ended while this viewer watched: same prompt, but the page stays, so it
+          waits for the server's answer and says whether the feedback was really saved. */}
+      <FeedbackModal
+        open={showEndedFeedback && !showLeaveFeedback}
+        role="viewer"
+        onSubmit={submitFeedback}
+        onDone={() => setShowEndedFeedback(false)}
       />
     </div>
   );

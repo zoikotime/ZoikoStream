@@ -93,6 +93,10 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
   // state (not just read off streamRef) so useLiveKitPublish can detect the swap and
   // republish; a ref wouldn't trigger its effect.
   const [videoTrack, setVideoTrack] = useState(null);
+  // The same for the microphone. Every re-acquire (a mic or camera switch, a restart after a
+  // device dropped) yields a NEW audio track; useLiveKitPublish swaps the published mic to it
+  // on this changing. Null while the preview holds no audio track at all (micMissing below).
+  const [audioTrack, setAudioTrack] = useState(null);
   // Unsupported is knowable at init, so start in that state instead of setting it from an
   // effect (which would render once claiming everything is fine).
   const [error, setError] = useState(() => {
@@ -148,6 +152,7 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
     setActive(false);
     setActual(null);
     setVideoTrack(null);
+    setAudioTrack(null);
   }, []);
 
   // Every acquisition attempt chains onto the previous one instead of firing independently.
@@ -190,6 +195,7 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
         setError(null);
         setActive(true);
         setVideoTrack(stream.getVideoTracks()[0] || null);
+        setAudioTrack(stream.getAudioTracks()[0] || null);
         readActual();
 
         // A track whose SOURCE dies — webcam unplugged, OS privacy switch flipped, another
@@ -202,6 +208,7 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
           if (cancelled) return;
           setActive(false);
           setVideoTrack(null);
+          setAudioTrack(null);
           setError("Your camera or microphone stopped — check the device is still connected "
             + "and available, then start the preview again.");
         };
@@ -258,7 +265,7 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
 
   useEffect(() => {
     streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !!mic; });
-  }, [mic, active]);
+  }, [mic, active, audioTrack]);
 
   // Resolution / frame rate / audio processing changes apply to the live track.
   //
@@ -319,6 +326,12 @@ export default function useMediaPreview({ enabled, camera, mic, settings }) {
     // MediaStream itself) so reading it doesn't force this hook's consumers to re-render.
     streamRef,
     videoTrack,
+    audioTrack,
+    // The preview is running but holds no microphone: the camera was granted and the mic was
+    // not (blocked, missing or in use), so the per-kind fallback above went on with video
+    // only. Viewers would hear nothing while the console's mic button read "Mic" — so this
+    // is surfaced (ControlBar, StudioStage) instead of being discovered by the audience.
+    micMissing: active && !audioTrack,
     devices,
     picked,
     actual,

@@ -103,7 +103,16 @@ export const useEventWorkspace = () => useOutletContext();
 export function useHashScroll() {
   const { hash } = useLocation();
   useEffect(() => {
-    if (!hash) return undefined;
+    if (!hash) {
+      const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
+      if (main && typeof main.scrollTo === "function") {
+        main.scrollTo({ top: 0, behavior: "smooth" });
+      }
+      if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+      return undefined;
+    }
     const id = decodeURIComponent(hash.slice(1));
     let tries = 0;
     const timer = setInterval(() => {

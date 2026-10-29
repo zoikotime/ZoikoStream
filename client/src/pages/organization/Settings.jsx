@@ -918,7 +918,7 @@ export default function OrganizationSettings() {
                   {[
                     [FiCode, "API reference", "Endpoints, versioning and platform status", "/organization/developers"],
                     [FiVideo, "Live inputs", "RTMP / WHIP ingest for OBS, vMix and hardware encoders", "/organization/live-inputs"],
-                    [FiCloud, "Playback & access", "Where and how your streams can be watched", "/organization/playback"],
+                    [FiCloud, "Playback & access", "Where and how your streams can be watched", "/organization/audience/access"],
                   ].map(([Icon, name, desc, to]) => (
                     <Link
                       key={to}

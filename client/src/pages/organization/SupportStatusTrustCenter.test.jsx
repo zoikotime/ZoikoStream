@@ -161,15 +161,18 @@ describe("the /trust route itself", () => {
   });
 });
 
-describe("the rest of the footer and the trust cards are unchanged", () => {
-  it("keeps Privacy and Terms as they were — plain text, not links", async () => {
+describe("the rest of the footer and the trust cards", () => {
+  // The footer's rule is "only destinations that exist are links". Privacy has one now — the
+  // public privacy policy, /privacy — so it links there; Terms still has no page and stays
+  // text. Incident History opens the published incident history (/status, "Past incidents"):
+  // it pointed at the organization dashboard, which shows no incidents at all.
+  it("links each item that has a destination, and leaves Terms as plain text", async () => {
     renderAt("/organization/support");
     await supportLoaded();
-    for (const label of ["Privacy", "Terms"]) {
-      expect(within(footer()).getByText(label)).toBeInTheDocument();
-      expect(within(footer()).queryByRole("link", { name: label })).not.toBeInTheDocument();
-    }
-    expect(within(footer()).getByRole("link", { name: "Incident History" })).toHaveAttribute("href", "/organization/dashboard");
+    expect(within(footer()).getByRole("link", { name: "Privacy" })).toHaveAttribute("href", "/privacy");
+    expect(within(footer()).getByText("Terms")).toBeInTheDocument();
+    expect(within(footer()).queryByRole("link", { name: "Terms" })).not.toBeInTheDocument();
+    expect(within(footer()).getByRole("link", { name: "Incident History" })).toHaveAttribute("href", "/status");
     expect(within(footer()).getByRole("link", { name: "Contact" })).toHaveAttribute("href", "/contact");
   });
 
@@ -197,7 +200,7 @@ describe("the footer on a phone", () => {
     renderAt("/organization/support");
     await supportLoaded();
     const links = within(footer()).getAllByRole("link");
-    expect(links.map((a) => a.textContent.trim())).toEqual(["Trust Center", "Incident History", "Contact"]);
+    expect(links.map((a) => a.textContent.trim())).toEqual(["Privacy", "Trust Center", "Incident History", "Contact"]);
     for (const a of links) {
       expect(a.className.split(/\s+/)).toEqual(expect.arrayContaining(["inline-flex", "items-center"]));
     }

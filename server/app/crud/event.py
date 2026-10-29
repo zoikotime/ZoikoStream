@@ -55,6 +55,13 @@ def _ever_broadcast():
         BroadcastSession.event_id == Event.id, BroadcastSession.started_at.isnot(None)))
 
 
+def overdue_clause(now: datetime | None = None):
+    """SQL: the event is overdue at `now` (UTC) past start + grace without having broadcast."""
+    cutoff = (now or datetime.now(timezone.utc)) - start_grace()
+    return and_(Event.status.in_(_OVERDUE_FROM_STATUSES), Event.start_time.isnot(None),
+                Event.start_time < cutoff, ~_ever_broadcast())
+
+
 def missed_clause(now: datetime | None = None):
     """SQL: the event is Missed at `now` (UTC)."""
     cutoff = (now or datetime.now(timezone.utc)) - start_grace()
@@ -332,7 +339,7 @@ def list_events(db, org_id, q=None, status=None, host_id=None, date_from=None, d
     elif display_status == DISPLAY_ON_AIR:
         stmt = stmt.where(Event.status.in_(ON_AIR_STATUSES))
     elif display_status == DISPLAY_UPCOMING:
-        stmt = stmt.where(Event.status.in_(UPCOMING_STATUSES), ~missed_clause(now))
+        stmt = stmt.where(Event.status.in_(UPCOMING_STATUSES), ~overdue_clause(now))
     elif display_status:
         stmt = stmt.where(Event.status == display_status)
         if display_status in MISSED_FROM_STATUSES:
@@ -378,12 +385,16 @@ def status_counts(db, org_id) -> dict:
 
 def display_status_counts(db, org_id, now: datetime | None = None) -> dict:
     """status_counts as the Events page shows them: Missed counted on its own and NOT in
-    Scheduled, which then means upcoming only."""
+    Scheduled, which then means upcoming only; upcoming counts all pre-live events not overdue."""
     counts = status_counts(db, org_id)
     missed = db.scalar(select(func.count()).select_from(Event).where(
         Event.org_id == org_id, Event.deleted_at.is_(None), missed_clause(now))) or 0
     counts["scheduled"] = max(0, counts.get("scheduled", 0) - int(missed))
     counts[DISPLAY_MISSED] = int(missed)
+    upcoming = db.scalar(select(func.count()).select_from(Event).where(
+        Event.org_id == org_id, Event.deleted_at.is_(None),
+        Event.status.in_(UPCOMING_STATUSES), ~overdue_clause(now))) or 0
+    counts[DISPLAY_UPCOMING] = int(upcoming)
     return counts
 
 

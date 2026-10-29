@@ -1,17 +1,19 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   FiSearch, FiPlay, FiMonitor, FiShield, FiAlignLeft,
   FiTrendingUp, FiCheckSquare, FiChevronRight, FiKey, FiLink, FiLayers, FiActivity, FiCode,
   FiCalendar, FiLock, FiCheck, FiArrowRight,
 } from "react-icons/fi";
-import api from "../../api";
+import api, { errMsg } from "../../api";
 import useApi from "../../hooks/useApi";
 import useInterval from "../../hooks/useInterval";
 import { keyInventory } from "../../data/keyInventory";
 import { ACCENT, CONSOLE, STAGE_COLOR, cx, focusRing, type } from "../../ui/tokens";
 import { ConsoleButton } from "../../ui/Button";
-import { Input } from "../../ui/forms";
+import { Input, Label, Select, Textarea } from "../../ui/forms";
+import Modal from "../../ui/Modal";
+import { notify } from "../../ui/Toast";
 import HealthDot from "../../components/admin/HealthDot";
 import StatRow from "../../components/admin/StatRow";
 import OrganizationPageHeader from "../../components/organization/OrganizationPageHeader";
@@ -60,7 +62,7 @@ const QUICKSTARTS = [
     crumb: "Contribute → Ingest", stages: ["contribute", "ingest"],
   },
   {
-    icon: FiShield, tile: ACCENT.violet.chip, to: "/organization/playback",
+    icon: FiShield, tile: ACCENT.violet.chip, to: "/organization/audience/access",
     title: "Secure playback with signed tokens",
     desc: "Issue short-lived access grants and verify sessions before serving protected media.",
     crumb: "Secure", stages: ["secure"],
@@ -83,15 +85,6 @@ const QUICKSTARTS = [
     desc: "Understand the request, readiness, and status contract for operator-run events.",
     crumb: "Deliver", stages: ["deliver"],
   },
-];
-
-// Footer, in the design's order. `null` = no destination exists yet, so it renders as text.
-const FOOTER_LINKS = [
-  ["Feedback", null],
-  ["Accessibility", null],
-  ["Security", "/organization/settings?tab=security"],
-  ["Status", "/organization/support"],
-  ["Terms", null],
 ];
 
 // What the platform actually enforces today — each line is a behaviour of this codebase
@@ -256,9 +249,320 @@ function Deliveries({ hooks, errorsOnly }) {
   );
 }
 
+
+// What the Feedback dialog may claim is decided by the SERVER's answer, not assumed. Today
+// POST /organization/feedback validates the message and answers 503
+// FEEDBACK_DELIVERY_UNAVAILABLE: nothing stores or forwards console feedback yet. So the dialog
+// says the message was NOT sent, keeps the text, and points at Contact support. Only an answer
+// of `status: "delivered"` — once delivery exists — shows a "sent" confirmation.
+const FEEDBACK_MAX = 4000;
+
+export function FeedbackModal({ open, onClose }) {
+  const [category, setCategory] = useState("developer_platform");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState(null);
+  const [undelivered, setUndelivered] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [sent, setSent] = useState(false);
+  // Each submission takes a ticket; closing the dialog voids it (and aborts the request), so
+  // an answer that arrives later cannot write into a dialog that was closed or reopened.
+  const attempt = useRef(0);
+  const inFlight = useRef(null);
+
+  const resetForm = () => {
+    setCategory("developer_platform");
+    setMessage("");
+    setError(null);
+    setUndelivered(false);
+    setSubmitting(false);
+    setSent(false);
+  };
+
+  const handleClose = () => {
+    attempt.current += 1;
+    inFlight.current?.abort();
+    inFlight.current = null;
+    resetForm();
+    onClose();
+  };
+
+  const handleSubmit = async (e) => {
+    e?.preventDefault();
+    if (submitting) return;
+    const trimmed = message.trim();
+    if (!trimmed) {
+      setError("Please enter your feedback before submitting.");
+      return;
+    }
+    if (trimmed.length < 5) {
+      setError("Please enter at least 5 characters of feedback.");
+      return;
+    }
+    const ticket = ++attempt.current;
+    const controller = new AbortController();
+    inFlight.current = controller;
+    setError(null);
+    setUndelivered(false);
+    setSubmitting(true);
+    try {
+      const { data } = await api.post(
+        "/organization/feedback",
+        { category, message: trimmed },
+        { signal: controller.signal }
+      );
+      if (ticket !== attempt.current) return;
+      if (data?.status === "delivered") {
+        setSent(true);
+        notify.success("Feedback sent");
+      } else {
+        // A success status that does not say "delivered" is not a receipt.
+        setUndelivered(true);
+      }
+    } catch (err) {
+      if (ticket !== attempt.current) return;
+      const detail = err?.response?.data?.detail;
+      if (err?.response?.status === 503 && detail?.code === "FEEDBACK_DELIVERY_UNAVAILABLE") setUndelivered(true);
+      else setError(errMsg(err));
+    } finally {
+      if (ticket === attempt.current) {
+        setSubmitting(false);
+        inFlight.current = null;
+      }
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title={sent ? "Feedback sent" : "Developer Platform Feedback"}
+      size="md"
+      // A form: a stray click outside must not discard it. Escape, Cancel and the close
+      // button always close it, and cancel a submission still in flight.
+      closeOnBackdrop={false}
+      footer={
+        sent ? (
+          <ConsoleButton variant="secondary" type="button" onClick={handleClose}>
+            Done
+          </ConsoleButton>
+        ) : (
+          <div className="flex w-full items-center justify-end gap-2">
+            <ConsoleButton variant="secondary" type="button" onClick={handleClose}>
+              Cancel
+            </ConsoleButton>
+            <ConsoleButton
+              variant="primary"
+              type="button"
+              onClick={handleSubmit}
+              disabled={submitting}
+            >
+              {submitting ? "Submitting..." : "Submit Feedback"}
+            </ConsoleButton>
+          </div>
+        )
+      }
+    >
+      {sent ? (
+        <div className="space-y-3 py-2 text-center sm:text-left">
+          <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
+            <FiCheck className="h-5 w-5 shrink-0" aria-hidden="true" />
+            <p className="font-semibold text-slate-900 dark:text-white">
+              Your feedback was sent to the ZoikoStream team.
+            </p>
+          </div>
+          <p className="text-sm text-slate-600 dark:text-slate-300">
+            Thank you — it helps us improve ZoikoStream APIs, documentation, and developer tools.
+          </p>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Help us improve ZoikoStream developer tools, APIs, and documentation.
+          </p>
+
+          {undelivered && (
+            <div
+              role="alert"
+              className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100"
+            >
+              <p className="font-semibold">Your feedback was not sent.</p>
+              <p className="mt-1">
+                Feedback from the console can&rsquo;t reach our team yet. Your text is still here
+                — please send it through{" "}
+                <Link to="/contact" className={cx("font-semibold underline underline-offset-2", focusRing)}>
+                  Contact support
+                </Link>
+                .
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <div
+              role="alert"
+              className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/40 dark:text-rose-300"
+            >
+              {error}
+            </div>
+          )}
+
+          <div>
+            <Label htmlFor="feedback-category" variant="console">
+              Topic / Category
+            </Label>
+            <Select
+              id="feedback-category"
+              variant="console"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              disabled={submitting}
+            >
+              <option value="developer_platform">Developer Platform & APIs</option>
+              <option value="documentation">Documentation & Quickstarts</option>
+              <option value="webhooks_ingest">Webhooks & Stream Ingest</option>
+              <option value="general">General feedback</option>
+            </Select>
+          </div>
+
+          <div>
+            <Label htmlFor="feedback-message" variant="console">
+              Your feedback <span className="text-rose-500" aria-hidden="true">*</span>
+            </Label>
+            <Textarea
+              id="feedback-message"
+              variant="console"
+              rows={4}
+              maxLength={FEEDBACK_MAX}
+              value={message}
+              onChange={(e) => {
+                setMessage(e.target.value);
+                if (error) setError(null);
+              }}
+              placeholder="Tell us what worked, what was confusing, or what capability is missing..."
+              aria-required="true"
+              aria-describedby="feedback-message-hint"
+              error={Boolean(error)}
+              disabled={submitting}
+            />
+            <p id="feedback-message-hint" className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+              5–{FEEDBACK_MAX.toLocaleString()} characters. Do not include API keys, passwords, or personal credentials.
+            </p>
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
+export function AccessibilityModal({ open, onClose }) {
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Accessibility & Keyboard Navigation"
+      size="lg"
+      closeOnBackdrop
+      footer={
+        <ConsoleButton variant="secondary" type="button" onClick={onClose}>
+          Close
+        </ConsoleButton>
+      }
+    >
+      <div className="space-y-5 text-sm text-slate-600 dark:text-slate-300">
+        <p>
+          ZoikoStream is committed to providing an accessible console for developers and operators of all abilities.
+        </p>
+
+        <div>
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-900 dark:text-white">
+            Keyboard Shortcuts
+          </h3>
+          <dl className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 dark:border-slate-800 dark:bg-slate-800/50">
+              <dt className="font-mono text-xs font-bold text-violet-600 dark:text-violet-400">
+                Tab / Shift + Tab
+              </dt>
+              <dd className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                Navigate forward and backward through interactive elements, buttons, and form inputs.
+              </dd>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 dark:border-slate-800 dark:bg-slate-800/50">
+              <dt className="font-mono text-xs font-bold text-violet-600 dark:text-violet-400">
+                Enter / Space
+              </dt>
+              <dd className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                Activate links, toggle switches, expand collapsible sections, and submit dialog forms.
+              </dd>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 dark:border-slate-800 dark:bg-slate-800/50">
+              <dt className="font-mono text-xs font-bold text-violet-600 dark:text-violet-400">
+                Escape (Esc)
+              </dt>
+              <dd className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                Dismiss open dialogs, drawers, dropdown menus, and overlays.
+              </dd>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 dark:border-slate-800 dark:bg-slate-800/50">
+              <dt className="font-mono text-xs font-bold text-violet-600 dark:text-violet-400">
+                Arrow Keys
+              </dt>
+              <dd className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                Cycle through menu items, tab lists, and select options where supported.
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        <div className="space-y-3 border-t border-slate-100 pt-3 dark:border-slate-800">
+          <div>
+            <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
+              Visual & Contrast Standards
+            </h4>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Both light and dark console themes are calibrated against WCAG 2.1 Level AA color contrast ratios for text and essential interface components.
+            </p>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
+              Motion Sensitivity
+            </h4>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              The interface respects the system-level <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[11px] dark:bg-slate-800">prefers-reduced-motion</code> setting, disabling animated transitions and pulsing indicators.
+            </p>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
+              Assistive Technology & Feedback
+            </h4>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              We continuously test and improve screen reader compatibility (NVDA, JAWS, VoiceOver). If you encounter accessibility hurdles, please use the Feedback link or contact support.
+            </p>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export default function DeveloperPlatform() {
   const [query, setQuery] = useState("");
   const [stage, setStage] = useState(null);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [a11yOpen, setA11yOpen] = useState(false);
+  const feedbackTriggerRef = useRef(null);
+  const a11yTriggerRef = useRef(null);
+
+  const handleCloseFeedback = () => {
+    setFeedbackOpen(false);
+    feedbackTriggerRef.current?.focus();
+  };
+
+  const handleCloseA11y = () => {
+    setA11yOpen(false);
+    a11yTriggerRef.current?.focus();
+  };
 
   // Posture only — the catalogue above renders immediately, so there is no page skeleton
   // to wait behind. Same endpoint the Overview polls; no new API surface.
@@ -620,29 +924,47 @@ export default function DeveloperPlatform() {
         <p className={cx("text-[12px]", CONSOLE.faint)}>
           © {new Date().getFullYear()} Zoiko Group. All rights reserved.
         </p>
-        {/* Only destinations that exist are links; the rest render as text, not 404s. */}
+        {/* Feedback and Accessibility open modals; Security and Status navigate; Terms is informational.
+            inline-flex items-center: in the Android app the 44px touch-target floor (index.css) makes
+            a link or button 44px tall with its text pinned to the top, 13px above plain-text items.
+            Centering keeps the touch target and levels the row. */}
         <nav className="flex flex-wrap items-center gap-x-6 gap-y-2">
-          {FOOTER_LINKS.map(([label, to]) =>
-            to ? (
-              // inline-flex items-center: in the Android app the 44px touch-target floor
-              // (index.css) makes a link 44px tall with its text pinned to the top, 13px above
-              // the plain-text items beside it. Centering keeps the target and levels the row.
-              // Same fix as the Support & Status footer; no effect on web.
-              <Link
-                key={label}
-                to={to}
-                className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}
-              >
-                {label}
-              </Link>
-            ) : (
-              <span key={label} className={cx("text-[12px]", CONSOLE.faint)}>
-                {label}
-              </span>
-            )
-          )}
+          <button
+            ref={feedbackTriggerRef}
+            type="button"
+            onClick={() => setFeedbackOpen(true)}
+            className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}
+          >
+            Feedback
+          </button>
+          <button
+            ref={a11yTriggerRef}
+            type="button"
+            onClick={() => setA11yOpen(true)}
+            className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}
+          >
+            Accessibility
+          </button>
+          <Link
+            to="/organization/settings?tab=security"
+            className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}
+          >
+            Security
+          </Link>
+          <Link
+            to="/organization/support"
+            className={cx("inline-flex items-center rounded text-[12px]", CONSOLE.faint, "hover:text-slate-900 dark:hover:text-white", focusRing)}
+          >
+            Status
+          </Link>
+          <span className={cx("text-[12px]", CONSOLE.faint)}>
+            Terms
+          </span>
         </nav>
       </footer>
+
+      <FeedbackModal open={feedbackOpen} onClose={handleCloseFeedback} />
+      <AccessibilityModal open={a11yOpen} onClose={handleCloseA11y} />
     </div>
   );
 }

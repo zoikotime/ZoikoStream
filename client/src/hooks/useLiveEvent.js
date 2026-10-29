@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer } from "react";
-import { useSearchParams } from "react-router-dom";
+import useConsoleEventId from "./useConsoleEventId";
 import useEventStream from "./useEventStream";
 import useInterval from "./useInterval";
 import useReactionChannel from "./useReactionChannel";
@@ -265,8 +265,17 @@ export function reducer(state, env) {
     case "poll/poll.delete":
       return { ...state, polls: drop(state.polls, data) };
 
-    case "announcement/announcement.new":
-      return { ...state, announcements: [data, ...state.announcements] };
+    case "announcement/announcement.new": {
+      // The same announcement arrives as "new" twice when it was scheduled: once when it is
+      // created (no sent_at, a pending clock) and again when the scheduler sends it (sent_at,
+      // delivered_to). Prepending both left two entries for one record — a stale "pending"
+      // copy beside the "Sent · N connected" one. An id already listed is updated in place.
+      const i = state.announcements.findIndex((a) => a.id === data.id);
+      if (i === -1) return { ...state, announcements: [data, ...state.announcements] };
+      const next = state.announcements.slice();
+      next[i] = { ...next[i], ...data };
+      return { ...state, announcements: next };
+    }
     case "announcement/announcement.delete":
       return { ...state, announcements: drop(state.announcements, data) };
 
@@ -376,8 +385,8 @@ export function reducer(state, env) {
 }
 
 export default function useLiveEvent() {
-  const [params] = useSearchParams();
-  const eventParam = params.get("event");
+  // /host/live/:eventId or /host/dashboard?event=<id> — see useConsoleEventId.
+  const eventParam = useConsoleEventId();
   const [state, dispatch] = useReducer(reducer, EMPTY);
   // Audience reactions. Deliberately NOT part of `state`: a reaction is an ephemeral visual
   // event, and putting it through the reducer would re-render the entire Producer Console

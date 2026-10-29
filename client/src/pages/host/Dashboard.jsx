@@ -1,5 +1,6 @@
 // client/src/pages/host/Dashboard.jsx
-// Host / Producer console — broadcast control room. Route: /host/dashboard (optionally ?event=<id>).
+// Host / Producer console — broadcast control room. Routes: /host/dashboard?event=<id>, and
+// /host/live/<id> while that event is on air (the console moves between them; see below).
 // Standalone full-screen page (NOT the Organization Dashboard).
 //
 // Live state comes from hooks/useLiveEvent — the same socket and reducer the viewer watch
@@ -14,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { FiRadio, FiAlertTriangle } from "react-icons/fi";
 import useLiveEvent from "../../hooks/useLiveEvent";
+import { useHostConsoleUrl } from "../../hooks/useConsoleEventId";
 import useMediaPreview from "../../hooks/useMediaPreview";
 import useLiveKitPublish from "../../hooks/useLiveKitPublish";
 import useEventOverrun from "../../hooks/useEventOverrun";
@@ -86,6 +88,9 @@ export default function HostDashboard() {
 
   const canHost = state.canHost;
   const live = state.broadcast?.status === "live";
+  // /host/live/<id> while the broadcast is live or paused, /host/dashboard?event=<id> otherwise
+  // (hooks/useConsoleEventId.js). Settled once the snapshot has said which.
+  useHostConsoleUrl({ ready: state.ready, onAir: live || state.broadcast?.status === "paused" });
   // While this console is ON AIR the producer's sign-in is kept alive (auth/useSessionKeeper):
   // someone watching their own broadcast may not touch the mouse for half an hour, and must
   // not be signed out mid-event. The hold ends with the broadcast; an abandoned console that
@@ -202,6 +207,7 @@ export default function HostDashboard() {
     screenTrack,
     screenAudioTrack,
     videoTrack: media.videoTrack,
+    audioTrack: media.audioTrack,
   });
 
   // Report the VERIFIED publication state to the server, which has no other reliable way to

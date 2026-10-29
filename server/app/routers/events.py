@@ -260,7 +260,7 @@ def _attention_counts(db: Session, org_id) -> dict:
     can link straight to them."""
     upcoming = list(db.scalars(
         select(Event).where(Event.org_id == org_id, Event.deleted_at.is_(None),
-                            Event.status.in_(crud.UPCOMING_STATUSES), ~crud.missed_clause())
+                            Event.status.in_(crud.UPCOMING_STATUSES), ~crud.overdue_clause())
         .order_by(Event.start_time.asc().nulls_last()).limit(200)
     ).all())
     verdicts = ops_svc.readiness_many(db, upcoming)
@@ -605,6 +605,7 @@ def watch_event(
                     db, ev, identity,
                     registration_id=uuid.UUID(reg_payload["reg"]) if invited and reg_payload else None,
                     user_agent=request.headers.get("user-agent"), client_hint=client,
+                    client_ip=client_ip(request), request_headers=dict(request.headers),
                 )
                 # The same audience — and only it — measures its own playback quality.
                 qoe_token = playback_qoe.issue_token(

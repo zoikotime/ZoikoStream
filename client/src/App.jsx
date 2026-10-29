@@ -162,6 +162,22 @@ function LegacyModeratorRedirect() {
 
 // Super Admin sidebar destinations without a page yet — kept in-layout (Placeholder)
 // so the console nav never 404s. Everything else in the sidebar is a real page below.
+// The legacy standalone /organization/playback URL. Forwards to the canonical Audience & Access
+// hierarchy (/organization/audience/access), preserving query and hash. `replace` avoids back-button loops.
+function LegacyPlaybackRedirect() {
+  const location = useLocation();
+  return (
+    <Navigate
+      to={{
+        pathname: "/organization/audience/access",
+        search: location.search,
+        hash: location.hash,
+      }}
+      replace
+    />
+  );
+}
+
 const adminStubs = [];
 
 // Legacy generic dashboard (speaker/viewer land here until they get their own).
@@ -310,6 +326,9 @@ export default function App() {
                   the only event console this group protects. */}
               <Route element={<EventConsoleRoute capability={["can_host", "can_moderate"]} />}>
                 <Route path="/host/dashboard" element={<HostDashboard />} />
+                {/* The same console while its event is live: pages/host/Dashboard.jsx moves
+                    between the two URLs as the broadcast starts and ends, without remounting. */}
+                <Route path="/host/live/:eventId" element={<HostDashboard />} />
               </Route>
             </Route>
 
@@ -445,7 +464,8 @@ export default function App() {
                   <Route path="/organization/live-inputs" element={<LiveInputs />} />
                   {/* Operate */}
                   <Route path="/organization/sessions" element={<StreamingSessions />} />
-                  <Route path="/organization/playback" element={<PlaybackAccess />} />
+                  <Route path="/organization/audience/access" element={<PlaybackAccess />} />
+                  <Route path="/organization/playback" element={<LegacyPlaybackRedirect />} />
                   <Route path="/organization/audience" element={<AudienceAccess />} />
                   {/* Manage */}
                   <Route path="/organization/support" element={<SupportStatus />} />

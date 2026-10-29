@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     APP_URL: str = "http://localhost:5173"
     TRUSTED_PROXY_HOPS: int = 1
 
+    # GeoIP enrichment - ponytail: disabled by default; when enabled, enriches audience
+    # reach with coarse ISO 3166-1 alpha-2 country codes without persisting raw IP addresses.
+    GEOIP_ENABLED: bool = False
+    GEOIP_DATABASE_PATH: str = ""
+    GEOIP_TRUST_PROXY_HEADERS: bool = False
+
     # ── THE ANDROID APP ──────────────────────────────────────────────────────────────────
     # Kept OUT of CORS_ORIGINS on purpose. The production guard below rejects any
     # CORS_ORIGINS entry containing "localhost", and it is right to: combined with

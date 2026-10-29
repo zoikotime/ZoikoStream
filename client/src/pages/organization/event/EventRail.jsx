@@ -135,7 +135,11 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
             <li key={s.id}>
               <div className="flex">
                 <RailLink
-                  to={sectionPath(eventId, s.slug)}
+                  to={{
+                    pathname: sectionPath(eventId, s.slug),
+                    search: search || "",
+                    hash: "",
+                  }}
                   label={s.label}
                   icon={s.icon}
                   active={on}
@@ -154,7 +158,11 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
                     key: c.key,
                     label: c.label,
                     gated: c.gated,
-                    to: `${sectionPath(eventId, s.slug)}${c.query ? `?${c.query}` : ""}${c.hash ? `#${c.hash}` : ""}`,
+                    to: {
+                      pathname: sectionPath(eventId, s.slug),
+                      search: c.query ? `?${c.query}` : (search || ""),
+                      hash: c.hash ? `#${c.hash}` : "",
+                    },
                     current: childCurrent(c),
                     onClick: onNavigate,
                   }))}
@@ -169,7 +177,11 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
         {/* Preview, not open: the console never navigates to the attendee page itself — the
             Audience Access section explains what a viewer sees and holds the link. */}
         <RailLink
-          to={`${sectionPath(eventId, "access")}#viewer-preview`}
+          to={{
+            pathname: sectionPath(eventId, "access"),
+            search: search || "",
+            hash: "#viewer-preview",
+          }}
           label="Viewer preview"
           icon={FiEye}
           collapsed={collapsed}

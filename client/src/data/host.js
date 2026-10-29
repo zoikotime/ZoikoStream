@@ -126,3 +126,17 @@ export const NETWORK_TONE = { "4g": "success", "3g": "warning", "2g": "danger", 
 // Thresholds shared by the load/memory meters so both read the same way.
 export const meterTone = (percent) =>
   percent == null ? "neutral" : percent < 60 ? "success" : percent < 85 ? "warning" : "danger";
+
+// A watch duration in seconds, for the Producer Console's Stats tiles. Rounded to whole seconds
+// FIRST: the server sends a median like 90.1 (services/viewing_sessions.py rounds to 0.1s), and
+// splitting that unrounded printed "1m 30.099999999999994s". Same reading as the organization
+// panel (components/organization/ViewingSessionsPanel.jsx fmtSeconds); null stays "—".
+export const fmtWatchDuration = (s) => {
+  if (s == null || !Number.isFinite(Number(s))) return "—";
+  const total = Math.round(Number(s));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${total % 60}s`;
+  return `${total}s`;
+};

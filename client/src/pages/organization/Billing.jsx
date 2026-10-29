@@ -140,6 +140,7 @@ export default function OrganizationBilling() {
   // BETWEEN approved prices — it can never introduce one. Defaults to monthly, and the toggle
   // is not rendered at all unless some plan genuinely offers an alternative.
   const [interval, setInterval] = useState("monthly");
+  const [selectedPlanSlug, setSelectedPlanSlug] = useState(null);
   const intervalChoices = useMemo(() => {
     const seen = new Set();
     (plansList || []).forEach((p) => (p.billing_intervals || []).forEach((i) => seen.add(i)));
@@ -268,6 +269,18 @@ export default function OrganizationBilling() {
     () => plansList?.find((p) => p.slug === ent?.plan_slug),
     [plansList, ent]
   );
+
+  // Authoritative selected plan for comparison/upgrade:
+  // Defaults to the user's current subscribed plan if known and offered, or the first selectable tier.
+  const activeSelection = useMemo(() => {
+    if (selectedPlanSlug) return selectedPlanSlug;
+    const currentSlug = ent?.plan_slug;
+    if (currentSlug && offeredPlans.some((p) => p.slug === currentSlug)) {
+      return currentSlug;
+    }
+    const firstSelectable = offeredPlans.find((p) => p.pricing_state === "PUBLISHED" && p.self_service !== false);
+    return firstSelectable?.slug || null;
+  }, [selectedPlanSlug, ent?.plan_slug, offeredPlans]);
   // Does this organization already have a LIVE PAID subscription? A trial is not paid — that
   // is the self-service purchase path and must keep its Upgrade button. `active`/`past_due`
   // mean money is already moving, and the backend refuses a second checkout for exactly those
@@ -712,12 +725,30 @@ export default function OrganizationBilling() {
                 // `self_service`, never from the price shown on the card.
                 const cta = planCta(p, ent?.plan_slug, { checkoutLocked });
                 const current = cta.kind === "current";
+                const isSelectable = p.pricing_state === "PUBLISHED" && p.self_service !== false;
+                const isSelected = activeSelection === p.slug;
                 return (
                   <div
                     key={p.id}
+                    data-plan-slug={p.slug}
+                    data-selected={isSelected ? "true" : "false"}
+                    data-current={current ? "true" : "false"}
+                    tabIndex={isSelectable ? 0 : undefined}
+                    onClick={() => {
+                      if (isSelectable) setSelectedPlanSlug(p.slug);
+                    }}
+                    onKeyDown={(e) => {
+                      if (isSelectable && (e.key === "Enter" || e.key === " ")) {
+                        e.preventDefault();
+                        setSelectedPlanSlug(p.slug);
+                      }
+                    }}
                     className={cx(
-                      "flex flex-col rounded-2xl border p-4",
-                      current ? "border-violet-500 ring-1 ring-violet-500/30" : "border-slate-200 dark:border-slate-700"
+                      "flex flex-col rounded-2xl border p-4 transition-colors duration-150 motion-reduce:transition-none",
+                      isSelectable && "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-900",
+                      isSelected
+                        ? "border-violet-500 ring-1 ring-violet-500/30"
+                        : "border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600"
                     )}
                   >
                     <div className="flex items-center justify-between">

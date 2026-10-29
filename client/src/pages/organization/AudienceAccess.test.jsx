@@ -611,3 +611,127 @@ describe("sorting", () => {
     await waitFor(() => expect(listParams()).toMatchObject({ sort_by: "start_time", order: "desc" }));
   });
 });
+
+
+// ── metrics clarity and independence (Phase 3 regression tests) ───────────────────
+
+describe("metrics clarity and independence (registrations vs playback sessions)", () => {
+  const withMetrics = ({ registrations, qoeTotal, qoeByEvent = {}, failQoe = false }) => {
+    serve();
+    const base = vi.mocked(api.get).getMockImplementation();
+    vi.mocked(api.get).mockImplementation((url, cfg) => {
+      if (url === "/organization/audience-summary") {
+        return Promise.resolve({
+          data: { ...SUMMARY, registrations, range: cfg?.params?.range || "30d" },
+        });
+      }
+      if (url === "/organization/playback/qoe") {
+        if (failQoe) return Promise.reject(new Error("qoe failed"));
+        return Promise.resolve({
+          data: {
+            window: cfg?.params?.window || "30d",
+            live: { sessions: Math.floor(qoeTotal * 0.7) },
+            replay: { sessions: Math.ceil(qoeTotal * 0.3) },
+            total: {
+              sessions: qoeTotal,
+              playback_starts: qoeTotal,
+              failed_sessions: 0,
+              failures: [],
+            },
+            series: {
+              bucket: "day",
+              timezone: "UTC",
+              points: qoeTotal > 0 ? [{ start: "2026-10-20T00:00:00+00:00", sessions: qoeTotal, playback_starts: qoeTotal }] : [],
+            },
+            by_event: qoeByEvent,
+          },
+        });
+      }
+      return base(url, cfg);
+    });
+  };
+
+  it("scenario 1: registrations exist but playback sessions do not", async () => {
+    withMetrics({ registrations: 7, qoeTotal: 0, qoeByEvent: {} });
+    renderPage();
+    await accessTable().findByText("Full House");
+
+    // Registrations KPI is present and non-zero
+    expect(within(card("Registrations")).queryByText("—")).not.toBeInTheDocument();
+    expect(screen.getByText(/Across events in window · does not imply attendance/i)).toBeInTheDocument();
+
+    // Playback sessions is 0
+    await waitFor(() => expect(screen.getByText("0 total sessions")).toBeInTheDocument());
+    expect(screen.getByText("No playback sessions were reported in this window.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Player telemetry is recorded only when viewers start video playback/i)
+    ).toBeInTheDocument();
+  });
+
+  it("scenario 2: registrations and playback sessions both exist", async () => {
+    withMetrics({ registrations: 19, qoeTotal: 12, qoeByEvent: { e1: 8, e2: 4 } });
+    renderPage();
+    await accessTable().findByText("Full House");
+
+    expect(within(card("Registrations")).queryByText("—")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("12 total sessions")).toBeInTheDocument());
+    expect(screen.queryByText("No playback sessions were reported in this window.")).not.toBeInTheDocument();
+  });
+
+  it("scenario 3: playback sessions exist but registrations do not", async () => {
+    withMetrics({ registrations: 0, qoeTotal: 15, qoeByEvent: { e1: 15 } });
+    renderPage();
+    await accessTable().findByText("Full House");
+
+    await waitFor(() => expect(within(card("Registrations")).getByText("0")).toBeInTheDocument());
+    expect(screen.getByText("15 total sessions")).toBeInTheDocument();
+  });
+
+  it("scenario 4 & 5: switching between 7-day, 30-day, and 90-day updates both metrics and date wording", async () => {
+    const u = userEvent.setup();
+    withMetrics({ registrations: 7, qoeTotal: 3, qoeByEvent: { e1: 3 } });
+    renderPage();
+    await accessTable().findByText("Full House");
+
+    // Initially 30 days
+    expect(screen.getByText(/Events in the selected 30 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/Reported in the last 30 days · not unique people/i)).toBeInTheDocument();
+    expect(screen.getByText(/Playback sessions reported in the last 30 days/i)).toBeInTheDocument();
+
+    // Switch to 7 days
+    await u.click(screen.getByRole("button", { name: "7 days" }));
+    await waitFor(() => {
+      const qoeCalls = vi.mocked(api.get).mock.calls.filter(([u]) => u === "/organization/playback/qoe");
+      expect(qoeCalls[qoeCalls.length - 1][1].params.window).toBe("7d");
+    });
+    expect(screen.getByText(/Events in the selected 7 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/Reported in the last 7 days · not unique people/i)).toBeInTheDocument();
+
+    // Switch to 90 days
+    await u.click(screen.getByRole("button", { name: "90 days" }));
+    await waitFor(() => {
+      const qoeCalls = vi.mocked(api.get).mock.calls.filter(([u]) => u === "/organization/playback/qoe");
+      expect(qoeCalls[qoeCalls.length - 1][1].params.window).toBe("90d");
+    });
+    expect(screen.getByText(/Events in the selected 90 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/Reported in the last 90 days · not unique people/i)).toBeInTheDocument();
+  });
+
+  it("scenario 8: unavailable QoE displays telemetry unavailable caption and error note", async () => {
+    withMetrics({ registrations: 5, qoeTotal: 0, failQoe: true });
+    renderPage();
+    await accessTable().findByText("Full House");
+
+    await waitFor(() => expect(screen.getByText("Playback telemetry unavailable")).toBeInTheDocument());
+    expect(screen.getByText("Playback telemetry couldn't be read.")).toBeInTheDocument();
+  });
+
+  it("scenario 9: empty playback state remains visible with 0 total sessions", async () => {
+    withMetrics({ registrations: 10, qoeTotal: 0, qoeByEvent: {} });
+    renderPage();
+    await accessTable().findByText("Full House");
+
+    expect(await screen.findByText("No playback sessions were reported in this window.")).toBeInTheDocument();
+    expect(screen.getByText("0 total sessions")).toBeInTheDocument();
+  });
+});

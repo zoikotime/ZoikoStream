@@ -1617,15 +1617,38 @@ async def _feedback_submit(ctx, payload):
 
     role = "host" if ctx.can_host else "viewer"
 
+    # One feedback row per viewer per event. The prompt can now appear twice for one person —
+    # when the event ends, and again from "Leave Event" — and a retry after a failed answer
+    # resubmits; each used to add a row, and the organization's average counted the same
+    # viewer several times. A later submission updates the earlier one, keeping any field it
+    # leaves blank (a comment added after a rating does not erase the rating).
     def work(db):
-        db.add(EventFeedback(
-            event_id=ctx.event_id, org_id=ctx.org_id, role=role,
-            user_id=ctx.user_id, identity=ctx.identity, name=ctx.name,
-            rating=rating, comment=comment,
-        ))
+        row = db.scalars(select(EventFeedback).where(
+            EventFeedback.event_id == ctx.event_id, EventFeedback.org_id == ctx.org_id,
+            EventFeedback.identity == ctx.identity,
+        ).order_by(EventFeedback.created_at).limit(1).with_for_update()).first()
+        if row is None:
+            db.add(EventFeedback(
+                event_id=ctx.event_id, org_id=ctx.org_id, role=role,
+                user_id=ctx.user_id, identity=ctx.identity, name=ctx.name,
+                rating=rating, comment=comment,
+            ))
+            return
+        if rating is not None:
+            row.rating = rating
+        if comment:
+            row.comment = comment
 
-    await tx(work)
-    return []
+    try:
+        await tx(work)
+    except Exception:  # noqa: BLE001 - reported to the submitter, not raised into the socket
+        logging.getLogger(__name__).exception("feedback for event %s not saved", ctx.event_id)
+        # dispatch() sends a returned string back as an error frame on THIS socket only.
+        return "Your feedback couldn't be saved. Please try again."
+    # The submitter's acknowledgement: the row is committed. Sent on the per-identity
+    # "session" channel (only the matching connection acts on it, as with session/removed),
+    # so the viewer's dialog can say "saved" because it was — not because a send() returned.
+    return [("session", "feedback.saved", {"identity": ctx.identity})]
 
 
 # dispatcher ------------------------------------------------------------------
@@ -1727,9 +1750,14 @@ def _due(db) -> list[tuple[str, str, dict]]:
                                                LivePoll.closes_at <= now)).all():
         p.status, p.closed_at, p.closes_at = "closed", now, None
         out.append((str(p.event_id), "poll.update", poll_out(p, actor_role="host")))
+    # FOR UPDATE SKIP LOCKED: every worker process runs this ticker, and the bus fans each
+    # publish out to every worker's viewers. Without the lock two tickers could both claim the
+    # same due announcement and broadcast it twice; with it, one claims it, the other skips it
+    # and then sees sent_at set.
     for a in db.scalars(select(LiveAnnouncement).where(LiveAnnouncement.sent_at.is_(None),
                                                        LiveAnnouncement.scheduled_at.isnot(None),
-                                                       LiveAnnouncement.scheduled_at <= now)).all():
+                                                       LiveAnnouncement.scheduled_at <= now)
+                        .with_for_update(skip_locked=True)).all():
         a.sent_at = now
         a.delivered_to = bus.local_subscribers(str(a.event_id))
         out.append((str(a.event_id), "announcement.new", announcement_out(a)))

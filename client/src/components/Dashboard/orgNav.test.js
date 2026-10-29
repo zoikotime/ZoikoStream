@@ -48,6 +48,9 @@ describe("which group and child a location means", () => {
     expect(groupIsActive(byId("events.list"), "/organization/live-inputs")).toBe(true);
     expect(groupIsActive(byId("org.manage"), "/organization/billing")).toBe(true);
     expect(groupIsActive(byId("support.home"), "/organization/support/security")).toBe(true);
+    expect(groupIsActive(byId("audience.home"), "/organization/audience")).toBe(true);
+    expect(groupIsActive(byId("audience.home"), "/organization/audience/access")).toBe(true);
+    expect(groupIsActive(byId("audience.home"), "/organization/playback")).toBe(true);
     expect(groupIsActive(byId("events.list"), "/organization/eventsx")).toBe(false);
   });
 
@@ -67,5 +70,9 @@ describe("which group and child a location means", () => {
     const analytics = byId("analytics.home");
     expect(activeChildId(analytics, "/organization/analytics", "")).toBe("analytics.overview");
     expect(activeChildId(analytics, "/organization/analytics", "", "#quality")).toBe("analytics.quality");
+    const audience = byId("audience.home");
+    expect(activeChildId(audience, "/organization/audience", "")).toBe("audience.overview");
+    expect(activeChildId(audience, "/organization/audience/access", "")).toBe("audience.access");
+    expect(activeChildId(audience, "/organization/playback", "")).toBe("audience.access");
   });
 });

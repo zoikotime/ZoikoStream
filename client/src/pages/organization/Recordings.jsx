@@ -10,7 +10,7 @@
 // them and the rail's "Replay-ready" / "Processing status" children are real destinations.
 // There are no thumbnails: egress produces no poster frame, so each asset shows its category's
 // colour rather than an image that does not exist.
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   FiAlertTriangle, FiCheck, FiChevronRight, FiClock, FiCopy, FiDownload, FiEyeOff, FiFilm,
@@ -595,9 +595,41 @@ export default function OrganizationRecordings() {
   );
   const list = Array.isArray(data?.list) ? data.list : NONE;
   const summary = data?.summary || null;
-  const [query, setQueryText] = useState(() => params.get("q") || "");
+  const qParam = params.get("q") || "";
+  const [prevQ, setPrevQ] = useState(qParam);
+  const [query, setQueryText] = useState(qParam);
   const [exporting, setExporting] = useState(null);
   const [playing, setPlaying] = useState(null);
+
+  if (prevQ !== qParam) {
+    setPrevQ(qParam);
+    setQueryText(qParam);
+  }
+
+  const resetView = useCallback(() => {
+    setQueryText("");
+    setParams({}, { replace: true });
+    setExporting(null);
+    setPlaying(null);
+    reload();
+    if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+      try {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } catch {
+        // Unsupported in test environments
+      }
+    }
+  }, [reload, setParams]);
+
+  useEffect(() => {
+    const onReset = (e) => {
+      if (!e.detail?.path || e.detail.path === "/organization/recordings") {
+        resetView();
+      }
+    };
+    window.addEventListener("zoiko:route-reset", onReset);
+    return () => window.removeEventListener("zoiko:route-reset", onReset);
+  }, [resetView]);
 
   const stateParam = params.get("state");
   const stateFilter = STATE_FILTERS.some(([v]) => v === stateParam) ? stateParam : "all";
@@ -709,7 +741,7 @@ export default function OrganizationRecordings() {
   return (
     <div className="space-y-6">
       <OrganizationPageHeader
-        breadcrumbs={[["Organization", "/organization/manage"], ["Media & Recordings", "/organization/recordings"], [CRUMB[stateFilter]]]}
+        breadcrumbs={[["Organization", "/organization/manage"], ["Media & Recordings", "/organization/recordings", { onNavigate: resetView }], [CRUMB[stateFilter]]]}
         eyebrow="Organization console / Media operations"
         title="Media & recordings"
         subtitle="One secure library for your event recordings, replay readiness and processing status."

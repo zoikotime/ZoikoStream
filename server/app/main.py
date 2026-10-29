@@ -17,7 +17,8 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from .routers.auth import router as auth_router
 from .routers.dashboard import router as dashboard_router
 from .routers.admin import router as admin_router
-from .routers.organization import router as organization_router
+from .routers.organization import FEEDBACK_MAX_BODY_BYTES, router as organization_router
+from .body_limit import BodySizeLimit
 from .routers.events import router as events_router
 from .routers.live import router as live_router
 from .routers.playback import router as playback_router
@@ -340,6 +341,11 @@ class ReadableServerErrors:
 
 
 app.add_middleware(ReadableServerErrors)
+# Route-scoped body caps, enforced before the body is read (app/body_limit.py). Added BEFORE
+# CORS so it sits inside it: a 413 still carries the CORS headers the browser needs to read it.
+app.add_middleware(BodySizeLimit, limits={
+    ("POST", "/api/organization/feedback"): FEEDBACK_MAX_BODY_BYTES,
+})
 app.add_middleware(CORSMiddleware, **_CORS_KWARGS)
 
 

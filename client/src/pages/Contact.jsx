@@ -359,12 +359,13 @@ export default function Contact() {
               <Dropdown
                 label="What can we help with?"
                 size="lg"
-                width="w-[min(24rem,calc(100vw-3rem))]"
+                className="w-full"
+                width="w-full"
                 placeholder="Select an option"
                 value={form.topic}
                 onChange={set("topic")}
                 options={topicOptions}
-                triggerClassName={errors.topic ? "!border-rose-400" : ""}
+                triggerClassName={`px-3.5 ${errors.topic ? "!border-rose-400" : ""}`}
               />
               <Error>{errors.topic}</Error>
             </div>

@@ -305,7 +305,7 @@ describe("Support & Status around the cards", () => {
   it("sends the other two trust cards to the Trust Center's forms, leaving none inert", async () => {
     renderAt(SUPPORT);
     await supportLoaded();
-    expect(screen.getByRole("link", { name: /compliance documents/i })).toHaveAttribute("href", "/trust#evidence");
+    expect(screen.getByRole("link", { name: /compliance documents/i })).toHaveAttribute("href", "/trust#compliance");
     expect(screen.getByRole("link", { name: /report a vulnerability/i })).toHaveAttribute("href", "/trust#report");
     expect(screen.queryByText(/on request/i)).toBeNull();
   });

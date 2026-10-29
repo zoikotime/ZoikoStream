@@ -226,3 +226,79 @@ describe("useMediaPreview", () => {
     });
   });
 });
+
+// ── a preview with no microphone, and the mic across a re-acquire ─────────────
+//
+// Production report: microphone problems during live sessions. Two defects in the host path:
+// a camera-granted / mic-denied preview went on silently with video only (the console's mic
+// button still read "Mic" while viewers heard nothing), and a re-acquire produced a new audio
+// track the publisher never learned about (see livekitPublishFlow.test.jsx). The preview now
+// exposes `micMissing` and the current `audioTrack`.
+// The current audio track, recorded after each render for the assertions below.
+const seenMic = { track: null };
+function MicHarness({ mic = true }) {
+  const { videoRef, phase, micMissing, audioTrack, selectMic } = useMediaPreview({
+    enabled: true, camera: true, mic, settings: {},
+  });
+  useEffect(() => { seenMic.track = audioTrack; });
+  return (
+    <>
+      <span data-testid="phase">{phase}</span>
+      <span data-testid="micMissing">{String(micMissing)}</span>
+      <span data-testid="audioEnabled">{audioTrack ? String(audioTrack.enabled) : "none"}</span>
+      <button type="button" onClick={() => selectMic("mic-2")}>switch mic</button>
+      <video ref={videoRef} />
+    </>
+  );
+}
+
+describe("useMediaPreview microphone", () => {
+  beforeEach(() => {
+    navigator.mediaDevices = {
+      getUserMedia: vi.fn(async () => fakeAvStream()),
+      enumerateDevices: vi.fn().mockResolvedValue([]),
+    };
+  });
+
+  function fakeAvStream() {
+    const v = fakeTrack();
+    const a = fakeTrack();
+    return { getTracks: () => [v, a], getVideoTracks: () => [v], getAudioTracks: () => [a] };
+  }
+
+  it("flags a preview that came up without a microphone", async () => {
+    const v = fakeTrack();
+    navigator.mediaDevices.getUserMedia = vi.fn(async (c) => {
+      if (c.audio) throw Object.assign(new Error("denied"), { name: "NotAllowedError" });
+      return { getTracks: () => [v], getVideoTracks: () => [v], getAudioTracks: () => [] };
+    });
+    render(<MicHarness />);
+    await waitFor(() => expect(screen.getByTestId("phase")).toHaveTextContent("ready"));
+    expect(screen.getByTestId("micMissing")).toHaveTextContent("true");
+    expect(screen.getByTestId("audioEnabled")).toHaveTextContent("none");
+  });
+
+  it("does not flag a preview that has its microphone", async () => {
+    render(<MicHarness />);
+    await waitFor(() => expect(screen.getByTestId("phase")).toHaveTextContent("ready"));
+    expect(screen.getByTestId("micMissing")).toHaveTextContent("false");
+  });
+
+  it("switching mic exposes the NEW audio track, and a muted host stays muted on it", async () => {
+    const { rerender } = render(<MicHarness mic={false} />);
+    await waitFor(() => expect(seenMic.track?.enabled).toBe(false));
+    const before = seenMic.track;
+
+    screen.getByRole("button", { name: "switch mic" }).click();
+    await waitFor(() => expect(seenMic.track).not.toBe(before));
+    expect(seenMic.track).toBeTruthy();
+    // Muted before the switch → the new track is muted too, so the button and the audience
+    // agree. Read off the track itself: mute is a mutation of .enabled (what LiveKit sends),
+    // made in an effect after the render, so a rendered copy of it would be stale.
+    await waitFor(() => expect(seenMic.track.enabled).toBe(false));
+    expect(before.stop).toHaveBeenCalled();               // the old track was released
+
+    rerender(<MicHarness mic />);
+    await waitFor(() => expect(seenMic.track.enabled).toBe(true));
+  });
+});

@@ -176,7 +176,7 @@ export default function EventInsights() {
                 </p>
               ) : (
                 <>
-                  <AreaTrend data={series} height={220} showX />
+                  <AreaTrend data={series} height={220} showX name="Concurrent viewers" labelName="Time" />
                   <p className={cx("mt-2 text-[11.5px]", CONSOLE.faint)}>
                     Event local time · {event.timezone || "local"} · source: live presence samples
                   </p>

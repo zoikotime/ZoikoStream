@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { FiGlobe, FiLock, FiEyeOff } from "react-icons/fi";
 import { cx } from "../../ui/tokens";
 import Modal from "../../ui/Modal";
 import { ConsoleButton as Button } from "../../ui/Button";
+import Dropdown from "../../ui/Dropdown";
 import TimeField from "../../ui/TimeField";
-import { Input, Textarea, Select, Label, Switch } from "../../ui/forms";
+import { Input, Textarea, Label, Switch } from "../../ui/forms";
 import TimezonePicker from "../../components/organization/TimezonePicker";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
@@ -30,6 +31,10 @@ const CATEGORIES = [
   "Community / Charity",
   "Other",
 ];
+// A listbox, not a native <select>: the browser draws a select's option list outside the page,
+// so over this dark dialog it opened as a bare white panel before its options appeared, and no
+// style of ours reaches it (ui/Dropdown, variant "field").
+const CATEGORY_OPTIONS = CATEGORIES.map((c) => ({ value: c, label: c }));
 // Timezone list lives in data/timezones.js — the option VALUE stays an IANA identifier
 // (which is what the API stores and what Intl.DateTimeFormat needs) while the label reads
 // as the abbreviation people actually schedule by.
@@ -120,6 +125,7 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
   // retired, so changing the category must leave every other choice exactly as the organiser
   // left it.
   const setCategory = (value) => set("category", value);
+  const categoryLabelId = useId();
   const toggleHost = (id) => {
     setHostIds((s) => {
       const next = new Set(s);
@@ -331,10 +337,9 @@ export default function CreateEventModal({ open, onClose, onCreated }) {
               <Textarea variant="console" rows={3} value={form.description} onChange={(e) => set("description", e.target.value)} placeholder="What is this event about?" />
             </div>
             <div>
-              <Label>Category</Label>
-              <Select variant="console" value={form.category} onChange={(e) => setCategory(e.target.value)}>
-                {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-              </Select>
+              <Label id={categoryLabelId}>Category</Label>
+              <Dropdown variant="field" label="Category" labelId={categoryLabelId}
+                value={form.category} onChange={setCategory} options={CATEGORY_OPTIONS} />
             </div>
           </div>
         </Section>
