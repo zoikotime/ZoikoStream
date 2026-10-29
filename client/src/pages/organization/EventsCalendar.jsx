@@ -8,9 +8,9 @@ import { displayStatusOf, statusMeta } from "../../data/events";
 import { dayKey, monthKey, overlapping, parseMonth } from "../../data/eventCalendar";
 
 // Events › Calendar (ZST-UX-NAV-001 §5, events.calendar: "Calendar and scheduling conflicts").
-// One month of the organization's events, placed on the day they start in YOUR zone, with any
-// two whose times overlap marked — two broadcasts at once is the conflict an owner plans
-// around. The month is in the URL (?month=YYYY-MM) so it survives Back and a reload.
+// One month of the organization's events, placed on the day they start in YOUR zone, with
+// events in valid, overlapping scheduled intervals marked. The badge counts distinct involved
+// events, not pairs. The month is in the URL (?month=YYYY-MM) so it survives Back and a reload.
 //
 // Read-only: a day shows what is scheduled; opening an event goes to its workspace.
 
@@ -90,7 +90,7 @@ export default function EventsCalendar({ month: monthParam, onMonth, onOpen }) {
             : `${items.length}${state.data?.total > items.length ? ` of ${state.data.total}` : ""} event${items.length === 1 ? "" : "s"} · times in your zone`}
           {clash.size > 0 && (
             <span className="ml-2 inline-flex items-center gap-1 font-semibold text-amber-700 dark:text-amber-300">
-              <FiAlertTriangle aria-hidden="true" /> {clash.size} overlapping
+              <FiAlertTriangle aria-hidden="true" /> {clash.size} overlapping events
             </span>
           )}
         </p>

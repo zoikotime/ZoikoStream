@@ -13,17 +13,18 @@ export function parseMonth(value, now = new Date()) {
   return new Date(now.getFullYear(), now.getMonth(), 1);
 }
 
-// Ids of events whose [start, end) intervals overlap another's. An event without an end is
-// taken as one hour long — so it can still conflict — and an end at or before its start as
-// one minute.
+// Ids of eligible events involved in at least one overlapping [start, end) pair. The calendar
+// badge counts distinct events, not pairs. Unknown/invalid intervals cannot establish a
+// conflict, and cancelled or archived events are not active schedule conflicts.
 export function overlapping(events) {
   const spans = events
-    .filter((e) => e.start_time)
+    .filter((e) => e.start_time && e.end_time && !["cancelled", "archived"].includes(e.status))
     .map((e) => {
       const start = new Date(e.start_time).getTime();
-      const end = e.end_time ? new Date(e.end_time).getTime() : start + 3600 * 1000;
-      return { id: e.id, start, end: Math.max(end, start + 60 * 1000) };
+      const end = new Date(e.end_time).getTime();
+      return { id: e.id, start, end };
     })
+    .filter(({ start, end }) => Number.isFinite(start) && Number.isFinite(end) && end > start)
     .sort((a, b) => a.start - b.start);
   const clash = new Set();
   for (let i = 0; i < spans.length; i += 1) {

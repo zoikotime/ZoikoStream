@@ -82,13 +82,15 @@ const LEDGER = (items = [entry({}), entry({
 });
 
 let handlers;
-let scrollIntoView;
+let scrollTo;
 beforeEach(() => {
   vi.clearAllMocks();
-  scrollIntoView = vi.fn();
-  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+  scrollTo = vi.fn(function ({ top }) {
+    this.scrollTop = top;
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", {
     configurable: true,
-    value: scrollIntoView,
+    value: scrollTo,
   });
   handlers = {
     "/organization/console-state": () => ({ organization: { name: "Northwind" }, user: { role: "org_admin" }, badges: {}, health: { status: "ok", label: "Healthy" } }),
@@ -105,7 +107,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.useRealTimers();
-  delete HTMLElement.prototype.scrollIntoView;
+  delete HTMLElement.prototype.scrollTo;
 });
 
 function renderAt(path) {
@@ -387,6 +389,15 @@ describe("Live Control", () => {
     handlers["/organization/events/e1/live-status"] = () => LIVE();
   };
   const sectionLink = (name) => screen.getByRole("link", { name });
+  const prepareScrollGeometry = (id) => {
+    const target = document.getElementById(id);
+    const main = document.querySelector("main");
+    target.style.scrollMarginTop = "24px";
+    vi.spyOn(target, "getBoundingClientRect").mockReturnValue({ top: 450 });
+    vi.spyOn(main, "getBoundingClientRect").mockReturnValue({ top: 100 });
+    main.scrollTop = 12;
+    return main;
+  };
 
   it.each([
     ["Live monitor", "monitor"],
@@ -397,22 +408,32 @@ describe("Live Control", () => {
     liveReady();
     renderAt("/organization/events/e1/live");
     const link = await screen.findByRole("link", { name: label });
+    await waitFor(() => expect(document.getElementById(id)).toBeInTheDocument());
+    const main = prepareScrollGeometry(id);
 
     await userEvent.click(link);
 
     await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent(`/live#${id}`));
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
-    expect(scrollIntoView.mock.contexts.some((element) => element.id === id)).toBe(true);
+    await waitFor(() => expect(scrollTo).toHaveBeenCalled());
+    expect(scrollTo.mock.contexts.some((element) => element === main)).toBe(true);
+    expect(main.scrollTop).toBe(338);
     expect(link).toHaveAttribute("aria-current", "page");
+    expect(api.post).not.toHaveBeenCalled();
+    expect(api.patch).not.toHaveBeenCalled();
+    expect(api.delete).not.toHaveBeenCalled();
   });
 
-  it.each(["sessions", "incidents"])("directly opening #%s scrolls to its section after data mounts", async (id) => {
+  it.each(["sessions", "incidents", "recovery"])("directly opening #%s scrolls to its section after data mounts", async (id) => {
     liveReady();
     renderAt(`/organization/events/e1/live#${id}`);
 
-    await screen.findByRole("heading", { name: id === "sessions" ? "Stream health & sessions" : "Incident & recovery desk" });
-    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === id)).toBe(true));
-    expect(sectionLink(id === "sessions" ? "Stream health & sessions" : "Alerts & incidents"))
+    await screen.findByRole("heading", {
+      name: id === "sessions" ? "Stream health & sessions" : id === "incidents" ? "Incident & recovery desk" : "Recovery procedures",
+    });
+    await waitFor(() => expect(scrollTo.mock.contexts.some((element) => element.tagName === "MAIN")).toBe(true));
+    expect(sectionLink(
+      id === "sessions" ? "Stream health & sessions" : id === "incidents" ? "Alerts & incidents" : "Recovery procedures"
+    ))
       .toHaveAttribute("aria-current", "page");
   });
 
@@ -420,22 +441,22 @@ describe("Live Control", () => {
     liveReady();
     renderAt("/organization/events/e1/live#sessions");
     await screen.findByRole("heading", { name: "Stream health & sessions" });
-    scrollIntoView.mockClear();
+    scrollTo.mockClear();
 
     await userEvent.click(sectionLink("Alerts & incidents"));
     await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/live#incidents"));
-    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === "incidents")).toBe(true));
+    await waitFor(() => expect(scrollTo.mock.contexts.some((element) => element.tagName === "MAIN")).toBe(true));
 
-    scrollIntoView.mockClear();
+    scrollTo.mockClear();
     await userEvent.click(screen.getByRole("button", { name: "Browser back" }));
     await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/live#sessions"));
-    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === "sessions")).toBe(true));
+    await waitFor(() => expect(scrollTo.mock.contexts.some((element) => element.tagName === "MAIN")).toBe(true));
     expect(sectionLink("Stream health & sessions")).toHaveAttribute("aria-current", "page");
 
-    scrollIntoView.mockClear();
+    scrollTo.mockClear();
     await userEvent.click(screen.getByRole("button", { name: "Browser forward" }));
     await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/live#incidents"));
-    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === "incidents")).toBe(true));
+    await waitFor(() => expect(scrollTo.mock.contexts.some((element) => element.tagName === "MAIN")).toBe(true));
   });
 
   it("normalizes unknown hashes to the Live monitor fallback", async () => {
@@ -444,7 +465,7 @@ describe("Live Control", () => {
 
     await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/live#monitor"));
     expect(await screen.findByRole("link", { name: "Live monitor" })).toHaveAttribute("aria-current", "page");
-    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === "monitor")).toBe(true));
+    await waitFor(() => expect(scrollTo.mock.contexts.some((element) => element.tagName === "MAIN")).toBe(true));
   });
 
   it("normalizes a valid hash whose section cannot mount to Live monitor", async () => {
@@ -459,6 +480,21 @@ describe("Live Control", () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(screen.getByTestId("route-location")).toHaveTextContent("/live#monitor");
+  });
+
+  it("keeps Live Control destinations available for cancelled events without performing actions", async () => {
+    handlers["/events/e1"] = () => ({ ...EVENT, status: "cancelled", display_status: "cancelled" });
+    liveReady();
+    renderAt("/organization/events/e1/live");
+
+    await userEvent.click(await screen.findByRole("link", { name: "Alerts & incidents" }));
+
+    expect(await screen.findByRole("heading", { name: "Incident & recovery desk" })).toBeInTheDocument();
+    expect(screen.getByTestId("route-location")).toHaveTextContent("/live#incidents");
+    expect(sectionLink("Alerts & incidents")).toHaveAttribute("aria-current", "page");
+    expect(api.post).not.toHaveBeenCalled();
+    expect(api.patch).not.toHaveBeenCalled();
+    expect(api.delete).not.toHaveBeenCalled();
   });
 
   it("says NOT LIVE in words, links to the Producer Console, and names what blocks go-live", async () => {
@@ -544,7 +580,7 @@ describe("Insights", () => {
     const tab = await activeTab(hash === "overview" ? "Overview" : label);
     expect(tab).toHaveAttribute("href", `/organization/events/e1/insights#${hash}`);
     expect(activeRailItem(label)).toHaveAttribute("aria-current", "page");
-    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === hash)).toBe(true));
+    await waitFor(() => expect(scrollTo.mock.contexts.some((element) => element.tagName === "MAIN")).toBe(true));
     if (hash === "viewers") {
       expect(screen.getByText("No live samples were recorded.")).toBeInTheDocument();
     }
@@ -562,7 +598,7 @@ describe("Insights", () => {
     }[hash];
     await activeTab(hash === "overview" ? "Overview" : label);
     expect(activeRailItem(label)).toHaveAttribute("aria-current", "page");
-    await waitFor(() => expect(scrollIntoView.mock.contexts.some((element) => element.id === hash)).toBe(true));
+    await waitFor(() => expect(scrollTo.mock.contexts.some((element) => element.tagName === "MAIN")).toBe(true));
   });
 
   it("restores Insights tab state on browser back and forward", async () => {

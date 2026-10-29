@@ -1,12 +1,12 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import api, { errMsg } from "../api";
 import {
   MessageSquare, CalendarDays, ArrowRight, UserCircle, Globe, Send, Lock,
-  Building2, Code, ShieldCheck, FileText, Layers, Handshake, Headset, MoreHorizontal,
+  Code, ShieldCheck, Headset,
   AudioLines,
 } from "lucide-react";
-import { Logo, Dropdown } from "../ui";
+import { Logo } from "../ui";
 import AskGuideCta from "../guide/AskGuideCta";
 
 // Contact — where "Talk to an expert" lands. Public and unauthenticated, like the landing
@@ -22,15 +22,15 @@ const MAX_MESSAGE = 1500;
 // Topics route the inquiry to a team, so they are worded as the reason someone is writing
 // rather than as internal department names.
 const TOPICS = [
-  ["platform", "Platform evaluation & enterprise sales", Building2],
-  ["api", "API, SDK & integrations", Code],
-  ["events", "Live Events & managed broadcasting", CalendarDays],
-  ["security", "Security, privacy & compliance", ShieldCheck],
-  ["procurement", "Procurement, licensing & commercial terms", FileText],
-  ["architecture", "Technical architecture & implementation", Layers],
-  ["partnerships", "Partnerships & strategic opportunities", Handshake],
-  ["support", "Existing customer support", Headset],
-  ["other", "Other", MoreHorizontal],
+  ["platform", "Platform evaluation & enterprise sales"],
+  ["api", "API, SDK & integrations"],
+  ["events", "Live Events & managed broadcasting"],
+  ["security", "Security, privacy & compliance"],
+  ["procurement", "Procurement, licensing & commercial terms"],
+  ["architecture", "Technical architecture & implementation"],
+  ["partnerships", "Partnerships & strategic opportunities"],
+  ["support", "Existing customer support"],
+  ["other", "Other"],
 ];
 
 // Countries come from the platform's own region data rather than a 250-line hardcoded list:
@@ -140,11 +140,6 @@ export default function Contact() {
     setErrors((e) => (e[key] ? { ...e, [key]: undefined } : e));
   };
 
-  const topicOptions = useMemo(
-    () => TOPICS.map(([value, label, icon]) => ({ value, label, icon })),
-    []
-  );
-
   // Jump to the form with the topic already chosen, so a sidebar card is a real shortcut
   // rather than a link to a page that does not exist.
   const pickTopic = (topic) => {
@@ -190,7 +185,7 @@ export default function Contact() {
       return;
     }
     const email = form.email.trim();
-    const topicLabel = TOPICS.find(([v]) => v === form.topic)?.[1] || form.topic;
+    const topicLabel = TOPICS.find(([value]) => value === form.topic)?.[1] || form.topic;
     const country = COUNTRIES.find(([code]) => code === form.country)?.[1] || form.country;
     setSending(true);
     setSendError("");
@@ -352,22 +347,31 @@ export default function Contact() {
               <Error>{errors.country}</Error>
             </div>
 
-            <div ref={topicRef} className="scroll-mt-24">
-              <label className={LABEL} id="ct-topic-label">
+            <div ref={topicRef} className="scroll-mt-24 min-w-0">
+              <label className={LABEL} htmlFor="ct-topic">
                 What can we help with?
                 <Required />
               </label>
-              <Dropdown
-                label="What can we help with?"
-                size="lg"
-                width="w-[min(24rem,calc(100vw-3rem))]"
-                placeholder="Select an option"
-                value={form.topic}
-                onChange={set("topic")}
-                options={topicOptions}
-                triggerClassName={errors.topic ? "!border-rose-400" : ""}
-              />
-              <Error>{errors.topic}</Error>
+              <div className="relative">
+                <select
+                  id="ct-topic"
+                  value={form.topic}
+                  onChange={(e) => set("topic")(e.target.value)}
+                  aria-required="true"
+                  aria-invalid={errors.topic ? true : undefined}
+                  aria-describedby={errors.topic ? "ct-topic-error" : undefined}
+                  className={`${FIELD} cursor-pointer appearance-none pr-9 ${
+                    errors.topic ? "border-rose-400" : ""
+                  } ${form.topic ? "text-slate-800" : "text-slate-400"}`}
+                >
+                  <option value="">Select an option</option>
+                  {TOPICS.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                <Chevron />
+              </div>
+              <Error id="ct-topic-error">{errors.topic}</Error>
             </div>
           </div>
 
@@ -563,9 +567,9 @@ function Field({ label, required, error, value, onChange, ...rest }) {
   );
 }
 
-function Error({ children }) {
+function Error({ children, id }) {
   if (!children) return null;
-  return <p className="mt-1.5 text-[12px] font-medium text-rose-600">{children}</p>;
+  return <p id={id} className="mt-1.5 text-[12px] font-medium text-rose-600">{children}</p>;
 }
 
 function Chevron() {

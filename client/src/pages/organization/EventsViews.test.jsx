@@ -120,9 +120,45 @@ describe("the calendar", () => {
     await within(cal).findByText("Event a");
     const call = vi.mocked(api.get).mock.calls.find(([u, c]) => u === "/events" && c?.params?.date_from);
     expect(new Date(call[1].params.date_from).getMonth()).toBe(10);
-    expect(within(cal).getByText(/2 overlapping/)).toBeInTheDocument();
+    expect(within(cal).getByText(/2 overlapping events/)).toBeInTheDocument();
     expect(within(cal).getByRole("button", { name: /event a.*overlaps another event/i })).toBeInTheDocument();
     expect(within(cal).getByRole("button", { name: /event c,/i })).not.toHaveAccessibleName(/overlaps/i);
+  });
+
+  it("does not badge same-day events without intersecting scheduled intervals", async () => {
+    calendarItems = [
+      row("a", "scheduled", "2026-10-06T06:10:00Z", "2026-10-06T06:12:00Z"),
+      row("b", "scheduled", "2026-10-06T06:13:00Z", "2026-10-06T06:30:00Z"),
+      row("c", "scheduled", "2026-10-06T07:03:00Z", "2026-10-06T07:30:00Z"),
+      row("d", "scheduled", "2026-10-06T06:11:00Z", null),
+    ];
+    renderEvents("/organization/events?view=calendar&month=2026-10");
+    const cal = await screen.findByRole("region", { name: /event calendar, october 2026/i });
+    await within(cal).findByText("Event a");
+
+    expect(within(cal).queryByText(/overlapping events/)).not.toBeInTheDocument();
+    for (const id of ["a", "b", "c"]) {
+      expect(within(cal).getByRole("button", { name: new RegExp(`event ${id},`, "i") }))
+        .not.toHaveAccessibleName(/overlaps another event/i);
+    }
+  });
+
+  it("counts unique overlapping events after navigating to a month with multiple conflicts", async () => {
+    calendarItems = [
+      row("a", "scheduled", "2026-11-10T10:00:00Z", "2026-11-10T11:00:00Z"),
+      row("b", "scheduled", "2026-11-10T10:15:00Z", "2026-11-10T10:30:00Z"),
+      row("c", "scheduled", "2026-11-10T10:45:00Z", "2026-11-10T11:30:00Z"),
+      row("d", "cancelled", "2026-11-11T10:00:00Z", "2026-11-11T12:00:00Z"),
+    ];
+    renderEvents("/organization/events?view=calendar&month=2026-10");
+    await screen.findByRole("region", { name: /event calendar, october 2026/i });
+    await userEvent.click(screen.getByRole("button", { name: "Next month" }));
+
+    const cal = await screen.findByRole("region", { name: /event calendar, november 2026/i });
+    await within(cal).findByText("Event a");
+    expect(within(cal).getByText(/3 overlapping events/)).toBeInTheDocument();
+    expect(within(cal).getByRole("button", { name: /event d,/i }))
+      .not.toHaveAccessibleName(/overlaps another event/i);
   });
 
   it("moves between months through the URL and opens an event in its workspace", async () => {
