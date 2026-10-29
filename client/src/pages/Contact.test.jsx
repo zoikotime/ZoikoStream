@@ -28,8 +28,7 @@ function renderAt(path = "/contact") {
   );
 }
 
-/** Fill every required field. `country` and `topic` are custom Dropdowns, so they are chosen
- *  by clicking their option rather than by selectOptions. */
+/** Fill the text fields; the native selects are completed separately. */
 async function fillForm(user, { message = "Need help" } = {}) {
   await user.type(screen.getByLabelText(/first name/i), "Ada");
   await user.type(screen.getByLabelText(/last name/i), "Lovelace");
@@ -117,18 +116,53 @@ describe("Contact form", () => {
     }
   }, 20000);
 
-  /** Country is a native <select>; topic is the custom Dropdown (button + role=listbox).
-   *
-   *  The topic option MUST be queried inside the listbox: native <option> elements carry an
-   *  implicit role="option", so a bare getAllByRole("option") also matches all ~250 country
-   *  entries and picks a country instead of a topic, leaving the form invalid. */
   async function completeForm(user) {
     await fillForm(user);
     await user.selectOptions(document.getElementById("ct-country"), "GB");
-    await user.click(screen.getByRole("button", { name: /what can we help with/i }));
-    const listbox = screen.getByRole("listbox");
-    await user.click(within(listbox).getAllByRole("option")[0]);
+    await user.selectOptions(screen.getByRole("combobox", { name: /what can we help with/i }), "platform");
   }
+
+  it("uses a native, labeled topic select with responsive full-width styling", () => {
+    renderAt();
+    const topic = screen.getByRole("combobox", { name: /what can we help with/i });
+
+    expect(topic.tagName).toBe("SELECT");
+    expect(topic).toHaveAttribute("aria-required", "true");
+    expect(topic).toHaveClass("w-full", "appearance-none", "rounded-xl", "bg-white");
+    expect(topic.closest(".grid")).toHaveClass("sm:grid-cols-2");
+    expect(topic).toHaveValue("");
+    expect(within(topic).getByRole("option", { name: "Platform evaluation & enterprise sales" }))
+      .toHaveValue("platform");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("keeps the topic control fluid within the form's mobile, tablet, and desktop layouts", () => {
+    renderAt();
+    const form = document.querySelector("main form");
+    const topic = screen.getByRole("combobox", { name: /what can we help with/i });
+
+    expect(form.closest("section")).toHaveClass("grid", "lg:grid-cols-[minmax(0,1fr)_360px]");
+    expect(topic.closest(".grid")).toHaveClass("grid", "sm:grid-cols-2");
+    expect(topic).toHaveClass("w-full");
+    expect(topic).not.toHaveClass("absolute", "fixed");
+    expect(topic.parentElement).toHaveClass("relative");
+    expect(topic.parentElement.parentElement).toHaveClass("min-w-0");
+  });
+
+  it("exposes topic validation to assistive technology and clears it after selection", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    const topic = screen.getByRole("combobox", { name: /what can we help with/i });
+
+    await user.click(screen.getByTestId("contact-submit"));
+    expect(topic).toHaveAttribute("aria-invalid", "true");
+    expect(topic).toHaveAttribute("aria-describedby", "ct-topic-error");
+    expect(document.getElementById("ct-topic-error")).toHaveTextContent("Required");
+
+    await user.selectOptions(topic, "platform");
+    expect(topic).not.toHaveAttribute("aria-invalid");
+    expect(topic).not.toHaveAttribute("aria-describedby");
+  });
 
   it("posts to the contact endpoint when the form is complete", async () => {
     const user = userEvent.setup();

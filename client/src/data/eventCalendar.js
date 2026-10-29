@@ -13,46 +13,19 @@ export function parseMonth(value, now = new Date()) {
   return new Date(now.getFullYear(), now.getMonth(), 1);
 }
 
-// Ids of events whose scheduled [start, end) intervals intersect.
-// Follows the interval-overlap rule: eventA.start < eventB.end && eventB.start < eventA.end.
-// Events ending exactly when another starts are non-overlapping.
-// Cancelled/archived/deleted events and events without a valid end time/duration are excluded.
+// Ids of eligible events involved in at least one overlapping [start, end) pair. The calendar
+// badge counts distinct events, not pairs. Unknown/invalid intervals cannot establish a
+// conflict, and cancelled or archived events are not active schedule conflicts.
 export function overlapping(events) {
-  if (!Array.isArray(events)) return new Set();
-
-  const spans = [];
-  const seenIds = new Set();
-
-  for (const e of events) {
-    if (!e || !e.id || seenIds.has(e.id)) continue;
-    if (e.status === "cancelled" || e.status === "archived" || e.display_status === "cancelled" || e.deleted_at) {
-      continue;
-    }
-    if (!e.start_time) continue;
-
-    const start = new Date(e.start_time).getTime();
-    if (Number.isNaN(start)) continue;
-
-    let end = null;
-    if (e.end_time) {
-      const parsedEnd = new Date(e.end_time).getTime();
-      if (!Number.isNaN(parsedEnd) && parsedEnd > start) {
-        end = parsedEnd;
-      }
-    } else if (typeof e.duration_minutes === "number" && e.duration_minutes > 0) {
-      end = start + e.duration_minutes * 60 * 1000;
-    }
-
-    // Do not invent durations when end times or duration_minutes are missing.
-    // Events without a valid end time (> start) have no interval to intersect.
-    if (end === null) continue;
-
-    seenIds.add(e.id);
-    spans.push({ id: e.id, start, end });
-  }
-
-  spans.sort((a, b) => a.start - b.start || a.end - b.end);
-
+  const spans = events
+    .filter((e) => e.start_time && e.end_time && !["cancelled", "archived"].includes(e.status))
+    .map((e) => {
+      const start = new Date(e.start_time).getTime();
+      const end = new Date(e.end_time).getTime();
+      return { id: e.id, start, end };
+    })
+    .filter(({ start, end }) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+    .sort((a, b) => a.start - b.start);
   const clash = new Set();
   for (let i = 0; i < spans.length; i += 1) {
     const a = spans[i];

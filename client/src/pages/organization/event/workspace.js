@@ -97,6 +97,34 @@ export const LEGACY_TABS = {
 // readiness verdict, and the reloads that re-read them after a change.
 export const useEventWorkspace = () => useOutletContext();
 
+function scrollToHashTarget(target) {
+  let container = target.parentElement;
+  while (container && container !== document.body) {
+    const { overflow, overflowY } = window.getComputedStyle(container);
+    if (/(auto|scroll|overlay)/.test(`${overflow} ${overflowY}`)) break;
+    container = container.parentElement;
+  }
+
+  // Organization pages scroll inside the shell's main element, not the document viewport.
+  if (!container || container === document.body) {
+    container = target.closest("main") || document.scrollingElement;
+  }
+  if (!container) return;
+
+  const targetTop = target.getBoundingClientRect().top;
+  const containerTop = container === document.scrollingElement
+    ? 0
+    : container.getBoundingClientRect().top;
+  const marginTop = Number.parseFloat(window.getComputedStyle(target).scrollMarginTop) || 0;
+  const top = Math.max(0, container.scrollTop + targetTop - containerTop - marginTop);
+
+  if (typeof container.scrollTo === "function") {
+    container.scrollTo({ top, behavior: "smooth" });
+  } else {
+    container.scrollTop = top;
+  }
+}
+
 // A sub-item link (#details) moves to that part of the page. React Router changes the URL but
 // does not scroll. A target may render after its data, so observe the page until it appears.
 // Read-only: scrolling never triggers an event action.
@@ -141,7 +169,7 @@ export function useHashScroll({ supportedHashes, fallbackHash } = {}) {
     const observer = new MutationObserver(() => {
       const el = document.getElementById(id);
       if (!el) return;
-      el.scrollIntoView?.({ block: "start", behavior: "smooth" });
+      scrollToHashTarget(el);
       observer.disconnect();
       clearTimeout(timeout);
     });
@@ -152,7 +180,7 @@ export function useHashScroll({ supportedHashes, fallbackHash } = {}) {
 
     const target = document.getElementById(id);
     if (target) {
-      target.scrollIntoView?.({ block: "start", behavior: "smooth" });
+      scrollToHashTarget(target);
       observer.disconnect();
       clearTimeout(timeout);
     } else {

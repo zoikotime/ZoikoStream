@@ -106,6 +106,7 @@ function renderShell(at = "/organization/dashboard") {
               <Route key={path} path={path} element={<h1>{label} page</h1>} />
             ))}
           </Route>
+          <Route path="/status" element={<h1>Public status page</h1>} />
           <Route path="/organization/events/:id" element={<EventWorkspaceLayout />}>
             <Route index element={<h1>overview section</h1>} />
             <Route path="preparation" element={<h1>preparation section</h1>} />
@@ -269,41 +270,40 @@ describe("role-aware rail", () => {
 
 describe("utility footer", () => {
   it.each([
-    ["/organization/support", "Service status: Healthy"],
-    ["/organization/support", "View service status details"],
-    ["/organization/developers", "Service status: Healthy"],
-    ["/organization/developers", "View service status details"],
-    ["/organization/events", "Service status: Healthy"],
-    ["/organization/events", "View service status details"],
-  ])("opens the Support service-health section from %s", async (path, linkName) => {
+    ["/organization/support", "Service status: Healthy", "/organization/support#service-health", "Support page"],
+    ["/organization/support", "View service status details", "/status", "Public status page"],
+    ["/organization/developers", "Service status: Healthy", "/organization/support#service-health", "Support page"],
+    ["/organization/developers", "View service status details", "/status", "Public status page"],
+    ["/organization/events", "Service status: Healthy", "/organization/support#service-health", "Support page"],
+    ["/organization/events", "View service status details", "/status", "Public status page"],
+  ])("from %s, %s opens its intended destination", async (path, linkName, destination, destinationPage) => {
     renderShell(path);
     await screen.findByRole("heading", { level: 1 });
     const user = userEvent.setup();
     const status = await screen.findByRole("link", { name: linkName });
-    expect(status).toHaveAttribute("href", "/organization/support#service-health");
+    expect(status).toHaveAttribute("href", destination);
 
     await user.click(status);
-    await waitFor(() => {
-      expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/support#service-health");
-    });
-    expect(screen.getByText("Support page")).toBeInTheDocument();
-    expect(within(rail()).getByRole("link", { name: "Support" })).toHaveAttribute("aria-current", "page");
+    await screen.findByText(destinationPage);
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent(destination));
+    if (destination.startsWith("/organization/support")) {
+      expect(within(rail()).getByRole("link", { name: "Support" })).toHaveAttribute("aria-current", "page");
+    }
 
     await user.click(screen.getByRole("button", { name: "Browser back" }));
     await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent(path));
     await user.click(screen.getByRole("button", { name: "Browser forward" }));
-    await waitFor(() => {
-      expect(screen.getByTestId("route-location")).toHaveTextContent("/organization/support#service-health");
-    });
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent(destination));
   });
 
-  it("provides two separate links to the same status section when already on Support", async () => {
+  it("keeps the organization health indicator and public status details as separate links", async () => {
     renderShell("/organization/support");
     await screen.findByText("Support page");
     const status = await screen.findByRole("link", { name: "Service status: Healthy" });
     const viewStatus = screen.getByRole("link", { name: "View service status details" });
     expect(status).toHaveAttribute("href", "/organization/support#service-health");
-    expect(viewStatus).toHaveAttribute("href", "/organization/support#service-health");
+    expect(viewStatus).toHaveAttribute("href", "/status");
+    expect(status).not.toHaveAttribute("href", viewStatus.getAttribute("href"));
   });
 
   it("keeps the status link unavailable message when health cannot be read", async () => {
