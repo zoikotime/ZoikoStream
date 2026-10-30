@@ -53,22 +53,16 @@ export function overlappingPairs(events) {
     }
     if (!e.start_time) continue;
 
+    if (!e.end_time) continue;
+
     const start = new Date(e.start_time).getTime();
-    if (Number.isNaN(start)) continue;
+    const end = new Date(e.end_time).getTime();
 
-    let end = null;
-    if (e.end_time) {
-      const parsedEnd = new Date(e.end_time).getTime();
-      if (!Number.isNaN(parsedEnd) && parsedEnd > start) {
-        end = parsedEnd;
-      }
-    } else if (typeof e.duration_minutes === "number" && e.duration_minutes > 0) {
-      end = start + e.duration_minutes * 60 * 1000;
-    }
-
-    // Do not invent durations when end times or duration_minutes are missing or invalid.
+    // Do not invent durations when end times are missing or invalid.
     // Events without a valid end time (> start) have no interval to intersect.
-    if (end === null) continue;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      continue;
+    }
 
     seenIds.add(e.id);
     spans.push({ id: e.id, start, end });
@@ -112,5 +106,7 @@ export function overlapping(events) {
     clashIds.add(idA);
     clashIds.add(idB);
   }
-  return new OverlapResult(clashIds, pairs);
+  Object.defineProperty(clashIds, "pairs", { value: pairs, enumerable: false, writable: true });
+  Object.defineProperty(clashIds, "pairCount", { value: pairs.length, enumerable: false, writable: true });
+  return clashIds;
 }

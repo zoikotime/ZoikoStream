@@ -127,34 +127,43 @@ export function scrollToSection(elementOrId) {
   try {
     el.scrollIntoView?.({ block: "start", behavior: "smooth" });
   } catch {
-    // Unsupported in older testing environments
+    // Unsupported in older test environments
   }
 
-  const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
-  if (main && typeof main.scrollTo === "function" && main.scrollHeight > main.clientHeight) {
-    try {
-      const mainRect = main.getBoundingClientRect();
-      const elRect = el.getBoundingClientRect();
-      // 80px clears the 64px sticky Topbar with padding
-      const targetScrollTop = main.scrollTop + (elRect.top - mainRect.top) - 80;
-      main.scrollTo({ top: Math.max(0, targetScrollTop), behavior: "smooth" });
-    } catch {
-      // Ignore
-    }
+  let container = el.parentElement;
+  while (container && container !== document.body) {
+    const { overflow, overflowY } = window.getComputedStyle(container);
+    if (/(auto|scroll|overlay)/.test(`${overflow} ${overflowY}`)) break;
+    container = container.parentElement;
   }
 
-  if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+  // Organization pages scroll inside the shell's main element, not the document viewport.
+  if (!container || container === document.body) {
+    container = el.closest("main") || document.scrollingElement;
+  }
+  if (!container) return false;
+
+  const targetTop = el.getBoundingClientRect().top;
+  const containerTop = container === document.scrollingElement
+    ? 0
+    : container.getBoundingClientRect().top;
+  const marginTop = Number.parseFloat(window.getComputedStyle(el).scrollMarginTop) || 0;
+  const top = Math.max(0, container.scrollTop + targetTop - containerTop - marginTop);
+
+  if (typeof container.scrollTo === "function") {
     try {
-      const elRect = el.getBoundingClientRect();
-      const targetScrollTop = window.scrollY + elRect.top - 80;
-      window.scrollTo({ top: Math.max(0, targetScrollTop), behavior: "smooth" });
+      container.scrollTo({ top, behavior: "smooth" });
     } catch {
-      // Ignore
+      container.scrollTop = top;
     }
+  } else {
+    container.scrollTop = top;
   }
 
   return true;
 }
+
+export const scrollToHashTarget = scrollToSection;
 
 // A sub-item link (#details) moves to that part of the page. React Router changes the URL but
 // does not scroll. A target may render after its data, so observe the page until it appears.
