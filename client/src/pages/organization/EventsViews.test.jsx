@@ -120,7 +120,7 @@ describe("the calendar", () => {
     await within(cal).findByText("Event a");
     const call = vi.mocked(api.get).mock.calls.find(([u, c]) => u === "/events" && c?.params?.date_from);
     expect(new Date(call[1].params.date_from).getMonth()).toBe(10);
-    expect(within(cal).getByText(/2 overlapping events/)).toBeInTheDocument();
+    expect(within(cal).getByText(/1 overlapping/)).toBeInTheDocument();
     expect(within(cal).getByRole("button", { name: /event a.*overlaps another event/i })).toBeInTheDocument();
     expect(within(cal).getByRole("button", { name: /event c,/i })).not.toHaveAccessibleName(/overlaps/i);
   });
@@ -136,14 +136,14 @@ describe("the calendar", () => {
     const cal = await screen.findByRole("region", { name: /event calendar, october 2026/i });
     await within(cal).findByText("Event a");
 
-    expect(within(cal).queryByText(/overlapping events/)).not.toBeInTheDocument();
+    expect(within(cal).queryByText(/overlapping/)).not.toBeInTheDocument();
     for (const id of ["a", "b", "c"]) {
       expect(within(cal).getByRole("button", { name: new RegExp(`event ${id},`, "i") }))
         .not.toHaveAccessibleName(/overlaps another event/i);
     }
   });
 
-  it("counts unique overlapping events after navigating to a month with multiple conflicts", async () => {
+  it("counts unique overlapping pairs after navigating to a month with multiple conflicts", async () => {
     calendarItems = [
       row("a", "scheduled", "2026-11-10T10:00:00Z", "2026-11-10T11:00:00Z"),
       row("b", "scheduled", "2026-11-10T10:15:00Z", "2026-11-10T10:30:00Z"),
@@ -156,7 +156,7 @@ describe("the calendar", () => {
 
     const cal = await screen.findByRole("region", { name: /event calendar, november 2026/i });
     await within(cal).findByText("Event a");
-    expect(within(cal).getByText(/3 overlapping events/)).toBeInTheDocument();
+    expect(within(cal).getByText(/2 overlapping/)).toBeInTheDocument();
     expect(within(cal).getByRole("button", { name: /event d,/i }))
       .not.toHaveAccessibleName(/overlaps another event/i);
   });

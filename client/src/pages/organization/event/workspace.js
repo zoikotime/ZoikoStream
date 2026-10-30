@@ -97,8 +97,44 @@ export const LEGACY_TABS = {
 // readiness verdict, and the reloads that re-read them after a change.
 export const useEventWorkspace = () => useOutletContext();
 
-function scrollToHashTarget(target) {
-  let container = target.parentElement;
+export const HASH_ALIASES = {
+  "live-monitor": "monitor",
+  "stream-health": "sessions",
+};
+
+/**
+ * Resolves a section target DOM element by ID or supported alias.
+ */
+export function resolveTargetElement(id) {
+  if (!id) return null;
+  const canonicalId = HASH_ALIASES[id] || id;
+  return (
+    document.getElementById(id) ||
+    document.getElementById(canonicalId) ||
+    (canonicalId === "monitor" && document.querySelector("#monitor, [data-section='live-monitor']")) ||
+    (canonicalId === "sessions" && document.querySelector("#sessions, [data-section='stream-health']")) ||
+    null
+  );
+}
+
+let lastScrolledHash = null;
+
+/**
+ * Scrolls smoothly to a target element, ensuring sticky header clearance.
+ */
+export function scrollToSection(elementOrId) {
+  const el = typeof elementOrId === "string" ? resolveTargetElement(elementOrId) : elementOrId;
+  if (!el) return false;
+
+  lastScrolledHash = typeof elementOrId === "string" ? elementOrId : el.id;
+
+  try {
+    el.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  } catch {
+    // Unsupported in older test environments
+  }
+
+  let container = el.parentElement;
   while (container && container !== document.body) {
     const { overflow, overflowY } = window.getComputedStyle(container);
     if (/(auto|scroll|overlay)/.test(`${overflow} ${overflowY}`)) break;
@@ -107,28 +143,36 @@ function scrollToHashTarget(target) {
 
   // Organization pages scroll inside the shell's main element, not the document viewport.
   if (!container || container === document.body) {
-    container = target.closest("main") || document.scrollingElement;
+    container = el.closest("main") || document.scrollingElement;
   }
-  if (!container) return;
+  if (!container) return false;
 
-  const targetTop = target.getBoundingClientRect().top;
+  const targetTop = el.getBoundingClientRect().top;
   const containerTop = container === document.scrollingElement
     ? 0
     : container.getBoundingClientRect().top;
-  const marginTop = Number.parseFloat(window.getComputedStyle(target).scrollMarginTop) || 0;
+  const marginTop = Number.parseFloat(window.getComputedStyle(el).scrollMarginTop) || 0;
   const top = Math.max(0, container.scrollTop + targetTop - containerTop - marginTop);
 
   if (typeof container.scrollTo === "function") {
-    container.scrollTo({ top, behavior: "smooth" });
+    try {
+      container.scrollTo({ top, behavior: "smooth" });
+    } catch {
+      container.scrollTop = top;
+    }
   } else {
     container.scrollTop = top;
   }
+
+  return true;
 }
+
+export const scrollToHashTarget = scrollToSection;
 
 // A sub-item link (#details) moves to that part of the page. React Router changes the URL but
 // does not scroll. A target may render after its data, so observe the page until it appears.
 // Read-only: scrolling never triggers an event action.
-export function useHashScroll({ supportedHashes, fallbackHash } = {}) {
+export function useHashScroll({ supportedHashes, fallbackHash, ready = true } = {}) {
   const { pathname, search, hash } = useLocation();
   const navigate = useNavigate();
 
@@ -136,12 +180,21 @@ export function useHashScroll({ supportedHashes, fallbackHash } = {}) {
   // so a query-string change does not move the page.
   useEffect(() => {
     if (!hash) {
+      lastScrolledHash = null;
       const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
       if (main && typeof main.scrollTo === "function") {
-        main.scrollTo({ top: 0, behavior: "smooth" });
+        try {
+          main.scrollTo({ top: 0, behavior: "smooth" });
+        } catch {
+          // Unsupported in older test environments
+        }
       }
       if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
-        window.scrollTo({ top: 0, behavior: "smooth" });
+        try {
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        } catch {
+          // Unsupported in older test environments
+        }
       }
     }
   }, [hash]);
@@ -156,40 +209,64 @@ export function useHashScroll({ supportedHashes, fallbackHash } = {}) {
       id = "";
     }
 
+    const canonicalId = HASH_ALIASES[id] || id;
+
     const normalizeToFallback = () => {
       if (!fallbackHash || hash === `#${fallbackHash}`) return;
       navigate({ pathname, search, hash: `#${fallbackHash}` }, { replace: true });
     };
 
-    if (!id || (supportedHashes && !supportedHashes.includes(id))) {
+    const isSupported =
+      !supportedHashes ||
+      supportedHashes.includes(id) ||
+      supportedHashes.includes(canonicalId);
+
+    if (!id || !isSupported) {
       normalizeToFallback();
       return undefined;
     }
 
-    const observer = new MutationObserver(() => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      scrollToHashTarget(el);
-      observer.disconnect();
-      clearTimeout(timeout);
-    });
-    const timeout = setTimeout(() => {
-      observer.disconnect();
-      normalizeToFallback();
-    }, 10_000);
+    if (lastScrolledHash === id || lastScrolledHash === canonicalId) {
+      lastScrolledHash = null;
+      return undefined;
+    }
 
-    const target = document.getElementById(id);
-    if (target) {
-      scrollToHashTarget(target);
-      observer.disconnect();
-      clearTimeout(timeout);
-    } else {
+    // When the component is still loading asynchronous data, defer scrolling until ready
+    if (!ready) {
+      return undefined;
+    }
+
+    let timeoutId;
+    let observer;
+
+    const attemptScroll = () => {
+      const target = resolveTargetElement(id);
+      if (target) {
+        scrollToSection(target);
+        return true;
+      }
+      return false;
+    };
+
+    if (!attemptScroll()) {
+      observer = new MutationObserver(() => {
+        if (attemptScroll()) {
+          observer.disconnect();
+          clearTimeout(timeoutId);
+        }
+      });
+
       observer.observe(document.body, { childList: true, subtree: true });
+
+      timeoutId = setTimeout(() => {
+        observer?.disconnect();
+        normalizeToFallback();
+      }, 10_000);
     }
 
     return () => {
-      observer.disconnect();
-      clearTimeout(timeout);
+      observer?.disconnect();
+      clearTimeout(timeoutId);
     };
-  }, [fallbackHash, hash, navigate, pathname, search, supportedHashes]);
+  }, [fallbackHash, hash, navigate, pathname, search, supportedHashes, ready]);
 }

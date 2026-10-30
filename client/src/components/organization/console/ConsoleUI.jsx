@@ -112,9 +112,9 @@ export function Tag({ children, tone = "violet", className = "", plain = false }
 }
 
 // A titled panel: title + subtitle on the left, a tag or an action link on the right.
-export function Panel({ id, title, subtitle, eyebrow, tag, tagTone, action, children, className = "", bodyClass = "", flush = false }) {
+export function Panel({ id, title, subtitle, eyebrow, tag, tagTone, action, children, className = "", bodyClass = "", flush = false, ...rest }) {
   return (
-    <section id={id} className={cx(CARD, "flex scroll-mt-24 flex-col", className)} aria-label={typeof title === "string" ? title : undefined}>
+    <section id={id} className={cx(CARD, "flex scroll-mt-24 flex-col", className)} aria-label={typeof title === "string" ? title : undefined} {...rest}>
       {(title || action || tag) && (
         <header className={cx("flex items-start justify-between gap-3 px-5 pt-5", flush ? "pb-4" : "pb-3")}>
           <div className="min-w-0">

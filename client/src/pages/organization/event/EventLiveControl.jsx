@@ -33,7 +33,7 @@ import { ageOf, fmtSeconds, fmtUtc, fmtZoned, fmtZonedShort, secondsSince } from
 const POLL_ON_AIR_MS = 10_000;
 const POLL_OFF_AIR_MS = 60_000;
 const LIVE_HASH_SCROLL = {
-  supportedHashes: ["monitor", "sessions", "incidents", "recovery"],
+  supportedHashes: ["monitor", "live-monitor", "sessions", "stream-health", "incidents", "recovery"],
   fallbackHash: "monitor",
 };
 
@@ -84,9 +84,10 @@ function GovernedAction({ icon: Icon, label, note, to, danger }) {
 
 export default function EventLiveControl() {
   const { event, eventId, reload, readiness } = useEventWorkspace();
-  useHashScroll(LIVE_HASH_SCROLL);
   const onAir = ON_AIR_STATUSES.includes(event.status);
   const live = useApi(() => api.get(`/organization/events/${eventId}/live-status`).then((r) => r.data));
+  const isReady = Boolean(live.data) || Boolean(live.error);
+  useHashScroll({ ...LIVE_HASH_SCROLL, ready: isReady });
   const [now, setNow] = useState(() => Date.now());
   useInterval(live.reload, onAir ? POLL_ON_AIR_MS : POLL_OFF_AIR_MS);
   useInterval(() => setNow(Date.now()), 1000);
@@ -105,7 +106,7 @@ export default function EventLiveControl() {
   const refresh = () => { reload(); live.reload(); };
 
   return (
-    <div id="monitor" className="scroll-mt-24 space-y-6">
+    <div id="monitor" data-section="live-monitor" className="scroll-mt-24 space-y-6">
       <EventSectionHeader
         icon={FiActivity}
         eyebrow="Event workspace / 04"
@@ -251,7 +252,7 @@ export default function EventLiveControl() {
               )}
             </Panel>
 
-            <Panel id="incidents" title="Incident & recovery desk" subtitle="Delays and holds announced for this event"
+            <Panel id="incidents" eyebrow="Alerts & incidents" title="Incident & recovery desk" subtitle="Delays and holds announced for this event"
               action={<PanelLink to="#recovery">Open runbook</PanelLink>}>
               {data.open_incidents.length === 0 ? (
                 <p className={cx("text-sm", CONSOLE.muted)}>No open incident.</p>
@@ -285,7 +286,7 @@ export default function EventLiveControl() {
             </Panel>
           </div>
 
-          <Panel id="sessions" title="Stream health & sessions" subtitle={`Broadcast sessions for this event (${data.session_count} on record).`} flush={data.sessions.length > 0}>
+          <Panel id="sessions" data-section="stream-health" title="Stream health & sessions" subtitle={`Broadcast sessions for this event (${data.session_count} on record).`} flush={data.sessions.length > 0}>
             {data.sessions.length === 0 ? (
               <p className={cx("text-sm", CONSOLE.muted)}>No broadcast has started for this event.</p>
             ) : (
