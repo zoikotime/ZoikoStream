@@ -117,12 +117,16 @@ export function resolveTargetElement(id) {
   );
 }
 
+let lastScrolledHash = null;
+
 /**
  * Scrolls smoothly to a target element, ensuring sticky header clearance.
  */
 export function scrollToSection(elementOrId) {
   const el = typeof elementOrId === "string" ? resolveTargetElement(elementOrId) : elementOrId;
   if (!el) return false;
+
+  lastScrolledHash = typeof elementOrId === "string" ? elementOrId : el.id;
 
   try {
     el.scrollIntoView?.({ block: "start", behavior: "smooth" });
@@ -176,6 +180,7 @@ export function useHashScroll({ supportedHashes, fallbackHash, ready = true } = 
   // so a query-string change does not move the page.
   useEffect(() => {
     if (!hash) {
+      lastScrolledHash = null;
       const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
       if (main && typeof main.scrollTo === "function") {
         try {
@@ -221,6 +226,11 @@ export function useHashScroll({ supportedHashes, fallbackHash, ready = true } = 
       return undefined;
     }
 
+    if (lastScrolledHash === id || lastScrolledHash === canonicalId) {
+      lastScrolledHash = null;
+      return undefined;
+    }
+
     // When the component is still loading asynchronous data, defer scrolling until ready
     if (!ready) {
       return undefined;
@@ -245,6 +255,7 @@ export function useHashScroll({ supportedHashes, fallbackHash, ready = true } = 
           clearTimeout(timeoutId);
         }
       });
+
       observer.observe(document.body, { childList: true, subtree: true });
 
       timeoutId = setTimeout(() => {

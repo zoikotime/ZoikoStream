@@ -15,13 +15,21 @@ describe("parseMonth", () => {
   });
 });
 
-describe("overlapping detection", () => {
-  const ev = (id, start, end, extra = {}) => ({
-    id,
-    start_time: start,
-    end_time: end,
-    status: "scheduled",
-    ...extra,
+describe("overlapping", () => {
+  const ev = (id, start, end, extra = {}) => {
+    const base = { id, status: "scheduled", start_time: start, end_time: end };
+    if (typeof extra === "string") {
+      return { ...base, status: extra };
+    }
+    return { ...base, ...extra };
+  };
+
+  it("does not mark same-day events whose actual scheduled intervals do not intersect", () => {
+    expect(overlapping([
+      ev("a", "2026-10-06T11:40:00+05:30", "2026-10-06T11:42:00+05:30"),
+      ev("b", "2026-10-06T11:43:00+05:30", "2026-10-06T12:00:00+05:30"),
+      ev("c", "2026-10-06T12:33:00+05:30", "2026-10-06T13:00:00+05:30"),
+    ])).toEqual(new Set());
   });
 
   it("1: Same day, non-overlapping events -> 0", () => {
@@ -62,7 +70,6 @@ describe("overlapping detection", () => {
     const clash = overlapping([
       ev("a", "2026-11-02T10:00:00Z", "2026-11-02T11:00:00Z"),
       ev("b", "2026-11-02T10:30:00Z", "2026-11-02T12:00:00Z"),
-      ev("c", "2026-11-02T13:00:00Z", "2026-11-02T14:00:00Z"),
     ]);
     expect(clash.pairCount).toBe(1);
     expect(clash.pairs).toEqual([["a", "b"]]);
@@ -195,11 +202,6 @@ describe("overlapping detection", () => {
   });
 
   it("evaluates real database records from October 6 with genuine overlaps", () => {
-    // Actual event records present in zoiko_stream_dev for October 6:
-    // Event 1: d0c1d1ff (12:55 to 13:07 IST, 07:25 to 07:37 UTC)
-    // Event 2: 9a01b8c6 (12:58 to 13:19 IST, 07:28 to 07:49 UTC) -> overlaps Event 1
-    // Event 3: fc0f7c82 (15:56 to 16:08 IST, 10:26 to 10:38 UTC)
-    // Event 4: e4ae828d (15:56 to 16:06 IST, 10:26 to 10:36 UTC) -> overlaps Event 3
     const realDbRecords = [
       ev("d0c1d1ff-5951-4934-b32e-2c8dfd9a4e56", "2026-10-06T12:55:00+05:30", "2026-10-06T13:07:00+05:30", { status: "ended" }),
       ev("9a01b8c6-29b6-4221-a4df-9d029ff16efd", "2026-10-06T12:58:00+05:30", "2026-10-06T13:19:00+05:30", { status: "scheduled" }),
@@ -216,8 +218,6 @@ describe("overlapping detection", () => {
   });
 
   it("10: Timezone conversion -> comparisons remain correct using normalized timestamps", () => {
-    // Event A: 23:30Z to 00:30Z next day
-    // Event B: starts 19:45-04:00 (EDT = 23:45Z), ends 20:45-04:00 (00:45Z next day)
     const crossTz = [
       ev("london", "2026-10-06T23:30:00Z", "2026-10-07T00:30:00Z"),
       ev("newyork", "2026-10-06T19:45:00-04:00", "2026-10-06T20:45:00-04:00"),
@@ -226,26 +226,15 @@ describe("overlapping detection", () => {
     expect(overlapping(crossTz).pairCount).toBe(1);
     expect(overlapping(crossTz).size).toBe(2);
 
-    // Non-overlapping across timezones
     const crossTzNonOverlap = [
       ev("london", "2026-10-06T20:00:00Z", "2026-10-06T21:00:00Z"),
-      ev("kolkata", "2026-10-07T03:00:00+05:30", "2026-10-07T04:00:00+05:30"), // 21:30Z to 22:30Z
+      ev("kolkata", "2026-10-07T03:00:00+05:30", "2026-10-07T04:00:00+05:30"),
     ];
     expect(overlapCount(crossTzNonOverlap)).toBe(0);
     expect(overlapping(crossTzNonOverlap).pairCount).toBe(0);
   });
 
-
-
   describe("main branch compatibility tests", () => {
-    it("does not mark same-day events whose actual scheduled intervals do not intersect", () => {
-      expect(overlapping([
-        ev("a", "2026-10-06T11:40:00+05:30", "2026-10-06T11:42:00+05:30"),
-        ev("b", "2026-10-06T11:43:00+05:30", "2026-10-06T12:00:00+05:30"),
-        ev("c", "2026-10-06T12:33:00+05:30", "2026-10-06T13:00:00+05:30"),
-      ])).toEqual(new Set());
-    });
-
     it("marks partially overlapping and fully contained events", () => {
       const clash = overlapping([
         ev("a", "2026-11-02T10:00:00Z", "2026-11-02T11:00:00Z"),
@@ -289,10 +278,22 @@ describe("overlapping detection", () => {
 
     it("excludes cancelled and archived events from schedule conflicts", () => {
       expect(overlapping([
-        ev("cancelled", "2026-11-02T10:00:00Z", "2026-11-02T12:00:00Z", { status: "cancelled" }),
-        ev("archived", "2026-11-02T10:00:00Z", "2026-11-02T12:00:00Z", { status: "archived" }),
+        ev("cancelled", "2026-11-02T10:00:00Z", "2026-11-02T12:00:00Z", "cancelled"),
+        ev("archived", "2026-11-02T10:00:00Z", "2026-11-02T12:00:00Z", "archived"),
         ev("scheduled", "2026-11-02T10:30:00Z", "2026-11-02T11:30:00Z"),
       ])).toEqual(new Set());
+    });
+
+    it("counts distinct involved events alongside overlapping pairs", () => {
+      const clash = overlapping([
+        ev("a", "2026-11-02T10:00:00Z", "2026-11-02T11:00:00Z"),
+        ev("b", "2026-11-02T10:30:00Z", "2026-11-02T10:45:00Z"),
+        ev("c", "2026-11-02T10:50:00Z", "2026-11-02T11:30:00Z"),
+        ev("d", "2026-11-02T12:00:00Z", "2026-11-02T13:00:00Z"),
+      ]);
+      expect(clash.size).toBe(3);
+      expect([...clash].sort()).toEqual(["a", "b", "c"]);
+      expect(clash.pairCount).toBe(2);
     });
   });
 });

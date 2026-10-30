@@ -51,9 +51,7 @@ export function overlappingPairs(events) {
     if (e.status === "cancelled" || e.status === "archived" || e.display_status === "cancelled" || e.deleted_at) {
       continue;
     }
-    if (!e.start_time) continue;
-
-    if (!e.end_time) continue;
+    if (!e.start_time || !e.end_time) continue;
 
     const start = new Date(e.start_time).getTime();
     const end = new Date(e.end_time).getTime();
@@ -96,7 +94,7 @@ export function overlapCount(events) {
 }
 
 /**
- * Returns an OverlapResult Set containing the IDs of all events involved in any
+ * Returns a Set containing the IDs of all events involved in any
  * overlap, with `.pairs` (unique pairs) and `.pairCount` (count of unique pairs).
  */
 export function overlapping(events) {

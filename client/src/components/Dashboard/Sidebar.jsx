@@ -441,7 +441,7 @@ export default function Sidebar({ open, onClose, state, collapsed = false, nav =
         {nav || <OrgNav state={state} role={role} collapsed={collapsed} onNavigate={onClose} />}
 
         <div className="shrink-0 border-t border-white/[0.07] pt-2">
-          {/* Both controls open the service-health section on Support; neither wraps the other. */}
+          {/* The indicator opens organization-scoped health; details open the public status page. */}
           <div
             className={cx(
               "mx-3 mb-2 flex items-center justify-between gap-2 rounded-lg px-2 py-2 text-[12.5px] text-white/70 hover:bg-white/[0.06] hover:text-white",
@@ -460,7 +460,7 @@ export default function Sidebar({ open, onClose, state, collapsed = false, nav =
               <Tip show={collapsed}>Service status · {health.label || "Unknown"}</Tip>
             </Link>
             <Link
-              to="/organization/support#service-health"
+              to="/status"
               onClick={onClose}
               aria-label="View service status details"
               className={cx("inline-flex shrink-0 items-center gap-1 rounded-md text-white/60", focusRing, collapsed && "lg:hidden")}
