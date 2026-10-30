@@ -88,9 +88,9 @@ export default function EventsCalendar({ month: monthParam, onMonth, onOpen }) {
           {loading
             ? "Loading…"
             : `${items.length}${state.data?.total > items.length ? ` of ${state.data.total}` : ""} event${items.length === 1 ? "" : "s"} · times in your zone`}
-          {clash.size > 0 && (
+          {clash.pairCount > 0 && (
             <span className="ml-2 inline-flex items-center gap-1 font-semibold text-amber-700 dark:text-amber-300">
-              <FiAlertTriangle aria-hidden="true" /> {clash.size} overlapping
+              <FiAlertTriangle aria-hidden="true" /> {clash.pairCount} overlapping
             </span>
           )}
         </p>

@@ -53,10 +53,16 @@ const STAGE_OF = {
   ended: 5, cancelled: 5, archived: 6,
 };
 
-function StageStrip({ status, eventId }) {
+export function StageStrip({ status, eventId }) {
   const current = STAGE_OF[status] ?? 0;
+  const [prevCurrent, setPrevCurrent] = useState(current);
   const [selected, setSelected] = useState(current);
   const links = useRef([]);
+
+  if (prevCurrent !== current) {
+    setPrevCurrent(current);
+    setSelected(current);
+  }
 
   const moveFocus = (event, index) => {
     let next;
@@ -81,22 +87,25 @@ function StageStrip({ status, eventId }) {
       <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
         {STAGES.map((stage, i) => {
           const state = i < current ? "done" : i === current ? "current" : "next";
+          const isSelected = i === selected;
           const to = `${sectionPath(eventId, stage.section)}${stage.hash ? `#${stage.hash}` : ""}`;
           return (
             <li key={stage.label}>
               <Link
               ref={(node) => { links.current[i] = node; }}
               to={to}
-              tabIndex={i === selected ? 0 : -1}
-              aria-current={state === "current" ? "step" : undefined}
+              tabIndex={isSelected ? 0 : -1}
+              aria-current={isSelected ? "step" : undefined}
               aria-label={`${stage.label}, ${state === "done" ? "completed" : state === "current" ? "current stage" : "upcoming"}; open ${stage.destination}`}
               className={cx(
                 CARD,
                 "flex min-h-full w-full cursor-pointer flex-col items-center gap-1.5 px-2 py-3 text-center transition-colors",
-                "hover:border-violet-300 hover:bg-violet-50/50 dark:hover:border-violet-400/40 dark:hover:bg-violet-500/5",
-                state === "current" && "border-violet-300 bg-violet-50/80 ring-1 ring-violet-200 dark:border-violet-400/40 dark:bg-violet-500/10 dark:ring-violet-400/20",
+                isSelected
+                  ? "border-violet-300 bg-violet-50/80 ring-1 ring-violet-200 dark:border-violet-400/40 dark:bg-violet-500/10 dark:ring-violet-400/20"
+                  : "hover:border-violet-300 hover:bg-violet-50/50 dark:hover:border-violet-400/40 dark:hover:bg-violet-500/5",
                 focusRing
               )}
+              onClick={() => setSelected(i)}
               onFocus={() => setSelected(i)}
               onKeyDown={(event) => moveFocus(event, i)}
               >

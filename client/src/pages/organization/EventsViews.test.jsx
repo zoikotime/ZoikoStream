@@ -120,7 +120,7 @@ describe("the calendar", () => {
     await within(cal).findByText("Event a");
     const call = vi.mocked(api.get).mock.calls.find(([u, c]) => u === "/events" && c?.params?.date_from);
     expect(new Date(call[1].params.date_from).getMonth()).toBe(10);
-    expect(within(cal).getByText(/2 overlapping/)).toBeInTheDocument();
+    expect(within(cal).getByText(/1 overlapping/)).toBeInTheDocument();
     expect(within(cal).getByRole("button", { name: /event a.*overlaps another event/i })).toBeInTheDocument();
     expect(within(cal).getByRole("button", { name: /event c,/i })).not.toHaveAccessibleName(/overlaps/i);
   });

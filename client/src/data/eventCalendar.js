@@ -13,12 +13,35 @@ export function parseMonth(value, now = new Date()) {
   return new Date(now.getFullYear(), now.getMonth(), 1);
 }
 
-// Ids of events whose scheduled [start, end) intervals intersect.
-// Follows the interval-overlap rule: eventA.start < eventB.end && eventB.start < eventA.end.
-// Events ending exactly when another starts are non-overlapping.
-// Cancelled/archived/deleted events and events without a valid end time/duration are excluded.
-export function overlapping(events) {
-  if (!Array.isArray(events)) return new Set();
+export class OverlapResult extends Set {
+  constructor(clashIds, pairs) {
+    super(clashIds);
+    this.pairs = pairs;
+  }
+
+  get pairCount() {
+    return this.pairs.length;
+  }
+}
+
+/**
+ * Returns an array of unique overlapping event pairs: [[idA, idB], ...]
+ * Follows the interval intersection rule:
+ *   eventA.start < eventB.end && eventB.start < eventA.end
+ *
+ * Requirements:
+ * - Compares full date-time values, not just calendar dates.
+ * - Uses actual event start and end timestamps.
+ * - Events on the same day but at different times do not overlap.
+ * - Sequential events (where one ends exactly when the next starts) do not overlap.
+ * - Events on different dates do not overlap unless their actual intervals cross a date boundary.
+ * - Missing or invalid timestamps are safely excluded (never invent default durations or end times).
+ * - Duplicate event records are deduplicated before calculation.
+ * - Avoids counting the same overlap pair twice.
+ * - Reflects unique overlapping event pairs.
+ */
+export function overlappingPairs(events) {
+  if (!Array.isArray(events)) return [];
 
   const spans = [];
   const seenIds = new Set();
@@ -43,7 +66,7 @@ export function overlapping(events) {
       end = start + e.duration_minutes * 60 * 1000;
     }
 
-    // Do not invent durations when end times or duration_minutes are missing.
+    // Do not invent durations when end times or duration_minutes are missing or invalid.
     // Events without a valid end time (> start) have no interval to intersect.
     if (end === null) continue;
 
@@ -53,7 +76,7 @@ export function overlapping(events) {
 
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
 
-  const clash = new Set();
+  const pairs = [];
   for (let i = 0; i < spans.length; i += 1) {
     const a = spans[i];
     for (let j = i + 1; j < spans.length; j += 1) {
@@ -63,11 +86,31 @@ export function overlapping(events) {
         break;
       }
       if (a.start < b.end && b.start < a.end) {
-        clash.add(a.id);
-        clash.add(b.id);
+        pairs.push([a.id, b.id]);
       }
     }
   }
 
-  return clash;
+  return pairs;
+}
+
+/**
+ * Returns the count of unique overlapping event pairs.
+ */
+export function overlapCount(events) {
+  return overlappingPairs(events).length;
+}
+
+/**
+ * Returns an OverlapResult Set containing the IDs of all events involved in any
+ * overlap, with `.pairs` (unique pairs) and `.pairCount` (count of unique pairs).
+ */
+export function overlapping(events) {
+  const pairs = overlappingPairs(events);
+  const clashIds = new Set();
+  for (const [idA, idB] of pairs) {
+    clashIds.add(idA);
+    clashIds.add(idB);
+  }
+  return new OverlapResult(clashIds, pairs);
 }

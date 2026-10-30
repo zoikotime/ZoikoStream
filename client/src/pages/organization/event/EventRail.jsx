@@ -3,7 +3,7 @@ import { FiArrowLeft, FiCalendar, FiChevronRight, FiEye, FiLifeBuoy } from "reac
 import { cx, focusRing } from "../../../ui/tokens";
 import { ON_AIR_STATUSES, displayStatusOf, statusMeta, visLabel } from "../../../data/events";
 import { RailChildren, RailLink, RailSection } from "../../../components/Dashboard/Sidebar";
-import { SECTIONS, sectionPath } from "./workspace";
+import { HASH_ALIASES, SECTIONS, scrollToSection, sectionPath } from "./workspace";
 
 // The event-local rail (ZST-UX-NAV-001 §6, Figure C; ZST-ENG-DASH-001 EVT-01..07):
 //
@@ -123,8 +123,16 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
           const on = active === s.id;
           const children = on && !collapsed && s.children ? s.children : null;
           // Which part of the open section the URL points at: a hash, a filter, or the top.
+          const currentHashClean = (hash || "").replace(/^#/, "");
+          const canonicalCurrentHash = HASH_ALIASES[currentHashClean] || currentHashClean;
           const childCurrent = (c) => {
-            if (c.hash) return hash === `#${c.hash}` || (!hash && c.hash === "overview");
+            if (c.hash) {
+              const canonicalChild = HASH_ALIASES[c.hash] || c.hash;
+              return (
+                canonicalCurrentHash === canonicalChild ||
+                (!hash && (c.hash === "overview" || c.hash === "monitor"))
+              );
+            }
             if (c.query) {
               const [k, v] = c.query.split("=");
               return params.get(k) === v;
@@ -164,7 +172,12 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
                       hash: c.hash ? `#${c.hash}` : "",
                     },
                     current: childCurrent(c),
-                    onClick: onNavigate,
+                    onClick: (e) => {
+                      onNavigate?.(e);
+                      if (c.hash) {
+                        scrollToSection(HASH_ALIASES[c.hash] || c.hash);
+                      }
+                    },
                   }))}
                 />
               )}
