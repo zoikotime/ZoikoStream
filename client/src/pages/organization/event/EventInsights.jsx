@@ -32,7 +32,7 @@ const TABS = [
   ["outcomes", "Event outcomes"],
 ];
 const INSIGHTS_HASH_SCROLL = {
-  supportedHashes: TABS.map(([anchor]) => anchor),
+  supportedHashes: [...TABS.map(([anchor]) => anchor), "feedback"],
   fallbackHash: "overview",
 };
 
@@ -95,8 +95,12 @@ function Feedback({ eventId }) {
 export default function EventInsights() {
   const { event, eventId } = useEventWorkspace();
   const { hash } = useLocation();
-  useHashScroll(INSIGHTS_HASH_SCROLL);
   const ins = useApi(() => api.get(`/organization/events/${eventId}/insights`).then((r) => r.data));
+  // Viewer feedback renders at once, but every panel above it mounts only when this request
+  // answers. Scrolling before that put #feedback under them (277px down instead of 96px), so the
+  // hash waits for it, as Live Control and Preparation do. Charts keep a fixed height, so nothing
+  // above moves afterwards; data/error persist across reloads, so a refresh does not re-scroll.
+  useHashScroll({ ...INSIGHTS_HASH_SCROLL, ready: Boolean(ins.data) || Boolean(ins.error) });
   const d = ins.data;
   const total = d?.playback?.total || {};
   const live = d?.playback?.live || {};

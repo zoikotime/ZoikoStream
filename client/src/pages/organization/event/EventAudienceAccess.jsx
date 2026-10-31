@@ -136,7 +136,7 @@ export default function EventAudienceAccess() {
   const block = dateBlock(event.start_time, event.timezone);
 
   return (
-    <div className="space-y-6">
+    <div id="overview" data-section="overview" className="scroll-mt-24 space-y-6">
       <EventSectionHeader
         icon={FiShield}
         eyebrow="Event workspace / 03"

@@ -98,62 +98,138 @@ export const LEGACY_TABS = {
 export const useEventWorkspace = () => useOutletContext();
 
 export const HASH_ALIASES = {
+  // Live Control aliases
   "live-monitor": "monitor",
   "stream-health": "sessions",
+  // Audience Access aliases
+  "invitations": "registrations",
+  "links": "access-links",
+  // Preparation aliases
+  "details-schedule": "details",
+  "schedule": "details",
+  "sources-ingest": "sources",
+  "readiness-checks": "readiness",
+  "event-team": "team",
+  // Replay aliases
+  "assets": "recordings",
+  "preservation": "retention",
+  // Insights aliases
+  "viewer-activity": "viewers",
+  "stream-quality": "quality",
+  "outcomes-viewing": "outcomes",
+  // Activity aliases
+  "timeline": "timeline",
 };
+
+// The canonical section for a hash. Own keys only: a hash such as #constructor must not pick up
+// an Object.prototype member.
+export const canonicalHash = (id) =>
+  (Object.prototype.hasOwnProperty.call(HASH_ALIASES, id) ? HASH_ALIASES[id] : id);
 
 /**
  * Resolves a section target DOM element by ID or supported alias.
+ *
+ * The id comes from the URL, so it is compared, never built into a CSS selector: #a%22b%5D
+ * decodes to `a"b]`, and as `[data-section="a"b]"]` querySelector threw inside the hash
+ * effect and took the page down.
  */
 export function resolveTargetElement(id) {
-  if (!id) return null;
-  const canonicalId = HASH_ALIASES[id] || id;
+  if (!id || typeof id !== "string") return null;
+  const canonicalId = canonicalHash(id);
+  const byId = document.getElementById(id) || document.getElementById(canonicalId);
+  if (byId) return byId;
+  const sections = [...document.querySelectorAll("[data-section]")];
   return (
-    document.getElementById(id) ||
-    document.getElementById(canonicalId) ||
-    (canonicalId === "monitor" && document.querySelector("#monitor, [data-section='live-monitor']")) ||
-    (canonicalId === "sessions" && document.querySelector("#sessions, [data-section='stream-health']")) ||
+    sections.find((el) => el.getAttribute("data-section") === id) ||
+    sections.find((el) => canonicalHash(el.getAttribute("data-section")) === canonicalId) ||
     null
   );
 }
 
-let lastScrolledHash = null;
+// Back to the top: the shell's <main> when it is the scroller (a locked-viewport shell), the
+// window otherwise. Both are set to 0; the one that does not scroll is a no-op.
+function scrollPageToTop() {
+  const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
+  if (main && typeof main.scrollTo === "function") {
+    try {
+      main.scrollTo({ top: 0, behavior: "smooth" });
+    } catch {
+      main.scrollTop = 0;
+    }
+  } else if (main) {
+    main.scrollTop = 0;
+  }
+
+  if (typeof window.scrollTo === "function") {
+    try {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch {
+      const docEl = document.scrollingElement || document.documentElement;
+      if (docEl) docEl.scrollTop = 0;
+    }
+  }
+}
 
 /**
  * Scrolls smoothly to a target element, ensuring sticky header clearance.
+ * Handles nested scroll containers (<main>) and the document/window viewport.
  */
 export function scrollToSection(elementOrId) {
+  if (elementOrId === "top") {
+    scrollPageToTop();
+    return true;
+  }
+
   const el = typeof elementOrId === "string" ? resolveTargetElement(elementOrId) : elementOrId;
   if (!el) return false;
 
-  lastScrolledHash = typeof elementOrId === "string" ? elementOrId : el.id;
-
-  try {
-    el.scrollIntoView?.({ block: "start", behavior: "smooth" });
-  } catch {
-    // Unsupported in older test environments
-  }
-
+  // The nearest ancestor that scrolls by style; failing that, the shell's <main>.
   let container = el.parentElement;
-  while (container && container !== document.body) {
+  while (container && container !== document.body && container !== document.documentElement) {
     const { overflow, overflowY } = window.getComputedStyle(container);
     if (/(auto|scroll|overlay)/.test(`${overflow} ${overflowY}`)) break;
     container = container.parentElement;
   }
-
-  // Organization pages scroll inside the shell's main element, not the document viewport.
-  if (!container || container === document.body) {
-    container = el.closest("main") || document.scrollingElement;
+  if (!container || container === document.body || container === document.documentElement) {
+    container = el.closest("main");
   }
-  if (!container) return false;
 
-  const targetTop = el.getBoundingClientRect().top;
-  const containerTop = container === document.scrollingElement
-    ? 0
-    : container.getBoundingClientRect().top;
+  // Exactly one scroller moves. The organization shell's <main> is overflow-auto but grows with
+  // its content (AppShell without fullHeight), so there the window scrolls; a locked-viewport
+  // shell scrolls <main>. Scrolling both started two smooth scrolls toward different offsets.
+  const docEl = document.scrollingElement || document.documentElement;
+  const containerScrolls = Boolean(container) && container.scrollHeight > container.clientHeight;
+  const windowScrolls = Boolean(docEl) && docEl.scrollHeight > window.innerHeight;
+  const useWindow = !container || (!containerScrolls && windowScrolls);
+
+  // A scroll-margin on the target wins. Without one, clear a sticky header that covers the
+  // scrolled content: the shell's top bar when the window scrolls (it sits outside <main>),
+  // or one inside the scrolling container.
   const marginTop = Number.parseFloat(window.getComputedStyle(el).scrollMarginTop) || 0;
-  const top = Math.max(0, container.scrollTop + targetTop - containerTop - marginTop);
+  const header = useWindow
+    ? document.querySelector("header.sticky")
+    : container.querySelector("header.sticky");
+  const offset = marginTop > 0 ? marginTop : (header ? header.getBoundingClientRect().height : 0) + 16;
 
+  if (useWindow) {
+    const current = window.pageYOffset || (docEl ? docEl.scrollTop : 0) || 0;
+    const top = Math.max(0, current + el.getBoundingClientRect().top - offset);
+    if (typeof window.scrollTo === "function") {
+      try {
+        window.scrollTo({ top, behavior: "smooth" });
+      } catch {
+        if (docEl) docEl.scrollTop = top;
+      }
+    } else if (docEl) {
+      docEl.scrollTop = top;
+    }
+    return true;
+  }
+
+  const top = Math.max(
+    0,
+    container.scrollTop + el.getBoundingClientRect().top - container.getBoundingClientRect().top - offset,
+  );
   if (typeof container.scrollTo === "function") {
     try {
       container.scrollTo({ top, behavior: "smooth" });
@@ -163,11 +239,32 @@ export function scrollToSection(elementOrId) {
   } else {
     container.scrollTop = top;
   }
-
   return true;
 }
 
 export const scrollToHashTarget = scrollToSection;
+
+// A workspace link's click. useHashScroll (below) scrolls when the URL's hash or query changes,
+// on the page that renders the destination and once its target exists. So a click scrolls by
+// itself only where no such change will follow: a repeated click on the current item, or a
+// top-of-page link when the hash is already empty (a query-only change does not run the
+// no-hash effect). Anything else, a link to another section included, is left to the
+// destination: scrolling at click time would move the page being left, which can hold an
+// element with the same id (several sections have #overview).
+export function scrollForSamePageLink(location, to) {
+  if (location.pathname !== to.pathname) return false;
+  const toHash = to.hash || "";
+  if (toHash !== (location.hash || "")) return false;
+  if (!toHash) return scrollToSection("top");
+  if ((to.search || "") !== (location.search || "")) return false;
+  let id;
+  try {
+    id = decodeURIComponent(toHash.slice(1));
+  } catch {
+    return false;
+  }
+  return scrollToSection(id);
+}
 
 // A sub-item link (#details) moves to that part of the page. React Router changes the URL but
 // does not scroll. A target may render after its data, so observe the page until it appears.
@@ -179,24 +276,7 @@ export function useHashScroll({ supportedHashes, fallbackHash, ready = true } = 
   // No hash (a section or parent link): back to the top of the page. Keyed on the hash alone,
   // so a query-string change does not move the page.
   useEffect(() => {
-    if (!hash) {
-      lastScrolledHash = null;
-      const main = document.querySelector("main.zk-guide-safe") || document.querySelector("main");
-      if (main && typeof main.scrollTo === "function") {
-        try {
-          main.scrollTo({ top: 0, behavior: "smooth" });
-        } catch {
-          // Unsupported in older test environments
-        }
-      }
-      if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
-        try {
-          window.scrollTo({ top: 0, behavior: "smooth" });
-        } catch {
-          // Unsupported in older test environments
-        }
-      }
-    }
+    if (!hash) scrollPageToTop();
   }, [hash]);
 
   useEffect(() => {
@@ -209,7 +289,7 @@ export function useHashScroll({ supportedHashes, fallbackHash, ready = true } = 
       id = "";
     }
 
-    const canonicalId = HASH_ALIASES[id] || id;
+    const canonicalId = canonicalHash(id);
 
     const normalizeToFallback = () => {
       if (!fallbackHash || hash === `#${fallbackHash}`) return;
@@ -226,10 +306,10 @@ export function useHashScroll({ supportedHashes, fallbackHash, ready = true } = 
       return undefined;
     }
 
-    if (lastScrolledHash === id || lastScrolledHash === canonicalId) {
-      lastScrolledHash = null;
-      return undefined;
-    }
+    // Every hash change scrolls here, Back/Forward included. There is deliberately no "already
+    // scrolled" memory: a module-level one outlived the navigation it was set for, and a later
+    // Back to that hash (after a page without one) was skipped. Clicks that do not change the
+    // URL scroll themselves (scrollForSamePageLink), so nothing scrolls twice.
 
     // When the component is still loading asynchronous data, defer scrolling until ready
     if (!ready) {

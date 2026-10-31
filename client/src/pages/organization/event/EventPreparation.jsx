@@ -484,7 +484,6 @@ function Team({ eventId, team }) {
 
 export default function EventPreparation() {
   const { event, eventId, readiness, readinessError } = useEventWorkspace();
-  useHashScroll();
   const live = useApi(() => api.get(`/organization/events/${eventId}/live-status`).then((r) => r.data));
   const rehearsals = useApi(() => api.get(`/events/${eventId}/rehearsals`).then((r) => r.data));
   const team = useApi(() =>
@@ -493,6 +492,11 @@ export default function EventPreparation() {
       api.get(`/events/${eventId}/speakers`).then((r) => r.data),
     ]).then(([hosts, speakers]) => ({ hosts, speakers }))
   );
+  // Scroll to a #hash once these have answered (loaded or failed), as Live Control does: earlier,
+  // the content they add above a section pushed it down after the scroll — Back to #details
+  // landed 80px below its place. data/error persist across reloads, so a refresh does not re-scroll.
+  const settled = (q) => Boolean(q.data) || Boolean(q.error);
+  useHashScroll({ ready: settled(live) && settled(rehearsals) && settled(team) });
 
   const gates = readiness?.gates || [];
   const passed = gates.filter((g) => g.passed).length;
@@ -501,7 +505,7 @@ export default function EventPreparation() {
   const inputs = live.data?.inputs || [];
 
   return (
-    <div className="space-y-6">
+    <div id="hub" data-section="hub" className="scroll-mt-24 space-y-6">
       <EventSectionHeader
         icon={FiClipboard}
         eyebrow="Event workspace / 02"

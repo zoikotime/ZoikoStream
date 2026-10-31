@@ -3,7 +3,7 @@ import { FiArrowLeft, FiCalendar, FiChevronRight, FiEye, FiLifeBuoy } from "reac
 import { cx, focusRing } from "../../../ui/tokens";
 import { ON_AIR_STATUSES, displayStatusOf, statusMeta, visLabel } from "../../../data/events";
 import { RailChildren, RailLink, RailSection } from "../../../components/Dashboard/Sidebar";
-import { HASH_ALIASES, SECTIONS, scrollToSection, sectionPath } from "./workspace";
+import { SECTIONS, canonicalHash, scrollForSamePageLink, sectionPath } from "./workspace";
 
 // The event-local rail (ZST-UX-NAV-001 §6, Figure C; ZST-ENG-DASH-001 EVT-01..07):
 //
@@ -68,6 +68,8 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
     "event.live": { hint: onAir ? "Live" : null },
   };
   const params = new URLSearchParams(search);
+  const here = { pathname, hash, search };
+  const viewerPreviewTo = { pathname: sectionPath(eventId, "access"), search: search || "", hash: "#viewer-preview" };
 
   return (
     <nav
@@ -124,10 +126,10 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
           const children = on && !collapsed && s.children ? s.children : null;
           // Which part of the open section the URL points at: a hash, a filter, or the top.
           const currentHashClean = (hash || "").replace(/^#/, "");
-          const canonicalCurrentHash = HASH_ALIASES[currentHashClean] || currentHashClean;
+          const canonicalCurrentHash = canonicalHash(currentHashClean);
           const childCurrent = (c) => {
             if (c.hash) {
-              const canonicalChild = HASH_ALIASES[c.hash] || c.hash;
+              const canonicalChild = canonicalHash(c.hash);
               return (
                 canonicalCurrentHash === canonicalChild ||
                 (!hash && (c.hash === "overview" || c.hash === "monitor"))
@@ -139,15 +141,15 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
             }
             return !hash && !(s.children || []).some((o) => o.query && params.get(o.query.split("=")[0]));
           };
+          const sectionTo = { pathname: sectionPath(eventId, s.slug), search: search || "", hash: "" };
+          // In a section whose items are filters (Activity & Audit), an item without one drops
+          // the current filter rather than carrying it along.
+          const filtered = (s.children || []).some((o) => o.query);
           return (
             <li key={s.id}>
               <div className="flex">
                 <RailLink
-                  to={{
-                    pathname: sectionPath(eventId, s.slug),
-                    search: search || "",
-                    hash: "",
-                  }}
+                  to={sectionTo}
                   label={s.label}
                   icon={s.icon}
                   active={on}
@@ -156,29 +158,35 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
                   countTone="warn"
                   hint={signal[s.id]?.hint}
                   collapsed={collapsed}
-                  onClick={onNavigate}
+                  onClick={(e) => {
+                    onNavigate?.(e);
+                    scrollForSamePageLink(here, sectionTo);
+                  }}
                 />
               </div>
               {children && (
                 <RailChildren
                   id={`rail-${s.slug || "overview"}`}
-                  items={children.map((c) => ({
-                    key: c.key,
-                    label: c.label,
-                    gated: c.gated,
-                    to: {
+                  items={children.map((c) => {
+                    const to = {
                       pathname: sectionPath(eventId, s.slug),
-                      search: c.query ? `?${c.query}` : (search || ""),
+                      search: c.query ? `?${c.query}` : filtered ? "" : (search || ""),
                       hash: c.hash ? `#${c.hash}` : "",
-                    },
-                    current: childCurrent(c),
-                    onClick: (e) => {
-                      onNavigate?.(e);
-                      if (c.hash) {
-                        scrollToSection(HASH_ALIASES[c.hash] || c.hash);
-                      }
-                    },
-                  }))}
+                    };
+                    return {
+                      key: c.key,
+                      label: c.label,
+                      gated: c.gated,
+                      to,
+                      current: childCurrent(c),
+                      // Scrolls now only when the URL will not change; otherwise the section's
+                      // useHashScroll does, after navigating (workspace.scrollForSamePageLink).
+                      onClick: (e) => {
+                        onNavigate?.(e);
+                        scrollForSamePageLink(here, to);
+                      },
+                    };
+                  })}
                 />
               )}
             </li>
@@ -190,15 +198,14 @@ export default function EventRail({ event, eventId, readiness, state, collapsed,
         {/* Preview, not open: the console never navigates to the attendee page itself — the
             Audience Access section explains what a viewer sees and holds the link. */}
         <RailLink
-          to={{
-            pathname: sectionPath(eventId, "access"),
-            search: search || "",
-            hash: "#viewer-preview",
-          }}
+          to={viewerPreviewTo}
           label="Viewer preview"
           icon={FiEye}
           collapsed={collapsed}
-          onClick={onNavigate}
+          onClick={(e) => {
+            onNavigate?.(e);
+            scrollForSamePageLink(here, viewerPreviewTo);
+          }}
         />
         <RailLink
           to="/organization/support"
