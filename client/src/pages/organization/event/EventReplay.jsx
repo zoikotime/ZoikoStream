@@ -75,7 +75,7 @@ export default function EventReplay() {
   const held = rows.some((r) => r.legal_hold);
 
   return (
-    <div className="space-y-6">
+    <div id="overview" data-section="overview" className="scroll-mt-24 space-y-6">
       <EventSectionHeader
         icon={FiFilm}
         eyebrow="Event workspace / 05"

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -327,4 +327,17 @@ describe("Analytics Parent and Sub-Navigation", { timeout: 20000 }, () => {
     // Range remains 7d on current page because Ctrl+click opens a new tab
     expect(rangeSelect).toHaveValue("7d");
   });
+
+  // The page's useHashScroll resolves the hash against the DOM. A malformed one (#a%22b%5D decodes
+  // to `a"b]`) used to reach querySelector as a selector and throw inside the effect.
+  it.each(["#a%22b%5D", "#%", "#section%ZZ", "#unknown-section", "#a'b%5D", "#.x%3Ey", "#constructor"])(
+    "a malformed or unknown hash (%s) leaves the page rendered",
+    async (hash) => {
+      renderApp(`/organization/analytics${hash}`);
+      expect(await screen.findByRole("heading", { name: "Analytics" })).toBeInTheDocument();
+      await act(async () => {});
+      expect(screen.getByRole("heading", { name: "Analytics" })).toBeInTheDocument();
+      expect(screen.getByRole("navigation", { name: "Organization" })).toBeInTheDocument();
+    }
+  );
 });

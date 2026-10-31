@@ -2,7 +2,7 @@ import { FiActivity, FiDownload, FiSearch } from "react-icons/fi";
 import ActivityLedger from "../../../components/organization/ActivityLedger";
 import { ConsoleButton as Button } from "../../../ui/Button";
 import EventSectionHeader from "./EventSectionHeader";
-import { useEventWorkspace } from "./workspace";
+import { useEventWorkspace, useHashScroll } from "./workspace";
 
 // EVT-07 Activity & Audit (EVT-07 frames): this event's ledger — management changes, lifecycle
 // moves, live console actions, access-link changes, refusals and evidence actions — scoped by
@@ -10,8 +10,9 @@ import { useEventWorkspace } from "./workspace";
 // in UTC.
 export default function EventActivity() {
   const { event, eventId } = useEventWorkspace();
+  useHashScroll();
   return (
-    <div className="space-y-6">
+    <div id="timeline" data-section="timeline" className="scroll-mt-24 space-y-6">
       <EventSectionHeader
         icon={FiActivity}
         eyebrow="Event workspace / 07"
