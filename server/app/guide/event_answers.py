@@ -54,14 +54,40 @@ _NAMED_ZONES = [
     (r"\b(cst|cdt|central\s+time|us\s+central)\b", "America/Chicago"),
     (r"\b(mst|mdt|mountain\s+time)\b", "America/Denver"),
     (r"\b(pst|pdt|pacific(\s+time)?|us\s+pacific)\b", "America/Los_Angeles"),
-    (r"\b(bst|london(\s+time)?|uk\s+time)\b", "Europe/London"),
+    (r"\b(bst|london\s+time|uk\s+time)\b", "Europe/London"),
     (r"\b(cet|cest|central\s+european(\s+time)?)\b", "Europe/Paris"),
     (r"\b(jst|japan(ese)?\s+time)\b", "Asia/Tokyo"),
     (r"\b(sgt|singapore\s+time)\b", "Asia/Singapore"),
     (r"\b(gst|dubai\s+time|uae\s+time)\b", "Asia/Dubai"),
     (r"\b(aest|aedt|sydney\s+time|australia(n)?\s+eastern)\b", "Australia/Sydney"),
 ]
-_ZONE_WORDS = "|".join(rx for rx, _ in _NAMED_ZONES)
+_CITY_ALIASES = {"mumbai": "Asia/Kolkata", "delhi": "Asia/Kolkata", "new delhi": "Asia/Kolkata",
+                 "bangalore": "Asia/Kolkata", "bengaluru": "Asia/Kolkata",
+                 "hyderabad": "Asia/Kolkata", "chennai": "Asia/Kolkata", "india": "Asia/Kolkata",
+                 "new york": "America/New_York", "san francisco": "America/Los_Angeles",
+                 "los angeles": "America/Los_Angeles", "hong kong": "Asia/Hong_Kong",
+                 "beijing": "Asia/Shanghai", "uk": "Europe/London", "berlin": "Europe/Berlin"}
+
+
+def _city_zones() -> dict[str, str]:
+    """"tokyo" -> "Asia/Tokyo" for every IANA city, plus the aliases people actually type."""
+    from zoneinfo import available_timezones
+    cities = {}
+    for name in sorted(available_timezones()):
+        if "/" in name and not name.startswith(("Etc/", "SystemV/", "US/")):
+            city = name.rsplit("/", 1)[1].replace("_", " ").lower()
+            if len(city) >= 4:
+                cities.setdefault(city, name)
+    return {**cities, **_CITY_ALIASES}
+
+
+_CITIES = _city_zones()
+_CITY_WORDS = "|".join(sorted(map(re.escape, _CITIES), key=len, reverse=True))
+# "in Tokyo", "for London", "Paris time" — a city only counts next to a time/zone cue so a
+# question about where the event is held is not read as a time-zone request.
+_CITY_ASK = (rf"\b(time|start\w*|end\w*|begin\w*|when|schedule\w*)\b.{{0,40}}\b(in|for|at)\s+(the\s+)?"
+             rf"({_CITY_WORDS})\b|\b({_CITY_WORDS})\s+(local\s+)?time\b")
+_ZONE_WORDS = "|".join([rx for rx, _ in _NAMED_ZONES] + [_CITY_ASK])
 
 
 def _asked_zone(text: str) -> str | None:
@@ -70,6 +96,10 @@ def _asked_zone(text: str) -> str | None:
     for rx, name in _NAMED_ZONES:
         if re.search(rx, text, re.I):
             return name
+    m = re.search(_CITY_ASK, text, re.I)
+    if m:
+        city = next((g for g in reversed(m.groups()) if g and g.lower() in _CITIES), None)
+        return _CITIES.get((city or "").lower())
     return None
 
 
@@ -94,7 +124,7 @@ _ANSWERABLE = [
     ("status", _rx(r"\bis\s+(it|this|(the|this)\s+(event|meeting|session|stream))\s+(live|on|over|started|"
                    r"finished|ended|cancel+ed)\b", r"\bhas\s+(it|the\s+event|this\s+event)\s+"
                    r"(started|ended|begun|finished)\b", r"\b(is\s+it\s+)?live\s+yet\b",
-                   r"\bevent\s+status\b")),
+                   r"\bevent\s+status\b", r"\b(cancel+ed|postponed|rescheduled)\b")),
     ("replay", _rx(r"\breplay\b", r"\bwatch\s+(it\s+)?later\b")),
     ("captions", _rx(r"\bcaptions?\b", r"\bsubtitles?\b")),
     ("host", _rx(r"\bwho\b.{0,20}\b(host|hosting|hosted|organi[sz]|running|presenting)",
@@ -148,6 +178,14 @@ def _start(c):
 def _status(c):
     text = _STATUS_TEXT.get(c.get("public_status"))
     return f"{_name(c)} {text}." if text else None
+
+
+def _status_note(c, text: str) -> str:
+    """"Is it cancelled?" gets a direct yes/no before the status line."""
+    for word, state in (("cancel", "cancelled"), ("postpone", "postponed")):
+        if re.search(word, text, re.I) and c.get("public_status"):
+            return (f"Yes. " if c["public_status"] == state else f"No, {_name(c)} is not {state}. ")
+    return ""
 
 
 def _replay(c):
@@ -204,6 +242,12 @@ def _left(c):
     end = _dt(c.get("public_end_at"))
     if c.get("public_status") in ("ended", "replay_available"):
         return f"{_name(c)} has ended."
+    start = _dt(c.get("public_start_at"))
+    if c.get("public_status") in ("scheduled", "starting_soon") and start is not None:
+        until = (start - datetime.now(start.tzinfo)).total_seconds()
+        if until > 0:
+            return (f"{_name(c)} hasn't started yet. It begins in about {_span(until)}, at "
+                    f"{when(c.get('public_start_at'), c.get('public_timezone'))}.")
     if c.get("public_status") != "live" or end is None:
         return _end(c)
     remaining = (end - datetime.now(end.tzinfo)).total_seconds()
@@ -294,6 +338,8 @@ def answer(text: str, claims: dict | None) -> EventAnswer | None:
                 reply = (_features(claims, text) if kind == "features" else
                          _zone(claims, text) if kind == "zone" else
                          _both(claims, text) if kind == "both" else _ANSWER[kind](claims))
+                if reply and kind == "status":
+                    reply = _status_note(claims, text) + reply
                 if reply:
                     return EventAnswer(reply, True)
                 return EventAnswer(GAP, False) if kind in _GAP_WHEN_MISSING else None

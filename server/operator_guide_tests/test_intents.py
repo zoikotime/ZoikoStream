@@ -164,3 +164,17 @@ def test_suggestions_depend_on_page_and_role():
     host = suggestions_for(None, admin=False)
     assert "Show my upcoming events" in host and "Show open support cases" not in host
     assert suggestions_for(object(), workspace="Recordings")[0] == "Where is the replay?"
+
+
+@pytest.mark.parametrize("text,tool", [
+    ("What date and time is this event scheduled for?", "event.summary"),
+    ("Is this event currently live or ended?", "event.summary"),
+    ("What is the title or subject of this live event?", "event.summary"),
+    ("Who is presenting or hosting this event?", "event.summary"),
+    ("What time was this event scheduled to start?", "event.summary"),
+    ("Is account status in good standing?", "event.readiness"),
+    ("How many total readiness checks are marked as PASSED?", "event.readiness"),
+    ("How many total sessions were admitted?", "org.analytics"),
+])
+def test_questions_about_the_selected_event_read_the_event_record(text, tool):
+    assert classify(text).tools == [tool]
