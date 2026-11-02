@@ -164,7 +164,8 @@ ATTENTION = _rx(r"\b(what\s+needs\s+(my\s+)?attention|anything\s+(i\s+should|to)
 # ── 5. Reads ─────────────────────────────────────────────────────────────────────────
 TOPICS: list[tuple[str, re.Pattern, int]] = [
     ("event.readiness", _rx(r"\b(ready|readiness|blockers?|blocked|gates?|conditional|"
-                            r"go[- ]live\s+check|preflight|prepared|good\s+to\s+go)\b"), 3),
+                            r"go[- ]live\s+check|preflight|prepared|good\s+to\s+go|good\s+standing|checklist|"
+                            r"checks?\s+(passed|failed|pending)|passed\s+checks?)\b"), 3),
     ("event.live", _rx(r"\b(health|healthy|on\s+air|live\s+now|broadcast\s+(ok|status)|ingest|"
                        r"encoder|signal|bitrate|stream\s+(ok|status|quality)|how('s|\s+is)\s+"
                        r"(the\s+)?(broadcast|stream|event)\s+(going|doing))\b"), 3),
@@ -176,7 +177,7 @@ TOPICS: list[tuple[str, re.Pattern, int]] = [
     ("event.replay", _rx(r"\b(replay|recordings?|recorded|vod|on[- ]demand|download|retention|"
                          r"legal\s+hold)\b"), 3),
     ("org.analytics", _rx(r"\b(analytics|viewers?|audience|attendance|attended|watch\s+time|"
-                          r"engagement|peak|metrics?|stats|statistics|perform(ed|ing|ance)?|numbers|"
+                          r"engagement|peak|metrics?|stats|statistics|admitted|admission\s+rate|perform(ed|ing|ance)?|numbers|"
                           r"how\s+(many|well)|show\s+rate|devices?|countries|geography)\b"), 2),
     ("event.planning", _rx(r"\b(plan(ning)?|rehearsals?|run[- ]of[- ]show|intake|requirements?|"
                            r"cue|checklist|prep(aration)?)\b"), 2),
@@ -193,6 +194,24 @@ TOPICS: list[tuple[str, re.Pattern, int]] = [
     ("org.overview", _rx(r"\b(upcoming|overview|today|tomorrow|this\s+week|next\s+week|"
                          r"my\s+events|our\s+events|all\s+events|schedule[d]?)\b"), 2),
 ]
+# "How many readiness checks passed?" is a readiness tally, not an audience-size question.
+READINESS_COUNT = _rx(r"\b(readiness|gates?|checks?|checklist)\b.{0,40}\b(passed|passing|pass|failed|"
+                      r"failing|pending)\b|\b(passed|passing|failed)\b.{0,30}\b(readiness|gates?|checks?)\b")
+
+# Plain facts about the selected event (name, host, schedule, status) — answered from the event
+# record, never from documentation or the org-wide upcoming list.
+_THIS = r"(?:this|the\s+(?:current|selected)|that|my|our)?\s*(?:live\s+)?(?:event|meeting|session|stream|webinar)"
+EVENT_DETAIL = _rx(
+    rf"\b(title|name|subject|topic)\b.{{0,30}}\b{_THIS}\b|\b{_THIS}\b.{{0,30}}\b(title|name|subject)\b|"
+    rf"\bwho\b.{{0,25}}\b(host(ing|ed)?|present(ing|er)|organi[sz](ing|er)|running)\b|"
+    rf"\b(host|presenter)\s+(name|of)\b|"
+    rf"\b(what|which)\s+(date|time|day)\b.{{0,40}}\b(scheduled|start|begin|set|held)\b|"
+    rf"\b(scheduled|start(ed|ing)?|begin|begins)\s+(for|time|date|at)\b.{{0,30}}\b{_THIS}\b|"
+    rf"\b{_THIS}\b.{{0,40}}\b(scheduled|start(s|ed)?\s+(time|at)|begin)\b|"
+    rf"\b(is|has)\s+{_THIS}\s+(currently\s+)?(live|ended|over|started|finished|scheduled)\b|"
+    rf"\b(live|ended|over)\s+or\s+(live|ended|over|scheduled|upcoming)\b|"
+    rf"\b(what|which)\s+(is\s+)?(the\s+)?(event\s+)?status\b(?!.{{0,20}}\baccount\b)|"
+    rf"\bevent\s+status\b|\bstart\s+time\b")
 DEFINITIONAL = _rx(r"^\s*(what\s+(does|do|is|are)\b(?!.{0,40}\b(my|our|this|current|now)\b)|"
                    r"how\s+(do|does|can|should)\s+(i|we|you|it)\b|explain\b|define\b|"
                    r"what('s|\s+is)\s+the\s+difference|why\s+(does|do|would|is)\b|"
@@ -237,6 +256,11 @@ def classify(text: str) -> Intent:
             return Intent("chat", name)
     if ATTENTION.search(t):
         return Intent("read", "attention", tools=["org.overview"])
+
+    if READINESS_COUNT.search(t):
+        return Intent("read", "event.readiness", tools=["event.readiness"])
+    if EVENT_DETAIL.search(t):
+        return Intent("read", "event.summary", tools=["event.summary"])
 
     scores: dict[str, int] = {}
     for tool, pattern, weight in TOPICS:

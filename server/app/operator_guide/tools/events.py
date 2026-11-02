@@ -124,7 +124,10 @@ def event_summary(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
             value="On" if ev.waiting_room_enabled else "Off"),
     ]
     return ToolResult("event.summary", [status_card(ev.title or "Untitled event", rows, [src])],
-                      [src], summary=f"Here is the current configuration of {ev.title}.",
+                      [src], summary=(
+                          f"{ev.title or 'Untitled event'} is {ev.status.replace('_', ' ')}. "
+                          f"Scheduled start: {_fmt_when(ev.start_time, ev.timezone)}. "
+                          f"Host: {hosts.get(ev.id) or 'no host assigned'}."),
                       actions=[nav("Open event", event_href(actor, ev))],
                       mode="live" if ev.status in ON_AIR else "standard",
                       facts={"title": ev.title, "status": ev.status,
@@ -177,6 +180,8 @@ def event_readiness(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
         sources.append(plan_src)
         blocks.append(status_card("Planning", planning["rows"], [plan_src]))
     failing = [g["label"] for g in result["gates"] if not g["passed"]]
+    total = len(result["gates"])
+    tally = f"{total - len(failing)} of {total} readiness checks passed. "
     if ev.status in ON_AIR:
         direct = "This event is already on air; readiness gates applied before going live."
     elif verdict == "passed":
@@ -185,7 +190,7 @@ def event_readiness(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
         direct = ("Not yet. " + (f"{len(failing)} gate(s) are not met: "
                                  + "; ".join(failing) + "." if failing else ""))
     actions = [nav("Review event setup", event_href(actor, ev))]
-    return ToolResult("event.readiness", blocks, sources, summary=direct, actions=actions,
+    return ToolResult("event.readiness", blocks, sources, summary=direct.rstrip() + " " + tally.rstrip(), actions=actions,
                       mode="live" if ev.status in ON_AIR else "standard",
                       facts={"event": ev.title, "verdict": verdict, "failing_gates": failing,
                              "planning_outstanding": planning["outstanding"]})

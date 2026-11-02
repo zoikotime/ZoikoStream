@@ -128,3 +128,33 @@ def test_viewer_chat_end_to_end(client):
     assert gap["sources"] == []
     boundary = ask("change the replay settings")
     assert boundary["answer_class"] == "restricted"
+
+
+@pytest.mark.parametrize("question,expected", [
+    ("what time is it in Tokyo for the start", "Town Hall starts at Monday, October 12 at 3:05 PM JST."),
+    ("end time in London", "Town Hall ends at Monday, October 12 at 8:35 AM BST."),
+    ("start time in Mumbai", "Town Hall starts at Monday, October 12 at 11:35 AM IST."),
+    ("what is the start time in new york", "Town Hall starts at Monday, October 12 at 2:05 AM EDT."),
+])
+def test_any_city_converts_the_event_time(question, expected):
+    assert event_answers.answer(question, FULL).text == expected
+
+
+def test_a_city_without_a_time_cue_is_not_a_zone_request():
+    assert event_answers.answer("is the event held in London?", FULL) is None
+
+
+def test_time_left_before_the_start_counts_down_to_the_start():
+    soon = {**FULL, "public_status": "scheduled", "public_start_at": "2099-01-01T00:00:00Z",
+            "public_end_at": "2099-01-01T01:00:00Z"}
+    reply = event_answers.answer("how much time is left?", soon).text
+    assert reply.startswith("Town Hall hasn't started yet. It begins in about ")
+
+
+@pytest.mark.parametrize("status,question,expected", [
+    ("scheduled", "is the event cancelled?", "No, Town Hall is not cancelled. Town Hall hasn't started yet."),
+    ("cancelled", "is the event cancelled?", "Yes. Town Hall has been cancelled."),
+    ("live", "has it been postponed", "No, Town Hall is not postponed. Town Hall is live now."),
+])
+def test_cancelled_and_postponed_questions_get_a_direct_answer(status, question, expected):
+    assert event_answers.answer(question, {**FULL, "public_status": status}).text == expected
