@@ -11,6 +11,7 @@ import { setGuideEventContextToken } from "./pageContext";
 
 const WATCH = /^\/events\/([0-9a-f-]{36})\/watch\/?$/i;
 const REFRESH_MARGIN_S = 120;
+const RETRY_DELAYS_S = [2, 5, 15, 30, 60];
 
 export function viewerEventId(pathname) {
   const m = WATCH.exec(pathname || "");
@@ -29,6 +30,7 @@ function stored(key) {
 export function watchViewerEventContext(eventId, onToken) {
   let timer = null;
   let cancelled = false;
+  let attempt = 0;
   const load = () => {
     const reg = stored(`zk_reg_${eventId}`);
     const link = stored(`zk_link_${eventId}`);
@@ -37,13 +39,19 @@ export function watchViewerEventContext(eventId, onToken) {
       .post(`/guide/event-context/${eventId}`, { ...(reg ? { reg } : {}), ...(link ? { link } : {}) })
       .then(({ data }) => {
         if (cancelled || !data?.token) return;
+        attempt = 0;
         setGuideEventContextToken(data.token);
         onToken?.(data.token);
         const wait = Math.max(60, (data.expires_in || 3600) - REFRESH_MARGIN_S) * 1000;
         timer = setTimeout(load, wait);
       })
       .catch(() => {
-        if (!cancelled) setGuideEventContextToken(null);
+        if (cancelled) return;
+        setGuideEventContextToken(null);
+        // A private event's first request can arrive before the watch page has claimed the
+        // viewer's registration (403): try again shortly, then back off. A viewer who is
+        // genuinely not allowed stops after the last attempt.
+        if (attempt < RETRY_DELAYS_S.length) timer = setTimeout(load, RETRY_DELAYS_S[attempt++] * 1000);
       });
   };
   load();

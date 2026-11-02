@@ -30,9 +30,15 @@ def test_public_event_issues_only_the_spec_claim_set(client, world):
     res = client.post(f"{PATH}/{ev.id}")
     assert res.status_code == 200, res.text
     claims = event_context.verify(res.json()["token"]).safe_claims
-    # Conversation Flow §16: public name, start time/zone, status, replay state — nothing else.
-    assert set(claims) <= {"event_display_name", "public_start_at", "public_timezone",
-                           "public_status", "replay_public_state", "locale"}
+    # What the watch page already shows a viewer: name, schedule, status, replay state, host,
+    # description and which interactive features are on. Never attendee data, links,
+    # credentials, the support address itself or internal state.
+    assert set(claims) <= {"event_display_name", "public_start_at", "public_end_at",
+                           "public_timezone", "public_status", "replay_public_state", "locale",
+                           "host_display_name", "organization_name", "event_summary",
+                           "event_category", "chat_enabled", "qa_enabled", "polls_enabled",
+                           "organizer_contact_route"}
+    assert "public_end_at" in claims and claims["event_summary"] == "Quarterly update."
     assert claims["event_display_name"] == "Town Hall"
     assert claims["public_timezone"] == "Asia/Kolkata"
     assert claims["replay_public_state"] == "unavailable"  # recording is off

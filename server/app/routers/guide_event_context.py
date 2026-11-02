@@ -110,10 +110,11 @@ ORGANIZER_ROUTE = "organizer-support"
 
 
 def claims_for(ev, db: Session | None = None) -> dict:
-    """Exactly the public-safe claim set of Conversation Flow §16 / Architecture §9 — the
-    event's public name, start time and zone, public status, replay state, and whether the
-    organizer has published a support contact. Nothing else (no end time, host,
-    description, settings or the contact address itself) is sent to the public Guide.
+    """The public-safe claim set — the facts the watch page already shows a viewer who may
+    watch this event: its name, start and end time and zone, public status, replay state, host
+    and organization name, description, which interactive features are on, and whether the
+    organizer has published a support contact. Nothing else (attendee data, links,
+    credentials, the contact address itself, internal state) is ever sent to the public Guide.
 
     Captions (captions_available / caption_languages) are omitted: the platform persists no
     per-event caption setting — captions exist only while a live room carries them — so
@@ -122,11 +123,20 @@ def claims_for(ev, db: Session | None = None) -> dict:
     start = ev.start_time
     public_status = _public_status(crud.viewer_status_of(ev), start)
     org = getattr(ev, "organization", None)
+    hosts = crud.list_assignees(db, ev.id, "host") if db is not None else []
     claims = {
         "event_display_name": ev.title,
         "public_start_at": _iso(start),
         "public_timezone": ev.timezone,
         "public_status": public_status,
+        "public_end_at": _iso(ev.end_time),
+        "host_display_name": hosts[0].full_name if hosts else getattr(org, "name", None),
+        "organization_name": getattr(org, "name", None),
+        "event_summary": (ev.short_description or ev.description or "").strip()[:600] or None,
+        "event_category": ev.category,
+        "chat_enabled": bool(ev.chat_enabled),
+        "qa_enabled": bool(ev.qa_enabled),
+        "polls_enabled": bool(ev.polls_enabled),
         "replay_public_state": replay_state_for(db, ev, public_status),
         # The organization's own Support Email, which it sets for its audience in
         # Organization settings. Only the existence of the route is claimed.

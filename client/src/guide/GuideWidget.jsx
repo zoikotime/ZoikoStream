@@ -608,6 +608,7 @@ export default function GuideWidget({
             links={pageLinks}
             openHref={pageOpenHref}
             request={overlayRequest}
+            pageContextFor={getPageContext}
             mode={maximized ? "max" : "popup"}
             onMinimize={() => closePanel()}
             onToggleMax={() => setMaximized((m) => !m)}

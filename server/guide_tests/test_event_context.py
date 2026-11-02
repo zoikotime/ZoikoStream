@@ -77,6 +77,9 @@ def _event(**kw):
     from types import SimpleNamespace
     base = dict(id=uuid.uuid4(), title="Spring Memorial Service",
                 start_time=datetime(2026, 10, 10, 18, tzinfo=timezone.utc),
+                end_time=datetime(2026, 10, 10, 19, 30, tzinfo=timezone.utc),
+                description="A service of remembrance.", short_description=None, category="Service",
+                chat_enabled=True, qa_enabled=False, polls_enabled=False,
                 timezone="America/New_York", recording_enabled=True,
                 organization=SimpleNamespace(support_email="help@example.org"))
     base.update(kw)
@@ -84,8 +87,11 @@ def _event(**kw):
 
 
 def _issuer(monkeypatch, viewer_status="ended", entitlement=None, expired=False):
+    from types import SimpleNamespace
     from app.routers import guide_event_context as gec
     monkeypatch.setattr(gec.crud, "viewer_status_of", lambda ev: viewer_status)
+    monkeypatch.setattr(gec.crud, "list_assignees",
+                        lambda db, eid, role: [SimpleNamespace(full_name="Pat Morgan")])
     monkeypatch.setattr(gec.commercial_crud, "get_replay_entitlement",
                         lambda db, eid, scope="audience": entitlement)
     monkeypatch.setattr(gec.commercial_crud, "replay_access_expired", lambda ent: expired)
@@ -103,6 +109,11 @@ def test_issuer_claims_survive_guide_verification_and_omit_unknowns(monkeypatch)
     assert claims["replay_public_state"] == "available"
     assert claims["organizer_contact_route"] == "organizer-support"
     assert "help@example.org" not in str(claims)  # the address itself never leaves
+    # What the watch page already shows a viewer: end time, host, description, features.
+    assert claims["public_end_at"] == "2026-10-10T19:30:00Z"
+    assert claims["host_display_name"] == "Pat Morgan"
+    assert claims["event_summary"] == "A service of remembrance."
+    assert claims["chat_enabled"] is True and claims["qa_enabled"] is False
     # No persisted caption setting exists, so caption claims are omitted, not guessed.
     assert "captions_available" not in claims and "caption_languages" not in claims
     verified = event_context.verify(event_context.issue(claims))
