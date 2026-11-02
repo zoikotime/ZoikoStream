@@ -177,6 +177,9 @@ function HeroArt() {
 export default function GuidePage({
   embedded = false, links: linkOverrides, openHref = null, request = null,
   mode = "page", onMinimize = null, onToggleMax = null, onClose = null,
+  // The launcher's window runs on the page being viewed, so it supplies that page's context
+  // (real path and, on a viewer page, the signed event token). The /guide route uses its own.
+  pageContextFor = null,
 }) {
   const compact = mode === "popup";
   const links = linkOverrides || {};
@@ -194,7 +197,10 @@ export default function GuidePage({
   const openedRef = useRef(false);
 
   const directRoutes = useMemo(() => boot?.direct_routes || [], [boot]);
-  const getPageContext = useCallback((entryPoint) => buildPageContext(PATH, PAGE, { entryPoint }), []);
+  const getPageContext = useCallback(
+    (entryPoint) => (pageContextFor ? pageContextFor(entryPoint) : buildPageContext(PATH, PAGE, { entryPoint })),
+    [pageContextFor],
+  );
   const g = useGuide({ getPageContext, directRoutes });
   const { state } = g;
 
