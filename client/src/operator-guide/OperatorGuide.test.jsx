@@ -125,6 +125,30 @@ describe("launcher and panel", () => {
     expect(within(panel).getByText("blocker:", { exact: false })).toHaveClass("og-sr");
   });
 
+  it("super admins get the platform overview; tiles ask their own question", async () => {
+    const platform = [
+      { id: "health", label: "Platform health", value: "Operational with limitations", state: "ready", detail: "2 not integrated", ask: "Is ZoikoStream down?" },
+      { id: "live", label: "Live now", value: "0", state: "inactive", detail: "No broadcast on air", ask: "Show upcoming events" },
+      { id: "support", label: "Open support cases", value: "2", state: "review", detail: "across all organizations", ask: "Show open support cases" },
+    ];
+    const user = setup({ boot: { ...BOOT, user: { name: "Super Admin", role: "super_admin", is_org_admin: true }, platform } });
+    api.post.mockResolvedValueOnce({ data: guideMessage({ answer: "2 open support case(s) across 1 organization(s)." }) });
+    const panel = await openPanel(user);
+    expect(within(panel).getByText("Platform overview")).toBeInTheDocument();
+    expect(within(panel).getByText("Welcome back, Super.")).toBeInTheDocument();
+    expect(within(panel).getByText("Operational with limitations")).toBeInTheDocument();
+    expect(within(panel).getByText("Needs a look")).toBeInTheDocument(); // state is text, not colour alone
+    await user.click(within(panel).getByRole("button", { name: /Open support cases: 2/ }));
+    expect(api.post).toHaveBeenCalledWith("/operator-guide/messages", expect.objectContaining({ text: "Show open support cases" }));
+  });
+
+  it("organization admins keep the standard welcome", async () => {
+    const user = setup();
+    const panel = await openPanel(user);
+    expect(within(panel).queryByText("Platform overview")).not.toBeInTheDocument();
+    expect(within(panel).getByText(/Hello, Dana\./)).toBeInTheDocument();
+  });
+
   it("renders nothing for a role Guide does not serve", async () => {
     setup({ bootError: { response: { status: 403, data: { code: "OPGUIDE_FORBIDDEN", message: "no" } } } });
     await waitFor(() => expect(api.get).toHaveBeenCalled());

@@ -26,7 +26,8 @@ from app.guide.secrets_detect import detect as detect_secrets
 from app.models.event import EventAccessLink
 
 from . import (
-    actions, attention, context as context_svc, errors, governance, knowledge, llm, policy,
+    actions, attention, context as context_svc, errors, governance, knowledge, llm,
+    platform_scope, policy,
 )
 from .intents import EVENT_TOOLS, Intent
 from .policy import Actor
@@ -90,6 +91,15 @@ def compose(db: Session, actor: Actor, ctx: dict, text: str, intent: Intent, *,
             conversation_id=None, history: list[dict] | None = None) -> Composed:
     """``history``: the last few turns of this conversation (memory.history), used only to
     phrase the model's explanation of a follow-up — never as a source of facts."""
+    out = _compose(db, actor, ctx, text, intent, conversation_id=conversation_id, history=history)
+    # Every link points at a page this role can open (a Super Admin cannot open /organization/*).
+    platform_scope.localize(out.actions, actor)
+    platform_scope.localize(out.blocks, actor)
+    return out
+
+
+def _compose(db: Session, actor: Actor, ctx: dict, text: str, intent: Intent, *,
+             conversation_id=None, history: list[dict] | None = None) -> Composed:
     event = ctx.get("_event")
     try:
         if intent.kind == "chat":

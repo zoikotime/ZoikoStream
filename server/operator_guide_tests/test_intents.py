@@ -178,3 +178,9 @@ def test_suggestions_depend_on_page_and_role():
 ])
 def test_questions_about_the_selected_event_read_the_event_record(text, tool):
     assert classify(text).tools == [tool]
+
+
+def test_performance_question_does_not_pull_in_upcoming_events():
+    assert classify("How did our events perform?").tools == ["org.analytics"]
+    assert "org.overview" in classify("How did our upcoming events perform?").tools \
+        or classify("Show upcoming events").tools == ["org.overview"]

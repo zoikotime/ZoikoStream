@@ -67,6 +67,9 @@ def _fmt_when(dt, tz: str | None) -> str:
 @register(id="org.overview", title="Upcoming events and readiness", owner="Organization service",
           risk="R0", capability="event_analysis")
 def org_overview(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
+    from .. import platform_scope
+    if platform_scope.in_scope(actor, ctx.route):
+        return platform_scope.overview(db, actor, ctx)
     upcoming = org_svc.upcoming_events(db, actor.org_id, include_test=True, limit=8)
     live = db.scalar(select(func.count(BroadcastSession.id)).where(
         BroadcastSession.org_id == actor.org_id,

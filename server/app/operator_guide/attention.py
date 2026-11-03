@@ -22,7 +22,7 @@ from app.models.live import BroadcastSession, LiveRecording
 from app.models.support_ticket import SupportTicket
 from app.services import org as org_svc
 
-from . import policy
+from . import platform_scope, policy
 from .policy import Actor
 from .sources import iso, now
 from .tools.events import event_href
@@ -118,8 +118,10 @@ def items(db: Session, actor: Actor) -> list[dict]:
                              "organization.", href="/organization/support",
                              ask="Show my open support cases"))
 
+    if actor.role == "super_admin":
+        out += platform_scope.attention_items(db, _item)
     out.sort(key=lambda i: SEVERITY_ORDER[i["severity"]])
-    return out
+    return platform_scope.localize(out, actor)
 
 
 def _relevant(db: Session, actor: Actor):

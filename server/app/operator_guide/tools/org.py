@@ -92,6 +92,9 @@ def org_developer(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
 @register(id="org.support", title="Support cases", owner="Support service",
           risk="R0", capability="event_analysis")
 def org_support(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
+    from .. import platform_scope
+    if platform_scope.in_scope(actor, ctx.route):
+        return platform_scope.support(db, actor, ctx)
     cases = list(db.scalars(select(SupportTicket).where(
         SupportTicket.org_id == actor.org_id,
         SupportTicket.status.notin_(("resolved", "closed")))
