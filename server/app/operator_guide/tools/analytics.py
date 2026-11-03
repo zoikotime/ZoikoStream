@@ -48,6 +48,9 @@ def _fmt(v, unit: str | None = None):
 @register(id="org.analytics", title="Audience analytics", owner="Analytics service",
           risk="R1", capability="analytics")
 def org_analytics(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
+    from .. import platform_scope
+    if platform_scope.in_scope(actor, ctx.route):
+        return platform_scope.analytics(db, actor, ctx)
     rng = ctx.range_key if ctx.range_key in RANGES else "30d"
     a = org_svc.analytics(db, actor.org, rng)
     att = org_svc.audience_attendance(db, actor.org, rng)

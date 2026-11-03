@@ -29,7 +29,7 @@ from app.security import get_current_user
 
 from . import (
     actions, attention, audit, composer, context as context_svc, conversations, errors,
-    governance, memory, policy, schema,
+    governance, memory, platform_scope, policy, schema,
 )
 from .intents import Intent, classify
 from .tools.base import notice
@@ -129,6 +129,8 @@ def bootstrap(route: str = Query("", max_length=300), event_id: str | None = Non
         "attention": attention.summary(db, actor),
         "suggestions": composer.suggestions_for_ctx(ctx, actor),
         "recent": conversations.listing(db, actor, limit=5),
+        # Super Admins get a platform overview on the welcome screen; everyone else None.
+        "platform": platform_scope.glance(db) if actor.role == "super_admin" else None,
     }
 
 

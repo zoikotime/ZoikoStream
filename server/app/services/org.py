@@ -1658,11 +1658,14 @@ def upcoming_events(db: Session, org_id, include_test: bool = True, limit: int =
     Super Admin console evaluates, so the two views can never disagree about whether an
     event is ready — then adds `readiness_state`, which distinguishes "nothing has been
     set up yet" from "set up and failing a gate"."""
-    all_upcoming = ops_svc.event_readiness(db, include_test=include_test, limit=200,
-                                          high_impact_only=False)
     ids = {str(e_id) for e_id in db.scalars(
         select(Event.id).where(Event.org_id == org_id, Event.deleted_at.is_(None))
     ).all()}
+    if not ids:
+        # Nothing to filter down to: skip the platform-wide readiness pass entirely.
+        return []
+    all_upcoming = ops_svc.event_readiness(db, include_test=include_test, limit=200,
+                                          high_impact_only=False)
     mine = [e for e in all_upcoming if e["id"] in ids][:limit]
 
     for ev in mine:

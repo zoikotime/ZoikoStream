@@ -194,6 +194,8 @@ TOPICS: list[tuple[str, re.Pattern, int]] = [
     ("org.overview", _rx(r"\b(upcoming|overview|today|tomorrow|this\s+week|next\s+week|"
                          r"my\s+events|our\s+events|all\s+events|schedule[d]?)\b"), 2),
 ]
+UPCOMING_WORDS = _rx(r"\b(upcoming|schedule[d]?|next|tomorrow|today|this\s+week|next\s+week)\b")
+
 # "How many readiness checks passed?" is a readiness tally, not an audience-size question.
 READINESS_COUNT = _rx(r"\b(readiness|gates?|checks?|checklist)\b.{0,40}\b(passed|passing|pass|failed|"
                       r"failing|pending)\b|\b(passed|passing|failed)\b.{0,30}\b(readiness|gates?|checks?)\b")
@@ -273,6 +275,10 @@ def classify(text: str) -> Intent:
         # Live health and incident triage answer the same question from two sides.
         if ranked[0] == "event.incidents" and "event.live" not in ranked:
             ranked.append("event.live")
+        # "How did our events perform?" is analytics; "our events" alone must not tack the
+        # upcoming-events list onto it.
+        if ranked[0] == "org.analytics" and "org.overview" in ranked and not UPCOMING_WORDS.search(t):
+            ranked.remove("org.overview")
         return Intent("read", ranked[0], tools=ranked, docs=definitional)
     return Intent("docs", "docs", docs=True)
 
