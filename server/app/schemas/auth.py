@@ -18,6 +18,46 @@ class LoginIn(BaseModel):
     remember: bool = False
 
 
+class GoogleStartOut(BaseModel):
+    """Step 1 of Google sign-in. The SPA keeps `state` and `code_verifier` in sessionStorage
+    for this tab and sends the browser to `authorization_url`."""
+    authorization_url: str
+    state: str
+    code_verifier: str
+
+
+# RFC 7636 §4.1: code_verifier = 43*128unreserved, unreserved = ALPHA / DIGIT / "-" / "." / "_"
+# / "~". Enforced at the request boundary, so a malformed verifier (non-ASCII, whitespace, other
+# punctuation, wrong length) is an ordinary 422 before anything is hashed or decoded.
+# services/google_oauth.py applies the same rule again before its own processing.
+PKCE_CODE_VERIFIER_PATTERN = r"^[A-Za-z0-9._~-]{43,128}$"
+
+
+class GoogleCallbackIn(BaseModel):
+    """Step 3: what Google returned to the SPA's callback route, plus the verifier from step 1."""
+    code: str = Field(min_length=1, max_length=2048)
+    state: str = Field(min_length=1, max_length=4096)
+    code_verifier: str = Field(min_length=43, max_length=128, pattern=PKCE_CODE_VERIFIER_PATTERN)
+    remember: bool = False
+
+
+class GoogleLinkCompleteIn(BaseModel):
+    """What Google returned for a LINK attempt (POST /auth/google/link/complete). Sent with the
+    account's own bearer token; the state is bound to that account and that session."""
+    code: str = Field(min_length=1, max_length=2048)
+    state: str = Field(min_length=1, max_length=4096)
+    code_verifier: str = Field(min_length=43, max_length=128, pattern=PKCE_CODE_VERIFIER_PATTERN)
+
+
+class GoogleIdentityOut(BaseModel):
+    """The signed-in account's Google sign-in status. Never carries Google's `sub`."""
+    available: bool           # Google sign-in is configured AND this account's role may use it
+    linked: bool
+    email: str | None = None  # the verified Google email when the link was made
+    linked_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
 class ForgotPasswordIn(BaseModel):
     email: EmailStr
 

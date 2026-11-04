@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Link } from "react-router-dom";
-import Card from "../../ui/Card";
+import { cx } from "../../ui/tokens";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
 import { FiLock, FiMail } from "react-icons/fi";
-import { Field, PasswordField, SubmitButton, CheckField } from "../../ui/forms";
-import AuthTabs from "./AuthTabs";
+import { Field, PasswordField, CheckField } from "../../ui/forms";
+import AuthCard from "./AuthCard";
+import AuthSubmit from "./AuthSubmit";
+import { authLink } from "./authStyles";
 import VerificationSentModal from "./VerificationSentModal";
 
 
@@ -34,6 +36,11 @@ export default function CreateOrganization() {
   const [agree, setAgree] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
+  // The slug is optional (blank = auto-generated), so it stays behind a disclosure until asked
+  // for — or until it holds something the person typed.
+  const slugId = useId();
+  const [showSlugRequested, setShowSlug] = useState(false);
+  const showSlug = showSlugRequested || !!form.slug || !!errors.slug;
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const submit = async (e) => {
@@ -88,37 +95,56 @@ export default function CreateOrganization() {
           resending={resending}
         />
       )}
-    <Card
-      padding="xl"
-      className="zk-fade-in rounded-[20px] shadow-xl shadow-slate-900/5 transition-shadow duration-300 hover:shadow-2xl hover:shadow-violet-900/10 dark:shadow-black/30"
+    {/* The modal above stays a SIBLING of AuthCard: the card's float transform and glass
+        blur would otherwise become the fixed-position modal's containing block. */}
+    <AuthCard
+      tabs
+      dense
+      title="Create your organization"
+      subtitle="Register your organization and start streaming."
     >
-      <AuthTabs />
-      <h1 className="text-[26px] font-bold tracking-tight text-slate-900 dark:text-white">
-        Create Your Organization
-      </h1>
-      <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-        Create your organization and start streaming professional live events.
-      </p>
-
-      <form onSubmit={submit} noValidate className="mt-6 space-y-4">
+      {/* One field per row, always. `dense` tightens the desktop rhythm so every required
+          field and the submit button fit the viewport (measured 1280×720 up to 1920×1080);
+          the optional slug opens on request, and only then may a short screen scroll. */}
+      <form onSubmit={submit} noValidate className="mt-[var(--auth-s3)] space-y-[var(--auth-s2)]">
         <Field
           label="Organization Name"
           placeholder="Acme Inc."
+          className="h-[var(--auth-ctl)] py-0!"
           value={form.name}
           onChange={set("name")}
           error={errors.name}
+          hint={
+            !showSlug && (
+              <button
+                type="button"
+                aria-expanded="false"
+                aria-controls={slugId}
+                onClick={() => setShowSlug(true)}
+                className={cx("text-xs", authLink)}
+              >
+                Customize event link (optional)
+              </button>
+            )
+          }
         />
-        <Field
-          label="Organization Slug (optional)"
-          placeholder={slugify(form.name) || "acme-inc"}
-          value={form.slug}
-          onChange={set("slug")}
-          hint="Used in your event links — leave blank to auto-generate."
-        />
+        {showSlug && (
+          <div id={slugId}>
+            <Field
+              label="Organization Slug (optional)"
+              placeholder={slugify(form.name) || "acme-inc"}
+              className="h-[var(--auth-ctl)] py-0!"
+              value={form.slug}
+              onChange={set("slug")}
+              hint="Used in your event links — leave blank to auto-generate."
+            />
+          </div>
+        )}
         <Field
           label="Organization Admin Name"
           autoComplete="name"
           placeholder="Jane Doe"
+          className="h-[var(--auth-ctl)] py-0!"
           value={form.adminName}
           onChange={set("adminName")}
           error={errors.adminName}
@@ -129,6 +155,7 @@ export default function CreateOrganization() {
           type="email"
           autoComplete="email"
           placeholder="you@company.com"
+          className="h-[var(--auth-ctl)] py-0!"
           value={form.email}
           onChange={set("email")}
           error={errors.email}
@@ -138,6 +165,7 @@ export default function CreateOrganization() {
           label="Password"
           autoComplete="new-password"
           placeholder="At least 8 characters"
+          className="h-[var(--auth-ctl)] py-0! pr-12"
           value={form.password}
           onChange={set("password")}
           error={errors.password}
@@ -147,6 +175,7 @@ export default function CreateOrganization() {
           label="Confirm Password"
           autoComplete="new-password"
           placeholder="Re-enter password"
+          className="h-[var(--auth-ctl)] py-0! pr-12"
           value={form.confirm}
           onChange={set("confirm")}
           error={errors.confirm}
@@ -159,19 +188,16 @@ export default function CreateOrganization() {
           error={errors.agree}
         />
 
-        <SubmitButton loading={loading} variant="gradient">Create Organization</SubmitButton>
+        <AuthSubmit loading={loading}>Create Organization</AuthSubmit>
 
-        <p className="text-center text-sm text-slate-500 dark:text-slate-400">
+        <p className="text-center text-[15px] text-slate-500 dark:text-slate-400">
           Already have an account?{" "}
-          <Link
-            to="/login"
-            className="rounded-lg font-semibold text-emerald-700 underline-offset-4 transition-colors duration-200 hover:text-fuchsia-600 hover:underline dark:text-emerald-400 dark:hover:text-fuchsia-400"
-          >
-            Sign In
+          <Link to="/login" className={authLink}>
+            Log in
           </Link>
         </p>
       </form>
-    </Card>
+    </AuthCard>
     </>
   );
 }

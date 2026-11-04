@@ -22,6 +22,7 @@ import { logoUrlError } from "../../utils/orgLogo";
 import OrganizationErrorState from "../../components/organization/OrganizationErrorState";
 import ApiCredentials from "../../components/organization/ApiCredentials";
 import ChangePasswordForm from "../../components/organization/profile/ChangePasswordForm";
+import GoogleSignInSettings from "../../components/organization/profile/GoogleSignInSettings";
 import ProfilePhotoEditor from "../../components/profile/ProfilePhotoEditor";
 import { useAuth } from "../../auth/AuthContext";
 import BrandingPreview from "../../components/organization/BrandingPreview";
@@ -701,6 +702,13 @@ export default function OrganizationSettings() {
                   org_policy the control below writes to. */}
               <Panel title="Account Security" desc="Change the password you sign in with">
                 <ChangePasswordForm minLength={settings.security.minPasswordLength} />
+              </Panel>
+
+              {/* Google sign-in works only for a Google account linked here (password
+                  step-up to link; never matched by email). Same no-gate rule as above: it is
+                  this member's own account. */}
+              <Panel title="Google sign-in" desc="Link a Google account to sign in without your password">
+                <GoogleSignInSettings />
               </Panel>
 
               {/* Org-wide policy, admin-only at GET and PATCH alike. A host or viewer never

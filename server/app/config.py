@@ -374,6 +374,22 @@ class Settings(BaseSettings):
     CLOUDFLARE_ZONE_ID: str = ""
     CLOUDFLARE_API_TOKEN: str = ""
 
+    # ── Google sign-in (services/google_oauth.py) ───────────────────────────────────────
+    # OpenID Connect authorization-code flow with PKCE. ALL THREE must be set or Google
+    # sign-in is unavailable (POST /api/auth/google/start answers 503) — no check is ever
+    # relaxed because one is missing. From Google Cloud Console -> APIs & Services ->
+    # Credentials -> OAuth 2.0 Client ID (type "Web application").
+    #   GOOGLE_CLIENT_ID       the client id (....apps.googleusercontent.com). Also the audience
+    #                          every ID token must carry.
+    #   GOOGLE_CLIENT_SECRET   server-side only; never returned by any API or logged.
+    #   GOOGLE_REDIRECT_URI    the SPA route Google returns the browser to, exactly as
+    #                          registered in the console: <APP origin>/auth/google/callback
+    #                          (e.g. http://localhost:5173/auth/google/callback locally,
+    #                          https://get.zoikostream.com/auth/google/callback in production).
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = ""
+
     def is_production(self) -> bool:
         """Whether this process is a real deployment serving real users.
 
@@ -489,6 +505,19 @@ def _validate_production_config() -> None:
             "credential-bearing email links."
         )
 
+    # Google sign-in: the redirect URI is where Google delivers a one-time authorization code,
+    # so in production it must be the public https origin. Fatal, like APP_URL above.
+    google_redirect = settings.GOOGLE_REDIRECT_URI.strip()
+    if google_redirect and (
+        not google_redirect.lower().startswith("https://")
+        or any(h in google_redirect.lower() for h in _LOCAL_HOSTS)
+    ):
+        raise InsecureProductionConfig(
+            f"GOOGLE_REDIRECT_URI is {google_redirect!r} while ENVIRONMENT={settings.ENVIRONMENT!r}. "
+            "It must be the public https app origin + /auth/google/callback, exactly as registered "
+            "in Google Cloud Console."
+        )
+
     # Non-fatal: each of these degrades a feature rather than exposing anything.
     if not settings.REDIS_URL.strip():
         log.warning(
@@ -506,4 +535,18 @@ def _validate_production_config() -> None:
         )
 
 
+def _warn_partial_google_config() -> None:
+    """Any environment: a half-filled Google configuration is almost always a mistake, and it
+    silently leaves the button answering "unavailable". Say so once at startup."""
+    values = {
+        "GOOGLE_CLIENT_ID": settings.GOOGLE_CLIENT_ID,
+        "GOOGLE_CLIENT_SECRET": settings.GOOGLE_CLIENT_SECRET,
+        "GOOGLE_REDIRECT_URI": settings.GOOGLE_REDIRECT_URI,
+    }
+    missing = [name for name, value in values.items() if not value.strip()]
+    if missing and len(missing) < len(values):
+        log.warning("Google sign-in is DISABLED: %s not set (all three are required).", ", ".join(missing))
+
+
 _validate_production_config()
+_warn_partial_google_config()

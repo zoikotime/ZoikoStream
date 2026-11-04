@@ -50,6 +50,7 @@ from .auth_session import (
     AuthSession,
 )
 from .stepup import (
+    STEP_UP_GOOGLE_LINK,
     STEP_UP_HIGH_RISK_ROLE_GRANT,
     STEP_UP_OWNERSHIP_TRANSFER,
     STEP_UP_PURPOSES,
@@ -160,10 +161,12 @@ from .identity_security import (
     ALLOW,
     ALLOW_NEW_CONTEXT,
     AUTH_METHOD_PASSWORD,
+    AUTH_METHOD_GOOGLE,
     BLOCK_SUSPICIOUS,
     RISK_DECISIONS,
     SIGN_IN_OUTCOMES,
 )
+from .user_identity import IDENTITY_PROVIDER_GOOGLE, IDENTITY_PROVIDERS, UserIdentity
 from .event import (
     Event,
     EventAccessLink,

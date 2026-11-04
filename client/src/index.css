@@ -448,6 +448,102 @@ select:autofill {
 @keyframes zk-spin-slow { to { transform: rotate(360deg); } }
 .zk-spin-slow { animation: zk-spin-slow 42s linear infinite; }
 
+/* ── Auth screens (layouts/AuthLayout, components/auth/AuthHero, pages/auth/AuthCard) ──
+   zk-auth-bob: slow vertical float. Amplitude, duration and delay are per-element custom
+   properties so each hero card drifts on its own clock instead of the whole scene bobbing
+   in lock-step. */
+@keyframes zk-auth-bob {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, var(--zk-bob, -8px), 0); }
+}
+.zk-auth-bob {
+  animation: zk-auth-bob var(--zk-bob-dur, 7s) ease-in-out var(--zk-bob-delay, 0s) infinite;
+}
+/* Auth pages type: Inter (already a dependency; AuthLayout imports the variable font) —
+   the same clean sans as the ZoikoSema reference. */
+.zk-auth-font {
+  font-family: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* Auth panel rhythm. One set of tokens for every vertical size in the sign-in panel, so the
+   whole desktop login fits one viewport: on lg+ they scale with viewport HEIGHT (a 720px-tall
+   screen gets the compact end, 900px+ the roomy end); below lg the page scrolls naturally and
+   touch-friendly fixed sizes apply. Used as h-[var(--auth-ctl)] etc. */
+.zk-auth-panel {
+  --auth-ctl: 48px;   /* buttons and inputs */
+  --auth-s1: 12px;    /* tight gaps */
+  --auth-s2: 20px;    /* standard gaps */
+  --auth-s3: 32px;    /* section gaps */
+  --auth-logo: 48px;
+  --auth-title: 2rem;
+}
+@media (min-width: 1024px) {
+  .zk-auth-panel {
+    /* Steeper than proportional (calc(k·vh − c)): short screens get the compact end quickly,
+       900px+ screens reach the roomy end. 720px → 36 / 18; 900px → 50 / 27; 1080px → caps. */
+    --auth-ctl: clamp(36px, calc(8vh - 22px), 50px);
+    --auth-s1: clamp(6px, 1.1vh, 12px);
+    --auth-s2: clamp(10px, 1.9vh, 20px);
+    --auth-s3: clamp(12px, calc(5vh - 18px), 32px);
+    --auth-logo: clamp(28px, 4.4vh, 48px);
+    --auth-title: clamp(1.45rem, 3.4vh, 2.25rem);
+  }
+  /* Dense rhythm for the longest form (Register, pages/auth/AuthCard `dense`). Tighter
+     GAPS, not smaller text: labels and inputs keep their type size, controls never go below
+     the 36px the standard tokens already floor at, and they top out at 46px rather than 50px.
+     Measured to fit every field plus the submit button without the card scrolling at
+     1280×720, 1366×768, 1440×900 and 1920×1080. */
+  .zk-auth-dense {
+    --auth-ctl: clamp(36px, calc(7vh - 16px), 46px);
+    --auth-s1: clamp(4px, 0.8vh, 10px);
+    --auth-s2: clamp(8px, 1.2vh, 14px);
+    --auth-s3: clamp(10px, calc(3.4vh - 14px), 24px);
+    --auth-logo: clamp(26px, 3.6vh, 44px);
+    --auth-title: clamp(1.4rem, 3vh, 2rem);
+  }
+}
+/* Short desktop screens: the hero's brand mark is already on screen beside the card, so the
+   dense card drops its duplicate logo rather than push the submit button out of view. */
+@media (min-width: 1024px) and (max-height: 800px) {
+  .zk-auth-dense .zk-auth-logo {
+    display: none;
+  }
+}
+
+/* Stage light breathing behind the hero's product showcase. */
+@keyframes zk-glow-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.zk-glow-pulse { animation: zk-glow-pulse 7s ease-in-out infinite; }
+
+/* On-air dot: a ring that radiates out and fades, the dot itself stays put. */
+@keyframes zk-live-ping {
+  0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.65); }
+  70% { box-shadow: 0 0 0 7px rgba(244, 63, 94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
+}
+.zk-live-ping { animation: zk-live-ping 1.8s ease-out infinite; }
+
+/* Audio/stream activity bars. Each bar sets its own --zk-wave-delay. */
+@keyframes zk-wave {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+.zk-wave > span {
+  transform-origin: bottom;
+  animation: zk-wave 1.25s ease-in-out var(--zk-wave-delay, 0s) infinite;
+}
+
+/* Rejected submit: one short horizontal shake. No fill-mode, so nothing is left applied. */
+@keyframes zk-shake {
+  10%, 90% { transform: translateX(-1px); }
+  20%, 80% { transform: translateX(2px); }
+  30%, 50%, 70% { transform: translateX(-4px); }
+  40%, 60% { transform: translateX(4px); }
+}
+.zk-shake { animation: zk-shake 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+
 /* Custom scrollbar for dense console panes (both sidebar navs, the playback event list).
    Still narrower and quieter than the ~16px opaque default, but wide enough to read as a
    grabbable affordance rather than a hairline. Firefox gets `scrollbar-width` (which only
@@ -504,7 +600,8 @@ select:autofill {
   html { scroll-behavior: auto; }
   .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift, .zk-badge-glow,
   .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow, .zk-pop,
-  .zk-pop-in, .zk-tip-in { animation: none; }
+  .zk-pop-in, .zk-tip-in,
+  .zk-auth-bob, .zk-live-ping, .zk-wave > span, .zk-shake, .zk-glow-pulse { animation: none; }
   /* Reactions are the exception to "animation: none": they are information, not decoration
      (the host has no other view of audience reactions), so the emoji still fades in, holds
      long enough to read, and fades out on its own clock — it just no longer travels, tilts

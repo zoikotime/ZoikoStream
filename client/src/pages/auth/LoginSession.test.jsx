@@ -91,7 +91,7 @@ describe("Remember me", () => {
     await user.type(screen.getByLabelText(/^password/i), "correct-horse-battery");
     const box = screen.getByRole("checkbox", { name: /remember me/i });
     if (box.checked !== remember) await user.click(box);
-    await user.click(screen.getByRole("button", { name: /^sign in$/i }));
+    await user.click(screen.getByRole("button", { name: /^log in$/i }));
     expect(await screen.findByRole("heading", { name: "Home" })).toBeInTheDocument();
     return api.post.mock.calls.find(([url]) => url === "/auth/login")[1];
   }

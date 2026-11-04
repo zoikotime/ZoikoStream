@@ -469,6 +469,9 @@ IDN_006_RECOVERY_NOTE = (
 
 # Canonical variant copy. change_description is rendered into the body sentence.
 IDN_006_RECOVERY_METHOD_CHANGED = "Your recovery method"
+# Google sign-in link / unlink (routers/auth.py google_link_complete / google_unlink).
+IDN_006_GOOGLE_LINKED = "Linking Google sign-in to your account"
+IDN_006_GOOGLE_UNLINKED = "Removing Google sign-in from your account"
 
 
 def send_security_setting_changed_email(to, *, change_description, changed_at,

@@ -76,8 +76,9 @@ const IMAGE_URL = /url\(['"]?(\/[^'")]+\.(?:jpe?g|png|svg|webp|avif|gif))['"]?\)
 // with no code change, which is the point.
 //
 // This list is the difference between "absent by design" and "someone mistyped a path": a new
-// unresolved asset is a failure, these two are not.
-const INTENTIONALLY_ABSENT = new Set(["/auth-stage.jpg", "/live-events-hero.jpg"]);
+// unresolved asset is a failure, this one is not. (`/auth-stage.jpg` left the list when the
+// auth redesign replaced that optional layer with real files — see the auth hero test below.)
+const INTENTIONALLY_ABSENT = new Set(["/live-events-hero.jpg"]);
 
 const referencedImages = () => {
   const found = new Map();
@@ -117,5 +118,18 @@ describe("every root-relative image reference is accounted for", () => {
     for (const url of INTENTIONALLY_ABSENT) {
       expect(existsSync(join(PUBLIC, url.replace(/^\//, "")))).toBe(false);
     }
+  });
+});
+
+// The auth hero's images are referenced as plain path strings (components/auth/authAssets.js,
+// used as <img src> / <source srcSet>), which the url(...) scan above cannot see. They are
+// REQUIRED, not optional: a missing one is a broken image on every sign-in screen.
+describe("auth hero assets", () => {
+  it("every AUTH_ASSETS path is a real file in public/", async () => {
+    const { AUTH_ASSETS } = await import("./components/auth/authAssets.js");
+    const paths = Object.values(AUTH_ASSETS);
+    expect(paths.length).toBeGreaterThan(0);
+    const missing = paths.filter((p) => !existsSync(join(PUBLIC, p.replace(/^\//, ""))));
+    expect(missing).toEqual([]);
   });
 });

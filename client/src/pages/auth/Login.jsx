@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { SESSION_END_MESSAGES, clearSessionEndReason, peekSessionEndReason } from "../../auth/sessionStore";
-import { FiArrowRight, FiLock, FiMail } from "react-icons/fi";
-import Card from "../../ui/Card";
+import { FiArrowRight, FiCheck, FiLock, FiMail } from "react-icons/fi";
 import { notify } from "../../ui/Toast";
+import { cx } from "../../ui/tokens";
 import api, { errCode, errMsg } from "../../api";
 import { useAuth } from "../../auth/AuthContext";
 import { resolvePostLogin } from "../../auth/destination";
-import { Field, PasswordField, SubmitButton, CheckField } from "../../ui/forms";
-import AuthTabs from "./AuthTabs";
+import { Field, PasswordField, CheckField } from "../../ui/forms";
+import AuthCard from "./AuthCard";
+import AuthSubmit from "./AuthSubmit";
+import GoogleSignIn from "./GoogleSignIn";
+import { IS_NATIVE } from "../../platform";
+import { authLink } from "./authStyles";
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
@@ -48,6 +52,11 @@ export default function Login() {
   // action instead of a generic failure toast.
   const [needsVerification, setNeedsVerification] = useState(null); // { email }
   const [resending, setResending] = useState(false);
+  // Success is shown only once the SERVER has confirmed the session (setSession resolved an
+  // account) — never optimistically on the login response alone.
+  const [signedIn, setSignedIn] = useState(false);
+  // One short shake of the form on any rejected attempt (validation or server).
+  const [shake, setShake] = useState(false);
   // Whether a sign-in request is in flight. A ref, not the `loading` state: the button only
   // turns disabled after React re-renders, and a second submit (Enter then a click, a double
   // tap) can arrive before that. Read and written synchronously, so it cannot.
@@ -60,7 +69,10 @@ export default function Login() {
     if (!isEmail(email)) next.email = "Enter a valid work email.";
     if (!password) next.password = "Enter your password.";
     setErrors(next);
-    if (Object.keys(next).length) return;
+    if (Object.keys(next).length) {
+      setShake(true);
+      return;
+    }
 
     inFlight.current = true;
     setLoading(true);
@@ -78,8 +90,10 @@ export default function Login() {
       const account = await setSession(data, { remember });
       if (!account) {
         notify.error("Signed in, but the session could not be confirmed. Please try again.", { id: SIGN_IN_TOAST });
+        setShake(true);
         return;
       }
+      setSignedIn(true);
       notify.dismiss?.(SIGN_IN_TOAST);            // an earlier attempt's failure is now stale
       notify.success(`Welcome back, ${account.full_name}!`);
       // One authoritative destination. `from` is a REQUEST, not a permission: a saved
@@ -90,11 +104,13 @@ export default function Login() {
       if (reason) notify.error(reason);
       navigate(to, { replace: true });
     } catch (error) {
+      setSignedIn(false);
       if (errCode(error) === "EMAIL_VERIFICATION_REQUIRED") {
         setNeedsVerification({ email: error?.response?.data?.detail?.email });
         return;
       }
       notify.error(errMsg(error, "Unable to sign in right now."), { id: SIGN_IN_TOAST });
+      setShake(true);
     } finally {
       inFlight.current = false;
       setLoading(false);
@@ -114,72 +130,69 @@ export default function Login() {
   };
 
   return (
-    <div className="zk-fade-in space-y-4">
-      <Card
-        padding="xl"
-        className="rounded-[20px] shadow-xl shadow-slate-900/5 transition-shadow duration-300 hover:shadow-2xl hover:shadow-violet-900/10 dark:shadow-black/30"
+    <AuthCard tabs title="Welcome back!" subtitle="Sign in to your ZoikoStream account.">
+      {/* Why the previous session ended, as the server reported it (idle, maximum length,
+          signed out elsewhere). Shown once, never as a generic error. */}
+      {endedReason && (
+        <p
+          role="status"
+          data-testid="session-ended"
+          className="mt-[var(--auth-s2)] rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          {SESSION_END_MESSAGES[endedReason] || SESSION_END_MESSAGES.reauth}
+        </p>
+      )}
+
+      <form
+        onSubmit={submit}
+        noValidate
+        onAnimationEnd={(e) => e.animationName === "zk-shake" && setShake(false)}
+        className={cx("mt-[var(--auth-s3)] space-y-[var(--auth-s2)]", shake && "zk-shake")}
       >
-        <AuthTabs />
+        <Field
+          icon={FiMail}
+          label="Work email address"
+          type="email"
+          autoComplete="email"
+          placeholder="name@company.com"
+          className="h-[var(--auth-ctl)] py-0!"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          error={errors.email}
+        />
 
-        <h1 className="text-[26px] font-bold tracking-tight text-slate-900 dark:text-white">Welcome back</h1>
-        <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">Sign in to your ZoikoStream account</p>
-
-        {/* Why the previous session ended, as the server reported it (idle, maximum length,
-            signed out elsewhere). Shown once, never as a generic error. */}
-        {endedReason && (
-          <p
-            role="status"
-            data-testid="session-ended"
-            className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
-          >
-            {SESSION_END_MESSAGES[endedReason] || SESSION_END_MESSAGES.reauth}
-          </p>
-        )}
-
-        <form onSubmit={submit} noValidate className="mt-6 space-y-4">
-          <Field
-            icon={FiMail}
-            label="Work Email"
-            type="email"
-            autoComplete="email"
-            placeholder="you@company.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            error={errors.email}
+        <div>
+          <PasswordField
+            icon={FiLock}
+            label="Password"
+            autoComplete="current-password"
+            placeholder="Enter your password"
+            className="h-[var(--auth-ctl)] py-0! pr-12"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            error={errors.password}
           />
-
-          <div>
-            <PasswordField
-              icon={FiLock}
-              label="Password"
-              autoComplete="current-password"
-              placeholder="Enter your password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              error={errors.password}
+          <div className="mt-[var(--auth-s1)] flex items-center justify-between gap-4">
+            {/* Not "for 30 days": remembering only keeps the sign-in across browser
+                restarts. The server's idle and maximum-length limits still apply. */}
+            <CheckField
+              label="Remember me"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
             />
-            <div className="mt-4 flex items-center justify-between gap-4">
-              <CheckField
-                label="Remember Me"
-                checked={remember}
-                onChange={(e) => setRemember(e.target.checked)}
-              />
-              {/* inline-flex items-center: in the Android app the 44px touch-target floor
-                  (index.css) makes this link taller than its text — keep the text centred so
-                  it stays level with Remember Me. No effect on web, where it is text-height. */}
-              <Link
-                to="/forgot-password"
-                className="inline-flex items-center rounded-lg text-sm font-semibold text-emerald-700 underline-offset-4 transition-colors duration-200 hover:text-fuchsia-600 hover:underline dark:text-emerald-400 dark:hover:text-fuchsia-400"
-              >
-                Forgot Password?
-              </Link>
-            </div>
+            {/* inline-flex items-center: in the Android app the 44px touch-target floor
+                (index.css) makes this link taller than its text — keep the text centred so
+                it stays level with Remember me. No effect on web, where it is text-height. */}
+            <Link to="/forgot-password" className={cx("inline-flex items-center text-sm", authLink)}>
+              Forgot password?
+            </Link>
           </div>
+        </div>
 
         {needsVerification && (
           <div
             role="alert"
-            className="rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10"
+            className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10"
           >
             <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">
               Verify your email to continue.
@@ -204,37 +217,48 @@ export default function Login() {
           </div>
         )}
 
-        <SubmitButton loading={loading} variant="gradient">
-          Sign In
-        </SubmitButton>
+        <AuthSubmit loading={loading && !signedIn} disabled={signedIn} className="!mt-[var(--auth-s2)]">
+          {signedIn ? (
+            <>
+              <FiCheck aria-hidden="true" className="text-lg" /> Signed in
+            </>
+          ) : (
+            <>
+              Log In
+              <FiArrowRight
+                aria-hidden="true"
+                className="transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none"
+              />
+            </>
+          )}
+        </AuthSubmit>
+
+        {/* Spoken progress for screen readers; failures are announced by the toast. */}
+        <p role="status" className="sr-only">
+          {signedIn ? "Signed in. Redirecting…" : loading ? "Signing in…" : ""}
+        </p>
       </form>
 
-      </Card>
+      {/* Not in the Android app: Google refuses OAuth inside embedded WebViews
+          (disallowed_useragent), so a button there could never succeed. */}
+      {!IS_NATIVE && (
+        <>
+          {/* Email + password first; Google underneath (GoogleSignIn.jsx, googleAuth.js). */}
+          <div className="my-[var(--auth-s2)] flex items-center gap-4 text-[13px] text-slate-400 dark:text-slate-500">
+            <span aria-hidden="true" className="h-px flex-1 bg-slate-200 dark:bg-white/10" />
+            or
+            <span aria-hidden="true" className="h-px flex-1 bg-slate-200 dark:bg-white/10" />
+          </div>
+          <GoogleSignIn remember={remember} from={from} />
+        </>
+      )}
 
-      <p className="text-center text-sm text-slate-500 dark:text-slate-400">
+      <p className="mt-[var(--auth-s2)] text-center text-[15px] text-slate-600 dark:text-slate-400">
         New to ZoikoStream?{" "}
-        <Link
-          to="/signup"
-          className="group inline-flex items-center gap-1.5 rounded-lg font-semibold text-emerald-700 underline-offset-4 transition-colors duration-200 hover:text-fuchsia-600 hover:underline dark:text-emerald-400 dark:hover:text-fuchsia-400"
-        >
-          Create an organization
-          <FiArrowRight
-            aria-hidden="true"
-            className="transition-transform duration-200 group-hover:translate-x-1 motion-reduce:transition-none motion-reduce:group-hover:translate-x-0"
-          />
+        <Link to="/signup" className={authLink}>
+          Register
         </Link>
       </p>
-
-      {/* ponytail: Terms / Privacy are emphasised text, not links — neither page exists yet,
-          and a dead <a> is worse than none. Wrap them in <Link> when the routes land. */}
-      <div className="flex items-start gap-3 rounded-2xl border border-slate-200/70 bg-slate-100/60 p-3.5 text-[11.5px] leading-relaxed text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
-        <FiLock className="mt-px shrink-0 text-sm text-slate-400 dark:text-slate-500" aria-hidden="true" />
-        <p>
-          We take security seriously. Your data is encrypted and never shared. By signing in, you
-          agree to our <span className="font-semibold text-emerald-700 dark:text-emerald-400">Terms of Service</span> and{" "}
-          <span className="font-semibold text-emerald-700 dark:text-emerald-400">Privacy Policy</span>.
-        </p>
-      </div>
-    </div>
+    </AuthCard>
   );
 }

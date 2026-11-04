@@ -1,10 +1,15 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { FiArrowLeft, FiMail, FiCheckCircle, FiLock } from "react-icons/fi";
-import Card from "../../ui/Card";
 import { notify } from "../../ui/Toast";
+import { cx } from "../../ui/tokens";
 import api, { errMsg } from "../../api";
-import { Field, PasswordField, SubmitButton } from "../../ui/forms";
+import { Field, PasswordField } from "../../ui/forms";
+import AuthCard from "./AuthCard";
+import AuthSubmit from "./AuthSubmit";
+import { authLink } from "./authStyles";
+
+const backLink = cx("inline-flex items-center gap-1.5 text-sm", authLink);
 
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 
@@ -85,34 +90,37 @@ export default function ForgotPassword() {
 
   if (step === "done") {
     return (
-      <Card padding="xl">
-        <span className="grid h-12 w-12 place-items-center rounded-2xl bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400">
-          <FiCheckCircle className="text-2xl" />
-        </span>
-        <h1 className="mt-5 text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Password updated</h1>
-        <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-          Your password has been changed. You can now log in with your new password.
+      <AuthCard
+        icon={
+          <span className="grid h-12 w-12 place-items-center rounded-2xl bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400">
+            <FiCheckCircle aria-hidden="true" className="text-2xl" />
+          </span>
+        }
+        title="Password updated"
+        subtitle="Your password has been changed. You can now log in with your new password."
+      >
+        <p className="mt-7 text-center">
+          <Link to="/login" className={backLink}>
+            <FiArrowLeft aria-hidden="true" /> Back to login
+          </Link>
         </p>
-        <Link
-          to="/login"
-          className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
-        >
-          <FiArrowLeft /> Back to Login
-        </Link>
-      </Card>
+      </AuthCard>
     );
   }
 
   if (step === "reset") {
     return (
-      <Card padding="xl">
-        <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Enter reset code</h1>
-        <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-          We sent a {codeLength}-digit code to <span className="font-semibold text-slate-800 dark:text-slate-100">{email.trim()}</span>.
-          Enter it below with your new password. The code expires in {ttlMinutes} minutes.
-        </p>
-
-        <form onSubmit={resetPassword} noValidate className="mt-8 space-y-5">
+      <AuthCard
+        tabs
+        title="Enter reset code"
+        subtitle={
+          <>
+            We sent a {codeLength}-digit code to <span className="font-semibold text-slate-800 dark:text-slate-100">{email.trim()}</span>.
+            Enter it below with your new password. The code expires in {ttlMinutes} minutes.
+          </>
+        }
+      >
+        <form onSubmit={resetPassword} noValidate className="mt-7 space-y-5">
           <Field
             label={`${codeLength}-digit code`}
             inputMode="numeric"
@@ -144,50 +152,49 @@ export default function ForgotPassword() {
             onChange={(e) => setConfirm(e.target.value)}
             error={errors.confirm}
           />
-          <SubmitButton loading={loading}>
-            <FiLock className="text-base" /> Reset Password
-          </SubmitButton>
+          <AuthSubmit loading={loading}>
+            <FiLock aria-hidden="true" className="text-base" /> Reset Password
+          </AuthSubmit>
         </form>
 
         <button
           type="button"
           onClick={() => { setStep("email"); setOtp(""); setPassword(""); setConfirm(""); setErrors({}); }}
-          className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
+          className={cx("mt-6", backLink)}
         >
-          <FiArrowLeft /> Use a different email
+          <FiArrowLeft aria-hidden="true" /> Use a different email
         </button>
-      </Card>
+      </AuthCard>
     );
   }
 
   return (
-    <Card padding="xl">
-      <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Reset Password</h1>
-      <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
-        Enter your work email and we'll send you a {DEFAULT_CODE_LENGTH}-digit code to reset your password.
-      </p>
-
-      <form onSubmit={sendCode} noValidate className="mt-8 space-y-5">
+    <AuthCard
+      tabs
+      title="Reset your password"
+      subtitle={`Enter your work email and we'll send you a ${DEFAULT_CODE_LENGTH}-digit code to reset your password.`}
+    >
+      <form onSubmit={sendCode} noValidate className="mt-7 space-y-5">
         <Field
-          label="Work Email"
+          icon={FiMail}
+          label="Work email address"
           type="email"
           autoComplete="email"
-          placeholder="you@company.com"
+          placeholder="name@company.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           error={errors.email}
         />
-        <SubmitButton loading={loading}>
-          <FiMail className="text-base" /> Send Reset Code
-        </SubmitButton>
+        <AuthSubmit loading={loading}>
+          <FiMail aria-hidden="true" className="text-base" /> Send Reset Code
+        </AuthSubmit>
       </form>
 
-      <Link
-        to="/login"
-        className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
-      >
-        <FiArrowLeft /> Back to Login
-      </Link>
-    </Card>
+      <p className="mt-6 text-center">
+        <Link to="/login" className={backLink}>
+          <FiArrowLeft aria-hidden="true" /> Back to login
+        </Link>
+      </p>
+    </AuthCard>
   );
 }
