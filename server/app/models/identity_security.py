@@ -38,6 +38,8 @@ BLOCK_SUSPICIOUS = "block_suspicious"
 RISK_DECISIONS = (ALLOW, ALLOW_NEW_CONTEXT, BLOCK_SUSPICIOUS)
 
 AUTH_METHOD_PASSWORD = "password"
+# Google OpenID Connect sign-in (services/google_oauth.py). Same column, no schema change.
+AUTH_METHOD_GOOGLE = "google"
 
 
 class SignInEvent(Base):

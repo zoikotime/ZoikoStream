@@ -1,10 +1,12 @@
+import hashlib
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -22,7 +24,8 @@ from ..email import (
     send_reset_otp_email,
     verification_url,
 )
-from ..models import STEP_UP_PURPOSES, STEP_UP_TTL_MINUTES, ALLOW, ALLOW_NEW_CONTEXT, BLOCK_SUSPICIOUS, SESSION_END_LOGOUT, Organization, User
+from ..models import STEP_UP_GOOGLE_LINK, STEP_UP_PURPOSES, STEP_UP_TTL_MINUTES, ALLOW, ALLOW_NEW_CONTEXT, AUTH_METHOD_GOOGLE, AUTH_METHOD_PASSWORD, BLOCK_SUSPICIOUS, IDENTITY_PROVIDER_GOOGLE, SESSION_END_LOGOUT, Organization, User, UserIdentity
+from ..services import google_oauth
 from ..services import identity_security as idsec
 from ..ratelimit import rate_limit
 from ..schemas import (
@@ -32,6 +35,10 @@ from ..schemas import (
     ConfirmRecoveryContactIn,
     ForgotPasswordIn,
     LoginIn,
+    GoogleCallbackIn,
+    GoogleIdentityOut,
+    GoogleLinkCompleteIn,
+    GoogleStartOut,
     RegisterIn,
     RegistrationPendingOut,
     ResendVerificationIn,
@@ -70,6 +77,9 @@ TOKEN_ALREADY_USED = "TOKEN_ALREADY_USED"
 # their password never notices, tight enough that a 4-digit OTP (10k combinations) can no
 # longer be walked in one sitting. See ratelimit.py for the per-worker caveat.
 _LOGIN_LIMIT = rate_limit("login", limit=10, window=60.0)
+# Starting a Google sign-in is cheap and stateless (nothing is stored), but it is still an
+# unauthenticated endpoint that mints signed values, so it is bounded like the others.
+_GOOGLE_START_LIMIT = rate_limit("google-start", limit=20, window=60.0)
 _OTP_REQUEST_LIMIT = rate_limit("otp-request", limit=5, window=300.0)
 _OTP_VERIFY_LIMIT = rate_limit("otp-verify", limit=10, window=300.0)
 _REGISTER_LIMIT = rate_limit("register", limit=5, window=300.0)
@@ -144,7 +154,8 @@ def _notify_new_sign_in(db: Session, user: User, event, background: BackgroundTa
             email_mod.send_new_sign_in_email,
             user.email,
             signed_in_at=_utc_stamp(event.occurred_at),
-            authentication_method=event.authentication_method,
+            authentication_method=_AUTH_METHOD_LABELS.get(event.authentication_method,
+                                                          event.authentication_method),
             device=idsec.describe_device(event.browser_family, event.platform_family),
             location=idsec.describe_location(event.approximate_location),
             session_reference=event.session_reference,
@@ -293,12 +304,24 @@ def login(data: LoginIn, background: BackgroundTasks, request: Request,
         # is durable rather than living only in the per-process rate limiter.
         idsec.record_event(db, user=user, outcome="failed", ip=ip, user_agent=agent)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+    _require_account_may_sign_in(user)
+    return _complete_sign_in(db, user, remember=data.remember, ip=ip, agent=agent,
+                             background=background, method=AUTH_METHOD_PASSWORD)
+
+
+# ── shared by every sign-in method (password, Google) ───────────────────────────────────
+# One account gate and one session issuer, so a new sign-in method can never drift from the
+# rules password sign-in enforces: disabled accounts, unverified ZoikoStream email, the
+# authoritative sign-in record, the new-context notice, and one server-side session.
+
+def _require_account_may_sign_in(user: User) -> None:
+    """Raise unless this (already authenticated) account may receive a session."""
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is disabled")
     if not user.email_verified:
         # Credentials were correct, so no session is issued and no token is minted. The
         # code is structured (not prose) because the client renders a specific state with a
-        # resend action. Only reachable after a correct password, so it discloses nothing
+        # resend action. Only reachable after a correct credential, so it discloses nothing
         # an attacker did not already have.
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
@@ -310,25 +333,322 @@ def login(data: LoginIn, background: BackgroundTasks, request: Request,
         )
 
 
+def _complete_sign_in(db: Session, user: User, *, remember: bool, ip: str | None,
+                      agent: str | None, background: BackgroundTasks, method: str) -> TokenOut:
     # Authoritative sign-in record, committed before any mail is queued.
     browser, platform = idsec.parse_user_agent(agent)
     is_new = idsec.is_new_context(db, user, browser, platform)
     event = idsec.record_event(
         db, user=user, outcome="success", ip=ip, user_agent=agent,
-        risk_decision=ALLOW_NEW_CONTEXT if is_new else ALLOW, is_new=is_new,
+        risk_decision=ALLOW_NEW_CONTEXT if is_new else ALLOW, is_new=is_new, method=method,
     )
     _notify_new_sign_in(db, user, event, background)
 
     # Include organization name in response
     user_out = UserOut.model_validate(user)
     user_out.organization_name = user.organization.name if user.organization else None
-    
+
     return TokenOut(
         # One server-side session per sign-in (services/auth_sessions.py): its own idle and
         # absolute limits, revocable on its own, independent of the user's other devices.
-        access_token=create_access_token(user, remember=data.remember, db=db, user_agent=agent),
+        access_token=create_access_token(user, remember=remember, db=db, user_agent=agent),
         user=user_out,
     )
+
+
+# ── Google sign-in (OpenID Connect + PKCE; services/google_oauth.py) ─────────────────────
+#
+# IDENTITY RULES
+#   * Google NEVER creates an account. Organizations are created through Register and people
+#     join one by invitation; a Google identity only signs in to an account that exists.
+#   * Google signs in ONLY through a stored link to Google's stable account id, the ID
+#     token's `sub` (models/user_identity.py). An email match is never enough: addresses get
+#     reassigned, `sub` never does. No link, no sign-in — and the refusal is the same whether
+#     or not the email belongs to an account, so it is not an account-existence oracle.
+#   * A link is made only by the signed-in account holder, after a fresh password step-up,
+#     with the Google account whose verified email is the account's own email
+#     (google_link_start / google_link_complete). One Google account per ZoikoStream account
+#     and vice versa; replacing a link means unlinking first, deliberately.
+#   * Google must be authoritative for the email's domain — @gmail.com, or a Workspace
+#     account whose `hd` equals the email's domain (google_oauth.google_is_authoritative).
+#   * super_admin accounts cannot use Google at all, to sign in or to link: platform-wide
+#     authority stays behind the password until Google identity linking has been
+#     independently verified in production.
+#   * Once a link resolves the account, it is treated exactly like a password sign-in: same
+#     risk block, same disabled / unverified-email gates, same session, role and tenant.
+#     Google cannot raise a role or move an account between organizations.
+
+# Error code -> HTTP status for Google failures that happen before an account is known.
+_GOOGLE_ERROR_STATUS = {
+    google_oauth.NOT_CONFIGURED: status.HTTP_503_SERVICE_UNAVAILABLE,
+    google_oauth.INVALID_STATE: status.HTTP_400_BAD_REQUEST,
+    google_oauth.EXCHANGE_FAILED: status.HTTP_401_UNAUTHORIZED,
+    google_oauth.INVALID_TOKEN: status.HTTP_401_UNAUTHORIZED,
+    google_oauth.EMAIL_UNVERIFIED: status.HTTP_403_FORBIDDEN,
+    google_oauth.DOMAIN_UNVERIFIED: status.HTTP_403_FORBIDDEN,
+}
+GOOGLE_NOT_LINKED = "GOOGLE_NOT_LINKED"
+GOOGLE_ROLE_NOT_PERMITTED = "GOOGLE_ROLE_NOT_PERMITTED"
+GOOGLE_ALREADY_LINKED = "GOOGLE_ALREADY_LINKED"
+GOOGLE_IDENTITY_IN_USE = "GOOGLE_IDENTITY_IN_USE"
+GOOGLE_EMAIL_MISMATCH = "GOOGLE_EMAIL_MISMATCH"
+
+# Roles that may never authenticate with Google. Enforced here, server-side, on every Google
+# entry point — hiding a button is not a control.
+_GOOGLE_BLOCKED_ROLES = frozenset({"super_admin"})
+
+# Display labels for the IDN-003 new-sign-in email. Display only: SignInEvent keeps the stable
+# machine value ("password" / "google").
+_AUTH_METHOD_LABELS = {AUTH_METHOD_GOOGLE: "Google sign-in"}
+
+
+def _google_error(exc: google_oauth.GoogleOAuthError) -> HTTPException:
+    return HTTPException(
+        _GOOGLE_ERROR_STATUS.get(exc.code, status.HTTP_401_UNAUTHORIZED),
+        {"code": exc.code, "message": exc.message},
+    )
+
+
+def _google_refusal(http_status: int, code: str, message: str) -> HTTPException:
+    return HTTPException(http_status, {"code": code, "message": message})
+
+
+def _google_role_permitted(user: User) -> bool:
+    return user.role not in _GOOGLE_BLOCKED_ROLES
+
+
+def _google_role_refusal() -> HTTPException:
+    return _google_refusal(status.HTTP_403_FORBIDDEN, GOOGLE_ROLE_NOT_PERMITTED,
+                           "Google sign-in isn't available for this account. "
+                           "Please sign in with your email and password.")
+
+
+def _google_link_for(db: Session, user: User) -> UserIdentity | None:
+    return db.scalar(select(UserIdentity).where(UserIdentity.user_id == user.id,
+                                                UserIdentity.provider == IDENTITY_PROVIDER_GOOGLE))
+
+
+def _link_session_binding(request: Request) -> str:
+    """What binds a link attempt to the session that started it. Derived from the
+    server-side session row (itself only a hash of the token's `sid`) and hashed again, so
+    the state that travels through Google and the browser never carries a session key."""
+    session = request.state.auth_session
+    return hashlib.sha256(f"google-link:{session.id}".encode()).hexdigest()[:32]
+
+
+def _google_identity_status(user: User, link: UserIdentity | None) -> GoogleIdentityOut:
+    return GoogleIdentityOut(
+        available=google_oauth.is_configured() and _google_role_permitted(user),
+        linked=link is not None,
+        email=link.email_at_link_time if link else None,
+        linked_at=link.linked_at if link else None,
+        last_used_at=link.last_used_at if link else None,
+    )
+
+
+def _audit_google_link(db: Session, user: User, action: str, *, email: str, subject: str,
+                       hosted_domain: str | None, ip: str | None) -> None:
+    """Security history for link/unlink, in the platform audit log. Commits. Google's `sub`
+    is recorded only as a short fingerprint: enough to correlate, not a cross-site id."""
+    admin_crud.create_audit_log(
+        db, actor=user, action=action, target_type="user", target_id=user.id, org_id=user.org_id,
+        meta={"provider": IDENTITY_PROVIDER_GOOGLE, "google_email": email,
+              "subject_fingerprint": hashlib.sha256(subject.encode()).hexdigest()[:12],
+              "hosted_domain": hosted_domain},
+        ip=ip,
+    )
+
+
+@router.post("/google/start", response_model=GoogleStartOut, dependencies=[_GOOGLE_START_LIMIT])
+def google_start():
+    """Step 1: Google's consent URL plus the signed state and PKCE verifier for this attempt.
+    503 GOOGLE_SIGN_IN_UNAVAILABLE until all three GOOGLE_* settings are configured."""
+    try:
+        req = google_oauth.build_authorization_request()
+    except google_oauth.GoogleOAuthError as exc:
+        raise _google_error(exc) from None
+    return GoogleStartOut(authorization_url=req.authorization_url, state=req.state,
+                          code_verifier=req.code_verifier)
+
+
+@router.post("/google/callback", response_model=TokenOut, dependencies=[_LOGIN_LIMIT])
+def google_callback(data: GoogleCallbackIn, background: BackgroundTasks, request: Request,
+                    db: Session = Depends(get_db)):
+    """Step 3: verify everything Google returned and, if this Google account is LINKED to an
+    account, sign that account in with the same rules and session as POST /auth/login."""
+    ip, agent = client_ip(request), request.headers.get("user-agent")
+    try:
+        identity = google_oauth.complete(code=data.code, state=data.state,
+                                         code_verifier=data.code_verifier)
+    except google_oauth.GoogleOAuthError as exc:
+        if exc.code == google_oauth.INVALID_TOKEN:
+            # A token that fails verification is the one Google outcome that looks like an
+            # attack rather than a user or network problem: keep the durable record.
+            idsec.record_event(db, user=None, outcome="failed", ip=ip, user_agent=agent,
+                               method=AUTH_METHOD_GOOGLE)
+        raise _google_error(exc) from None
+
+    # The ONLY way from a Google identity to an account: its stable `sub`. The email address
+    # is deliberately not consulted — neither to find an account nor to fall back to one.
+    link = db.scalar(select(UserIdentity).where(UserIdentity.provider == IDENTITY_PROVIDER_GOOGLE,
+                                                UserIdentity.subject == identity.sub))
+    user = db.get(User, link.user_id) if link is not None else None
+    if user is None:
+        # One answer whether or not the email has an account, so this reveals nothing about
+        # which addresses are registered.
+        idsec.record_event(db, user=None, outcome="failed", ip=ip, user_agent=agent,
+                           method=AUTH_METHOD_GOOGLE)
+        raise _google_refusal(
+            status.HTTP_403_FORBIDDEN, GOOGLE_NOT_LINKED,
+            "This Google account isn't linked to a ZoikoStream account. Sign in with your email "
+            "and password, then link Google from Settings > Security.")
+
+    if not _google_role_permitted(user):
+        idsec.record_event(db, user=user, outcome="failed", ip=ip, user_agent=agent,
+                           method=AUTH_METHOD_GOOGLE)
+        raise _google_role_refusal()
+
+    # The same risk decision password sign-in applies, with the same indistinguishable answer.
+    if idsec.evaluate_sign_in(db, user) == BLOCK_SUSPICIOUS:
+        event = idsec.record_event(db, user=user, outcome="blocked", ip=ip, user_agent=agent,
+                                   risk_decision=BLOCK_SUSPICIOUS, method=AUTH_METHOD_GOOGLE)
+        _notify_blocked_sign_in(db, user, event, background)
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Invalid credentials"},
+            background=background,
+        )
+
+    _require_account_may_sign_in(user)
+    # Committed with the sign-in record inside _complete_sign_in.
+    link.last_used_at = datetime.now(timezone.utc)
+    return _complete_sign_in(db, user, remember=data.remember, ip=ip, agent=agent,
+                             background=background, method=AUTH_METHOD_GOOGLE)
+
+
+# ── Linking Google to the signed-in account ─────────────────────────────────────────────
+
+@router.get("/google/identity", response_model=GoogleIdentityOut)
+def google_identity(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """This account's Google sign-in status. `available` is false when Google sign-in is not
+    configured or this account's role may not use it."""
+    return _google_identity_status(user, _google_link_for(db, user))
+
+
+@router.post("/google/link/start", response_model=GoogleStartOut, dependencies=[_GOOGLE_START_LIMIT])
+def google_link_start(request: Request,
+                      step_up: str | None = Header(None, alias="X-Step-Up"),
+                      user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    """Begin linking a Google account to THIS account. Needs a fresh password step-up
+    (purpose google_link): a session alone is not evidence the account holder is asking.
+
+    Every refusal that does not depend on the step-up comes first, so a grant is never spent
+    on a request that was going to fail anyway."""
+    if not _google_role_permitted(user):
+        raise _google_role_refusal()
+    if not google_oauth.is_configured():
+        raise _google_error(google_oauth.GoogleOAuthError(
+            google_oauth.NOT_CONFIGURED, "Google sign-in isn't available yet."))
+    if _google_link_for(db, user) is not None:
+        raise _google_refusal(status.HTTP_409_CONFLICT, GOOGLE_ALREADY_LINKED,
+                              "A Google account is already linked. Unlink it before linking another.")
+
+    outcome = stepup_svc.consume(db, user, reference=step_up, purpose=STEP_UP_GOOGLE_LINK,
+                                 spent_on="link Google sign-in")
+    if outcome != stepup_svc.OK:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "STEP_UP_REQUIRED", "purpose": STEP_UP_GOOGLE_LINK,
+             "message": stepup_svc.describe(outcome)})
+
+    try:
+        req = google_oauth.build_authorization_request(
+            purpose=google_oauth.STATE_PURPOSE_LINK, user_id=str(user.id),
+            session_id=_link_session_binding(request))
+    except google_oauth.GoogleOAuthError as exc:
+        raise _google_error(exc) from None
+    return GoogleStartOut(authorization_url=req.authorization_url, state=req.state,
+                          code_verifier=req.code_verifier)
+
+
+@router.post("/google/link/complete", response_model=GoogleIdentityOut, dependencies=[_LOGIN_LIMIT])
+def google_link_complete(data: GoogleLinkCompleteIn, background: BackgroundTasks, request: Request,
+                         user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Finish a link started by google_link_start in THIS session: verify Google's answer
+    exactly as sign-in does, then record the link to Google's `sub`.
+
+    Refused when the Google email is not the account's own email, when this Google account is
+    linked to another ZoikoStream account, or when this account already holds a different
+    Google account. Never relinks automatically."""
+    if not _google_role_permitted(user):
+        raise _google_role_refusal()
+    ip = client_ip(request)
+    try:
+        identity = google_oauth.complete(
+            code=data.code, state=data.state, code_verifier=data.code_verifier,
+            purpose=google_oauth.STATE_PURPOSE_LINK, user_id=str(user.id),
+            session_id=_link_session_binding(request))
+    except google_oauth.GoogleOAuthError as exc:
+        raise _google_error(exc) from None
+
+    if identity.email != (user.email or "").strip().lower():
+        raise _google_refusal(
+            status.HTTP_409_CONFLICT, GOOGLE_EMAIL_MISMATCH,
+            f"That Google account uses a different email address. Choose the Google account "
+            f"for {user.email}.")
+
+    owner = db.scalar(select(UserIdentity).where(UserIdentity.provider == IDENTITY_PROVIDER_GOOGLE,
+                                                 UserIdentity.subject == identity.sub))
+    if owner is not None:
+        if owner.user_id == user.id:
+            return _google_identity_status(user, owner)        # already linked to this account
+        raise _google_refusal(status.HTTP_409_CONFLICT, GOOGLE_IDENTITY_IN_USE,
+                              "This Google account is already linked to a different ZoikoStream account.")
+    if _google_link_for(db, user) is not None:
+        raise _google_refusal(status.HTTP_409_CONFLICT, GOOGLE_ALREADY_LINKED,
+                              "A different Google account is already linked. Unlink it before linking another.")
+
+    link = UserIdentity(provider=IDENTITY_PROVIDER_GOOGLE, subject=identity.sub, user_id=user.id,
+                        email_at_link_time=identity.email)
+    db.add(link)
+    try:
+        db.flush()
+    except IntegrityError:
+        # A concurrent link won the race; the database constraints are the final word.
+        db.rollback()
+        raise _google_refusal(status.HTTP_409_CONFLICT, GOOGLE_ALREADY_LINKED,
+                              "This Google account or this ZoikoStream account is already linked.") from None
+    _audit_google_link(db, user, "user.google_identity.linked", email=identity.email,
+                       subject=identity.sub, hosted_domain=identity.hosted_domain, ip=ip)   # commits
+    db.refresh(link)
+    background.add_task(
+        email_mod.send_security_setting_changed_email, user.email,
+        change_description=email_mod.IDN_006_GOOGLE_LINKED,
+        changed_at=_utc_stamp(link.linked_at or datetime.now(timezone.utc)),
+    )
+    return _google_identity_status(user, link)
+
+
+@router.delete("/google/identity", response_model=GoogleIdentityOut)
+def google_unlink(background: BackgroundTasks, request: Request,
+                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Remove this account's Google link. Removing a way in is always allowed (no step-up,
+    any role); it is recorded and the account holder is told."""
+    link = _google_link_for(db, user)
+    if link is None:
+        raise _google_refusal(status.HTTP_404_NOT_FOUND, GOOGLE_NOT_LINKED,
+                              "No Google account is linked to this account.")
+    email, subject = link.email_at_link_time, link.subject
+    db.delete(link)
+    _audit_google_link(db, user, "user.google_identity.unlinked", email=email, subject=subject,
+                       hosted_domain=None, ip=client_ip(request))                          # commits
+    background.add_task(
+        email_mod.send_security_setting_changed_email, user.email,
+        change_description=email_mod.IDN_006_GOOGLE_UNLINKED,
+        changed_at=_utc_stamp(datetime.now(timezone.utc)),
+    )
+    return _google_identity_status(user, None)
 
 
 # ── IDN-001 email verification ──────────────────────────────────────────────────────────

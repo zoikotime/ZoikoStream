@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import Card from "../../ui/Card";
+import AuthCard from "./AuthCard";
+import { authLink } from "./authStyles";
 import { notify } from "../../ui/Toast";
 import api, { errCode, errMsg } from "../../api";
 import { SubmitButton } from "../../ui/forms";
@@ -86,7 +87,7 @@ export default function VerifyEmail() {
   const canResend = state === "expired" || state === "invalid" || state === "missing" || state === "already_used";
 
   return (
-    <Card padding="xl">
+    <AuthCard>
       <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">{copy.title}</h1>
       <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">{copy.body}</p>
 
@@ -127,10 +128,10 @@ export default function VerifyEmail() {
       )}
 
       <p className="mt-6 text-center text-sm text-slate-500 dark:text-slate-400">
-        <Link to="/login" className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400">
+        <Link to="/login" className={authLink}>
           Back to sign in
         </Link>
       </p>
-    </Card>
+    </AuthCard>
   );
 }

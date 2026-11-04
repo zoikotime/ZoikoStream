@@ -37,6 +37,7 @@ import CreateOrganization from "./pages/auth/CreateOrganization";
 import ForgotPassword from "./pages/auth/ForgotPassword";
 import AcceptInvitation from "./pages/auth/AcceptInvitation";
 import VerifyEmail from "./pages/auth/VerifyEmail";
+import GoogleCallback from "./pages/auth/GoogleCallback";
 import EventRegistration from "./pages/EventRegistration";
 import CustomerDelivery from "./pages/CustomerDelivery";
 import HostDashboard from "./pages/host/Dashboard";
@@ -308,6 +309,8 @@ export default function App() {
               <Route path="/accept-invite" element={<AcceptInvitation />} />
               {/* IDN-001 — landing page for the emailed verification link. */}
               <Route path="/verify-email" element={<VerifyEmail />} />
+              {/* Google sign-in returns here (GOOGLE_REDIRECT_URI = <origin>/auth/google/callback). */}
+              <Route path="/auth/google/callback" element={<GoogleCallback />} />
             </Route>
 
             {/* Public event registration landing (shareable link) */}

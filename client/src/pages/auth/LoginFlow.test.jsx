@@ -24,6 +24,7 @@ import { AuthProvider } from "../../auth/AuthContext";
 import { __resetSessionChannelForTests, readToken } from "../../auth/sessionStore";
 import AppToaster from "../../ui/AppToaster";
 import Login from "./Login";
+import * as googleAuth from "./googleAuth";
 
 const ADMIN = { id: "u1", full_name: "Ada Admin", email: "ada@example.com", role: "org_admin", org_id: "o1" };
 const STAFF = { id: "u2", full_name: "Sam Staff", email: "sam@zoikostream.com", role: "super_admin", org_id: null };
@@ -77,7 +78,7 @@ const renderLogin = () =>
 async function fillAndSubmit(user, { email = "ada@example.com", password = "correct-horse" } = {}) {
   await user.type(screen.getByLabelText(/work email/i), email);
   await user.type(screen.getByLabelText(/^password$/i), password);
-  await user.click(screen.getByRole("button", { name: /sign in/i }));
+  await user.click(screen.getByRole("button", { name: /log in/i }));
 }
 
 const toastsWith = (text) => screen.queryAllByText(text);
@@ -105,6 +106,67 @@ describe("a valid sign-in", () => {
   });
 });
 
+describe("Google sign-in", () => {
+  it("is the only provider, placed after the Log In button, and is a live button", () => {
+    renderLogin();
+    for (const name of [/microsoft/i, /apple/i, /company sso/i]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+    const google = screen.getByRole("button", { name: "Continue with Google" });
+    expect(google).toBeEnabled();
+    expect(google).not.toHaveAttribute("aria-disabled");
+    expect(google).not.toHaveTextContent(/coming soon/i);
+    const logIn = screen.getByRole("button", { name: /^log in$/i });
+    expect(logIn.compareDocumentPosition(google) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("starts the server flow, keeps state + verifier for this tab, and goes to Google", async () => {
+    const redirect = vi.spyOn(googleAuth.browser, "redirect").mockImplementation(() => {});
+    vi.mocked(api.post).mockImplementation((url) =>
+      url === "/auth/google/start"
+        ? Promise.resolve({ data: { authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?x=1", state: "st-1", code_verifier: "v".repeat(64) } })
+        : Promise.reject(new Error(`unexpected ${url}`)),
+    );
+    const user = userEvent.setup();
+    renderLogin();
+    await user.click(screen.getByRole("button", { name: "Continue with Google" }));
+    await waitFor(() => expect(redirect).toHaveBeenCalledWith("https://accounts.google.com/o/oauth2/v2/auth?x=1"));
+    expect(api.post).toHaveBeenCalledWith("/auth/google/start");
+    const pending = googleAuth.peekPendingSignIn();
+    expect(pending).toMatchObject({ state: "st-1", codeVerifier: "v".repeat(64), remember: true });
+    expect(readToken()).toBeNull();                                   // nothing issued yet
+    redirect.mockRestore();
+  });
+
+  it("says plainly when the server has no Google credentials — no redirect, no session", async () => {
+    const redirect = vi.spyOn(googleAuth.browser, "redirect").mockImplementation(() => {});
+    vi.mocked(api.post).mockRejectedValue(
+      answered(503, { code: "GOOGLE_SIGN_IN_UNAVAILABLE", message: "Google sign-in isn't available yet. Please use your work email and password." }),
+    );
+    const user = userEvent.setup();
+    renderLogin();
+    await user.click(screen.getByRole("button", { name: "Continue with Google" }));
+    expect(await screen.findByText(/Google sign-in isn't available yet/)).toBeInTheDocument();
+    expect(redirect).not.toHaveBeenCalled();
+    expect(googleAuth.peekPendingSignIn()).toBeNull();
+    expect(readToken()).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue with Google" })).toBeEnabled();
+    redirect.mockRestore();
+  });
+});
+
+describe("client-side validation", () => {
+  it("an empty submit explains each field inline and sends nothing", async () => {
+    const user = userEvent.setup();
+    renderLogin();
+    await user.click(screen.getByRole("button", { name: /log in/i }));
+    expect(screen.getByText("Enter a valid work email.")).toBeInTheDocument();
+    expect(screen.getByText("Enter your password.")).toBeInTheDocument();
+    expect(screen.getByLabelText(/work email/i)).toHaveAttribute("aria-invalid", "true");
+    expect(api.post).not.toHaveBeenCalled();
+  });
+});
+
 describe("a sign-in that fails", () => {
   it("wrong credentials: the server's own words, once, and no session", async () => {
     vi.mocked(api.post).mockRejectedValue(answered(401, "Incorrect email or password"));
@@ -114,7 +176,7 @@ describe("a sign-in that fails", () => {
     expect(await screen.findByText("Incorrect email or password")).toBeInTheDocument();
     expect(toastsWith("Incorrect email or password")).toHaveLength(1);
     expect(readToken()).toBeNull();
-    expect(screen.getByRole("button", { name: /sign in/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /log in/i })).toBeEnabled();
     expect(screen.queryByRole("heading", { name: /dashboard/i })).toBeNull();
   });
 
@@ -175,7 +237,7 @@ describe("one attempt at a time, one notification per failure", () => {
     const user = userEvent.setup();
     renderLogin();
     await user.type(screen.getByLabelText(/work email/i), "ada@example.com");
-    const button = screen.getByRole("button", { name: /sign in/i });   // its label changes while busy
+    const button = screen.getByRole("button", { name: /log in/i });   // its label changes while busy
     await user.type(screen.getByLabelText(/^password$/i), "correct-horse{Enter}");
     await user.click(button);
     await user.keyboard("{Enter}");
@@ -191,7 +253,7 @@ describe("one attempt at a time, one notification per failure", () => {
     renderLogin();
     await user.type(screen.getByLabelText(/work email/i), "ada@example.com");
     await user.type(screen.getByLabelText(/^password$/i), "correct-horse");
-    const form = screen.getByRole("button", { name: /sign in/i }).closest("form");
+    const form = screen.getByRole("button", { name: /log in/i }).closest("form");
     act(() => {
       fireEvent.submit(form);
       fireEvent.submit(form);
@@ -206,7 +268,7 @@ describe("one attempt at a time, one notification per failure", () => {
     renderLogin();
     await fillAndSubmit(user);
     await screen.findByText(/Couldn't reach the ZoikoStream server/);
-    await user.click(screen.getByRole("button", { name: /sign in/i }));       // try again
+    await user.click(screen.getByRole("button", { name: /log in/i }));       // try again
     await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getAllByText(/Couldn't reach the ZoikoStream server/)).toHaveLength(1));
   });
@@ -219,7 +281,7 @@ describe("one attempt at a time, one notification per failure", () => {
     await screen.findByText("Incorrect email or password");
     await user.clear(screen.getByLabelText(/^password$/i));
     await user.type(screen.getByLabelText(/^password$/i), "correct-horse");
-    await user.click(screen.getByRole("button", { name: /sign in/i }));
+    await user.click(screen.getByRole("button", { name: /log in/i }));
     expect(await screen.findByRole("heading", { name: "Organization dashboard" })).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText("Incorrect email or password")).toBeNull());
   });

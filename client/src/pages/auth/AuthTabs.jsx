@@ -1,29 +1,29 @@
 import { NavLink, useLocation } from "react-router-dom";
 import { cx } from "../../ui/tokens";
 
-// Sign In / Create Organization tab strip at the top of the auth card. Each tab is the
-// EXISTING route rendered as a <NavLink>, so navigation, back/forward and deep links keep
-// working exactly as before — the strip is presentation over the router, not new state.
+// Login / Register / Reset Password across the top of the sign-in card (ZoikoSema reference:
+// a soft strip, the active tab raised in white and joined to the card body, a short underline
+// that slides between tabs). Each tab is the EXISTING route rendered as a <NavLink>, so
+// navigation, back/forward and deep links work exactly as before.
 //
 // Deliberately not role="tablist": these navigate to separate pages rather than swapping
-// panels in place, so links (with NavLink's aria-current) describe them correctly.
+// panels in place, so links (with NavLink's aria-current="page") describe them correctly.
 const TABS = [
-  ["Sign In", "/login"],
-  ["Create Organization", "/signup"],
+  ["Login", "/login"],
+  ["Register", "/signup"],
+  ["Reset Password", "/forgot-password"],
 ];
 
-// Sits flush with the card edge, so it cancels <Card padding="xl"> (p-7 sm:p-8).
 export default function AuthTabs({ className = "" }) {
   const { pathname } = useLocation();
-  // One underline that slides between the two tabs, rather than one per tab fading in and
-  // out — the movement is what tells you the card swapped.
-  const activeIndex = pathname.startsWith("/signup") ? 1 : 0;
+  const found = TABS.findIndex(([, to]) => pathname.startsWith(to));
+  const activeIndex = found === -1 ? 0 : found;
 
   return (
     <nav
       aria-label="Authentication"
       className={cx(
-        "relative -mx-7 -mt-7 mb-7 grid grid-cols-2 border-b border-slate-200 sm:-mx-8 sm:-mt-8 dark:border-slate-800",
+        "relative grid shrink-0 grid-cols-3 gap-1 border-b border-slate-200/80 bg-slate-100/80 px-2 pt-2 dark:border-white/10 dark:bg-white/[0.04]",
         className
       )}
     >
@@ -33,10 +33,10 @@ export default function AuthTabs({ className = "" }) {
           to={to}
           className={({ isActive }) =>
             cx(
-              "py-4 text-center text-sm transition-colors duration-200 first:rounded-tl-[20px] last:rounded-tr-[20px] motion-reduce:transition-none",
+              "-mb-px rounded-t-[18px] px-1 pb-[calc(var(--auth-s1)+4px)] pt-[var(--auth-s1)] whitespace-nowrap text-center text-[13px] transition-colors sm:text-[14.5px] duration-200 motion-reduce:transition-none",
               isActive
-                ? "font-semibold text-violet-700 dark:text-violet-400"
-                : "font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-white/5 dark:hover:text-slate-200"
+                ? "bg-white font-semibold text-slate-950 dark:bg-[#0d1020] dark:text-white"
+                : "font-medium text-slate-500 hover:bg-white/60 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-white/5 dark:hover:text-white"
             )
           }
         >
@@ -44,11 +44,15 @@ export default function AuthTabs({ className = "" }) {
         </NavLink>
       ))}
 
+      {/* One short underline that slides between tabs — the movement is what tells you the
+          page swapped. Each slot is exactly one third of the padded strip. */}
       <span
         aria-hidden="true"
-        style={{ transform: `translateX(${activeIndex * 100}%)` }}
-        className="absolute -bottom-px left-0 h-0.5 w-1/2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-500 transition-transform duration-300 ease-out motion-reduce:transition-none"
-      />
+        style={{ transform: `translateX(calc(${activeIndex} * (100% + 0.25rem)))` }}
+        className="pointer-events-none absolute bottom-[3px] left-2 flex w-[calc((100%-1rem-0.5rem)/3)] justify-center transition-transform duration-300 ease-out motion-reduce:transition-none"
+      >
+        <span className="h-[3px] w-[52%] rounded-full bg-gradient-to-r from-violet-600 to-blue-500" />
+      </span>
     </nav>
   );
 }

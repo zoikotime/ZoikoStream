@@ -17,6 +17,9 @@ email-validator
 httpx
 livekit-api
 google-cloud-storage
+# Google sign-in: verifies Google ID-token signatures (app/services/google_oauth.py).
+# Already installed transitively by google-cloud-storage; declared because it is used directly.
+google-auth>=2.20
 google-cloud-kms>=3,<4
 
 stripe>=15.3,<16

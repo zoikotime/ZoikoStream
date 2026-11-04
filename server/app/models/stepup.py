@@ -31,11 +31,15 @@ from app.db import Base
 STEP_UP_HIGH_RISK_ROLE_GRANT = "high_risk_role_grant"
 STEP_UP_OWNERSHIP_TRANSFER = "ownership_transfer"
 STEP_UP_SUPPORT_EMERGENCY_APPROVAL = "support_emergency_approval"
+# Linking a Google account adds a new way into this account, so it needs proof that the
+# account holder — not just an unattended session — is asking (routers/auth.py google_link_start).
+STEP_UP_GOOGLE_LINK = "google_link"
 
 STEP_UP_PURPOSES = (
     STEP_UP_HIGH_RISK_ROLE_GRANT,
     STEP_UP_OWNERSHIP_TRANSFER,
     STEP_UP_SUPPORT_EMERGENCY_APPROVAL,
+    STEP_UP_GOOGLE_LINK,
 )
 
 # Short by design. Long enough to complete the operation the user just re-authenticated for,

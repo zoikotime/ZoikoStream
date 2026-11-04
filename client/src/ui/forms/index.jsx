@@ -23,8 +23,9 @@ const CONTROL = {
   // control IS the interface.
   auth: "peer w-full rounded-xl border bg-white px-4 py-3.5 text-slate-800 outline-none transition duration-200 placeholder:text-slate-400 focus:ring-4 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500",
 };
+// Violet focus to match the auth card's brand accent (the leading icon already tints violet).
 const AUTH_OK =
-  "border-slate-200 hover:border-slate-300 focus:border-emerald-500 focus:ring-emerald-500/15 dark:border-slate-700 dark:hover:border-slate-600";
+  "border-slate-200 hover:border-slate-300 focus:border-violet-500 focus:ring-violet-500/15 dark:border-slate-700 dark:hover:border-slate-600";
 const AUTH_BAD = "border-rose-400 focus:border-rose-500 focus:ring-rose-500/15 dark:border-rose-500/60";
 const LABEL = {
   form: "mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300",

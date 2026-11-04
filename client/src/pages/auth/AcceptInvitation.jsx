@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import Card from "../../ui/Card";
+import AuthCard from "./AuthCard";
+import { authLink } from "./authStyles";
 import Spinner from "../../ui/Spinner";
 import { notify } from "../../ui/Toast";
 import api, { errMsg } from "../../api";
@@ -95,32 +96,34 @@ export default function AcceptInvitation() {
 
   if (loadingInvite) {
     return (
-      <Card padding="xl" className="flex items-center justify-center">
-        <Spinner />
-      </Card>
+      <AuthCard>
+        <div className="flex justify-center py-4">
+          <Spinner />
+        </div>
+      </AuthCard>
     );
   }
 
   if (loadError || !invite) {
     return (
-      <Card padding="xl">
+      <AuthCard>
         <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Invitation not found</h1>
         <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
           {loadError || "This invitation link is invalid."}
         </p>
         <p className="mt-8 text-center text-sm text-slate-500 dark:text-slate-400">
-          <Link to="/login" className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400">
+          <Link to="/login" className={authLink}>
             Back to Sign In
           </Link>
         </p>
-      </Card>
+      </AuthCard>
     );
   }
 
   const roleLabel = ROLE_LABEL[invite.role] || invite.role;
 
   return (
-    <Card padding="xl">
+    <AuthCard>
       <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Accept Invitation</h1>
       <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
         You've been invited to join{" "}
@@ -160,11 +163,11 @@ export default function AcceptInvitation() {
 
         <p className="text-center text-sm text-slate-500 dark:text-slate-400">
           Already accepted?{" "}
-          <Link to="/login" className="font-semibold text-emerald-700 hover:underline dark:text-emerald-400">
+          <Link to="/login" className={authLink}>
             Sign In
           </Link>
         </p>
       </form>
-    </Card>
+    </AuthCard>
   );
 }

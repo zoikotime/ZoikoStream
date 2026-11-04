@@ -25,6 +25,12 @@ const COPY = {
       "Granting admin access gives full control of this organization. Enter your password to confirm you want to make this change.",
     confirmLabel: "Confirm and grant access",
   },
+  google_link: {
+    title: "Confirm it's you",
+    description:
+      "Linking a Google account adds a new way to sign in to your ZoikoStream account. Enter your password to continue to Google.",
+    confirmLabel: "Confirm and continue",
+  },
 };
 const FALLBACK = {
   title: "Confirm it's you",
