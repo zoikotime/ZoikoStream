@@ -5,7 +5,7 @@ source_type: help
 canonical_path: "/events/:eventId/watch"
 risk_class: LOW
 authority_rank: 90
-version: "2026.10"
+version: "2026.10.1"
 origin_files: [client/src/pages/watch/EventWatch.jsx, client/src/pages/watch/viewerLanguage.jsx, client/src/pages/watch/CustomDomainNotFound.jsx, client/src/components/watch/RegistrationGate.jsx, client/src/components/watch/AccessWindowNotice.jsx, client/src/components/watch/CapacityWaitingNotice.jsx, client/src/components/watch/InAppBrowserNotice.jsx, client/src/components/watch/ViewerErrorState.jsx]
 author: guide-engineering
 owner_role: support
@@ -60,6 +60,14 @@ If you are removed from an event, the page shows "You've left this event" with t
 ## Invalid invitation links
 
 If an invitation link isn't valid, the page shows "This invitation link isn't valid. You can still continue below."
+
+## Private events
+
+A private event can be watched only by people who were invited, people who hold a valid access link, and members of the organizer's organization. Use the invitation link or access link you were sent. A personal invitation can be claimed on one device; using it on another device is refused. If you do not have a link, ask the event's organizer. Guide cannot look up who is invited or send you a link.
+
+## Watching on a phone or tablet
+
+The event page works on phones. On a phone the "Language" picker sits just below the header. If a link opens inside another app's built-in browser, open the page in your phone's own browser instead (see the next section).
 
 ## Opening the page inside another app
 

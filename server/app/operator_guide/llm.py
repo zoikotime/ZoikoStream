@@ -164,6 +164,19 @@ class GroqProvider:
                            _ms(started), payload.get("usage") or {})
 
 
+class GeminiProvider(GroqProvider):
+    """Gemini via its OpenAI-compatible endpoint; same request/response shape as Groq."""
+    URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+
+    def __init__(self):
+        s = get_settings()
+        if not s.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not configured")
+        self._key, self.model, self.timeout = s.GEMINI_API_KEY, s.OPGUIDE_GEMINI_MODEL, \
+            s.OPGUIDE_LLM_TIMEOUT_SECONDS
+        self.release = f"gemini:{self.model}"
+
+
 class AnthropicProvider:
     def __init__(self):
         import anthropic  # deferred: only needed when this provider is selected
@@ -234,7 +247,8 @@ class FallbackProvider:
         return result
 
 
-_PROVIDERS = {"groq": GroqProvider, "anthropic": AnthropicProvider, "mock": MockProvider}
+_PROVIDERS = {"groq": GroqProvider, "gemini": GeminiProvider, "anthropic": AnthropicProvider,
+              "mock": MockProvider}
 
 
 @lru_cache

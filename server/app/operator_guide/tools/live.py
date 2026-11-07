@@ -127,6 +127,11 @@ def event_live(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
     issues = [r for r in rows if r["state"] in ("degraded", "down")]
     summary = ("No critical issue detected." if not issues else
                f"{len(issues)} signal(s) need attention: " + ", ".join(r["label"] for r in issues) + ".")
+    if snaps and not tele_src.stale:
+        summary += f" {snaps[0].viewers} watching now."
+    elif snaps:
+        summary += (f" The latest audience sample is {age_text(tele_src.age_seconds)}, so I am "
+                    "not reporting a current viewer count.")
     return ToolResult("event.live", [status_card(title, rows, sources)], sources,
                       summary=summary, mode="live", inference=False,
                       actions=[nav("Open live console", f"/host/dashboard?event={ev.id}")],

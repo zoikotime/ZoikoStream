@@ -94,7 +94,7 @@ _PRICING_TOPIC = re.compile(
 # Privacy-notice vocabulary -> the Privacy/legal profile (K5 + supporting K4).
 _PRIVACY_TOPIC = re.compile(
     r"(?i)\b(privacy|personal data|my data|children'?s?|gdpr|data protection|"
-    r"data (subject|rights)|cookies?)\b")
+    r"data (subject|rights)|cookies?|collects?|collected|collection)\b")
 
 
 def retrieval_intent(query: str, intent: str) -> str:
@@ -135,7 +135,7 @@ _SYNONYMS = [
     (r"\bfuneral(s)?\b", "memorial service livestream"),
     (r"\bmemorial(s)?\b", "memorial service livestream"),
     (r"\b(church|worship|sermon|service)\b", "church live stream worship"),
-    (r"\b(freez\w*|lag\w*|stutter\w*|buffer\w*)\b", "playback buffering network browser"),
+    (r"\b(freez\w*|froze\w*|frozen|stuck|lag\w*|stutter\w*|buffer\w*)\b", "playback buffering network browser"),
     (r"\b(how much|cost|price|pricing|fee|fees|plans?|quotes?|quotation)\b", "pricing plans"),
     (r"\b(cc|subtitles?)\b", "captions"),
     (r"\b(recording|recorded|rewatch|watch later|on demand)\b", "replay recording"),
@@ -143,6 +143,9 @@ _SYNONYMS = [
     (r"\b(secure|safe|safety|encrypt\w*)\b", "security"),
     (r"\b(bugs?|bounty|bounties|exploit\w*)\b", "security vulnerability report"),
     (r"\b(gdpr|data protection|my data)\b", "privacy personal data"),
+    (r"\b(collect\w*|about me)\b", "privacy personal data collects"),
+    (r"\b(deaf|hard of hearing|hearing[- ]impaired|blind|visually impaired|screen ?readers?|"
+     r"assistive|disabilit\w*|accessib\w*)\b", "accessibility options captions read aloud"),
     (r"\b(api|sdk|developer|integration|webhook)s?\b", "developer api"),
     (r"\b(livestream\w*|webcast\w*)\b", "live stream"),
     (r"\b(city council|council|municipal\w*|government|town meeting)\b", "civic events"),
@@ -179,6 +182,8 @@ _QUALIFIER = re.compile(
     r"(?i)\b(certif\w*|complian\w*|accredit\w*|soc ?[123]|iso ?\d{4,5}|hipaa|pci(-dss)?|"
     r"fedramp|statera?mp|hitrust|tisax|nist|csa star|cyber essentials|"
     r"residen\w*|geograph\w*|data ?cent(er|re)s?|region\w*|uptime|sla|guarantee\w*|"
+    # Browser/device compatibility is a claim that needs an explicit published list.
+    r"browsers? (?:are )?(?:supported|compatible)|(?:supported|compatible) browsers?|"
     # Named jurisdictions: a storage/residency/legal claim about a place needs that place in
     # the evidence ("us" is deliberately absent — it is a pronoun).
     r"eu|europe\w*|usa|united states|uk|united kingdom|canada|australia|india|germany|"

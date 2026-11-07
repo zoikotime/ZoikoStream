@@ -15,6 +15,9 @@ Public and unlisted events always ask viewers to register before watching.
 ## Registration
 Registration can be required, and a registration limit caps the number of sign-ups. When registrations reach the limit the event is at capacity and new registrations are refused.
 
+## Waiting room
+When the waiting room is turned on for an event, ordinary attendees who join are held in a waiting room until a host lets them in. The host console shows the waiting-room queue with a count, and the host can admit people from it, including an "Admit all" action. Hosts, speakers and other staff never wait. The waiting room can be turned on or off in the event's settings; Guide can propose that change, and it only happens after you confirm.
+
 ## Access links
 Access links let people into a private event without an individual invitation. A link can have a label and an expiry, and it records how often it was used. You can rotate a link (the old link stops working and a new one is issued) or revoke it (it stops working). Link secrets are shown only once when the link is created or rotated; Guide never displays them.
 

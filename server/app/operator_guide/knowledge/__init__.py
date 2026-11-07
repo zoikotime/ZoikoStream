@@ -29,8 +29,17 @@ me my no not of on or our so that the their them then there these this to was we
 which who why will with work works you your""".split())
 
 
+def _stem(w: str) -> str:
+    """Light normalisation so "recordings"/"recording" and "retained"/"retention" meet."""
+    if w.startswith("retain"):
+        return "retention"
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
 def tokens(text: str) -> list[str]:
-    return [w for w in _WORD.findall(text.lower()) if w not in _STOP and len(w) > 1]
+    return [_stem(w) for w in _WORD.findall(text.lower()) if w not in _STOP and len(w) > 1]
 
 
 @dataclass(frozen=True)
@@ -111,7 +120,12 @@ def index() -> Index:
 
 
 def search(query: str, k: int = 3) -> list[Section]:
-    return [s for s, _ in index().search(query, k=k)]
+    found = index().search(query, k=k)
+    if not found:
+        return []
+    # Drop weak trailing hits: a section scoring far below the best one is noise, not support.
+    top = found[0][1]
+    return [s for s, score in found if score >= 0.4 * top]
 
 
 def api_version() -> str | None:

@@ -54,8 +54,9 @@ BLOCKED = [
     ("delete", "R6", _rx(r"\b(delete|erase|purge|destroy|wipe)\b")),
     ("secret", "R6", _rx(r"(\b(show|reveal|give|send|tell|display|copy)\b|\bwhat\s*('?s|\s+is)\s+"
                          r"(the|my|our)\b).{0,30}"
-                         r"\b(stream\s*key|api\s*key|secret|password|token|ingest\s*url|"
-                         r"access\s*link\s*url|signing\s*key)\b|"
+                         r"\b(stream\s*key|api\s*key|(?:client|webhook|signing|api|app)\s+secret|"
+                         r"secret\s+key|(?:my|our|the)\s+secrets?|secrets|password|token|"
+                         r"ingest\s*url|access\s*link\s*url|signing\s*key)\b|"
                          r"\b(rotate|regenerate|reset)\s+(the\s+|my\s+|an?\s+)?(api\s*)?"
                          r"(key|keys|secret|stream\s*key|token)\b")),
     ("roles", "R6", _rx(r"\b(make|promote|demote)\b.{0,40}\b(admin|owner|host)\b|"
@@ -214,6 +215,24 @@ EVENT_DETAIL = _rx(
     rf"\b(live|ended|over)\s+or\s+(live|ended|over|scheduled|upcoming)\b|"
     rf"\b(what|which)\s+(is\s+)?(the\s+)?(event\s+)?status\b(?!.{{0,20}}\baccount\b)|"
     rf"\bevent\s+status\b|\bstart\s+time\b")
+# "How many viewers are watching right now?" is a live-audience read, never 30-day analytics.
+LIVE_AUDIENCE = _rx(r"\b(right\s+now|currently|at\s+the\s+moment|now)\b.{0,40}\b(watching|viewers?|"
+                    r"audience|attendees)\b|\b(watching|viewers?|audience|attendees)\b.{0,40}\b"
+                    r"(right\s+now|currently|at\s+the\s+moment|now)\b|\bhow\s+many\b.{0,20}"
+                    r"\b(are\s+)?watching\b|\bwho('s|\s+is)\s+watching\b")
+# "What is the ingest status?" asks for the current signal, not for a definition of ingest.
+LIVE_SIGNAL = _rx(r"\b(ingest|encoder|bitrate|signal|input)\s+(status|health|state|ok|quality)\b|"
+                  r"\bstatus\s+of\s+(the\s+)?(ingest|encoder|input|stream|broadcast)\b")
+MEANING = _rx(r"\b(mean|means|meaning|definition|explain)\b")
+# "Which events are live right now?" is the organization overview, which names live sessions.
+LIVE_EVENTS = _rx(r"\b(which|what|any)\s+(of\s+)?(my\s+|our\s+)?(events?|streams?|broadcasts?|"
+                  r"sessions?)\b.{0,30}\b(live|on\s+air|broadcasting|streaming)\b|"
+                  r"\bwhat('s|\s+is)\s+live\b|\bany(thing|\s+events?)\s+(live|on\s+air)\b")
+# "How many people registered?" is a registration count from the access tool.
+REGISTRATION_COUNT = _rx(r"\bhow\s+many\b.{0,30}\b(regist\w+|sign[- ]?ups?|invited|rsvp\w*)\b")
+# Retention is a policy question; it is answered from documentation, not from one event.
+RETENTION_POLICY = _rx(r"\bhow\s+long\b.{0,40}\b(retain\w*|kept|keep|stored|retention)\b|"
+                       r"\bretention\s+(policy|period|rules?)\b")
 DEFINITIONAL = _rx(r"^\s*(what\s+(does|do|is|are)\b(?!.{0,40}\b(my|our|this|current|now)\b)|"
                    r"how\s+(do|does|can|should)\s+(i|we|you|it)\b|explain\b|define\b|"
                    r"what('s|\s+is)\s+the\s+difference|why\s+(does|do|would|is)\b|"
@@ -263,6 +282,15 @@ def classify(text: str) -> Intent:
         return Intent("read", "event.readiness", tools=["event.readiness"])
     if EVENT_DETAIL.search(t):
         return Intent("read", "event.summary", tools=["event.summary"])
+
+    if LIVE_EVENTS.search(t):
+        return Intent("read", "org.overview", tools=["org.overview"])
+    if REGISTRATION_COUNT.search(t):
+        return Intent("read", "event.access", tools=["event.access"])
+    if RETENTION_POLICY.search(t):
+        return Intent("docs", "docs", docs=True)
+    if LIVE_AUDIENCE.search(t) or (LIVE_SIGNAL.search(t) and not MEANING.search(t)):
+        return Intent("read", "event.live", tools=["event.live"])
 
     scores: dict[str, int] = {}
     for tool, pattern, weight in TOPICS:

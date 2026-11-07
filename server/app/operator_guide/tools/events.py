@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.audience import JoinDenial
-from app.models.event import EventAccessLink, EventRegistration
+from app.models.event import Event, EventAccessLink, EventRegistration
 from app.models.event_planning import EventIntake, EventPlanningRequirement, EventRehearsal
 from app.models.live import BroadcastSession
 from app.models.platform_ops import GovernanceRecord
@@ -89,7 +89,13 @@ def org_overview(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
         blocks.append(notice("warning", f"{len(needs)} upcoming event(s) need readiness "
                                         "attention: " + ", ".join(e["title"] for e in needs[:3]),
                              rule="Readiness service"))
-    summary = (f"You have {len(upcoming)} upcoming event(s)"
+    live_titles = db.scalars(select(Event.title).join(
+        BroadcastSession, BroadcastSession.event_id == Event.id).where(
+        BroadcastSession.org_id == actor.org_id,
+        BroadcastSession.status.in_(("live", "paused"))).distinct()).all()
+    live_note = (f"Live now: {', '.join(t or 'Untitled event' for t in live_titles[:5])}. "
+                 if live_titles else "")
+    summary = (live_note + f"You have {len(upcoming)} upcoming event(s)"
                + (f"; {len(needs)} need readiness attention." if needs else
                   " and none has an open readiness problem." if upcoming else "."))
     return ToolResult("org.overview", blocks, [src], summary=summary, facts={
@@ -263,7 +269,9 @@ def event_access(db: Session, actor: Actor, ctx: ToolContext) -> ToolResult:
     return ToolResult("event.access", blocks, [src, link_src],
                       summary=f"{ev.title} is {ev.visibility or 'public'}"
                               + (" with registration required." if ev.registration_required
-                                 else " without registration."),
+                                 else " without registration.")
+                              + f" {regs} registered"
+                              + (f" of {ev.registration_limit}." if ev.registration_limit else "."),
                       actions=[nav("Review access", event_href(actor, ev))],
                       facts={"visibility": ev.visibility, "registrations": regs,
                              "registration_limit": ev.registration_limit,
