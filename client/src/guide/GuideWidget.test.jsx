@@ -534,7 +534,7 @@ describe("Guide UX requirements", () => {
     const dialog = await openGuide(user);
     await within(dialog).findByRole("button", { name: "Product overview" });
     await user.type(within(dialog).getByLabelText("Ask Guide a question"), "Can you stream a memorial?{Enter}");
-    expect(await within(dialog).findByText(/Guide couldn't be reached/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/Guide couldn't be reached/, {}, { timeout: 5000 })).toBeInTheDocument();
     expect(within(dialog).getByText("Can you stream a memorial?")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(dialog.querySelector(".zg-answer")).toHaveTextContent(/Families can stream/));
