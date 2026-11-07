@@ -14,17 +14,18 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.event import Event, EventAccessLink
-from app.models.live import BroadcastSession, LiveRecording
+from app.models.live import AnalyticsSnapshot, BroadcastSession, LiveRecording
 from app.models.support_ticket import SupportTicket
 from app.services import org as org_svc
 
 from . import platform_scope, policy
+from .config import get_settings
 from .policy import Actor
-from .sources import iso, now
+from .sources import aware, iso, now
 from .tools.events import event_href
 
 SEVERITY_ORDER = {"blocker": 0, "warning": 1, "info": 2}
@@ -57,6 +58,34 @@ def items(db: Session, actor: Actor) -> list[dict]:
                          (s.health_issues or "The platform reports a health problem.")[:200],
                          href=f"/host/dashboard?event={ev.id}", event=ev,
                          ask="What's wrong with the live broadcast?"))
+
+    # A live broadcast whose audience telemetry has stopped updating cannot be trusted as
+    # "fine": say so instead of staying silent (§15 — stale data is never described as current).
+    stale_after = timedelta(seconds=get_settings().OPGUIDE_TELEMETRY_STALE_SECONDS)
+    for s in db.scalars(select(BroadcastSession).where(
+            BroadcastSession.org_id == actor.org_id,
+            BroadcastSession.status.in_(("live", "paused")),
+            BroadcastSession.health_level.notin_(("warn", "down")) |
+            BroadcastSession.health_level.is_(None))).all():
+        ev = db.get(Event, s.event_id)
+        if ev is None or not relevant(ev):
+            continue
+        last = db.scalar(select(func.max(AnalyticsSnapshot.created_at)).where(
+            AnalyticsSnapshot.event_id == s.event_id))
+        started = aware(s.started_at or s.created_at)
+        last = aware(last) if last is not None else None
+        if last is not None and t - last > stale_after:
+            since = last
+        elif last is None and started is not None and t - started > 2 * stale_after:
+            since = started
+        else:
+            continue
+        mins = max(1, int((t - since).total_seconds() // 60))
+        out.append(_item("live_telemetry", "warning", f"{ev.title}: live data is stale",
+                         f"No fresh audience data for about {mins} min; the broadcast may be "
+                         "unhealthy or the sampler may have stopped.",
+                         href=f"/host/dashboard?event={ev.id}", event=ev,
+                         ask="How's the broadcast going?"))
 
     for e in org_svc.upcoming_events(db, actor.org_id, include_test=True, limit=20):
         start = e.get("start_time")

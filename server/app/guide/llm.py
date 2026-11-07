@@ -296,6 +296,29 @@ class GroqProvider:
         return int((time.monotonic() - started) * 1000)
 
 
+class GeminiProvider(GroqProvider):
+    """Google Gemini through its OpenAI-compatible endpoint (default gemini-3.5-flash-lite).
+
+    Identical contract to GroqProvider (strict JSON schema, retry-once on a short 429, any other
+    failure is an "error" so the FallbackProvider moves on). It exists so that Groq and Gemini
+    can absorb each other's rate limits: GUIDE_LLM_PROVIDER=anthropic,groq,gemini."""
+
+    URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    # Gemini models may spend part of the completion budget on thinking before the JSON.
+    MAX_COMPLETION_TOKENS = 2048
+
+    name = "gemini"
+
+    def __init__(self):
+        s = get_settings()
+        if not s.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not configured")
+        self._key = s.GEMINI_API_KEY
+        self.model = s.GUIDE_GEMINI_MODEL
+        self.timeout = s.GUIDE_LLM_TIMEOUT_SECONDS
+        self.profile = f"gemini:{self.model}"
+
+
 def _retry_after(res) -> float | None:
     try:
         return float(res.headers.get("retry-after", ""))
@@ -343,7 +366,7 @@ class FallbackProvider:
 
 
 _PROVIDERS = {"anthropic": lambda: AnthropicProvider(), "groq": lambda: GroqProvider(),
-              "mock": lambda: MockProvider()}
+              "gemini": lambda: GeminiProvider(), "mock": lambda: MockProvider()}
 
 
 def approved_providers() -> set[str]:

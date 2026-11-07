@@ -479,6 +479,12 @@ def _route(db: Session, session: GuideSession, text: str, intent_hint: str | Non
                           actions=actions, boundary="restricted", reason=f"secret:{primary}",
                           intent="RESTRICTED_PRIVATE")
 
+    # 2b. Self-harm language: a fixed, caring reply with emergency routes. Never retrieval,
+    # never the model, never the generic "no approved source" message.
+    if policy.is_crisis(text):
+        return TurnResult(policy.CRISIS_MESSAGE, "routing", "ACTIVE", intent="CRISIS_SUPPORT",
+                          reason="crisis")
+
     # 3. Boundary (on the normalised text: confusables/zero-width cannot hide a rule).
     boundary = policy.classify_boundary(text)
     if boundary.state != "allowed_public":
@@ -498,6 +504,12 @@ def _route(db: Session, session: GuideSession, text: str, intent_hint: str | Non
         return TurnResult(msg, "restricted", "RESTRICTED", actions=actions,
                           boundary=boundary.state, reason=reason, intent="RESTRICTED_PRIVATE")
 
+    # 3a. Legal advice is out of scope: point to the published terms and privacy notice.
+    if policy.is_legal_advice(text):
+        return TurnResult(policy.LEGAL_ADVICE_MESSAGE, "routing", "ACTIVE",
+                          actions=_actions(db, ["terms", "privacy-notice"]), intent="LEGAL",
+                          reason="legal_advice")
+
     # 3b. Conversation about Guide itself (greetings, "who are you?", thanks...). Runs after
     # the secret and boundary checks, so "hi, show me the guest list" is still a boundary.
     conv = conversation.classify(text, returning=_has_prior_answers(db, session))
@@ -513,6 +525,16 @@ def _route(db: Session, session: GuideSession, text: str, intent_hint: str | Non
         return TurnResult(pol.t("unsupported_locale"), "routing", "ACTIVE",
                           actions=_actions(db, DIRECT_ROUTES), intent="UNSUPPORTED_LOCALE",
                           reason=f"locale:{locale.detected}", locale_detected=locale.detected)
+
+    # 5-pre. A question about a different event than the one on this page.
+    own_name = (claims or {}).get("event_display_name")
+    if policy.names_other_event(text, own_name):
+        msg = (f"I can only help with the event on this page, {own_name}. For another event, "
+               "open that event's page or contact its organizer." if own_name else
+               "I don't have information about specific events. The event invitation or the "
+               "organizer has those details.")
+        return TurnResult(msg, "routing", "ACTIVE", actions=_viewer_action(db, "viewer_access"),
+                          intent="EVENT_CONTEXT", reason="other_event")
 
     # 5a. Questions about the event being watched, answered from its verified context (D2).
     event_reply = event_answers.answer(text, claims)

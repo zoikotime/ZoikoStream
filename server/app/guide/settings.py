@@ -49,6 +49,9 @@ class GuideSettings(BaseSettings):
     # Groq (OpenAI-compatible API).
     GROQ_API_KEY: str = ""
     GUIDE_GROQ_MODEL: str = "openai/gpt-oss-120b"
+    # Google Gemini (OpenAI-compatible endpoint); a second rate-limit buffer behind Groq.
+    GEMINI_API_KEY: str = ""
+    GUIDE_GEMINI_MODEL: str = "gemini-3.5-flash-lite"
     GUIDE_LLM_EFFORT: str = "low"
     GUIDE_LLM_TIMEOUT_SECONDS: float = 25.0
     GUIDE_EMBEDDING_PROFILE: str = "fastembed:BAAI/bge-small-en-v1.5"

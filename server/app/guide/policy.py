@@ -196,7 +196,15 @@ _RESTRICTED = [
         r"\bexport\s+the\s+chat\s+(log\s+)?from\b",r"\bhidden\s+(q&a|questions)\b", r"\bq&a\s+questions\s+that\s+were\s+hidden\b",
         r"\brecording\s+link\b.{0,40}\bbefore\b.{0,20}\bpublished\b",
         r"\bwhat\s+email\s+did\b", r"\b(organizer|host|speaker)'?s?\s+(email|phone|backup\s+contact|contact)\b",
-        r"\bbackup\s+contact\b")),
+        r"\bbackup\s+contact\b",
+        # Reaching the organizer goes through the event's own contact route, not Guide.
+        r"\b(speak|talk|reach|contact|message|get\s+in\s+touch)\s+(to\s+|with\s+)?(the\s+)?"
+        r"(event\s+)?(organi[sz]er|host)\b",
+        # Other attendees' personal details are never shared.
+        r"\b(other|another|all|the)\s+(viewers?|attendees?|guests?|participants?|people)'?s?\s+"
+        r"(emails?|e-mails?|email\s+addresses|phone\s+numbers?|numbers?|contact|details|info)\b",
+        r"\b(emails?|e-mails?|email\s+addresses|phone\s+numbers?)\s+(of|for)\s+"
+        r"(the\s+|other\s+|all\s+)?(viewers?|attendees?|guests?|participants?|people)\b")),
     ("credential_request", _rx(
         r"\b(admin|root|database|db|server|internal)\s+(password|credentials?|login)",
         r"\b(your|the|zoikostream'?s?)\s+(api[_ ]?keys?|secret keys?|tokens?|private keys?)\b",
@@ -273,7 +281,8 @@ _INTENT_RULES = [
                   r"\b(sound|audio)\s+keeps\b", r"\b(sound|audio)\b.{0,20}\bcutting\s+out\b")),
     ("PLAYBACK", _rx(r"\bbuffer", r"\bfreez", r"\bblack\s+screen\b", r"\bstutter", r"\blagg",
                      r"\b(video|stream|player)\s+(won'?t|isn'?t|is\s+not|not|doesn'?t|keeps)\b",
-                     r"\bplayback\b", r"\bwon'?t\s+(play|load)\b", r"\bpixelat")),
+                     r"\bplayback\b", r"\bwon'?t\s+(play|load)\b", r"\bpixelat",
+                     r"\bfroze\b", r"\bfrozen\b", r"\b(video|stream|player|picture)\s+(is\s+)?stuck\b")),
     ("VIEWER_ACCESS", _rx(r"\bcan'?t\s+(get\s+in|get\s+into|access|join|open|enter)\b",
                           r"\bcannot\s+(access|join|open)\b", r"\b(join|access|enter)\s+(the|my|an)\s+event\b",
                           r"\binvitation\b", r"\binvite\s+link\b", r"\baccess\s+code\b",
@@ -287,6 +296,8 @@ _INTENT_RULES = [
     ("PRIVACY", _rx(r"\bprivacy\b", r"\bpersonal\s+data\b", r"\bgdpr\b", r"\bccpa\b", r"\bcookies?\b",
                     r"\bdata\s+(retention|deletion|protection|processors?|processing)\b",
                     r"\bhow\s+(is|do you use)\s+(my\s+)?(data|chat)\b", r"\b(my|your|personal)\s+(data|information)\b",
+                    r"\bwhat\s+(data|information)\b.{0,40}\b(collect|store|keep|hold|have|gather)\w*\b",
+                    r"\bcollect\w*\b.{0,30}\b(about\s+me|from\s+me|my)\b",
                     r"\bprocess(es|ing)?\s+(my|personal)\b", r"\bsell\s+(my|your|user)\b", r"\b(children|kids|minors)\b")),
     ("SECURITY_TRUST", _rx(r"\bsecur(e|ity)\b", r"\bencrypt", r"\bcomplian(t|ce)\b", r"\bsoc\s*2\b",
                            r"\biso\s*27001\b", r"\bhipaa\b", r"\btrust\s+center\b", r"\bdata\s+residency\b",
@@ -310,6 +321,62 @@ EVENT_TIME = _rx(r"\bwhat\s+time\b", r"\bwhen\s+(does|will|is)\b.{0,20}\b(start|
 
 _DISCOUNT = _rx(r"\bdiscount\b", r"\bcoupon\b", r"\bpromo(\s+code)?\b", r"\bnegotiat",
                 r"\bbetter\s+(deal|price)\b", r"\bcheaper\b")
+
+
+# Self-harm language gets a fixed, caring, non-retrieved reply: never the generic "no source"
+# message and never the model.
+_CRISIS = _rx(
+    r"\b(kill|hurt|harm|injure|cut)\s+(myself|my\s*self)\b", r"\bsuicid\w*\b",
+    r"\bself[- ]?harm\b", r"\bwant\s+to\s+die\b", r"\bwanna\s+die\b",
+    r"\b(don'?t|do\s+not)\s+want\s+to\s+(live|be\s+alive|exist)\b",
+    r"\bend\s+(my\s+life|it\s+all)\b", r"\bno\s+reason\s+to\s+(live|go\s+on)\b",
+    r"\bbetter\s+off\s+(dead|without\s+me)\b", r"\btake\s+my\s+(own\s+)?life\b")
+CRISIS_MESSAGE = (
+    "I'm really sorry you're feeling this way. I'm an AI assistant for ZoikoStream, so I can't "
+    "give you the support you deserve, but you don't have to go through this alone. If you might "
+    "act on these thoughts or you're in immediate danger, please call your local emergency number "
+    "now. You can also reach a crisis line in your country (in the US, call or text 988), or talk "
+    "to someone you trust. If you'd like help with ZoikoStream afterwards, I'm here for that too.")
+
+
+def is_crisis(text: str) -> bool:
+    return bool(_CRISIS.search(normalize(text)))
+
+
+# Legal advice is never given; the published terms and privacy notice are pointed to instead.
+_LEGAL_ADVICE = _rx(
+    r"\blegal\s+advice\b", r"\b(lawyer|attorney|solicitor)\b", r"\bsue\b", r"\blawsuit\b",
+    r"\bis\s+(it|this)\s+(legal|illegal)\b", r"\bam\s+i\s+liable\b",
+    r"\bwhat\s+are\s+my\s+legal\b",
+    r"\b(advice|opinion)\s+(about|on|regarding)\s+(my|our|the)\s+(\w+\s+)?"
+    r"(contract|agreement|lawsuit|liability)\b")
+LEGAL_ADVICE_MESSAGE = (
+    "I can't give legal advice. I can point you to ZoikoStream's published terms and privacy "
+    "notice, but for advice about your own contract or situation please speak to a qualified "
+    "legal professional.")
+
+
+def is_legal_advice(text: str) -> bool:
+    return bool(_LEGAL_ADVICE.search(normalize(text)))
+
+
+# A question about some OTHER event ("Rival Corp's secret event", "another event") on a page
+# that is about one event: Guide only discusses the event it was given.
+_OTHER_EVENT_WORD = re.compile(
+    r"(?i)\b(another|other|different|rival|competitor'?s?)\b.{0,40}\b(event|stream|meeting|webinar)s?\b")
+_OTHER_EVENT_OWNED = re.compile(
+    r"\b([A-Z][\w&-]*(?:\s+[A-Z][\w&-]*)*)'s\s+(?:\w+\s+)?(?:event|stream|meeting|webinar)\b")
+
+
+def names_other_event(text: str, own_name: str | None) -> bool:
+    if _OTHER_EVENT_WORD.search(text):
+        return True
+    own = (own_name or "").lower()
+    for m in _OTHER_EVENT_OWNED.finditer(text):
+        owner = m.group(1).lower()
+        if owner not in ("my", "your", "the") and owner not in own:
+            return True
+    return False
 
 
 def classify_boundary(text: str) -> Boundary:

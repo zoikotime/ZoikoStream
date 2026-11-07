@@ -5,7 +5,7 @@ source_type: accessibility
 canonical_path: "/events/:eventId/watch"
 risk_class: LOW
 authority_rank: 90
-version: "2026.10"
+version: "2026.10.1"
 origin_files: [client/src/pages/watch/viewerLanguage.jsx, client/src/pages/watch/EventWatch.jsx, client/src/components/watch/AccessWindowNotice.jsx, client/src/components/watch/ViewerErrorState.jsx]
 author: guide-engineering
 owner_role: accessibility
@@ -35,6 +35,18 @@ Use the "Language" picker in the event page header (on a phone, just below the h
 ## Read aloud
 
 The "Read aloud" button reads the instruction the page is currently showing, in the selected language. Select "Stop reading" to stop.
+
+## Accessibility options on the event page
+
+These options are available to every viewer:
+
+- Captions, where the organizer has turned them on (see the captions and replay help).
+- The "Read aloud" button, which reads the current on-page instruction aloud.
+- The "Language" picker, in six languages.
+- Light and dark theme, from the sun or moon button in the header.
+- Full screen, from the player controls.
+
+ZoikoStream has not published a statement about screen reader or other assistive-technology support. If you need a specific accommodation, ask the event organizer or contact ZoikoStream support.
 
 ## Event times
 

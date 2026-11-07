@@ -24,6 +24,8 @@ class OpGuideSettings(BaseSettings):
     GUIDE_LLM_PROVIDER: str = "mock"
     GROQ_API_KEY: str = ""
     OPGUIDE_GROQ_MODEL: str = "openai/gpt-oss-120b"
+    GEMINI_API_KEY: str = ""
+    OPGUIDE_GEMINI_MODEL: str = "gemini-3.5-flash-lite"
     ANTHROPIC_API_KEY: str = ""
     OPGUIDE_ANTHROPIC_MODEL: str = "claude-opus-5-5"
     OPGUIDE_LLM_TIMEOUT_SECONDS: float = 20.0
