@@ -448,91 +448,331 @@ select:autofill {
 @keyframes zk-spin-slow { to { transform: rotate(360deg); } }
 .zk-spin-slow { animation: zk-spin-slow 42s linear infinite; }
 
-/* ── Auth screens (layouts/AuthLayout, components/auth/AuthHero, pages/auth/AuthCard) ──
-   zk-auth-bob: slow vertical float. Amplitude, duration and delay are per-element custom
-   properties so each hero card drifts on its own clock instead of the whole scene bobbing
-   in lock-step. */
-@keyframes zk-auth-bob {
-  0%, 100% { transform: translate3d(0, 0, 0); }
-  50% { transform: translate3d(0, var(--zk-bob, -8px), 0); }
-}
-.zk-auth-bob {
-  animation: zk-auth-bob var(--zk-bob-dur, 7s) ease-in-out var(--zk-bob-delay, 0s) infinite;
-}
-/* Auth pages type: Inter (already a dependency; AuthLayout imports the variable font) —
-   the same clean sans as the ZoikoSema reference. */
+/* ── Auth screens (layouts/AuthLayout, components/auth/AuthHero, pages/auth/*) ──────────────
+   Type: Inter (already a dependency; AuthLayout imports the variable font). */
 .zk-auth-font {
   font-family: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-/* Auth panel rhythm. One set of tokens for every vertical size in the sign-in panel, so the
-   whole desktop login fits one viewport: on lg+ they scale with viewport HEIGHT (a 720px-tall
-   screen gets the compact end, 900px+ the roomy end); below lg the page scrolls naturally and
-   touch-friendly fixed sizes apply. Used as h-[var(--auth-ctl)] etc. */
-.zk-auth-panel {
-  --auth-ctl: 48px;   /* buttons and inputs */
-  --auth-s1: 12px;    /* tight gaps */
-  --auth-s2: 20px;    /* standard gaps */
-  --auth-s3: 32px;    /* section gaps */
-  --auth-logo: 48px;
-  --auth-title: 2rem;
+/* ── Auth design scale (layouts/AuthLayout) ──────────────────────────────────────────────
+   The approved login design is 1536 × 1024: an 880-wide hero and a 656-wide sign-in panel.
+   Every auth size is written as the design's px × a unit:
+     --u   the sign-in panel. lg+: the scale that fits the whole design in the viewport
+           (1 at 1536 × 1024, 0.879 at 1440 × 900). < lg: close to design size.
+     --hu  the hero. lg+: the same as --u. < lg: scaled to the screen width.
+   Interactive sizes carry floors (max(…)) so a small screen never gets cramped controls. */
+.zk-auth-root {
+  --u: clamp(0.8px, calc(100vw / 620), 1px);
+  --hu: clamp(0.5px, calc((100vw - 40px) / 580), 1px);
 }
 @media (min-width: 1024px) {
-  .zk-auth-panel {
-    /* Steeper than proportional (calc(k·vh − c)): short screens get the compact end quickly,
-       900px+ screens reach the roomy end. 720px → 36 / 18; 900px → 50 / 27; 1080px → caps. */
-    --auth-ctl: clamp(36px, calc(8vh - 22px), 50px);
-    --auth-s1: clamp(6px, 1.1vh, 12px);
-    --auth-s2: clamp(10px, 1.9vh, 20px);
-    --auth-s3: clamp(12px, calc(5vh - 18px), 32px);
-    --auth-logo: clamp(28px, 4.4vh, 48px);
-    --auth-title: clamp(1.45rem, 3.4vh, 2.25rem);
+  .zk-auth-root {
+    --u: min(calc(100vw / 1536), calc(100dvh / 1024));
+    --hu: var(--u);
   }
-  /* Dense rhythm for the longest form (Register, pages/auth/AuthCard `dense`). Tighter
-     GAPS, not smaller text: labels and inputs keep their type size, controls never go below
-     the 36px the standard tokens already floor at, and they top out at 46px rather than 50px.
-     Measured to fit every field plus the submit button without the card scrolling at
-     1280×720, 1366×768, 1440×900 and 1920×1080. */
-  .zk-auth-dense {
-    --auth-ctl: clamp(36px, calc(7vh - 16px), 46px);
-    --auth-s1: clamp(4px, 0.8vh, 10px);
-    --auth-s2: clamp(8px, 1.2vh, 14px);
-    --auth-s3: clamp(10px, calc(3.4vh - 14px), 24px);
-    --auth-logo: clamp(26px, 3.6vh, 44px);
-    --auth-title: clamp(1.4rem, 3vh, 2rem);
+  /* The sign-in panel gets its own, larger scale: the card (592 × ~776 design px) grows until
+     it fills 90% of the panel's width or 92% of the viewport's height, whichever comes first
+     — so on wide, short screens it no longer sits small in a mostly empty panel. At
+     1536 × 1024 this is ≈ 1, the design size. The hero keeps the root scale: --hu was
+     resolved on .zk-auth-root above and is inherited unchanged. */
+  .zk-auth-side {
+    --u: min(0.0649vw, 0.11856dvh);
   }
 }
-/* Short desktop screens: the hero's brand mark is already on screen beside the card, so the
-   dense card drops its duplicate logo rather than push the submit button out of view. */
+
+/* Sign-in panel tokens (pages/auth/*): the design's measurements. */
+.zk-auth-panel {
+  --auth-ctl: max(42px, calc(47 * var(--u)));    /* inputs, Google button */
+  --auth-btn: max(44px, calc(54 * var(--u)));    /* primary button */
+  --auth-s1: calc(11 * var(--u));                /* tight gaps */
+  --auth-s2: calc(20 * var(--u));                /* standard gaps */
+  --auth-s3: calc(26 * var(--u));                /* section gaps */
+  --auth-logo: calc(85 * var(--u));
+  --auth-title: max(26px, calc(38.5 * var(--u)));
+  --auth-pad: calc(25.5 * var(--u));             /* inner card side padding */
+  --auth-shell: calc(18 * var(--u));             /* outer card inset around the inner card */
+  --auth-text: max(14px, calc(16.5 * var(--u)));
+  --auth-label: max(13.5px, calc(15.5 * var(--u)));
+  --auth-radius: max(6px, calc(7 * var(--u)));
+}
+/* Dense rhythm for the longest form (Register, pages/auth/AuthCard `dense`): tighter gaps,
+   not smaller text. */
+.zk-auth-dense {
+  --auth-ctl: max(40px, calc(44 * var(--u)));
+  --auth-s1: calc(8 * var(--u));
+  --auth-s2: calc(13 * var(--u));
+  --auth-s3: calc(18 * var(--u));
+  --auth-logo: calc(62 * var(--u));
+}
+/* Short desktop screens: the hero's logo is already on screen beside the card, so the dense
+   card drops its duplicate rather than push the submit button further down. */
 @media (min-width: 1024px) and (max-height: 800px) {
   .zk-auth-dense .zk-auth-logo {
     display: none;
   }
 }
-
-/* Stage light breathing behind the hero's product showcase. */
-@keyframes zk-glow-pulse {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
+/* Fields on every auth page take the design's geometry: 7px corners and 16.5px text, labels
+   at 15.5px. Scoped here because Field is shared with the console, whose look must not
+   change. Unlayered, so it wins over the utility classes. */
+.zk-auth-panel input:not([type="checkbox"]):not([type="radio"]),
+.zk-auth-panel select,
+.zk-auth-panel textarea {
+  border-radius: var(--auth-radius);
+  font-size: var(--auth-text);
 }
-.zk-glow-pulse { animation: zk-glow-pulse 7s ease-in-out infinite; }
-
-/* On-air dot: a ring that radiates out and fades, the dot itself stays put. */
-@keyframes zk-live-ping {
-  0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.65); }
-  70% { box-shadow: 0 0 0 7px rgba(244, 63, 94, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
+.zk-auth-panel label.block {
+  font-size: var(--auth-label);
+  margin-bottom: calc(5 * var(--u));
 }
-.zk-live-ping { animation: zk-live-ping 1.8s ease-out infinite; }
-
-/* Audio/stream activity bars. Each bar sets its own --zk-wave-delay. */
-@keyframes zk-wave {
-  0%, 100% { transform: scaleY(0.35); }
-  50% { transform: scaleY(1); }
+html:not(.dark) .zk-auth-panel label.block {
+  color: #1b1c33;
 }
-.zk-wave > span {
-  transform-origin: bottom;
-  animation: zk-wave 1.25s ease-in-out var(--zk-wave-delay, 0s) infinite;
+html:not(.dark) .zk-auth-panel input:not([type="checkbox"]):not([type="radio"]):not([aria-invalid="true"]) {
+  border-color: #d3d7e2;
+}
+html:not(.dark) .zk-auth-panel input:not([type="checkbox"]):not([type="radio"]):not([aria-invalid="true"]):focus {
+  border-color: #7c3aed;
+}
+/* The design's 24px square checkbox with a 5px corner (Login's Remember me). Flex, so the
+   row is exactly the box's height (an inline label would add a text strut beneath it). */
+.zk-auth-check {
+  display: flex;
+}
+.zk-auth-check label > span:first-child,
+.zk-auth-check input[type="checkbox"] {
+  width: max(20px, calc(24 * var(--u)));
+  height: max(20px, calc(24 * var(--u)));
+}
+.zk-auth-check label > span:first-child {
+  margin-top: 0;
+}
+.zk-auth-check input[type="checkbox"] {
+  border-radius: max(4px, calc(5 * var(--u)));
+}
+.zk-auth-check label {
+  align-items: center;
+  gap: calc(14 * var(--u));
+  font-size: var(--auth-text);
+}
+html:not(.dark) .zk-auth-check label {
+  color: #1b1c33;
+}
+html:not(.dark) .zk-auth-check input[type="checkbox"]:checked {
+  background-color: #5b3fd6;
+  border-color: #5b3fd6;
+}
+
+/* Lavender panel behind the sign-in card: near-white with two soft diagonal light planes in
+   the top-right corner, as in the design. */
+.zk-auth-side {
+  background:
+    linear-gradient(225deg, rgba(204, 202, 255, 0.55) 0%, rgba(214, 212, 255, 0.35) 13%, transparent 13.2%, transparent 19%, rgba(220, 218, 255, 0.38) 19.2%, rgba(230, 229, 255, 0.12) 31%, transparent 31.2%),
+    radial-gradient(65% 42% at 100% 0%, rgba(206, 205, 255, 0.5), transparent 72%),
+    #f5f9fd;
+}
+html.dark .zk-auth-side {
+  background: radial-gradient(70% 45% at 100% 0%, rgba(91, 33, 182, 0.18), transparent 70%), #0a0d1e;
+}
+
+/* ── Auth hero composition (components/auth/AuthHero) ────────────────────────────────────
+   Design px of the 880 × 1024 hero × --hu. Mobile first: below lg the pieces flow in a
+   column under the sign-in card; from lg they sit at the design's coordinates — copy
+   anchored top-left, devices bottom-right, tagline bottom-left — so on a screen of another
+   shape the spare room opens between them instead of anything overlapping. */
+.zk-hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  color: #fff;
+  background: #050c20;
+  padding: 40px 20px 36px;
+}
+@media (min-width: 640px) {
+  .zk-hero { padding: 56px 40px 44px; }
+}
+.zk-hero-art {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Cover, anchored right: the artwork's right edge (arcs, world-map screen) always meets the
+     panel. The file carries 400 design px of soft extension on its left, so on screens up to
+     ~1.9:1 cover lands on exactly the copy's scale (--hu) and the composition is the design's;
+     35% down only matters on screens taller than 3:2, where it keeps the arcs in view. */
+  object-position: right 35%;
+  pointer-events: none;
+  user-select: none;
+}
+/* < lg the copy sits over the busy right side of the artwork: a navy wash keeps it legible. */
+.zk-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(90deg, rgba(5, 12, 32, 0.9) 0%, rgba(5, 12, 32, 0.6) 60%, rgba(5, 12, 32, 0.35) 100%);
+  pointer-events: none;
+}
+.zk-hero-logo {
+  display: inline-block;
+  border-radius: 8px;
+}
+.zk-hero-logo img {
+  display: block;
+  width: calc(315 * var(--hu));
+  max-width: 100%;
+  height: auto;
+}
+.zk-hero-eyebrow {
+  margin-top: 6px;
+  font-size: max(11px, calc(16 * var(--hu)));
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: #f6faff;
+}
+.zk-hero-headline {
+  margin-top: 28px;
+  font-size: max(40px, calc(72 * var(--hu)));
+  font-weight: 800;
+  line-height: 1.111;
+  letter-spacing: -0.032em;
+}
+/* Second line: 1.31 × the first (72 → 94 design px), sitting on the design's baseline. */
+.zk-hero-limits {
+  display: block;
+  width: fit-content;
+  font-size: 1.31em;
+  line-height: 0.725;
+  letter-spacing: -0.035em;
+  background: linear-gradient(90deg, #73bdfe 0%, #b686ea 52%, #f04fb5 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  padding-right: 0.06em;
+}
+.zk-hero-support {
+  margin-top: 20px;
+  max-width: max(300px, calc(440 * var(--hu)));
+  font-size: max(15px, calc(22.9 * var(--hu)));
+  line-height: 1.205;
+  color: #dee7fc;
+}
+.zk-hero-features {
+  margin-top: 28px;
+  display: grid;
+  gap: 14px;
+}
+.zk-hero-features li {
+  display: flex;
+  align-items: center;
+  gap: max(14px, calc(20 * var(--hu)));
+  font-size: max(15px, calc(17 * var(--hu)));
+  line-height: 1.2;
+  color: #f6fbff;
+}
+.zk-hero-ring {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: max(40px, calc(48 * var(--hu)));
+  height: max(40px, calc(48 * var(--hu)));
+  border: 2px solid #8b62e8;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgba(91, 55, 225, 0.22), rgba(20, 16, 60, 0.6));
+  color: #a57af0;
+  box-shadow: 0 0 18px -6px rgba(139, 92, 246, 0.75);
+}
+.zk-hero-ring svg {
+  width: 46%;
+  height: 46%;
+}
+.zk-hero-devices {
+  position: relative;
+  margin: 32px auto 0;
+  width: 100%;
+  max-width: 720px;
+  aspect-ratio: 720 / 450;
+}
+.zk-hero-tagline {
+  margin-top: 30px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: max(9px, calc(15 * var(--hu)));
+  row-gap: 10px;
+  font-size: max(10.5px, calc(13 * var(--hu)));
+  font-weight: 500;
+  line-height: 1.23;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #d5dbfa;
+}
+.zk-hero-slash { color: rgba(213, 219, 250, 0.7); letter-spacing: 0; }
+.zk-hero-first { position: relative; }
+.zk-hero-first::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0.22em;
+  top: calc(100% + max(5px, calc(8 * var(--hu))));
+  height: max(3px, calc(4 * var(--hu)));
+  border-radius: 9999px;
+  background: linear-gradient(90deg, #7d7ff8, #bc64df 50%, #f35ec6);
+}
+
+@media (min-width: 1024px) {
+  .zk-hero {
+    height: 100dvh;
+    padding: 0;
+  }
+  .zk-hero::before { display: none; }
+  /* Purple floor light along the bottom edge (the backdrop is cropped there on wide screens). */
+  .zk-hero::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 0 0;
+    z-index: -1;
+    height: calc(150 * var(--hu));
+    background: radial-gradient(60% 100% at 45% 100%, rgba(109, 70, 255, 0.32), transparent 70%);
+    pointer-events: none;
+  }
+  .zk-hero-copy > *,
+  .zk-hero-devices,
+  .zk-hero-tagline {
+    position: absolute;
+    margin: 0;
+  }
+  .zk-hero-logo { left: calc(67 * var(--hu)); top: calc(48 * var(--hu)); }
+  .zk-hero-logo img { max-width: none; }
+  /* Copy column rhythm. The headline is a touch smaller than the design's (66 vs 72) so the
+     block can breathe within the same height: ~31 design px from "limits." to the support
+     line, ~23 to the features, 8 between feature rows — and the list still ends (y 640)
+     above the phone (647) and clear of the laptop's top-left corner (x 360, y 600). */
+  .zk-hero-eyebrow { left: calc(73 * var(--hu)); top: calc(166 * var(--hu)); }
+  .zk-hero-headline { left: calc(72 * var(--hu)); top: calc(200 * var(--hu)); font-size: max(36px, calc(66 * var(--hu))); }
+  .zk-hero-support { left: calc(73 * var(--hu)); top: calc(362 * var(--hu)); max-width: calc(440 * var(--hu)); }
+  .zk-hero-features { left: calc(72 * var(--hu)); top: calc(440 * var(--hu)); gap: calc(8 * var(--hu)); }
+  /* Desktop keeps exact proportions (rings) with a smaller text floor, so the list never
+     grows into the phone on short screens. */
+  .zk-hero-features li { font-size: max(13px, calc(17 * var(--hu))); gap: calc(18 * var(--hu)); }
+  .zk-hero-ring { width: calc(44 * var(--hu)); height: calc(44 * var(--hu)); }
+  .zk-hero-devices {
+    right: 0;
+    bottom: calc(34 * var(--hu));
+    width: calc(720 * var(--hu));
+    max-width: none;
+    height: calc(450 * var(--hu));
+    aspect-ratio: auto;
+  }
+  .zk-hero-tagline {
+    left: calc(60 * var(--hu));
+    bottom: calc(36 * var(--hu));
+    flex-wrap: nowrap;
+    white-space: nowrap;
+  }
 }
 
 /* Rejected submit: one short horizontal shake. No fill-mode, so nothing is left applied. */
@@ -601,7 +841,7 @@ select:autofill {
   .zk-flow-dot, .zk-float, .zk-pulse-ring, .zk-spin, .zk-drift, .zk-badge-glow,
   .zk-fade-in, .zk-skeleton::after, .zk-gradient-pan, .zk-spin-slow, .zk-pop,
   .zk-pop-in, .zk-tip-in,
-  .zk-auth-bob, .zk-live-ping, .zk-wave > span, .zk-shake, .zk-glow-pulse { animation: none; }
+  .zk-shake { animation: none; }
   /* Reactions are the exception to "animation: none": they are information, not decoration
      (the host has no other view of audience reactions), so the emoji still fades in, holds
      long enough to read, and fades out on its own clock — it just no longer travels, tilts

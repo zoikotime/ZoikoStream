@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { SESSION_END_MESSAGES, clearSessionEndReason, peekSessionEndReason } from "../../auth/sessionStore";
-import { FiArrowRight, FiCheck, FiLock, FiMail } from "react-icons/fi";
+import { FiCheck, FiLock, FiMail } from "react-icons/fi";
 import { notify } from "../../ui/Toast";
 import { cx } from "../../ui/tokens";
 import api, { errCode, errMsg } from "../../api";
@@ -33,8 +33,10 @@ export default function Login() {
   const from = location.state?.from;
 
   // Read without consuming during render (StrictMode renders twice), cleared once mounted so
-  // a later visit to /login does not repeat it.
-  const [endedReason] = useState(() => peekSessionEndReason());
+  // a later visit to /login does not repeat it. Shown only when a session actually ended, and
+  // dismissed as soon as the user starts a new sign-in — it explains the form, it is not a
+  // standing part of it.
+  const [endedReason, setEndedReason] = useState(() => peekSessionEndReason());
   useEffect(() => {
     clearSessionEndReason();
   }, []);
@@ -65,6 +67,7 @@ export default function Login() {
   const submit = async (e) => {
     e.preventDefault();
     if (inFlight.current) return;
+    setEndedReason(null);
     const next = {};
     if (!isEmail(email)) next.email = "Enter a valid work email.";
     if (!password) next.password = "Enter your password.";
@@ -137,17 +140,31 @@ export default function Login() {
         <p
           role="status"
           data-testid="session-ended"
-          className="mt-[var(--auth-s2)] rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
+          className="mt-[calc(14*var(--u))] rounded-[var(--auth-radius)] border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200"
         >
           {SESSION_END_MESSAGES[endedReason] || SESSION_END_MESSAGES.reauth}
         </p>
+      )}
+
+      {/* Google first, then email + password (GoogleSignIn.jsx, googleAuth.js). Not in the
+          Android app: Google refuses OAuth inside embedded WebViews (disallowed_useragent),
+          so a button there could never succeed — the form stands alone. */}
+      {!IS_NATIVE && (
+        <>
+          <GoogleSignIn remember={remember} from={from} className="mt-[calc(17*var(--u))]" />
+          <div className="mt-[calc(19*var(--u))] flex items-center gap-[calc(16*var(--u))] text-[length:max(13.5px,calc(15.5*var(--u)))] leading-[1.4] text-[#5f6684] dark:text-slate-400">
+            <span aria-hidden="true" className="h-px flex-1 bg-[#c9cddb] dark:bg-white/10" />
+            or sign in with email
+            <span aria-hidden="true" className="h-px flex-1 bg-[#c9cddb] dark:bg-white/10" />
+          </div>
+        </>
       )}
 
       <form
         onSubmit={submit}
         noValidate
         onAnimationEnd={(e) => e.animationName === "zk-shake" && setShake(false)}
-        className={cx("mt-[var(--auth-s3)] space-y-[var(--auth-s2)]", shake && "zk-shake")}
+        className={cx(IS_NATIVE ? "mt-[var(--auth-s3)]" : "mt-[calc(14*var(--u))]", "space-y-[calc(8*var(--u))]", shake && "zk-shake")}
       >
         <Field
           icon={FiMail}
@@ -155,9 +172,12 @@ export default function Login() {
           type="email"
           autoComplete="email"
           placeholder="name@company.com"
-          className="h-[var(--auth-ctl)] py-0!"
+          className="h-[var(--auth-ctl)] py-0! pl-[calc(62*var(--u))]!"
           value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          onChange={(e) => {
+            setEmail(e.target.value);
+            setEndedReason(null);
+          }}
           error={errors.email}
         />
 
@@ -167,15 +187,19 @@ export default function Login() {
             label="Password"
             autoComplete="current-password"
             placeholder="Enter your password"
-            className="h-[var(--auth-ctl)] py-0! pr-12"
+            className="h-[var(--auth-ctl)] py-0! pl-[calc(62*var(--u))]! pr-12"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setEndedReason(null);
+            }}
             error={errors.password}
           />
-          <div className="mt-[var(--auth-s1)] flex items-center justify-between gap-4">
+          <div className="mt-[calc(11*var(--u))] flex items-center justify-between gap-4">
             {/* Not "for 30 days": remembering only keeps the sign-in across browser
                 restarts. The server's idle and maximum-length limits still apply. */}
             <CheckField
+              className="zk-auth-check"
               label="Remember me"
               checked={remember}
               onChange={(e) => setRemember(e.target.checked)}
@@ -183,7 +207,7 @@ export default function Login() {
             {/* inline-flex items-center: in the Android app the 44px touch-target floor
                 (index.css) makes this link taller than its text — keep the text centred so
                 it stays level with Remember me. No effect on web, where it is text-height. */}
-            <Link to="/forgot-password" className={cx("inline-flex items-center text-sm", authLink)}>
+            <Link to="/forgot-password" className={cx("inline-flex items-center text-[length:var(--auth-text)] font-medium! text-[#5b2fcf]! dark:text-violet-300!", authLink)}>
               Forgot password?
             </Link>
           </div>
@@ -217,19 +241,13 @@ export default function Login() {
           </div>
         )}
 
-        <AuthSubmit loading={loading && !signedIn} disabled={signedIn} className="!mt-[var(--auth-s2)]">
+        <AuthSubmit loading={loading && !signedIn} disabled={signedIn} className="flex! !mt-[calc(17*var(--u))]">
           {signedIn ? (
             <>
               <FiCheck aria-hidden="true" className="text-lg" /> Signed in
             </>
           ) : (
-            <>
-              Log In
-              <FiArrowRight
-                aria-hidden="true"
-                className="transition-transform duration-200 group-hover:translate-x-0.5 motion-reduce:transition-none"
-              />
-            </>
+            "Log In"
           )}
         </AuthSubmit>
 
@@ -239,23 +257,9 @@ export default function Login() {
         </p>
       </form>
 
-      {/* Not in the Android app: Google refuses OAuth inside embedded WebViews
-          (disallowed_useragent), so a button there could never succeed. */}
-      {!IS_NATIVE && (
-        <>
-          {/* Email + password first; Google underneath (GoogleSignIn.jsx, googleAuth.js). */}
-          <div className="my-[var(--auth-s2)] flex items-center gap-4 text-[13px] text-slate-400 dark:text-slate-500">
-            <span aria-hidden="true" className="h-px flex-1 bg-slate-200 dark:bg-white/10" />
-            or
-            <span aria-hidden="true" className="h-px flex-1 bg-slate-200 dark:bg-white/10" />
-          </div>
-          <GoogleSignIn remember={remember} from={from} />
-        </>
-      )}
-
-      <p className="mt-[var(--auth-s2)] text-center text-[15px] text-slate-600 dark:text-slate-400">
-        New to ZoikoStream?{" "}
-        <Link to="/signup" className={authLink}>
+      <p className="mt-[calc(22*var(--u))] text-center text-[length:max(15px,calc(17.5*var(--u)))] leading-[1.5] text-[#4b5070] dark:text-slate-400">
+        New to ZoikoStream?
+        <Link to="/signup" className={cx("ml-[calc(18*var(--u))] text-[length:max(15.5px,calc(19*var(--u)))] font-bold! text-[#7c2eb5]! dark:text-fuchsia-300!", authLink)}>
           Register
         </Link>
       </p>

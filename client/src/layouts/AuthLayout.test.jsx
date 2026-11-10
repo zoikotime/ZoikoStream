@@ -1,5 +1,5 @@
-// The auth shell: Login / Register / Reset Password tabs are real routes, and the floating
-// hero scene is decoration that assistive tech never reaches.
+// The auth shell: Login / Register / Reset Password tabs are real routes, and the hero's
+// artwork and device mock-ups are decoration that assistive tech never reaches.
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -58,19 +58,28 @@ describe("auth layout", () => {
 
   it("states the platform's capabilities as readable text", () => {
     renderAt("/login");
-    for (const label of ["Live & on-demand events", "Global audience reach", "Secure streaming", "Engagement and analytics"]) {
-      // The desktop column and the < lg header both carry the tiles (CSS shows one).
-      expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    for (const label of ["Live & on-demand events", "Global audience reach", "Secure and reliable streaming", "Engagement and analytics"]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
     }
   });
 
-  it("hides the floating mock product cards from assistive tech", () => {
+  it("puts the sign-in card before the brand hero, so the form is reached first", () => {
     renderAt("/login");
-    // Mock UI copy exists in the DOM for sighted users, but only inside aria-hidden layers.
-    for (const text of ["Global Product Keynote", "Main stage · Live now"]) {
-      for (const node of screen.queryAllByText(text)) {
-        expect(node.closest('[aria-hidden="true"]')).not.toBeNull();
-      }
+    const card = screen.getByRole("main");
+    const hero = screen.getByRole("region", { name: "ZoikoStream" });
+    expect(card.compareDocumentPosition(hero) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("hides the decorative hero layers from assistive tech", () => {
+    const { container } = renderAt("/login");
+    // The backdrop artwork, the laptop + phone (real screenshots) and the tagline are
+    // decoration: present for sighted users, never announced.
+    for (const selector of [".zk-hero-art", ".zk-hero-devices", ".zk-hero-tagline"]) {
+      const node = container.querySelector(selector);
+      expect(node).not.toBeNull();
+      expect(node.closest('[aria-hidden="true"]')).not.toBeNull();
     }
+    // The readable copy stays readable.
+    expect(screen.getByText("Stream without")).toBeVisible();
   });
 });

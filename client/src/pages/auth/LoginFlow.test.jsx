@@ -107,7 +107,7 @@ describe("a valid sign-in", () => {
 });
 
 describe("Google sign-in", () => {
-  it("is the only provider, placed after the Log In button, and is a live button", () => {
+  it("is the only provider, placed above the email form, and is a live button", () => {
     renderLogin();
     for (const name of [/microsoft/i, /apple/i, /company sso/i]) {
       expect(screen.queryByRole("button", { name })).toBeNull();
@@ -116,8 +116,10 @@ describe("Google sign-in", () => {
     expect(google).toBeEnabled();
     expect(google).not.toHaveAttribute("aria-disabled");
     expect(google).not.toHaveTextContent(/coming soon/i);
-    const logIn = screen.getByRole("button", { name: /^log in$/i });
-    expect(logIn.compareDocumentPosition(google) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Reference layout: Google first, then "or sign in with email", then the form.
+    const email = screen.getByLabelText("Work email address");
+    expect(google.compareDocumentPosition(email) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText("or sign in with email")).toBeInTheDocument();
   });
 
   it("starts the server flow, keeps state + verifier for this tab, and goes to Google", async () => {

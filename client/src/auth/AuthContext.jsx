@@ -6,6 +6,7 @@ import SessionExpiryWarning from "./SessionExpiryWarning";
 import {
   answerTokenRequests,
   broadcast,
+  clearSessionEndReason,
   clearToken,
   hasScopedHint,
   markSessionEnded,
@@ -287,7 +288,13 @@ export function AuthProvider({ children }) {
     }
     const before = generation.current;
     const confirmed = await validate();
-    if (confirmed) return confirmed;
+    if (confirmed) {
+      // A new session exists, so why an OLD one ended is no longer news: drop it, or it would
+      // greet the user on their next visit to the sign-in page (e.g. after a Google sign-in,
+      // which never passes through the page that normally consumes it).
+      clearSessionEndReason();
+      return confirmed;
+    }
     // /auth/me did not confirm the new session. If THIS validation reached a verdict (nothing
     // newer started — validate() bumps the generation by exactly one), that verdict was a
     // refusal or a failure and the app is now signed out: return null, so the sign-in page
