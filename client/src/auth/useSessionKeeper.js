@@ -73,6 +73,9 @@ export function useSessionKeeper({ authenticated, onEnded }) {
   const timers = useRef([]);
   const onEndedRef = useRef(onEnded);
   useEffect(() => { onEndedRef.current = onEnded; });
+  // Read by onInteraction, which AuthContext also calls on every route change (noteNavigation).
+  const authenticatedRef = useRef(authenticated);
+  useEffect(() => { authenticatedRef.current = authenticated; });
 
   const clearTimers = () => {
     for (const t of timers.current) clearTimeout(t);
@@ -137,6 +140,11 @@ export function useSessionKeeper({ authenticated, onEnded }) {
   // Genuine interaction -> at most one report per interval, the last interaction in an
   // interval reported at its end, so nothing a user does goes unrecorded.
   const onInteraction = useCallback(() => {
+    // Signed out there is no session to keep alive. Reporting anyway sent a request with no
+    // credential, whose 401 was then taken as THIS session ending — so merely switching
+    // between Login / Register / Reset Password recorded "Please sign in again" for the next
+    // visit to the sign-in page, even for someone who had never signed in.
+    if (!authenticatedRef.current) return;
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     const since = Date.now() - lastReport.current;
     if (since >= TOUCH_INTERVAL_MS) {

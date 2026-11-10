@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api", () => ({
@@ -181,6 +181,30 @@ describe("activity", () => {
     expect(activityCalls()).toHaveLength(0);
     // Only status reads, which never extend a session.
     expect(api.get.mock.calls.every(([url]) => url === "/auth/me" || url === "/auth/session")).toBe(true);
+  });
+
+  it("reports nothing — and records no ended session — while nobody is signed in", async () => {
+    // Signed out: no credential. Were a report sent, the server would refuse it.
+    localStorage.clear();
+    api.post.mockRejectedValue(Object.assign(new Error("401"), { response: { status: 401, data: { detail: "Not authenticated" } } }));
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/login" element={<Link to="/signup">Register</Link>} />
+            <Route path="/signup" element={<Link to="/login">Login</Link>} />
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    // Switching between the sign-in tabs is navigation, and clicks are interaction.
+    await user.click(await screen.findByRole("link", { name: "Register" }));
+    await user.click(await screen.findByRole("link", { name: "Login" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2 * TOUCH_INTERVAL_MS); });
+    expect(activityCalls()).toHaveLength(0);
+    // So the sign-in page has no "Please sign in again" to show on the next visit.
+    expect(peekSessionEndReason()).toBeNull();
   });
 
   it("ignores events from a hidden tab", async () => {

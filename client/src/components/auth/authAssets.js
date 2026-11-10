@@ -1,18 +1,20 @@
 // Images used by the auth hero (client/public/auth/). All served as static files.
 //
-// Photographs — Pexels, used under the Pexels License (free for commercial use, no
-// attribution required; https://www.pexels.com/license/). Downloaded, resized and re-encoded
-// to WebP with metadata stripped:
-//   stage-1920.webp / stage-960.webp  https://www.pexels.com/photo/2263436/
-//   live-stage.webp                   https://www.pexels.com/photo/167636/
+// hero-art.webp — the backdrop of the approved ZoikoStream login design: light arcs, tilted
+//   concert screens, world-map screen, stage and crowd. Made from the approved reference image
+//   (its 880 × 1024 hero) with its lettering and mock devices painted out — the page draws the
+//   real text, and devices showing real screenshots, on top. 1280 wide: the left 400 px are a
+//   soft continuation of the artwork's own left edge, so on screens wider than the design's
+//   3:2 it fills the hero at the SAME scale as the copy and devices instead of zooming in.
 //
-// Screenshots — the real ZoikoStream UI rendered with invented demo data (no real customer
-// data): the Organization dashboard (desktop, dark theme) and the public event registration
-// page (mobile). Re-capture them when those screens change materially.
+// Screenshots — the real ZoikoStream viewer page (/events/:id/watch) in its live state,
+// rendered with invented demo data (no real customer data): desktop dark theme for the laptop,
+// mobile light theme for the phone. A live broadcast needs the LiveKit + backend stack, so the
+// player's broadcast frame in these captures is the project's concert photograph
+// (live-stage.webp); everything around it is the page as a viewer sees it. Re-capture them
+// when the viewer page changes materially.
 export const AUTH_ASSETS = {
-  stage: "/auth/stage-1920.webp",
-  stageSmall: "/auth/stage-960.webp",
-  liveStage: "/auth/live-stage.webp",
-  dashboardShot: "/auth/showcase-dashboard.webp",
-  eventShot: "/auth/showcase-event.webp",
+  heroArt: "/auth/hero-art.webp",
+  watchShot: "/auth/showcase-watch.webp",
+  watchMobileShot: "/auth/showcase-watch-mobile.webp",
 };

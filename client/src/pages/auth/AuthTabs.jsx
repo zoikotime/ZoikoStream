@@ -1,17 +1,20 @@
 import { NavLink, useLocation } from "react-router-dom";
 import { cx } from "../../ui/tokens";
 
-// Login / Register / Reset Password across the top of the sign-in card (ZoikoSema reference:
-// a soft strip, the active tab raised in white and joined to the card body, a short underline
-// that slides between tabs). Each tab is the EXISTING route rendered as a <NavLink>, so
-// navigation, back/forward and deep links work exactly as before.
+// Login / Register / Reset Password across the top of the sign-in card, as in the approved
+// login design: the active tab is a white slot joined to the card with its label in violet
+// and a thick violet bar beneath it; the others are plain labels on the card's tinted edge,
+// with a hairline between two neighbouring inactive tabs. Slot widths are the design's
+// (193 : 180 : 219 of the 592-wide card). Sizes use --u (index.css, auth tokens).
 //
-// Deliberately not role="tablist": these navigate to separate pages rather than swapping
-// panels in place, so links (with NavLink's aria-current="page") describe them correctly.
+// Each tab is the EXISTING route rendered as a <NavLink>, so navigation, back/forward and
+// deep links work exactly as before. Deliberately not role="tablist": these navigate to
+// separate pages rather than swapping panels in place, so links (with NavLink's
+// aria-current="page") describe them correctly.
 const TABS = [
-  ["Login", "/login"],
-  ["Register", "/signup"],
-  ["Reset Password", "/forgot-password"],
+  ["Login", "/login", "rounded-tl-[calc(24*var(--u))] pl-[4.2%]"],
+  ["Register", "/signup", "rounded-t-[calc(16*var(--u))]"],
+  ["Reset Password", "/forgot-password", "rounded-tr-[calc(24*var(--u))] pr-[2.4%]"],
 ];
 
 export default function AuthTabs({ className = "" }) {
@@ -22,37 +25,38 @@ export default function AuthTabs({ className = "" }) {
   return (
     <nav
       aria-label="Authentication"
-      className={cx(
-        "relative grid shrink-0 grid-cols-3 gap-1 border-b border-slate-200/80 bg-slate-100/80 px-2 pt-2 dark:border-white/10 dark:bg-white/[0.04]",
-        className
-      )}
+      className={cx("grid h-[max(52px,calc(63*var(--u)))] shrink-0 grid-cols-[193fr_180fr_219fr]", className)}
     >
-      {TABS.map(([label, to]) => (
+      {TABS.map(([label, to, edge], i) => (
         <NavLink
           key={to}
           to={to}
           className={({ isActive }) =>
             cx(
-              "-mb-px rounded-t-[18px] px-1 pb-[calc(var(--auth-s1)+4px)] pt-[var(--auth-s1)] whitespace-nowrap text-center text-[13px] transition-colors sm:text-[14.5px] duration-200 motion-reduce:transition-none",
+              "relative flex items-center justify-center whitespace-nowrap transition-colors duration-200 focus-visible:z-10 motion-reduce:transition-none",
+              edge,
+              // Hairline between two neighbouring tabs that are both inactive.
+              i > 0 && i !== activeIndex && i - 1 !== activeIndex &&
+                "before:absolute before:left-0 before:top-1/2 before:h-[calc(28*var(--u))] before:w-px before:-translate-y-1/2 before:bg-slate-200 dark:before:bg-white/10",
               isActive
-                ? "bg-white font-semibold text-slate-950 dark:bg-[#0d1020] dark:text-white"
-                : "font-medium text-slate-500 hover:bg-white/60 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-white/5 dark:hover:text-white"
+                ? "bg-white text-[length:max(13.5px,calc(18*var(--u)))] font-semibold text-[#5b37e1] dark:bg-[#0d1020] dark:text-violet-300"
+                : "text-[length:max(13px,calc(17*var(--u)))] font-medium text-[#1b1c33] hover:text-[#5b37e1] dark:text-slate-300 dark:hover:text-white"
             )
           }
         >
-          {label}
+          {({ isActive }) => (
+            <span className="relative">
+              {label}
+              {isActive && (
+                <span
+                  aria-hidden="true"
+                  className="absolute left-1/2 top-[calc(100%_+_10*var(--u))] h-[max(4px,calc(5*var(--u)))] w-[min(calc(150*var(--u)),26vw)] -translate-x-1/2 rounded-t-full bg-[#5b37e1] dark:bg-violet-400"
+                />
+              )}
+            </span>
+          )}
         </NavLink>
       ))}
-
-      {/* One short underline that slides between tabs — the movement is what tells you the
-          page swapped. Each slot is exactly one third of the padded strip. */}
-      <span
-        aria-hidden="true"
-        style={{ transform: `translateX(calc(${activeIndex} * (100% + 0.25rem)))` }}
-        className="pointer-events-none absolute bottom-[3px] left-2 flex w-[calc((100%-1rem-0.5rem)/3)] justify-center transition-transform duration-300 ease-out motion-reduce:transition-none"
-      >
-        <span className="h-[3px] w-[52%] rounded-full bg-gradient-to-r from-violet-600 to-blue-500" />
-      </span>
     </nav>
   );
 }
